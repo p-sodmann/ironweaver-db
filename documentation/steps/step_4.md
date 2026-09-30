@@ -18,6 +18,13 @@ Every commit is appended to a CRC-checked log before it is acknowledged, accordi
 - [ ] Reader: iterate from a `seq`, stop cleanly at a torn or corrupt tail and report its position.
 - [ ] `cargo-fuzz` target for the reader.
 
+## Notes from step 3
+
+- The record to log is `iwdb_engine::CommitRecord { seq, change }` (serde, postcard). Its record kind is the `Change` variant: `Data` (resolved core ops) or `Catalog` (`CatalogChange`).
+- The commit order maps onto `Namespace::prepare` / `prepare_catalog` (resolve + validate), then append and fsync, then `Namespace::apply`. `apply` rejects a record that another commit overtook (`OutOfOrder`). If applying fails, it returns `ApplyFailed` and poisons the namespace, which should also make the store read-only.
+- The reader's records go through `Namespace::replay`, which applies them without validating them again and requires `seq` order without gaps.
+- Values in ops are at most `MAX_VALUE_DEPTH` deep and versions at most `i64::MAX`, so every record the pipeline produces encodes and decodes (upstream #31 is why the depth rule is one level stricter than the file format's).
+
 ## Acceptance criteria
 
 - With `always`, an acknowledged commit is readable after reopening the files.

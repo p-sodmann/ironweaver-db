@@ -58,8 +58,8 @@ Ironweaver DB is a **separate project** that turns `ironweaver-core` into a dura
 - Canonical-state comparison for tests (order-independent).
 
 ### 2. Transactions and commit pipeline
-- A transaction is a list of high-level mutations (upsert, merge, delete, set/remove/append attribute, label and type changes) with optional `expected_version` per entity.
-- The single writer resolves them into plain `Op`s with explicit edge ids, checks constraints, applies them with `apply_all`, bumps versions, flushes indexes and assigns a global `seq`.
+- A transaction is a list of high-level mutations (upsert, delete, set/remove/append attribute, label and type changes; a merge is several attribute sets in one transaction) with optional `expected_version` per entity.
+- The single writer resolves them into plain `Op`s with explicit edge ids and the new versions ([ADR 0004](adr/0004-version-ops.md)), checks constraints on the state after the whole transaction, then applies them with `apply_all`, flushes indexes and assigns the next `seq`.
 - Idempotency keys for retried writes. Read-your-writes via `min_seq`.
 
 ### 3. Storage: durability and recovery
