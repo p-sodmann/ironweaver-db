@@ -2,23 +2,28 @@
 //! pipeline, built on [`ironweaver_core`].
 //!
 //! - [`DbRecord`]: the node and edge payload, with a version per entity.
-//! - [`reserved`]: meta keys owned by the database (`iwdb.*`).
+//! - [`reserved`]: keys owned by the database (`iwdb.*`).
 //! - [`catalog`]: namespaces, index definitions and constraints.
 //! - [`codec`]: saving and loading `Graph<DbRecord, DbRecord>` in the
 //!   core's file format, with the catalog in the graph meta.
+//! - [`mutation`]: the write vocabulary, commit records and results.
+//! - [`Namespace`]: a graph changed only through the commit pipeline.
 //! - [`testutil`]: canonical graph comparison for tests.
-//!
-//! The commit pipeline arrives in step 3.
 
 pub mod catalog;
 pub mod codec;
 mod error;
+pub mod mutation;
+mod namespace;
 mod record;
 pub mod reserved;
+mod resolve;
 pub mod testutil;
 
 pub use catalog::Catalog;
 pub use error::{Entity, Error};
+pub use mutation::{CatalogChange, Change, CommitRecord, CommitResult, EdgeKey, Mutation, Target};
+pub use namespace::{Namespace, Prepared};
 pub use record::DbRecord;
 
 /// A graph of the database: [`DbRecord`] payloads on nodes and edges.

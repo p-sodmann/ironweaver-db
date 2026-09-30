@@ -1,11 +1,13 @@
-//! Reserved names: meta keys starting with `iwdb.` belong to the database.
+//! Reserved names: keys starting with `iwdb.` belong to the database.
 //!
 //! The database stores its own bookkeeping next to user data in the core's
 //! meta maps: the entity version in each node's and edge's meta, the
-//! commit position and the catalog in the graph meta of a saved file. User
-//! input must not use these keys, so every meta map that comes from a user
-//! goes through [`check_user_meta`]. Attribute keys (`attr`) are not
-//! restricted.
+//! commit position and the catalog in the graph meta of a saved file. The
+//! commit pipeline also sets versions through an attribute op on
+//! [`VERSION_KEY`] (ADR 0004). User input must not use these keys, so
+//! every meta map and every top-level attribute key that comes from a user
+//! goes through [`check_user_meta`] / [`check_user_attrs`] /
+//! [`check_user_key`]. Keys inside nested dicts are not restricted.
 
 use ironweaver_core::Attrs;
 
@@ -15,6 +17,7 @@ use crate::Error;
 pub const RESERVED_PREFIX: &str = "iwdb.";
 
 /// Entity meta: the node's or edge's version (see [`DbRecord`](crate::DbRecord)).
+/// Also the attribute key of the op that sets a version (ADR 0004).
 pub const VERSION_KEY: &str = "iwdb.version";
 
 /// Graph meta: the commit sequence number a saved file reflects (written
@@ -30,17 +33,32 @@ pub fn is_reserved(key: &str) -> bool {
 }
 
 /// Reject `key` if the database owns it.
-pub fn check_user_meta_key(key: &str) -> Result<(), Error> {
+pub fn check_user_key(key: &str) -> Result<(), Error> {
     if is_reserved(key) {
         return Err(Error::ReservedName { key: key.to_owned() });
     }
     Ok(())
 }
 
+/// Reject `key` if the database owns it (for meta keys).
+pub fn check_user_meta_key(key: &str) -> Result<(), Error> {
+    check_user_key(key)
+}
+
 /// Reject a user-supplied meta map that uses a reserved key. If several
 /// do, the error names the smallest. O(n) (O(n log n) only on error).
 pub fn check_user_meta(meta: &Attrs) -> Result<(), Error> {
-    let first = meta.keys().filter(|k| is_reserved(k)).min();
+    check_keys(meta)
+}
+
+/// Reject a user-supplied attribute map whose top-level keys include a
+/// reserved key. If several do, the error names the smallest. O(n).
+pub fn check_user_attrs(attr: &Attrs) -> Result<(), Error> {
+    check_keys(attr)
+}
+
+fn check_keys(map: &Attrs) -> Result<(), Error> {
+    let first = map.keys().filter(|k| is_reserved(k)).min();
     match first {
         Some(key) => Err(Error::ReservedName { key: key.clone() }),
         None => Ok(()),
@@ -57,6 +75,7 @@ mod tests {
         for key in [VERSION_KEY, SEQ_KEY, CATALOG_KEY, "iwdb.", "iwdb.anything"] {
             assert!(is_reserved(key), "{}", key);
             assert_eq!(check_user_meta_key(key), Err(Error::ReservedName { key: key.to_owned() }));
+            assert_eq!(check_user_key(key), Err(Error::ReservedName { key: key.to_owned() }));
         }
         for key in ["", "iwdb", "iwdb_version", "IWDB.version", "x.iwdb.version", "version"] {
             assert!(!is_reserved(key), "{}", key);
@@ -65,11 +84,16 @@ mod tests {
     }
 
     #[test]
-    fn user_meta_with_a_reserved_key_is_rejected() {
+    fn user_maps_with_a_reserved_key_are_rejected() {
         let mut meta: Attrs = [("source".to_owned(), Value::from("import"))].into();
         assert_eq!(check_user_meta(&meta), Ok(()));
         meta.insert("iwdb.z".into(), Value::Int(1));
         meta.insert("iwdb.version".into(), Value::Int(1));
         assert_eq!(check_user_meta(&meta), Err(Error::ReservedName { key: "iwdb.version".into() }));
+        assert_eq!(check_user_attrs(&meta), Err(Error::ReservedName { key: "iwdb.version".into() }));
+
+        // Nested keys are the user's
+        let nested: Attrs = [("d".to_owned(), Value::Dict(meta))].into();
+        assert_eq!(check_user_attrs(&nested), Ok(()));
     }
 }

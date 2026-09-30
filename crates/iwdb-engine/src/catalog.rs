@@ -221,6 +221,17 @@ pub struct Constraint {
     pub path: AttrPath,
 }
 
+impl fmt::Display for Constraint {
+    /// `unique constraint on :Person(email)`, `required constraint on :Person(address.city)`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self.kind {
+            ConstraintKind::Unique => "unique",
+            ConstraintKind::Required => "required",
+        };
+        write!(f, "{} constraint on :{}({})", kind, self.label.as_str(), self.path)
+    }
+}
+
 /// The catalog of one namespace: its indexes and constraints, sorted.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -284,6 +295,14 @@ impl NamespaceCatalog {
     /// The constraints, sorted.
     pub fn constraints(&self) -> impl Iterator<Item = &Constraint> {
         self.constraints.iter()
+    }
+
+    pub fn has_index(&self, index: &IndexDef) -> bool {
+        self.indexes.contains(index)
+    }
+
+    pub fn has_constraint(&self, constraint: &Constraint) -> bool {
+        self.constraints.contains(constraint)
     }
 
     /// Add an index definition; false if it exists already.
@@ -499,6 +518,16 @@ mod tests {
             read(Value::from(r#"{"format": 1, "namespace": "", "indexes": []}"#)),
             Err(CatalogError::Decode(msg)) if msg.contains("invalid namespace name")
         ));
+    }
+
+    #[test]
+    fn constraints_display() {
+        let c = Constraint {
+            kind: ConstraintKind::Required,
+            label: Label::new("Person").expect("label"),
+            path: path(&["address", "city"]),
+        };
+        assert_eq!(c.to_string(), "required constraint on :Person(address.city)");
     }
 
     #[test]

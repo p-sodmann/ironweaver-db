@@ -16,7 +16,8 @@
 //! equal catalogs save to equal bytes.
 //!
 //! Loading rejects, with an [`Error`] and never a panic: a node or edge
-//! without a valid `iwdb.version`, unknown `iwdb.*` keys, graph meta other
+//! without a valid `iwdb.version`, unknown `iwdb.*` keys (in meta, or as
+//! top-level attribute keys, which the database reserves too), graph meta other
 //! than the catalog, and an invalid catalog. Files written by other tools
 //! (or in format 1) therefore don't load as database files.
 
@@ -84,13 +85,13 @@ impl DbCodec {
 
 impl Codec<DbRecord, DbRecord> for DbCodec {
     fn node_attr<S: Serializer>(&self, node: &DbRecord, s: S) -> Result<S::Ok, S::Error> {
-        serialize_sorted(&node.attr, s)
+        user_attr(&node.attr, s)
     }
     fn node_meta<S: Serializer>(&self, node: &DbRecord, s: S) -> Result<S::Ok, S::Error> {
         EntityMeta(node).serialize(s)
     }
     fn edge_attr<S: Serializer>(&self, edge: &DbRecord, s: S) -> Result<S::Ok, S::Error> {
-        serialize_sorted(&edge.attr, s)
+        user_attr(&edge.attr, s)
     }
     fn edge_meta<S: Serializer>(&self, edge: &DbRecord, s: S) -> Result<S::Ok, S::Error> {
         EntityMeta(edge).serialize(s)
@@ -98,6 +99,12 @@ impl Codec<DbRecord, DbRecord> for DbCodec {
     fn graph_meta<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         serialize_sorted(&self.meta, s)
     }
+}
+
+/// A record's attributes, sorted by key; fails on a reserved key.
+fn user_attr<S: Serializer>(attr: &Attrs, s: S) -> Result<S::Ok, S::Error> {
+    crate::reserved::check_user_attrs(attr).map_err(format::ser_error::<S::Error>)?;
+    serialize_sorted(attr, s)
 }
 
 /// A record's user meta with its version, as one map sorted by key.
@@ -153,6 +160,9 @@ fn record(attr: &LoadAttrs<'_>, meta: &LoadAttrs<'_>, entity: impl Fn() -> Entit
         }
     }
     let version = version.ok_or_else(|| Error::MissingVersion { entity: entity() })?;
+    if let Some((key, _)) = attr.iter().find(|(k, _)| is_reserved(k)) {
+        return Err(Error::UnknownReservedKey { entity: entity(), key: key.to_owned() });
+    }
     Ok(DbRecord { attr: attr.to_attrs(), meta: user, version })
 }
 
