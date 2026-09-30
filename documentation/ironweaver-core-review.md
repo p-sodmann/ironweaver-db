@@ -42,7 +42,7 @@ Verified: `crates/iwdb-engine/tests/core_smoke.rs` checks the claims below again
 | Upsert, merge, list append, `expected_version` | Resolved by the single writer into plain `Op`s (e.g. upsert → `AddNode` or `SetNode`, list append → `SetNodeAttr` with the new list) **before** logging. The log only has deterministic, already-validated ops. |
 | Edge id assignment | Writer assigns explicit ids from `next_edge_id()` so replay produces identical ids. The writer must not assume the counter is unchanged after a failed transaction (see *Design consequences*) |
 | Checkpoint position | `seq` stored in the graph-level `meta` of the saved file (the storage layer keeps it next to the in-memory graph and hands it to the codec) |
-| Index persistence | Index definitions live in the catalog, which is the source of truth. Files also carry `metadata.indexes`; after loading, the database reconciles the loaded indexes with the catalog (rules decided in step 2) and flushes them |
+| Index persistence | Index definitions live in the catalog, which is the source of truth. Files also carry `metadata.indexes`; after loading, the database reconciles the loaded indexes with the catalog (`NamespaceCatalog::apply_indexes`, [ADR 0003](adr/0003-catalog-storage.md)) and flushes them |
 | Unique / required constraints | Checked at commit using `find_nodes` on a (hash/BTree) index |
 | Bounded reads | Core `Budget` for nodes and results, plus an edge-counting `edge_ok` closure for edges examined (the budget gap below), plus a cancel token for wall time |
 | Memory limit per namespace | `memory_usage()` (O(1)) plus the payload sizes, which the database tracks itself on commit |
@@ -69,12 +69,13 @@ All seven are **done upstream**: implemented in PR #25, merged as `a14149e`, and
   - `expand_limited` takes no `edge_ok` closure, so the workaround doesn't apply. **Don't expose `expand` to remote callers until this is fixed upstream.**
   - Follow-up drafted: [upstream-issues.md #8](upstream-issues.md#8-edge-budget-and-per-edge-cancellation-in-bfs-and-expand).
 - **`memory_usage()` is O(1), but excludes payloads.** Slots count the payload's inline size, but not the heap memory it owns (attribute maps, strings, lists). The database must add payload sizes itself, keeping its own counter updated on commit.
-- **Saved files carry index definitions** (`metadata.indexes`). `LoadGraph::build` and `build_from_reader` recreate them empty and dirty (lookups are exact but scan until `flush_indexes`). The DB catalog stays the source of truth: on load, the database drops indexes the catalog doesn't know, creates the ones missing, then flushes (rules decided in step 2).
+- **Saved files carry index definitions** (`metadata.indexes`). `LoadGraph::build` and `build_from_reader` recreate them empty and dirty (lookups are exact but scan until `flush_indexes`). The DB catalog stays the source of truth: on load, the database drops indexes the catalog doesn't know, creates the ones missing, then flushes ([ADR 0003](adr/0003-catalog-storage.md)).
 - **Deterministic saves.** Custom codecs must sort maps themselves; `value::sorted_entries` and `value::serialize_sorted` are public for that. `Value`'s own `Serialize` is the tagged encoding and sorts nested dicts, so a codec can write `serialize_sorted(&attrs, s)` for a map (no half-precision floats; `format::tagged` has the per-variant encoders if needed).
 - **Nits.**
   - New `.expect("live nodes are indexed")` in `Graph::remove_node` / `rename_node`, reached from `apply`. It is believed unreachable, but it is on the apply path that PR #25 otherwise made panic-free.
   - `Expr` serde errors (depth limit) are raised with `serde::ser::Error::custom`, not `format::ser_error`, so under postcard the message is lost (postcard drops custom messages). JSON keeps it. Pinned in `expr_and_pattern_round_trip`.
-  - `Record::at` (the attribute-path lookup behind `Attributes`) is still private, so payloads that want the same path rules copy it. `iwdb-engine` will do so for `DbRecord` in step 2. Possible upstream request: a public `record::lookup(&Attrs, path)`.
+  - The JSON loader reads `Float(-0.0)` back as `Float(0.0)`: the saver writes `-0.0`, the sign is lost on parsing. The binary format keeps it. Harmless for checkpoints (binary), a small inexactness in JSON export. Found in step 2 and pinned in `tests/db_graph.rs` (`json_loses_the_sign_of_negative_zero`). Worth a small upstream issue.
+  - `Record::at` (the attribute-path lookup behind `Attributes`) is still private, so payloads that want the same path rules copy it. `iwdb-engine` does so for `DbRecord` (step 2), with a proptest in `tests/db_record.rs` that checks every `Attributes` method against `Record`. Possible upstream request: a public `record::lookup(&Attrs, path)`.
 
 ## Design consequences for the database
 

@@ -12,7 +12,7 @@ Complete M1: online backup and point-in-time restore, integrity checks, a local 
 
 - [ ] Online backup: checkpoint + WAL segments copied while the store runs (like `pg_basebackup`); optional continuous WAL archiving to a directory.
 - [ ] Restore to a given `seq` or timestamp.
-- [ ] `verify` (like `PRAGMA integrity_check`): checksums of all files plus invariants (edge endpoints, versions, index contents vs. scan, catalog consistency).
+- [ ] `verify` (like `PRAGMA integrity_check`): checksums of all files plus invariants (edge endpoints, versions, index contents vs. scan, catalog consistency: non-empty `IndexChanges` after load means the saved indexes and the catalog disagree).
 - [ ] Create `crates/iwctl` with `status`, `checkpoint`, `backup`, `restore`, `verify` for local data directories.
 - [ ] Create `crates/iwdb-python` (PyO3, maturin): `Store`, transactions as context managers, reads returning plain Python values. Keep the API shape identical to the future remote client (step 14).
 - [ ] Wheels via maturin for Linux/macOS/Windows, x86_64/arm64; publish a `0.1.0` pre-release.

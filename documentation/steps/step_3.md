@@ -13,6 +13,7 @@ All changes go through one commit function that turns high-level mutations into 
 - [ ] `Mutation` enum (the public write vocabulary): upsert/delete node, add/upsert/delete edge (by `EdgeId`, or by endpoints + type for upsert), set/remove/append attribute, add/remove label, set edge type, each with an optional `expected_version`.
 - [ ] Resolver: reads the current graph and produces `Vec<Op<DbRecord, DbRecord>>` with explicit edge ids (from `next_edge_id`) and bumped versions. Upsert becomes `AddNode` or `SetNode`, append becomes `SetNodeAttr` with the full new list.
 - [ ] Checks before applying: `expected_version` mismatch → conflict error; constraint checks via index lookups (unique, required); reserved-name policy.
+- [ ] Note from step 2: `AttrPatch` (used by `SetNodeAttr` / `SetEdgeAttr`) changes only `DbRecord::attr`, never `version`. So a version bump needs `SetNode` / `SetEdge` with the whole record, or a cheaper mechanism decided here (with an ADR). The resolved ops must carry the new version either way, so that replay reproduces it.
 - [ ] `apply_all`, then `flush_indexes`; assign a global `seq`; return `CommitResult { seq, edge_ids, versions }`.
 - [ ] Catalog changes (create/drop index, add/drop constraint) as their own commit record type, validated against existing data.
 - [ ] Model-based proptest: random mutation sequences vs. a simple reference model; failed commits leave state unchanged (canonical comparison).

@@ -10,11 +10,11 @@ Depends on: step 4
 
 ## Tasks
 
-- [ ] Data-directory layout (`documentation/formats/data-dir.md`): lock file, `checkpoints/`, `wal/`, catalog.
+- [ ] Data-directory layout (`documentation/formats/data-dir.md`): lock file, `checkpoints/`, `wal/`. The namespace's catalog lives in each checkpoint's graph meta ([ADR 0003](../adr/0003-catalog-storage.md)).
 - [ ] Exclusive lock file (like SQLite); a second open fails with a clear error.
 - [ ] Background checkpointer: keeps its own graph, loads the latest checkpoint, replays WAL segments up to a target `seq`, saves with `write_atomic` (binary format, `iwdb.seq` in meta), then deletes WAL segments fully below the checkpoint. No lock on the live graph.
 - [ ] Triggers: WAL size, time interval, manual, graceful close.
-- [ ] Recovery: newest valid checkpoint (fall back to older ones on checksum failure), rebuild indexes from the catalog, replay WAL from `seq + 1`, truncate a torn tail.
+- [ ] Recovery: newest valid checkpoint (fall back to older ones on checksum failure), rebuild indexes from the catalog (`iwdb_engine::codec::from_binary_reader` applies them), replay WAL from `seq + 1`, truncate a torn tail.
 - [ ] Create `crates/iwdb` (embedded facade): `Store::open`, `transaction`, `commit`, basic reads, `checkpoint`, `close`.
 
 ## Acceptance criteria

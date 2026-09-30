@@ -5,7 +5,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | Step | Title | Milestone | Status |
 |---|---|---|---|
 | [1](step_1.md) | Bootstrap on `ironweaver-core` | M0 | done |
-| [2](step_2.md) | DB payload and catalog model | M0 | todo |
+| [2](step_2.md) | DB payload and catalog model | M0 | done |
 | [3](step_3.md) | Commit pipeline (in memory) | M0 | todo |
 | [4](step_4.md) | Write-ahead log | M1 | todo |
 | [5](step_5.md) | Checkpoints, recovery and `Store::open` | M1 | todo |
