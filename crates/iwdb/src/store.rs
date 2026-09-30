@@ -1,5 +1,6 @@
 //! [`Store`]: the embedded, durable store.
 
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -100,6 +101,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// ([`read_only`](Self::read_only)): reads work, commits fail with
 /// [`Error::ReadOnly`]. Reopening runs recovery. A failed checkpoint
 /// doesn't affect commits ([`checkpoint_failure`](Self::checkpoint_failure)).
+///
+/// **A panic while the store changes its namespace or WAL** (a commit, an
+/// fsync, the group commit timer) **aborts the process** (ADR 0008): the
+/// namespace may hold part of a transaction, or the WAL writer's state may
+/// disagree with its file, and no reader may see either. It is a crash;
+/// the next open recovers every logged commit. Such a panic is a bug (for
+/// example upstream #28). A panic in a [`read`](Self::read) closure
+/// changes nothing and only unwinds the caller.
 ///
 /// Reads and commits take `&self`; the store can be shared between
 /// threads, but a read waits while a commit runs (concurrent readers come
@@ -202,6 +211,8 @@ where
     /// [`Error::RecordTooLarge`] (likewise); [`Error::Io`] when the WAL
     /// fails (not applied, outcome unknown, the store is read-only now);
     /// [`Error::ReadOnly`].
+    ///
+    /// A panic inside the commit aborts the process (see the type docs).
     pub fn commit(&self, mutations: &[Mutation]) -> Result<CommitResult, Error> {
         self.write(|live| live.commit(mutations))
     }
@@ -215,7 +226,8 @@ where
     /// Fsync every commit so far, whatever the policy. On error the store
     /// is read-only.
     pub fn sync(&self) -> Result<(), Error> {
-        self.live()?.sync()
+        let mut live = self.live()?;
+        or_abort("an fsync of the WAL", || live.sync())
     }
 
     /// The node `id`, if it exists.
@@ -319,7 +331,7 @@ where
         let (target, appended) = {
             let mut live = lock(&self.shared.live);
             if live.read_only().is_none() && !self.shared.live.is_poisoned() {
-                live.sync()?;
+                or_abort("an fsync of the WAL", || live.sync())?;
             }
             (target(&live, &self.shared.options), live.wal().appended_bytes())
         };
@@ -338,7 +350,7 @@ where
         self.stop();
         let (target, appended) = {
             let mut live = self.live()?;
-            live.sync()?;
+            or_abort("an fsync of the WAL", || live.sync())?;
             (live.namespace().seq(), live.wal().appended_bytes())
         };
         if self.shared.options.checkpoint.on_close {
@@ -352,7 +364,7 @@ where
         commit: impl FnOnce(&mut LoggedNamespace<F>) -> Result<CommitResult, Error>,
     ) -> Result<CommitResult, Error> {
         let mut live = self.live()?;
-        let result = commit(&mut live)?;
+        let result = or_abort("a commit", || commit(&mut live))?;
         if live.wal().appended_bytes() >= self.shared.size_trigger.load(Ordering::Relaxed) {
             lock(&self.shared.signal).checkpoint = true;
             self.shared.wake.notify_all();
@@ -394,6 +406,31 @@ where
 }
 
 const PANICKED: &str = "a commit panicked; reopen the store";
+
+/// Run `f`, which changes the live namespace or its WAL, and abort the
+/// process if it panics (ADR 0008). After such a panic the namespace may
+/// hold part of a transaction, or the WAL writer's position may disagree
+/// with its file; only recovery from the checkpoint and the WAL restores a
+/// consistent state, so the panic is turned into a crash. The panic
+/// message has been printed by the panic hook already.
+fn or_abort<R>(what: &str, f: impl FnOnce() -> R) -> R {
+    match panic::catch_unwind(AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("(no message)");
+            log::error!("{} panicked, aborting the process: {}", what, message);
+            eprintln!(
+                "iwdb: {} panicked ({}); aborting the process. The next open recovers every logged commit.",
+                what, message
+            );
+            std::process::abort()
+        }
+    }
+}
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<JoinHandle<()>, Error> {
     thread::Builder::new().name(name.to_owned()).spawn(f).map_err(|e| Error::Io {
@@ -495,7 +532,7 @@ fn sync_loop<F: LogFs>(shared: &Shared<F>, period: Duration) {
         if live.read_only().is_some() {
             continue;
         }
-        if let Err(e) = live.sync_due() {
+        if let Err(e) = or_abort("the group commit fsync", || live.sync_due()) {
             log::error!("group commit fsync failed, the store is read-only until reopened: {}", e);
         }
     }
