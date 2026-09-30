@@ -456,3 +456,43 @@ fn expr_and_pattern_round_trip() {
     let pattern = Pattern::parse("(a:Person)-[:KNOWS*1..3]->(b)").expect("parse");
     assert_eq!(Pattern::parse(&pattern.to_string()).expect("reparse"), pattern);
 }
+
+fn nest(levels: usize, inner: Value) -> Value {
+    (0..levels).fold(inner, |v, _| Value::List(vec![v]))
+}
+
+/// Known deviation (in the review, upstream #31): `Value`'s
+/// serde counts containers entered, the file format counts value depth (a
+/// scalar is depth 1, `MAX_DEPTH` = 100). They agree when the innermost
+/// value is a scalar, but 100 nested lists with an empty innermost one
+/// (depth 100) save and load in the file format while `Value`'s serde (and
+/// so the log's postcard encoding) rejects them. The commit pipeline counts
+/// an empty container as holding a scalar (`MAX_VALUE_DEPTH`), so it never
+/// logs such a value. When this test fails, upstream has made the two agree.
+#[test]
+fn value_serde_rejects_empty_containers_at_the_depth_limit() {
+    let file_ok = |v: &Value| {
+        let mut g = G::new();
+        g.add_node("a", rec([("k", v.clone())])).unwrap();
+        format::to_binary(&g, &Attrs::new(), false).is_ok_and(|bytes| format::from_binary(&bytes).is_ok())
+    };
+    let serde_ok = |v: &Value| {
+        let (postcard, json) = (postcard::to_stdvec(v).is_ok(), serde_json::to_string(v).is_ok());
+        assert_eq!(postcard, json, "both encoders go through Value's serde");
+        postcard
+    };
+
+    // A scalar at depth 100 and 101: both agree
+    let at_limit = nest(99, Value::Int(1));
+    assert!(file_ok(&at_limit) && serde_ok(&at_limit));
+    let beyond = nest(100, Value::Int(1));
+    assert!(!file_ok(&beyond) && !serde_ok(&beyond));
+
+    // An empty list at depth 100: the file format takes it, serde doesn't
+    let empty_at_limit = nest(99, Value::List(vec![]));
+    assert!(file_ok(&empty_at_limit));
+    assert!(!serde_ok(&empty_at_limit));
+    let empty_dict_at_limit = nest(99, Value::Dict(Attrs::new()));
+    assert!(file_ok(&empty_dict_at_limit));
+    assert!(!serde_ok(&empty_dict_at_limit));
+}

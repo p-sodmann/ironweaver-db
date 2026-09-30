@@ -1,8 +1,8 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2; all are filed (links in the table).
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3; all are filed (links in the table).
 
-Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–12 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
+Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–13 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
 
 | # | Title | Status |
 |---|---|---|
@@ -18,6 +18,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–12 
 | 10 | [`expect` on the op apply path in `remove_node` / `rename_node`](#10-expect-on-the-op-apply-path-in-remove_node--rename_node) | filed: [#28](https://github.com/p-sodmann/Ironweaver/issues/28) |
 | 11 | [`Expr` depth-limit errors lose their message under postcard](#11-expr-depth-limit-errors-lose-their-message-under-postcard) | filed: [#29](https://github.com/p-sodmann/Ironweaver/issues/29) |
 | 12 | [Small API and dependency cleanups: public attribute lookup, optional bincode, doc comments](#12-small-api-and-dependency-cleanups-public-attribute-lookup-optional-bincode-doc-comments) | filed: [#30](https://github.com/p-sodmann/Ironweaver/issues/30) |
+| 13 | [`Value` serde rejects empty containers at the depth limit that the file format accepts](#13-value-serde-rejects-empty-containers-at-the-depth-limit-that-the-file-format-accepts) | filed: [#31](https://github.com/p-sodmann/Ironweaver/issues/31) |
 
 ---
 
@@ -257,3 +258,40 @@ Three small, independent items; low priority.
 1. **Public attribute-path lookup.** `Record::at` (the path rules behind `Attributes`: name, then keys into nested dicts, `None` counts as missing) is private. Payload types that want identical semantics have to copy it; Ironweaver DB's `DbRecord` does, with a property test that it matches `Record`. Proposal: a public `record::lookup(attrs: &Attrs, path: &[String]) -> Option<&Value>` that `Record` uses too.
 2. **bincode behind a feature.** bincode 1.x is unmaintained (RUSTSEC-2025-0141) and is only used to read format-1 binary files. It is an unconditional dependency, so every downstream `cargo deny` / `cargo audit` has to ignore the advisory. Proposal: a `format-v1` feature (default on, if compatibility matters), so users who only read format 2 can drop bincode.
 3. **Doc comments say "bincode".** `format::to_binary` ("Encode ... with bincode") and `format::from_binary` ("Decode a bincode document") describe format 1; format 2 is postcard. Update the comments.
+
+---
+
+## 13. `Value` serde rejects empty containers at the depth limit that the file format accepts
+
+Found in step 3 (filed as [#31](https://github.com/p-sodmann/Ironweaver/issues/31)).
+
+**Problem**
+
+`Value`'s serde and the file format disagree by one level on how deep an attribute value may be nested, when the innermost container is empty.
+
+- The file format counts value depth: a scalar is depth 1, and `MAX_DEPTH` (100) is the deepest allowed (`format/load.rs`, `tagged::check_depth` in `format/save.rs`).
+- `Value`'s serde (`value.rs`, module `nested`) counts containers entered, and fails once `MAX_DEPTH` containers are open (`enter_level`: `open >= max`).
+
+With a scalar innermost, both allow 99 lists around it (depth 100). With an empty list or dict innermost, the file format accepts 100 nested containers (depth 100), but `Value`'s serde rejects them. `Value`'s doc comment says serde "fails for values nested more than `MAX_DEPTH` levels", so it rejects a value that is within the documented limit.
+
+Reproduction (`a14149e`):
+
+```rust
+let v = (0..99).fold(Value::List(vec![]), |v, _| Value::List(vec![v])); // depth 100
+let mut g: Graph<Record, Record> = Graph::new();
+g.add_node("a", Record::with_attr([("k", v.clone())])).unwrap();
+let bytes = format::to_binary(&g, &Attrs::new(), false).unwrap();   // ok
+format::from_binary(&bytes).unwrap();                               // ok
+postcard::to_stdvec(&v).unwrap_err();     // "attribute values nested more than 100 levels deep"
+serde_json::to_string(&v).unwrap_err();   // same
+```
+
+The same holds for an empty `Dict`, and for `Op`s carrying such a value (`Op`'s serde goes through `Value`'s).
+
+**Proposal**
+
+Make `Value`'s serde count depth like the file format: fail when a value's depth exceeds `MAX_DEPTH`, where the attribute's own value is depth 1 and a container's items are one deeper. For example, count levels per `Value` (in `Value`'s own `Serialize` / `Deserialize`) rather than around a container's contents. Add the empty-container case to the depth tests of both encoders.
+
+**Why the database needs it**
+
+Ironweaver DB writes its log with `Value`'s serde (postcard) and saves checkpoints through a custom `Codec` that also serializes attributes with `Value`'s serde. So a graph file that holds an empty list at depth 100 loads, but can't be checkpointed or logged again: saving it fails with "nested more than 100 levels deep". Our commit pipeline avoids this by counting an empty container as if it held a scalar (one level stricter than the file format), and imports will have to apply the same check. With one depth rule for both encoders, everything that loads can be saved and logged again.
