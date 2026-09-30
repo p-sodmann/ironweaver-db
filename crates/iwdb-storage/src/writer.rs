@@ -1,0 +1,407 @@
+//! Writing the log: [`Wal`], its [`FsyncPolicy`] and [`WalOptions`].
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use iwdb_engine::CommitRecord;
+
+use crate::format::{self, FRAME_HEADER_LEN, SEGMENT_HEADER_LEN};
+use crate::io::{LogFile, LogFs, StdFs};
+use crate::{reader, Error};
+
+/// Smallest segment size (1 KiB).
+pub const MIN_SEGMENT_SIZE: u64 = 1 << 10;
+/// Largest segment size (1 GiB).
+pub const MAX_SEGMENT_SIZE: u64 = 1 << 30;
+/// Default segment size (64 MiB).
+pub const DEFAULT_SEGMENT_SIZE: u64 = 64 << 20;
+
+/// When the log is fsynced. The guarantees are stated in
+/// `documentation/guarantees.md` (ADR 0005).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FsyncPolicy {
+    /// Every append is fsynced before it returns, so before the commit is
+    /// applied and acknowledged. An acknowledged commit survives any crash.
+    Always,
+    /// Group commit, like Redis `appendfsync everysec`. An append fsyncs
+    /// the log (itself and every record before it) before it returns when,
+    /// counting the record just written, `max_batch` records are unsynced,
+    /// or the oldest unsynced record was written `max_delay` or longer ago.
+    /// Otherwise it returns without an fsync. [`Wal::sync_due`], called on
+    /// a timer by the owner, syncs records older than `max_delay` when no
+    /// append comes. After a crash, acknowledged commits can be lost: fewer
+    /// than `max_batch` of them, all written within `max_delay` of each
+    /// other (with a timer calling `sync_due` every `P`, within
+    /// `max_delay + P` of the crash).
+    Group { max_delay: Duration, max_batch: u32 },
+    /// Never fsync (tests only). A process crash loses nothing (the data is
+    /// in the OS page cache), an OS crash or power loss can lose or damage
+    /// anything written since the files were created.
+    Off,
+}
+
+/// Options of a [`Wal`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalOptions {
+    pub fsync: FsyncPolicy,
+    /// A segment is closed and a new one started before a record that would
+    /// make it larger than this (unless the segment has no records yet).
+    /// Between [`MIN_SEGMENT_SIZE`] and [`MAX_SEGMENT_SIZE`].
+    pub segment_size: u64,
+}
+
+impl Default for WalOptions {
+    /// `always`, 64 MiB segments.
+    fn default() -> Self {
+        WalOptions { fsync: FsyncPolicy::Always, segment_size: DEFAULT_SEGMENT_SIZE }
+    }
+}
+
+impl WalOptions {
+    fn check(&self) -> Result<(), Error> {
+        if !(MIN_SEGMENT_SIZE..=MAX_SEGMENT_SIZE).contains(&self.segment_size) {
+            return Err(Error::InvalidOptions(format!(
+                "segment size {} is not between {} and {}",
+                self.segment_size, MIN_SEGMENT_SIZE, MAX_SEGMENT_SIZE
+            )));
+        }
+        if let FsyncPolicy::Group { max_batch: 0, .. } = self.fsync {
+            return Err(Error::InvalidOptions("a group commit batch needs at least one record".into()));
+        }
+        Ok(())
+    }
+}
+
+/// Whether group commit must fsync now: `unsynced` records (at least one)
+/// are unsynced and the oldest was written at `oldest`.
+fn group_due(max_delay: Duration, max_batch: u32, unsynced: u64, oldest: Instant, now: Instant) -> bool {
+    unsynced >= u64::from(max_batch) || now.saturating_duration_since(oldest) >= max_delay
+}
+
+/// The writer of a log directory: appends [`CommitRecord`]s to segment
+/// files, fsyncing them according to its [`FsyncPolicy`].
+///
+/// - It is the only appender (the commit pipeline's single writer), and
+///   stores and returns records without knowing what their ops mean.
+/// - A new writer always starts a new segment. Segments are created
+///   complete: the header is written to a temporary file, synced, renamed
+///   into place and the directory synced, so a segment file either has a
+///   valid header or doesn't exist. Before rotating, the old segment is
+///   synced (except with [`FsyncPolicy::Off`]), so only the last segment
+///   can have a torn tail.
+/// - If a write, fsync, rename or directory sync fails, the writer is
+///   **failed**: it rejects every further append with [`Error::ReadOnly`]
+///   until the log is reopened (recovered). A failed fsync is never
+///   retried: after one, the OS may have dropped the unsynced pages and
+///   marked them clean, so a second fsync can succeed without writing them.
+///
+/// Appends are O(record size), plus an fsync per the policy.
+pub struct Wal<F: LogFs = StdFs> {
+    fs: F,
+    dir: PathBuf,
+    options: WalOptions,
+    file: F::File,
+    segment_path: PathBuf,
+    segment_len: u64,
+    segment_records: u64,
+    next_seq: u64,
+    /// The highest seq whose fsync completed (as far as this writer knows).
+    synced_seq: u64,
+    /// When the oldest unsynced record was written.
+    oldest_unsynced: Option<Instant>,
+    failed: Option<String>,
+    frame: Vec<u8>,
+}
+
+impl<F: LogFs> std::fmt::Debug for Wal<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Wal")
+            .field("dir", &self.dir)
+            .field("options", &self.options)
+            .field("segment_path", &self.segment_path)
+            .field("next_seq", &self.next_seq)
+            .field("synced_seq", &self.synced_seq)
+            .field("failed", &self.failed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Wal<StdFs> {
+    /// Start writing the log in the existing directory `dir` at `next_seq`,
+    /// in a new segment. See [`create_with`](Self::create_with).
+    pub fn create(dir: &Path, options: WalOptions, next_seq: u64) -> Result<Self, Error> {
+        Self::create_with(StdFs, dir, options, next_seq)
+    }
+}
+
+impl<F: LogFs> Wal<F> {
+    /// Start writing the log in the existing directory `dir` at `next_seq`
+    /// (at least 1, below `u64::MAX`), in a new segment, through `fs`.
+    ///
+    /// The log in `dir` must be empty or end right before `next_seq`, with
+    /// no torn tail: in a new directory there is nothing; after a restart,
+    /// recovery (step 5) has read the log to its end and truncated a torn
+    /// tail. The last segment is read to check this (O(its size)) and, except
+    /// with [`FsyncPolicy::Off`], fsynced: the writer's first record says that
+    /// everything before it is synced.
+    ///
+    /// Errors: [`Error::LogAhead`] if the log has records at or after
+    /// `next_seq`; [`Error::LogEndsBefore`] if it ends before `next_seq - 1`;
+    /// [`Error::TornTail`] if its last segment has a torn tail; any error
+    /// of the reader. A segment at `next_seq` without records (left by a
+    /// crash right after a rotation) is replaced.
+    pub fn create_with(fs: F, dir: &Path, options: WalOptions, next_seq: u64) -> Result<Self, Error> {
+        options.check()?;
+        if next_seq == 0 || next_seq == u64::MAX {
+            return Err(Error::InvalidOptions(format!("the log can't start at seq {}", next_seq)));
+        }
+        if let Some((first_seq, path)) = reader::list_segments(dir)?.pop() {
+            if first_seq > next_seq {
+                return Err(Error::LogAhead { next_seq, first_seq, path });
+            }
+            let end = reader::read_segment_file(&path, first_seq, true)?;
+            if end.torn.is_some() {
+                return Err(Error::TornTail { path, valid_len: end.valid_len });
+            }
+            if end.next_seq > next_seq {
+                return Err(Error::LogAhead { next_seq, first_seq, path });
+            }
+            if end.next_seq < next_seq {
+                return Err(Error::LogEndsBefore { from: next_seq, next_seq: end.next_seq });
+            }
+            if options.fsync != FsyncPolicy::Off {
+                let mut file = fs.open_append(&path).map_err(|e| Error::io("open", &path, e))?;
+                file.sync().map_err(|e| Error::io("fsync", &path, e))?;
+            }
+        }
+        let (file, segment_path) = new_segment(&fs, dir, next_seq, options.fsync)?;
+        Ok(Wal {
+            fs,
+            dir: dir.to_path_buf(),
+            options,
+            file,
+            segment_path,
+            segment_len: SEGMENT_HEADER_LEN as u64,
+            segment_records: 0,
+            next_seq,
+            synced_seq: next_seq - 1,
+            oldest_unsynced: None,
+            failed: None,
+            frame: Vec::new(),
+        })
+    }
+
+    /// Append `record` (whose seq must be [`next_seq`](Self::next_seq)) and
+    /// fsync per the policy. When this returns `Ok`, the record is written
+    /// and, with [`FsyncPolicy::Always`], durable: the commit may be
+    /// applied and acknowledged.
+    ///
+    /// Errors:
+    /// - [`Error::RecordTooLarge`], [`Error::Encode`], [`Error::OutOfOrder`]:
+    ///   nothing was written, and the log stays usable;
+    /// - [`Error::Io`]: a write, fsync or rotation failed. The log is now
+    ///   failed. The record may or may not be in the log (it may be found
+    ///   after reopening), so the commit's outcome is unknown; it must not
+    ///   be applied;
+    /// - [`Error::ReadOnly`]: the log failed earlier.
+    pub fn append(&mut self, record: &CommitRecord) -> Result<(), Error> {
+        self.check_usable()?;
+        if record.seq != self.next_seq {
+            return Err(Error::OutOfOrder { expected: self.next_seq, found: record.seq });
+        }
+        if record.seq == u64::MAX {
+            return Err(iwdb_engine::Error::SeqExhausted.into());
+        }
+        let (kind, payload) = format::encode_payload(record)?;
+        let frame_len = (FRAME_HEADER_LEN + payload.len()) as u64;
+        if self.segment_records > 0 && self.segment_len + frame_len > self.options.segment_size {
+            self.rotate()?;
+        }
+        self.frame.clear();
+        format::encode_frame(&mut self.frame, record.seq, self.synced_seq, kind, &payload);
+        if let Err(e) = self.file.write_all(&self.frame) {
+            return Err(self.fail("append", e));
+        }
+        self.segment_len += frame_len;
+        self.segment_records += 1;
+        self.next_seq += 1;
+        let now = Instant::now();
+        let oldest = *self.oldest_unsynced.get_or_insert(now);
+        let due = match self.options.fsync {
+            FsyncPolicy::Always => true,
+            FsyncPolicy::Group { max_delay, max_batch } => {
+                group_due(max_delay, max_batch, self.unsynced(), oldest, now)
+            }
+            FsyncPolicy::Off => false,
+        };
+        if due {
+            self.sync_now()?;
+        }
+        Ok(())
+    }
+
+    /// Fsync every record written so far (whatever the policy), unless
+    /// they are synced already. On error the log is failed.
+    pub fn sync(&mut self) -> Result<(), Error> {
+        self.check_usable()?;
+        if self.unsynced() > 0 {
+            self.sync_now()?;
+        }
+        Ok(())
+    }
+
+    /// With [`FsyncPolicy::Group`]: fsync if the oldest unsynced record was
+    /// written `max_delay` or longer ago. The owner calls this on a timer,
+    /// so that the last commits before an idle period become durable
+    /// without waiting for the next append. Returns whether it synced.
+    pub fn sync_due(&mut self) -> Result<bool, Error> {
+        self.check_usable()?;
+        let (FsyncPolicy::Group { max_delay, .. }, Some(oldest)) = (self.options.fsync, self.oldest_unsynced) else {
+            return Ok(false);
+        };
+        if Instant::now().saturating_duration_since(oldest) < max_delay {
+            return Ok(false);
+        }
+        self.sync_now()?;
+        Ok(true)
+    }
+
+    /// Sync (except with [`FsyncPolicy::Off`]) and close. Dropping a `Wal`
+    /// without closing it doesn't sync.
+    pub fn close(mut self) -> Result<(), Error> {
+        if self.options.fsync != FsyncPolicy::Off {
+            self.sync()?;
+        }
+        Ok(())
+    }
+
+    /// The seq the next record must have.
+    pub fn next_seq(&self) -> u64 {
+        self.next_seq
+    }
+
+    /// The highest seq known to be durable: every record up to it is
+    /// synced. Records after it are written but may be lost in a crash.
+    pub fn synced_seq(&self) -> u64 {
+        self.synced_seq
+    }
+
+    /// Why the log failed, if it did (it accepts no more appends then).
+    pub fn failure(&self) -> Option<&str> {
+        self.failed.as_deref()
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn options(&self) -> &WalOptions {
+        &self.options
+    }
+
+    /// The segment being written.
+    pub fn segment_path(&self) -> &Path {
+        &self.segment_path
+    }
+
+    fn unsynced(&self) -> u64 {
+        self.next_seq - 1 - self.synced_seq
+    }
+
+    fn check_usable(&self) -> Result<(), Error> {
+        match &self.failed {
+            Some(cause) => Err(Error::ReadOnly { cause: cause.clone() }),
+            None => Ok(()),
+        }
+    }
+
+    /// Fsync the current segment. Never retried on failure (see the type
+    /// docs).
+    fn sync_now(&mut self) -> Result<(), Error> {
+        if let Err(e) = self.file.sync() {
+            return Err(self.fail("fsync", e));
+        }
+        self.synced_seq = self.next_seq - 1;
+        self.oldest_unsynced = None;
+        Ok(())
+    }
+
+    /// Close the current segment (synced, except with `Off`) and start one
+    /// at `next_seq`.
+    fn rotate(&mut self) -> Result<(), Error> {
+        if self.options.fsync != FsyncPolicy::Off && self.unsynced() > 0 {
+            self.sync_now()?;
+        }
+        match new_segment(&self.fs, &self.dir, self.next_seq, self.options.fsync) {
+            Ok((file, path)) => {
+                self.file = file;
+                self.segment_path = path;
+                self.segment_len = SEGMENT_HEADER_LEN as u64;
+                self.segment_records = 0;
+                Ok(())
+            }
+            Err(e) => {
+                self.failed = Some(e.to_string());
+                Err(e)
+            }
+        }
+    }
+
+    /// Mark the log failed after an I/O error on the current segment.
+    fn fail(&mut self, op: &'static str, source: std::io::Error) -> Error {
+        let error = Error::io(op, &self.segment_path, source);
+        self.failed = Some(error.to_string());
+        error
+    }
+}
+
+/// Create the segment starting at `first_seq`: header into a temporary
+/// file, fsync, rename into place, directory fsync (no fsyncs with
+/// [`FsyncPolicy::Off`]); then open it for appending.
+fn new_segment<F: LogFs>(fs: &F, dir: &Path, first_seq: u64, policy: FsyncPolicy) -> Result<(F::File, PathBuf), Error> {
+    let name = format::segment_name(first_seq);
+    let path = dir.join(&name);
+    let tmp = dir.join(format!("{}.tmp", name));
+    let sync = policy != FsyncPolicy::Off;
+    let mut file = fs.create(&tmp).map_err(|e| Error::io("create", &tmp, e))?;
+    file.write_all(&format::encode_segment_header(first_seq)).map_err(|e| Error::io("append", &tmp, e))?;
+    if sync {
+        file.sync().map_err(|e| Error::io("fsync", &tmp, e))?;
+    }
+    drop(file);
+    fs.rename(&tmp, &path).map_err(|e| Error::io("rename", &tmp, e))?;
+    if sync {
+        fs.sync_dir(dir).map_err(|e| Error::io("sync directory", dir, e))?;
+    }
+    let file = fs.open_append(&path).map_err(|e| Error::io("open", &path, e))?;
+    Ok((file, path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_commit_is_due_by_count_or_age() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        assert!(!group_due(ms(10), 3, 1, t0, t0));
+        assert!(!group_due(ms(10), 3, 2, t0, t0 + ms(9)));
+        assert!(group_due(ms(10), 3, 3, t0, t0));
+        assert!(group_due(ms(10), 3, 1, t0, t0 + ms(10)));
+        assert!(group_due(Duration::ZERO, 100, 1, t0, t0));
+        assert!(group_due(ms(10), 1, 1, t0, t0));
+        // A clock that goes backwards counts as no time passed
+        assert!(!group_due(ms(10), 3, 1, t0 + ms(5), t0));
+    }
+
+    #[test]
+    fn options_are_checked() {
+        let options = |fsync, segment_size| WalOptions { fsync, segment_size }.check();
+        assert!(options(FsyncPolicy::Always, DEFAULT_SEGMENT_SIZE).is_ok());
+        assert!(options(FsyncPolicy::Always, MIN_SEGMENT_SIZE - 1).is_err());
+        assert!(options(FsyncPolicy::Always, MAX_SEGMENT_SIZE + 1).is_err());
+        assert!(options(FsyncPolicy::Group { max_delay: Duration::ZERO, max_batch: 0 }, MIN_SEGMENT_SIZE).is_err());
+        assert!(options(FsyncPolicy::Group { max_delay: Duration::ZERO, max_batch: 1 }, MIN_SEGMENT_SIZE).is_ok());
+    }
+}

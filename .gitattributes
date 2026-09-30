@@ -1,0 +1,2 @@
+# WAL segments (format fixtures) are binary
+*.wal binary

@@ -1,0 +1,24 @@
+[package]
+name = "iwdb-storage"
+description = "Ironweaver DB storage: write-ahead log (later: checkpoints, recovery, backup)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+crc32c.workspace = true
+ironweaver-core.workspace = true
+iwdb-engine = { path = "../iwdb-engine" }
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

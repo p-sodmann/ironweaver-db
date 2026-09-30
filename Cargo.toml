@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/iwdb-engine"]
+members = ["crates/iwdb-engine", "crates/iwdb-storage"]
+# The cargo-fuzz targets need nightly and are a workspace of their own
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.0"
@@ -16,10 +18,13 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 proptest = "1"
 criterion = "0.8"
-# Test-only: the binary encoding the core's `Op` and `Value` round-trip through
+# The WAL's record encoding (step 4); the core's `Op` and `Value` round-trip through it
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 # The catalog's encoding in graph meta (ADR 0003); also used by tests
 serde_json = "1"
+# CRC32C of WAL records, hardware accelerated (SSE 4.2, ARMv8 CRC)
+crc32c = "0.6"
+tempfile = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
