@@ -56,7 +56,7 @@ Every value in a logged record is nested at most `MAX_VALUE_DEPTH` deep, because
 - **Rotation**: before appending a frame that would make the segment larger than the configured segment size (1 KiB to 1 GiB, 64 MiB by default), the writer fsyncs the current segment and creates the next one, named by the frame's seq. A segment with no records takes any frame, so one frame can exceed the segment size. The largest segment file is therefore `1 GiB + 24 + 25 + 64 MiB` bytes, and the reader rejects larger files before it reads them.
 - **Appending**: one `write` of the whole frame. It is then fsynced per the fsync policy (ADR 0005, [guarantees.md](../guarantees.md)).
 - **Starting a writer** always creates a new segment at the next seq. The log must end right before it with no torn tail, and its last segment is fsynced first. A header-only segment with the same name is replaced.
-- With the `off` policy, none of these fsyncs happen.
+- With the `off` policy, none of these fsyncs happen. A writer then starts with `synced_seq` 0 (it knows of no fsync), and only an explicit sync fsyncs: every segment that may hold records after `synced_seq` (rotations and earlier writers left them unsynced), then the directory.
 
 ## Reading
 

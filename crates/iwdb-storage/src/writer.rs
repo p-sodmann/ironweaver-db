@@ -34,9 +34,12 @@ pub enum FsyncPolicy {
     /// other (with a timer calling `sync_due` every `P`, within
     /// `max_delay + P` of the crash).
     Group { max_delay: Duration, max_batch: u32 },
-    /// Never fsync (tests only). A process crash loses nothing (the data is
-    /// in the OS page cache), an OS crash or power loss can lose or damage
-    /// anything written since the files were created.
+    /// Never fsync on its own (tests only). A process crash loses nothing
+    /// (the data is in the OS page cache), an OS crash or power loss can
+    /// lose or damage anything written since the files were created. Only
+    /// an explicit [`Wal::sync`] (or [`Wal::close`]... no: `close` doesn't
+    /// sync with `Off`) fsyncs: then every segment that may hold unsynced
+    /// records, and the directory.
     Off,
 }
 
@@ -177,6 +180,8 @@ impl<F: LogFs> Wal<F> {
             }
         }
         let (file, segment_path) = new_segment(&fs, dir, next_seq, options.fsync)?;
+        // With `Off` the log before was never fsynced (as far as we know)
+        let synced_seq = if options.fsync == FsyncPolicy::Off { 0 } else { next_seq - 1 };
         Ok(Wal {
             fs,
             dir: dir.to_path_buf(),
@@ -186,7 +191,7 @@ impl<F: LogFs> Wal<F> {
             segment_len: SEGMENT_HEADER_LEN as u64,
             segment_records: 0,
             next_seq,
-            synced_seq: next_seq - 1,
+            synced_seq,
             oldest_unsynced: None,
             failed: None,
             frame: Vec::new(),
@@ -325,14 +330,52 @@ impl<F: LogFs> Wal<F> {
         }
     }
 
-    /// Fsync the current segment. Never retried on failure (see the type
-    /// docs).
+    /// Fsync the current segment. With `Off`, first every other segment
+    /// that may hold records after `synced_seq` (rotations and earlier
+    /// writers didn't sync them), and afterwards the directory (segments
+    /// were created without a directory sync). Never retried on failure
+    /// (see the type docs).
     fn sync_now(&mut self) -> Result<(), Error> {
+        if self.options.fsync == FsyncPolicy::Off {
+            if let Err(e) = self.sync_older_segments() {
+                self.failed = Some(e.to_string());
+                return Err(e);
+            }
+        }
         if let Err(e) = self.file.sync() {
             return Err(self.fail("fsync", e));
         }
+        if self.options.fsync == FsyncPolicy::Off {
+            if let Err(e) = self.fs.sync_dir(&self.dir) {
+                let error = Error::io("sync directory", &self.dir, e);
+                self.failed = Some(error.to_string());
+                return Err(error);
+            }
+        }
         self.synced_seq = self.next_seq - 1;
         self.oldest_unsynced = None;
+        Ok(())
+    }
+
+    /// With `Off`: fsync the segments before the current one that hold
+    /// records after `synced_seq`. A segment's records end where the next
+    /// segment begins. One that is gone was removed by the checkpointer
+    /// after a checkpoint that covers it.
+    fn sync_older_segments(&mut self) -> Result<(), Error> {
+        let segments = reader::list_segments(&self.dir)?;
+        for pair in segments.windows(2) {
+            let ((_, path), (next_first, _)) = (&pair[0], &pair[1]);
+            if *next_first > self.synced_seq + 1 && *path != self.segment_path {
+                let mut file = match self.fs.open_append(path) {
+                    Ok(file) => file,
+                    // The checkpointer removed it meanwhile: a checkpoint,
+                    // fsynced by `write_atomic`, holds its records
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(Error::io("open", path, e)),
+                };
+                file.sync().map_err(|e| Error::io("fsync", path, e))?;
+            }
+        }
         Ok(())
     }
 

@@ -192,6 +192,80 @@ fn off_never_syncs() {
     assert_eq!((records.len(), end.next_seq), (100, 101));
 }
 
+/// With `off`, an explicit sync makes every record durable, as it says:
+/// also the segments that rotations closed without an fsync, those an
+/// earlier writer left, and the directory. Until then `synced_seq` claims
+/// nothing. (In step 4 a new writer claimed every earlier record synced,
+/// and a sync covered only the current segment.)
+#[test]
+fn off_syncs_every_unsynced_segment_on_an_explicit_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = TestFs::default();
+    let synced = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = synced.clone();
+    fs.set_hook(Some(std::sync::Arc::new(move |call, path: &std::path::Path| {
+        if call == Call::Sync {
+            seen.lock().unwrap().push(path.to_path_buf());
+        }
+    })));
+    let off = options(FsyncPolicy::Off, MIN_SEGMENT_SIZE);
+    let mut logged = logged_with(&fs, dir.path(), FsyncPolicy::Off, MIN_SEGMENT_SIZE);
+    for i in 0..60 {
+        logged.commit(&[upsert("a", Value::Int(i))]).unwrap();
+    }
+    drop(logged);
+    let first = segments(dir.path());
+    assert!(first.len() > 2);
+
+    // A new writer knows nothing about the earlier writer's fsyncs
+    let wal = Wal::create_with(fs.clone(), dir.path(), off.clone(), 61).unwrap();
+    assert_eq!(wal.synced_seq(), 0, "nothing is known to be durable");
+    let (records, _) = read_log(dir.path(), 1).unwrap();
+    let mut logged = LoggedNamespace::new(replay(records), wal).unwrap();
+    for i in 60..120 {
+        logged.commit(&[upsert("a", Value::Int(i))]).unwrap();
+    }
+    assert_eq!(logged.wal().synced_seq(), 0);
+    assert_eq!((fs.count(Call::Sync), fs.count(Call::SyncDir)), (0, 0));
+
+    logged.sync().unwrap();
+    assert_eq!(logged.wal().synced_seq(), 120);
+    let synced = synced.lock().unwrap().clone();
+    for segment in segments(dir.path()) {
+        assert!(synced.contains(&segment), "{} was synced", segment.display());
+    }
+    assert_eq!(fs.count(Call::SyncDir), 1, "the directory too");
+    // Frames written after the sync say so; a sync without new records
+    // does nothing
+    let calls = fs.count(Call::Sync);
+    logged.sync().unwrap();
+    assert_eq!(fs.count(Call::Sync), calls);
+    logged.commit(&[upsert("a", Value::Int(120))]).unwrap();
+    logged.sync().unwrap();
+    assert_eq!(fs.count(Call::Sync), calls + 1, "only the segment with new records");
+    let (records, _) = read_log(dir.path(), 1).unwrap();
+    assert_eq!(records.len(), 121);
+}
+
+/// With `off`, a segment that disappeared before the sync (the
+/// checkpointer removed it, a checkpoint holds its records) is skipped.
+#[test]
+fn off_sync_skips_a_segment_removed_meanwhile() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = TestFs::default();
+    let mut logged = logged_with(&fs, dir.path(), FsyncPolicy::Off, MIN_SEGMENT_SIZE);
+    for i in 0..60 {
+        logged.commit(&[upsert("a", Value::Int(i))]).unwrap();
+    }
+    let segments = segments(dir.path());
+    assert!(segments.len() > 2);
+    fs::remove_file(&segments[0]).unwrap();
+    logged.sync().unwrap();
+    assert_eq!(logged.wal().synced_seq(), 60);
+    assert!(logged.read_only().is_none());
+    assert_eq!(fs.count(Call::Sync), segments.len() - 1);
+}
+
 #[test]
 fn a_record_above_the_limit_is_rejected_before_anything_happens() {
     let dir = tempfile::tempdir().unwrap();
