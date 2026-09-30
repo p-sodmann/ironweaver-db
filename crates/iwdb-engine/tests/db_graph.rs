@@ -314,7 +314,7 @@ fn unknown_reserved_keys_and_foreign_graph_meta_are_errors() {
     assert!(matches!(load_error(&plain, &graph_meta), Error::MissingVersion { .. }));
 }
 
-/// Known core deviation (in the core review): the JSON loader reads `-0.0`
+/// Known core deviation (in the core review, upstream #26): the JSON loader reads `-0.0`
 /// back as `0.0`; the binary format keeps it. When this fails, upstream
 /// has fixed it: allow -0.0 in `common::scalar` again.
 #[test]

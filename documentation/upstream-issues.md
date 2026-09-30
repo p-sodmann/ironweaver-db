@@ -1,6 +1,6 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Draft 8 comes from that review, is **drafted, pending review** and **not filed**. Draft 9 comes from step 2 and is to be filed (see AGENTS.md, *Findings in ironweaver-core*). After review, file it in [p-sodmann/Ironweaver](https://github.com/p-sodmann/Ironweaver/issues) and replace "not filed" with the issue link, here and in the core review.
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Draft 8 comes from that review, is **drafted, pending review** and **not filed**. Draft 9 comes from step 2 and is filed as [#26](https://github.com/p-sodmann/Ironweaver/issues/26). After review, file it in [p-sodmann/Ironweaver](https://github.com/p-sodmann/Ironweaver/issues) and replace "not filed" with the issue link, here and in the core review.
 
 Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8 and 9 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
 
@@ -14,7 +14,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8 and 9
 | 6 | [No panic in `apply_all` rollback](#6-no-panic-in-apply_all-rollback) | done upstream (PR #25, `a14149e`) |
 | 7 | [(Optional) Save index definitions in the file format](#7-optional-save-index-definitions-in-the-file-format) | done upstream (PR #25, `a14149e`) |
 | 8 | [Edge budget and per-edge cancellation in `bfs` and `expand`](#8-edge-budget-and-per-edge-cancellation-in-bfs-and-expand) | drafted, not filed |
-| 9 | [JSON loader reads `-0.0` back as `0.0`](#9-json-loader-reads--00-back-as-00) | not filed yet (no GitHub credentials in the session that found it) |
+| 9 | [JSON loader reads `-0.0` back as `0.0`](#9-json-loader-reads--00-back-as-00) | filed: [#26](https://github.com/p-sodmann/Ironweaver/issues/26) |
 
 ---
 
