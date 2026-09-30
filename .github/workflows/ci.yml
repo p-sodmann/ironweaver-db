@@ -60,3 +60,18 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  fuzz:
+    name: fuzz the WAL reader (nightly, 60 s)
+    runs-on: ubuntu-latest
+    env:
+      # fuzz/ is a nightly-only workspace; overrides rust-toolchain.toml
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo fuzz run wal_reader -- -max_total_time=60 -malloc_limit_mb=256 -max_len=4096

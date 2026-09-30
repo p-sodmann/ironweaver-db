@@ -17,6 +17,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+## Fuzzing
+
+The cargo-fuzz targets live in [`fuzz/`](fuzz/), a separate workspace that needs nightly, so the stable build, clippy, `cargo deny` and the MSRV check don't include it. CI runs each target for a minute; run them longer locally when you change a decoder:
+
+```
+cargo install cargo-fuzz
+cargo +nightly fuzz run wal_reader -- -max_total_time=600 -malloc_limit_mb=256
+```
+
 Keep commits small and prefix them with the step, e.g. `step 3: add WAL record CRC`. A PR covers one step (or a clearly separable part of one) and lists the acceptance criteria it satisfies.
 
 ## License

@@ -1,0 +1,26 @@
+# cargo-fuzz targets (nightly only): `cargo +nightly fuzz run wal_reader`.
+# A workspace of its own, excluded from the main one, so that the stable
+# build, clippy, cargo deny and the MSRV check don't see it.
+[package]
+name = "iwdb-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+crc32c = "0.6"
+iwdb-storage = { path = "../crates/iwdb-storage" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "wal_reader"
+path = "fuzz_targets/wal_reader.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
