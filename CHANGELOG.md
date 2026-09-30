@@ -22,8 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Version semantics: new entities start at 1, each commit that writes an entity adds 1, `expected_version: 0` means "must not exist", and versions never go above `i64::MAX`.
 - ADR 0004: versions are set by an attribute op on the reserved key `iwdb.version`.
 - Model-based proptest of the commit pipeline, and the replay property (replaying the commit records gives the same canonical state).
+- `iwdb-storage` crate with the write-ahead log (step 4): a versioned segment format with CRC32C per header and record (`documentation/formats/wal.md`), rotation by size, fsync policies `always`, `group` (by count and age) and `off`, a read-only state after any write or fsync failure (never retried), and a reader that reports a torn tail and rejects corruption, gaps and repeats.
+- `LoggedNamespace`: commits are logged, and fsynced per the policy, before they are applied and acknowledged.
+- ADR 0005 (fsync policies and failure behaviour) and `documentation/guarantees.md`.
+- WAL tests: random workloads reread and replayed, fault injection through the `LogFs` seam, truncation at every offset and every bit flip, and a format-1 compatibility fixture. Also a cargo-fuzz target for the reader (`fuzz/`, nightly, run in CI).
 
 ### Changed
+- The step 3 workload strategies moved to `crates/iwdb-engine/tests/workload/mod.rs`, shared with the WAL tests.
 - Top-level attribute keys starting with `iwdb.` are reserved, like meta keys: commits, `DbRecord`'s serde and the codec reject them (step 3, ADR 0004).
 - Upstream issue #31 filed: `Value`'s serde rejects empty containers at the depth limit that the file format accepts.
 - Bumped `ironweaver-core` from `02cefab` to `a14149e` (PR #25, which implements all seven upstream drafts). Core review updated; follow-up draft 8 (edge budget) added.

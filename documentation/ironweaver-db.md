@@ -63,8 +63,8 @@ Ironweaver DB is a **separate project** that turns `ironweaver-core` into a dura
 - Idempotency keys for retried writes. Read-your-writes via `min_seq`.
 
 ### 3. Storage: durability and recovery
-- WAL: segmented, append-only, CRC per record, records = resolved ops + `seq`.
-- fsync policies: `always`, `group` (every N ms), `off` (tests), each with a documented guarantee.
+- WAL: segmented, append-only, CRC32C per record, records = resolved ops (or a catalog change) + `seq` ([format](formats/wal.md)).
+- fsync policies: `always`, `group` (every N ms or N records), `off` (tests), each with a documented guarantee ([ADR 0005](adr/0005-wal-fsync-and-failures.md), [guarantees](guarantees.md)).
 - Checkpoints by a background checkpointer (load checkpoint, replay WAL, `write_atomic` the new one with `seq` in meta), then WAL truncation.
 - Recovery: newest valid checkpoint, replay WAL, stop at a torn tail.
 - Data-directory lock, online backup, point-in-time restore, `verify`.
