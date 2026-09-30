@@ -1,18 +1,19 @@
 # Upstream issue drafts for Ironweaver
 
-Status: **drafted, pending review.** None of these are filed yet. After review, file each one in [p-sodmann/Ironweaver](https://github.com/p-sodmann/Ironweaver/issues) and replace "not filed" with the issue link, here and in the [core review](ironweaver-core-review.md#recommended-upstream-changes).
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Draft 8 comes from that review, is **drafted, pending review** and **not filed**. After review, file it in [p-sodmann/Ironweaver](https://github.com/p-sodmann/Ironweaver/issues) and replace "not filed" with the issue link, here and in the core review.
 
-One draft per item in "Recommended upstream changes" of the core review, in the same order. All were checked against `ironweaver-core` at `02cefab`. Titles are ready to paste; the text below each title is the issue body.
+Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, draft 8 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
 
-| # | Title | Issue |
+| # | Title | Status |
 |---|---|---|
-| 1 | [Visit budgets for traversals, path expansion and random walks](#1-visit-budgets-for-traversals-path-expansion-and-random-walks) | not filed |
-| 2 | [`serde` for `Expr` / `CmpOp`, and a round-tripping `Display` for `Pattern`](#2-serde-for-expr--cmpop-and-a-round-tripping-display-for-pattern) | not filed |
-| 3 | [Streaming binary loader (`LoadGraph` from `impl Read`)](#3-streaming-binary-loader-loadgraph-from-impl-read) | not filed |
-| 4 | [Deterministic attribute order when saving](#4-deterministic-attribute-order-when-saving) | not filed |
-| 5 | [Incremental memory accounting](#5-incremental-memory-accounting) | not filed |
-| 6 | [No panic in `apply_all` rollback](#6-no-panic-in-apply_all-rollback) | not filed |
-| 7 | [(Optional) Save index definitions in the file format](#7-optional-save-index-definitions-in-the-file-format) | not filed |
+| 1 | [Visit budgets for traversals, path expansion and random walks](#1-visit-budgets-for-traversals-path-expansion-and-random-walks) | done upstream (PR #25, `a14149e`) |
+| 2 | [`serde` for `Expr` / `CmpOp`, and a round-tripping `Display` for `Pattern`](#2-serde-for-expr--cmpop-and-a-round-tripping-display-for-pattern) | done upstream (PR #25, `a14149e`) |
+| 3 | [Streaming binary loader (`LoadGraph` from `impl Read`)](#3-streaming-binary-loader-loadgraph-from-impl-read) | done upstream (PR #25, `a14149e`) |
+| 4 | [Deterministic attribute order when saving](#4-deterministic-attribute-order-when-saving) | done upstream (PR #25, `a14149e`) |
+| 5 | [Incremental memory accounting](#5-incremental-memory-accounting) | done upstream (PR #25, `a14149e`) |
+| 6 | [No panic in `apply_all` rollback](#6-no-panic-in-apply_all-rollback) | done upstream (PR #25, `a14149e`) |
+| 7 | [(Optional) Save index definitions in the file format](#7-optional-save-index-definitions-in-the-file-format) | done upstream (PR #25, `a14149e`) |
+| 8 | [Edge budget and per-edge cancellation in `bfs` and `expand`](#8-edge-budget-and-per-edge-cancellation-in-bfs-and-expand) | drafted, not filed |
 
 ---
 
@@ -140,3 +141,23 @@ Store the list of indexed attribute paths in the file (for example under `metada
 **Why the database needs it**
 
 Only worth doing if benchmarks show that index rebuild dominates restart time. Until then, the database keeps index definitions in its catalog and rebuilds them after loading a checkpoint. We'll file this one only once we have numbers.
+
+---
+
+## 8. Edge budget and per-edge cancellation in `bfs` and `expand`
+
+**Problem**
+
+`Budget::max_visited` counts nodes entered, not edges examined. In `traversal::bfs_limited` and `expand_limited`, a node counts once and then its whole edge list is scanned. The cancel token is also polled only once per node, before its edges. So one high-degree node defeats both limits: with a hub of 1M parallel edges and `Budget::default().max_visited(1)`, `bfs_limited` calls the `edge_ok` filter 1M times, and it still does when the token is cancelled from inside the filter on the first edge. `dfs_limited` and `expand_paths_limited` poll cancellation per edge, so a timeout does stop them, but their budget also doesn't count edges.
+
+A caller can bound `bfs_limited` by counting in `edge_ok` and returning an error from it. `expand_limited` takes no closure, so there is no workaround there.
+
+**Proposal**
+
+- Add `max_edges: Option<usize>` to `Budget` (edges examined, whether or not they pass the filter), counted in every `*_limited` search and reported the same way as the other limits (`BudgetExceeded`, or `truncated` with `OnLimit::Truncate`). `Limited` could report `edges` next to `visited`.
+- Poll the cancel token inside the edge loops of `bfs` and `expand` (as `dfs` and `expand_paths` already do), for example every 1024 edges if a per-edge poll is too costly.
+- A test with a hub of many parallel edges: `max_edges(k)` stops after `k` edges, and a cancel from inside the filter stops within one poll interval.
+
+**Why the database needs it**
+
+Ironweaver DB promises that every remote read is bounded. Graphs with supernodes (a popular account, a shared category) are common, and a neighbourhood query from one of them is exactly the request that must be bounded. Until this lands, the database counts edges in the `bfs` filter itself and doesn't offer `expand` to remote callers.
