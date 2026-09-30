@@ -237,6 +237,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix",
+ "windows-sys",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -359,6 +369,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "iwdb"
+version = "0.0.0"
+dependencies = [
+ "crc32c",
+ "ironweaver-core",
+ "iwdb-engine",
+ "iwdb-storage",
+ "log",
+ "proptest",
+ "tempfile",
+]
+
+[[package]]
 name = "iwdb-engine"
 version = "0.0.0"
 dependencies = [
@@ -375,6 +398,7 @@ name = "iwdb-storage"
 version = "0.0.0"
 dependencies = [
  "crc32c",
+ "fs4",
  "ironweaver-core",
  "iwdb-engine",
  "postcard",

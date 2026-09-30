@@ -1,6 +1,6 @@
 [package]
-name = "iwdb-storage"
-description = "Ironweaver DB storage: write-ahead log, data directory, checkpoints and recovery"
+name = "iwdb"
+description = "Ironweaver DB embedded: a durable graph store in a directory (Store::open)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,17 +9,15 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-crc32c.workspace = true
-fs4.workspace = true
 ironweaver-core.workspace = true
 iwdb-engine = { path = "../iwdb-engine" }
-postcard.workspace = true
-serde.workspace = true
-thiserror.workspace = true
+iwdb-storage = { path = "../iwdb-storage" }
+log.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
+crc32c.workspace = true
 
 [lints]
 workspace = true

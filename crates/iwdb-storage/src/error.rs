@@ -89,6 +89,53 @@ pub enum Error {
     /// The log ends before the requested seq: records are missing.
     #[error("the WAL ends before seq {from} (its next seq is {next_seq})")]
     LogEndsBefore { from: u64, next_seq: u64 },
+
+    // Data directory (step 5, `documentation/formats/data-dir.md`)
+    /// Another store, in this process or another one, has the data
+    /// directory open (it holds the lock on `path`).
+    #[error("the data directory is in use: '{}' is locked by another store", path.display())]
+    Locked { path: PathBuf },
+    /// The directory is not an Ironweaver DB data directory: its marker is
+    /// missing or isn't ours, and it holds other files. Nothing was changed.
+    #[error("'{}' is not an Ironweaver DB data directory: {reason}", path.display())]
+    NotADataDir { path: PathBuf, reason: String },
+    /// A data directory that is damaged: an unreadable marker, or a missing
+    /// `wal/` or `checkpoints/` directory.
+    #[error("the data directory '{}' is damaged: {reason}", path.display())]
+    InvalidDataDir { path: PathBuf, reason: String },
+    /// The data directory has a layout version this version doesn't know
+    /// (written by a newer Ironweaver DB).
+    #[error("the data directory '{}' has layout version {version}, this version knows {}", path.display(), crate::layout::LAYOUT_VERSION)]
+    UnsupportedLayout { path: PathBuf, version: u32 },
+
+    // Checkpoints and recovery (step 5)
+    /// A checkpoint file that can't be loaded: a checksum or format error,
+    /// or content that doesn't match its name or namespace. Recovery skips
+    /// it and falls back to an older checkpoint.
+    #[error("checkpoint '{}' can't be loaded: {reason}", path.display())]
+    InvalidCheckpoint { path: PathBuf, reason: String },
+    /// Recovery found no checkpoint it can start from: the newest one that
+    /// loads (or an empty namespace, seq 0, if none does) needs the WAL
+    /// from seq `from`, but the WAL starts at `first_seq`. The segments it
+    /// would need were deleted after newer checkpoints covered them.
+    /// Nothing was changed.
+    #[error("no usable checkpoint: recovery needs the WAL from seq {from}, but it starts at {first_seq} (checkpoints skipped: {})", crate::checkpoint::describe(skipped))]
+    NoUsableCheckpoint { from: u64, first_seq: u64, skipped: Vec<crate::SkippedCheckpoint> },
+    /// Replaying a logged record failed during recovery or in the
+    /// checkpointer (`ApplyFailed`, which includes `GraphError::Internal`).
+    /// Recovery stops and changes nothing; the log is not truncated.
+    #[error("replaying WAL record {seq} failed: {source}")]
+    ReplayFailed {
+        seq: u64,
+        #[source]
+        source: iwdb_engine::Error,
+    },
+    /// Checkpoints are disabled until the store is reopened, after a
+    /// failure that leaves the durability of a checkpoint or a deletion
+    /// unknown (a failed directory fsync is never retried). Commits are
+    /// not affected; the WAL just isn't cut.
+    #[error("checkpoints are disabled until the store is reopened, after an earlier failure: {cause}")]
+    CheckpointsDisabled { cause: String },
 }
 
 impl Error {

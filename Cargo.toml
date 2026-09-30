@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/iwdb-engine", "crates/iwdb-storage"]
+members = ["crates/iwdb-engine", "crates/iwdb-storage", "crates/iwdb"]
 # The cargo-fuzz targets need nightly and are a workspace of their own
 exclude = ["fuzz"]
 
@@ -25,6 +25,10 @@ serde_json = "1"
 # CRC32C of WAL records, hardware accelerated (SSE 4.2, ARMv8 CRC)
 crc32c = "0.6"
 tempfile = "3"
+# The data directory's exclusive lock (flock / LockFileEx); std's File::try_lock needs Rust 1.89, our MSRV is 1.85
+# Warnings from recovery and the background threads of the embedded store (already in the tree)
+log = "0.4"
+fs4 = { version = "1", default-features = false, features = ["sync"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
