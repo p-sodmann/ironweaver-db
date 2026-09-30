@@ -396,6 +396,15 @@ pub fn check_recovery(
     if store.read_only().is_some() {
         return Err(CheckError::Violation("the recovered store is read-only".into()));
     }
+    // No crash here damages a checkpoint under its name, so each loads, and
+    // its saved indexes match its catalog
+    let report = store.recovery();
+    if !report.skipped_checkpoints.is_empty() || report.index_changes != Default::default() {
+        return Err(CheckError::Violation(format!(
+            "recovery skipped checkpoints {:?} or changed indexes {:?}",
+            report.skipped_checkpoints, report.index_changes
+        )));
+    }
     Ok(store)
 }
 
