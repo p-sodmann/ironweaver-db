@@ -9,6 +9,8 @@ use std::fmt::Write as _;
 
 use ironweaver_core::{Attrs, Graph, Record, Value};
 
+use crate::DbRecord;
+
 /// A payload that can be rendered in a canonical, order-independent form.
 ///
 /// Two payloads with equal state must render to the same string, whatever
@@ -20,6 +22,12 @@ pub trait Canonical {
 impl Canonical for Record {
     fn canonical(&self) -> String {
         format!("attr={} meta={}", canonical_attrs(&self.attr), canonical_attrs(&self.meta))
+    }
+}
+
+impl Canonical for DbRecord {
+    fn canonical(&self) -> String {
+        format!("attr={} meta={} version={}", canonical_attrs(&self.attr), canonical_attrs(&self.meta), self.version)
     }
 }
 
@@ -133,6 +141,15 @@ mod tests {
         let mut g = build(&["a", "b"]);
         g.apply(Op::RemoveLabel { id: "b".into(), label: "Z".into() }).unwrap();
         assert_ne!(canonical(&g), base);
+    }
+
+    #[test]
+    fn db_records_include_the_version() {
+        let a = DbRecord { version: 1, ..DbRecord::with_attr([("x", Value::Int(1))]) };
+        let b = DbRecord { version: 2, ..a.clone() };
+        assert_ne!(a.canonical(), b.canonical());
+        assert_eq!(a.canonical(), a.clone().canonical());
+        assert!(a.canonical().ends_with("version=1"));
     }
 
     #[test]
