@@ -1,0 +1,59 @@
+name: Nightly crash suite
+
+# Step 6: the long run of the kill -9 crash harness (tests/crash): thousands
+# of kill/recover cycles per fsync policy and platform, over several seeds.
+# Every run prints its seeds; a failure prints the policy, seed and cycle,
+# and the command that reruns it, and its files are kept as an artifact.
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      cycles:
+        description: Kill/recover cycles per policy and seed
+        default: "2000"
+      seeds:
+        description: Consecutive seeds per policy
+        default: "3"
+      seed:
+        description: First seed (empty for the run id)
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  crash:
+    name: crash harness (${{ matrix.policy }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        policy: [always, group, off]
+    env:
+      CYCLES: ${{ inputs.cycles || '2000' }}
+      SEEDS: ${{ inputs.seeds || '3' }}
+      SEED: ${{ inputs.seed || github.run_id }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p iwdb-crash
+      - name: ${{ env.CYCLES }} cycles x ${{ env.SEEDS }} seeds
+        run: >-
+          ./target/release/iwdb-crash --policy ${{ matrix.policy }}
+          --seed "$SEED" --seeds "$SEEDS" --cycles "$CYCLES"
+          --progress 500 --work "$RUNNER_TEMP/iwdb-crash"
+      - name: Keep the files of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-${{ matrix.policy }}-${{ matrix.os }}
+          path: ${{ runner.temp }}/iwdb-crash
+          if-no-files-found: ignore

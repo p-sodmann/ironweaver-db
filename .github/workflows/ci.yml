@@ -40,6 +40,32 @@ jobs:
             exit 1
           fi
 
+  crash:
+    # Step 6: kill -9 at random points and failpoints, check recovery. The
+    # seed is printed; a failure prints the command that reruns it. The
+    # nightly workflow runs thousands of cycles.
+    name: crash harness, short (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p iwdb-crash
+      - name: 150 kill/recover cycles per fsync policy
+        run: ./target/release/iwdb-crash --policy all --cycles 150 --seed "${{ github.run_id }}${{ github.run_attempt }}" --work "$RUNNER_TEMP/iwdb-crash"
+      - name: Keep the files of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-${{ matrix.os }}
+          path: ${{ runner.temp }}/iwdb-crash
+          if-no-files-found: ignore
+
   msrv:
     name: Rust 1.85 (MSRV)
     runs-on: ubuntu-latest
