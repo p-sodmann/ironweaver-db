@@ -36,8 +36,8 @@ impl DbRecord {
     // Copy of the private `Record::at` in ironweaver-core (record.rs,
     // a14149e), so that `DbRecord` answers every `Attributes` method exactly
     // like `Record` for the same attribute map. Keep in sync on core bumps;
-    // `tests/db_record.rs` checks the equivalence. Possible upstream request:
-    // a public `record::lookup(&Attrs, path)`.
+    // `tests/db_record.rs` checks the equivalence. Upstream #30 asks for a
+    // public `record::lookup(&Attrs, path)`.
     fn at(&self, path: &[String]) -> Option<&Value> {
         let (first, rest) = path.split_first()?;
         let mut value = self.attr.get(first)?;

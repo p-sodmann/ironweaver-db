@@ -1,8 +1,8 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Draft 8 comes from that review, is **drafted, pending review** and **not filed**. Draft 9 comes from step 2 and is filed as [#26](https://github.com/p-sodmann/Ironweaver/issues/26). After review, file it in [p-sodmann/Ironweaver](https://github.com/p-sodmann/Ironweaver/issues) and replace "not filed" with the issue link, here and in the core review.
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2; all are filed (links in the table).
 
-Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8 and 9 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
+Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–12 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
 
 | # | Title | Status |
 |---|---|---|
@@ -13,8 +13,11 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8 and 9
 | 5 | [Incremental memory accounting](#5-incremental-memory-accounting) | done upstream (PR #25, `a14149e`) |
 | 6 | [No panic in `apply_all` rollback](#6-no-panic-in-apply_all-rollback) | done upstream (PR #25, `a14149e`) |
 | 7 | [(Optional) Save index definitions in the file format](#7-optional-save-index-definitions-in-the-file-format) | done upstream (PR #25, `a14149e`) |
-| 8 | [Edge budget and per-edge cancellation in `bfs` and `expand`](#8-edge-budget-and-per-edge-cancellation-in-bfs-and-expand) | drafted, not filed |
+| 8 | [Edge budget and per-edge cancellation in `bfs` and `expand`](#8-edge-budget-and-per-edge-cancellation-in-bfs-and-expand) | filed: [#27](https://github.com/p-sodmann/Ironweaver/issues/27) |
 | 9 | [JSON loader reads `-0.0` back as `0.0`](#9-json-loader-reads--00-back-as-00) | filed: [#26](https://github.com/p-sodmann/Ironweaver/issues/26) |
+| 10 | [`expect` on the op apply path in `remove_node` / `rename_node`](#10-expect-on-the-op-apply-path-in-remove_node--rename_node) | filed: [#28](https://github.com/p-sodmann/Ironweaver/issues/28) |
+| 11 | [`Expr` depth-limit errors lose their message under postcard](#11-expr-depth-limit-errors-lose-their-message-under-postcard) | filed: [#29](https://github.com/p-sodmann/Ironweaver/issues/29) |
+| 12 | [Small API and dependency cleanups: public attribute lookup, optional bincode, doc comments](#12-small-api-and-dependency-cleanups-public-attribute-lookup-optional-bincode-doc-comments) | filed: [#30](https://github.com/p-sodmann/Ironweaver/issues/30) |
 
 ---
 
@@ -196,3 +199,61 @@ let (h, _) = format::from_json(&json).unwrap();
 **Why the database needs it**
 
 Not for correctness of checkpoints: they use the binary format. But JSON export and import, and the JSON compatibility fixtures, should reproduce values exactly. Ironweaver DB compares graphs bit for bit in its round-trip tests (`Float(-0.0)` and `Float(0.0)` differ in the canonical form), and currently has to leave `-0.0` out of its random JSON tests.
+
+---
+
+## 10. `expect` on the op apply path in `remove_node` / `rename_node`
+
+**Problem**
+
+PR #25 made `Graph::apply` / `apply_all` panic-free: undo failures and "just looked up" nodes now return `GraphError::Internal`. But `Graph::remove_node` and `Graph::rename_node`, which `apply` calls for `Op::RemoveNode` and `Op::RenameNode`, gained a new `expect` (`graph.rs`, a14149e):
+
+```rust
+let (old_key, _) = self.index.remove_entry(&old).expect("live nodes are indexed");  // rename_node
+let (key, _) = self.index.remove_entry(&node.id).expect("live nodes are indexed");  // remove_node
+```
+
+It is believed unreachable (every live node is in the id index), but if an invariant bug ever broke that, the process panics in the middle of an op instead of returning an error.
+
+**Proposal**
+
+Return `GraphError::Internal("a live node is missing from the id index")` from these paths (`rename_node` already returns `Result`; `remove_node` returns `Option`, so either change it to `Result` or add an internal `try_remove_node` that `apply` uses). Optionally, audit the remaining `expect`s reachable from `apply` (e.g. `node_ref_mut`, `edge_ref` in graph.rs) the same way.
+
+**Why the database needs it**
+
+Ironweaver DB applies every transaction with `apply_all` while holding its write lock. A panic there poisons the lock and takes down every namespace on the server; an `Internal` error lets the database fail one transaction and reload one namespace from checkpoint + WAL.
+
+---
+
+## 11. `Expr` depth-limit errors lose their message under postcard
+
+**Problem**
+
+`Expr`'s serde helpers (`expr.rs`, module `nested`) raise the depth-limit error with `serde::ser::Error::custom` / `serde::de::Error::custom`. The binary encoding (postcard) drops custom messages, so a too-deeply nested expression fails with a generic postcard error instead of "expression nested more than 100 levels deep". JSON keeps the message. `Value` already avoids this by going through `format::ser_error` / `format::de_error`, which remember the message.
+
+Reproduction (a14149e):
+
+```rust
+let mut e = Expr::Const(true);
+for _ in 0..200 { e = Expr::Not(Box::new(e)); }
+let err = postcard::to_stdvec(&e).unwrap_err().to_string();
+assert!(err.contains("nested more than"));  // fails
+```
+
+**Proposal**
+
+Use `format::ser_error` / `format::de_error` in `expr.rs`'s `nested` module (and check `Pattern`'s serde for the same pattern), so callers that encode with postcard can report the real reason, as `write_binary` does for values.
+
+**Why the database needs it**
+
+Filters reach the database over gRPC in a binary encoding. A request with an over-deep filter should be rejected with "expression nested too deep", not an opaque decoding error, so clients know what to fix.
+
+---
+
+## 12. Small API and dependency cleanups: public attribute lookup, optional bincode, doc comments
+
+Three small, independent items; low priority.
+
+1. **Public attribute-path lookup.** `Record::at` (the path rules behind `Attributes`: name, then keys into nested dicts, `None` counts as missing) is private. Payload types that want identical semantics have to copy it; Ironweaver DB's `DbRecord` does, with a property test that it matches `Record`. Proposal: a public `record::lookup(attrs: &Attrs, path: &[String]) -> Option<&Value>` that `Record` uses too.
+2. **bincode behind a feature.** bincode 1.x is unmaintained (RUSTSEC-2025-0141) and is only used to read format-1 binary files. It is an unconditional dependency, so every downstream `cargo deny` / `cargo audit` has to ignore the advisory. Proposal: a `format-v1` feature (default on, if compatibility matters), so users who only read format 2 can drop bincode.
+3. **Doc comments say "bincode".** `format::to_binary` ("Encode ... with bincode") and `format::from_binary` ("Decode a bincode document") describe format 1; format 2 is postcard. Update the comments.

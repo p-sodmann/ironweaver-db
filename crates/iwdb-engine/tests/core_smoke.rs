@@ -383,7 +383,7 @@ fn memory_usage_leaves_out_payloads() {
     assert_eq!(build("").memory_usage(), build("x").memory_usage());
 }
 
-/// Known gap (documented in the review): `max_visited` counts nodes
+/// Known gap (documented in the review, upstream #27): `max_visited` counts nodes
 /// expanded, not edges examined, and the cancel token is checked per node.
 /// A hub's whole edge list is scanned under `max_visited(1)`, even when
 /// cancelled on the first edge. When this test fails, upstream has closed
@@ -442,8 +442,8 @@ fn expr_and_pattern_round_trip() {
     let bytes = postcard::to_stdvec(&expr).expect("postcard");
     assert_eq!(postcard::from_bytes::<Expr>(&bytes).expect("postcard decode"), expr);
 
-    // Too deep is an error, not a stack overflow. Nit (in the review): under
-    // postcard the error loses its message.
+    // Too deep is an error, not a stack overflow. Nit (in the review,
+    // upstream #29): under postcard the error loses its message.
     let mut deep = Expr::Const(true);
     for _ in 0..200 {
         deep = Expr::Not(Box::new(deep));
