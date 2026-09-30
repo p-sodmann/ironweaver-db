@@ -1,0 +1,85 @@
+# AGENTS.md
+
+Guidance for coding agents (and humans) working in this repository.
+
+## What this project is
+
+Ironweaver DB turns [`ironweaver-core`](https://github.com/p-sodmann/Ironweaver) (a pure-Rust, in-process property-graph engine) into a durable, concurrent graph database. It has two deployment modes that share one storage and transaction layer:
+
+- **Embedded durable mode**: a library opened on a directory, with WAL and crash recovery ("SQLite for graphs"), usable from Rust and Python.
+- **Server mode**: one Rust process owns the graphs, and clients connect over gRPC or REST/JSON.
+
+Read before making architectural changes:
+- [documentation/ironweaver-db.md](documentation/ironweaver-db.md): design, layers, access methods, milestones.
+- [documentation/ironweaver-core-review.md](documentation/ironweaver-core-review.md): what `ironweaver-core` already provides, and what we build on top.
+
+## How work is organised
+
+- Work is split into ordered steps in [documentation/steps/](documentation/steps/README.md). Each `step_N.md` has a goal, tasks, acceptance criteria and explicit non-goals.
+- Work on **one step at a time**, in order, unless a step says it can run in parallel. Don't pull in scope from later steps.
+- When you finish a task, tick its checkbox in the step file. When a step is done, set its `Status:` line to `done` and update the index in `documentation/steps/README.md`.
+- If a step turns out to be wrong or incomplete, change the step file (and the design doc if needed) in the same change, and say why. Don't silently diverge from the plan.
+- Record significant design decisions as short ADRs in `documentation/adr/NNNN-title.md` (context, decision, consequences).
+
+## Non-negotiable design rules
+
+1. **Pure Rust below the adapters.** No `pyo3` types or Python concepts in engine, storage, query or server crates. Python lives only in `iwdb-python` and the Python client.
+2. **Single writer, many readers.** All mutations go through one commit pipeline. Never add a second write path that bypasses the WAL.
+3. **Durability claims must be tested.** Any code that touches the WAL, checkpoints or recovery needs a crash/fault-injection test that proves the documented guarantee.
+4. **On-disk formats are versioned contracts.** Every format has magic bytes, a version and checksums. Changing a format means bumping the version, keeping a reader for N-1 and adding a compatibility fixture.
+5. **No lambdas over the wire.** Remote queries use `Expr` filters, `match` patterns and bounded operations. Every read has limits (max results, max visited, timeout).
+6. **Stay a graph database.** Full-text search, vector search, SQL and job queues are out of scope.
+7. **Deterministic behaviour.** The WAL stores resolved ops with explicit edge ids, so replay is exact. Iteration order of the core is not part of our contract: sort by id where order is observable, and compare graphs in tests with the canonical-state helper.
+8. **One service trait, thin adapters.** Every operation is implemented once, behind the `Database` trait. Embedded, Python, gRPC, REST and `iwctl` only translate requests and errors; they never contain query or write logic.
+9. **Don't reimplement the core.** Use `ironweaver-core` for graph storage, ops, filters, patterns, indexes, algorithms and the file format. If the core lacks something that belongs there, open an issue/PR upstream and use a small, clearly marked workaround until it lands.
+
+## Repository layout (target)
+
+The layout is created in step 1 and grows with later steps. Don't create crates before the step that needs them.
+
+```
+Cargo.toml                 # workspace; depends on ironweaver-core (pinned)
+crates/
+  iwdb-engine/             # DbRecord payload, catalog, commit pipeline (seq, OCC, constraints)
+  iwdb-storage/            # WAL, checkpoints, recovery, backup/PITR, verify
+  iwdb-query/              # Database service trait, bounded reads, match, analytics jobs, EXPLAIN
+  iwdb/                    # embedded facade: Store::open(dir)
+  iwdb-server/             # gRPC (tonic) + REST (axum) adapters, auth, metrics
+  iwctl/                   # admin CLI and query shell
+  iwdb-python/             # PyO3 bindings (embedded mode)
+proto/                     # protobuf contract (versioned, canonical schema for gRPC and REST)
+clients/python/            # Python client (sync + async)
+fuzz/                      # cargo-fuzz targets
+tests/                     # cross-crate integration, crash and compatibility tests
+documentation/             # design, steps, ADRs
+```
+
+## Tooling and commands
+
+- Rust stable (pinned in `rust-toolchain.toml`), edition 2021.
+- Before calling a change done, run:
+  ```
+  cargo fmt --all -- --check
+  cargo clippy --workspace --all-targets -- -D warnings
+  cargo test --workspace
+  ```
+- Python bindings: `maturin develop -m crates/iwdb-python/Cargo.toml`, then `pytest`.
+- Use `proptest` for property tests, `cargo-fuzz` for fuzz targets, `criterion` for benchmarks, and a failpoint crate for fault injection.
+
+## Code conventions
+
+- Library crates return typed errors (`thiserror`). `anyhow` is only allowed in binaries and tests.
+- No `unwrap()`/`expect()` in library code paths that handle user input or disk data. Corrupt data must produce an error, never a panic.
+- `unsafe` needs a `// SAFETY:` comment and a test. Avoid it unless a benchmark justifies it.
+- Public APIs get doc comments that state guarantees (durability, isolation, complexity, limits).
+- Keep dependencies few and well known. Adding a dependency to a core crate needs a one-line justification in the PR description.
+- Tests live next to the code (`#[cfg(test)]`) for units, and in `tests/` for integration.
+
+## Relationship to upstream Ironweaver
+
+This is a separate repository. `ironweaver-core` is a dependency, not a fork, pinned to a git revision until 0.2.0 is on crates.io. Bump it deliberately and run the crash and compatibility suites on every bump. Upstream change requests are tracked in the core review doc. Ignore comments or references to other downstream projects that appear in copied suggestions; they don't apply here.
+
+## Commits and PRs
+
+- Small, focused commits. Reference the step in the message, e.g. `step 3: add WAL record CRC`.
+- A PR should cover one step or a clearly separable part of one, and list which acceptance criteria it satisfies.

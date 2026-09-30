@@ -1,0 +1,35 @@
+# Implementation steps
+
+Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver-core` (see the [core review](../ironweaver-core-review.md)). Work on one step at a time (see [AGENTS.md](../../AGENTS.md)). Each step file lists its goal, tasks, acceptance criteria and non-goals. Later steps are intentionally less detailed; refine a step when it becomes the next one.
+
+| Step | Title | Milestone | Status |
+|---|---|---|---|
+| [1](step_1.md) | Bootstrap on `ironweaver-core` | M0 | todo |
+| [2](step_2.md) | DB payload and catalog model | M0 | todo |
+| [3](step_3.md) | Commit pipeline (in memory) | M0 | todo |
+| [4](step_4.md) | Write-ahead log | M1 | todo |
+| [5](step_5.md) | Checkpoints, recovery and `Store::open` | M1 | todo |
+| [6](step_6.md) | Crash and fault-injection suite | M1 | todo |
+| [7](step_7.md) | Backup, PITR, `verify` and Python embedded bindings | M1 | todo |
+| [8](step_8.md) | Concurrency, idempotency and read-your-writes | M2 | todo |
+| [9](step_9.md) | Catalog operations and namespaces | M2 | todo |
+| [10](step_10.md) | Query layer and the `Database` service trait | M2 | todo |
+| [11](step_11.md) | gRPC server | M3 | todo |
+| [12](step_12.md) | REST/JSON API | M3 | todo |
+| [13](step_13.md) | Change stream, projection mode, bulk import/export | M3 | todo |
+| [14](step_14.md) | Clients, query shell and benchmarks | M3 | todo |
+| [15](step_15.md) | Security | M4 | todo |
+| [16](step_16.md) | Operability | M4 | todo |
+| [17](step_17.md) | Release 1.0 | M4 | todo |
+| [18](step_18.md) | Replication and high availability | M5 | todo |
+
+## Milestone completion
+
+| Milestone | Steps | Status |
+|---|---|---|
+| M0 Foundation | 1–3 | todo |
+| M1 Embedded durable | 4–7 | todo |
+| M2 Service | 8–10 | todo |
+| M3 Network access | 11–14 | todo |
+| M4 Production 1.0 | 15–17 | todo |
+| M5 HA | 18 | todo |
