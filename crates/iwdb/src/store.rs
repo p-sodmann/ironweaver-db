@@ -65,9 +65,10 @@ struct Shared<F: LogFs> {
     options: StoreOptions,
 }
 
-/// Lock a mutex that only guards plain data, whatever a panicking holder
-/// left: the store's own state (signals, errors, the checkpointer, whose
-/// namespace is dropped on error) stays usable.
+/// Lock a mutex whatever a panicking holder left. The store's own state
+/// (signals, errors, the checkpointer, whose namespace is dropped on error)
+/// stays usable, and so does the live namespace: every change to it aborts
+/// the process on a panic (`or_abort`), so only a read can have poisoned it.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -292,13 +293,10 @@ where
         f(lock(&self.shared.live).namespace())
     }
 
-    /// Why the store is read-only, if it is: the WAL failed, a logged
-    /// commit failed to apply, or a commit panicked. Reopen it to recover.
+    /// Why the store is read-only, if it is: the WAL failed, or a logged
+    /// commit failed to apply. Reopen it to recover.
     pub fn read_only(&self) -> Option<String> {
-        match self.shared.live.lock() {
-            Ok(live) => live.read_only(),
-            Err(_) => Some(PANICKED.to_owned()),
-        }
+        lock(&self.shared.live).read_only()
     }
 
     /// What recovery found and did when the store was opened.
@@ -330,7 +328,7 @@ where
     pub fn checkpoint(&self) -> Result<CheckpointOutcome, Error> {
         let (target, appended) = {
             let mut live = lock(&self.shared.live);
-            if live.read_only().is_none() && !self.shared.live.is_poisoned() {
+            if live.read_only().is_none() {
                 or_abort("an fsync of the WAL", || live.sync())?;
             }
             (target(&live, &self.shared.options), live.wal().appended_bytes())
@@ -372,9 +370,10 @@ where
         Ok(result)
     }
 
-    /// The live namespace for writing; read-only after a panic.
+    /// The live namespace for writing. A read that panicked may have
+    /// poisoned the mutex; it changed nothing (see [`lock`]).
     fn live(&self) -> Result<MutexGuard<'_, LoggedNamespace<F>>, Error> {
-        self.shared.live.lock().map_err(|_| Error::ReadOnly { cause: PANICKED.into() })
+        Ok(lock(&self.shared.live))
     }
 }
 
@@ -404,8 +403,6 @@ where
         self.stop();
     }
 }
-
-const PANICKED: &str = "a commit panicked; reopen the store";
 
 /// Run `f`, which changes the live namespace or its WAL, and abort the
 /// process if it panics (ADR 0008). After such a panic the namespace may
@@ -528,7 +525,7 @@ fn sync_loop<F: LogFs>(shared: &Shared<F>, period: Duration) {
                 return;
             }
         }
-        let Ok(mut live) = shared.live.lock() else { return };
+        let mut live = lock(&shared.live);
         if live.read_only().is_some() {
             continue;
         }

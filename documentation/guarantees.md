@@ -26,7 +26,8 @@ Conditions:
 - A commit that fails because the log can't be written or fsynced is not applied and not acknowledged. **Its outcome is unknown**: the record may still reach the log and be recovered after a restart. Treat it like a timeout, and retry only if the retry is idempotent (idempotency keys come in step 8).
 - After such a failure, the namespace is **read-only until reopened**. Reads keep working and see every applied commit, including group-committed ones whose durability the failure may have cost. Writes fail with a read-only error. A failed fsync is never retried.
 - The same holds if applying a logged commit fails. That is a bug, and it poisons the namespace.
-- The store exposes this state (`Store::read_only`, step 5), and so does a commit that panicked. Reopening the store runs recovery and makes it writable again.
+- The store exposes this state (`Store::read_only`, step 5). Reopening the store runs recovery and makes it writable again.
+- **A panic while the store changes its namespace or WAL** (a commit, an fsync, the group commit timer) aborts the process (step 6, [ADR 0008](adr/0008-panics-in-the-commit-path-abort.md)). It is a crash: no reader sees a partially applied transaction, and the next open recovers every logged commit (the one in flight like a failed fsync: its outcome is unknown). A panic in a `Store::read` closure changes nothing and leaves the store writable.
 
 ## Recovery (step 5)
 
