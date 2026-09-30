@@ -36,6 +36,12 @@ pub enum Error {
     /// The graph meta of a saved file has a key the database doesn't own.
     #[error("graph meta has key '{key}', but graph meta belongs to the database")]
     UnexpectedGraphMeta { key: String },
+    /// The graph meta of a saved file has no `iwdb.seq`.
+    #[error("graph meta has no '{}' entry", crate::reserved::SEQ_KEY)]
+    MissingSeq,
+    /// The graph meta's `iwdb.seq` is not a non-negative integer.
+    #[error("graph meta has an invalid '{}' entry: {found}", crate::reserved::SEQ_KEY)]
+    InvalidSeq { found: String },
     /// An invalid catalog, or one that can't be read.
     #[error(transparent)]
     Catalog(#[from] CatalogError),

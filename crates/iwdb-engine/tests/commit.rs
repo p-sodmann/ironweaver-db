@@ -548,7 +548,7 @@ fn versions_never_wrap() {
         Error::VersionOverflow { target: edge0 },
     );
     // The maximum still saves (versions are Ints in files)
-    let meta = GraphMeta { namespace: ns.name().clone(), catalog: ns.catalog().clone() };
+    let meta = ns.graph_meta();
     let loaded = codec::from_binary(&codec::to_binary(ns.graph(), &meta).unwrap()).unwrap();
     assert_eq!(canonical(&loaded.graph), canonical(ns.graph()));
     // Deleting needs no new version; a node created again starts at 1
@@ -683,11 +683,32 @@ fn committed_graphs_save_and_load_with_their_versions() {
     ns.commit(&[upsert("a", &["P"], &[("k", Value::Int(1))]), upsert("b", &["P"], &[]), edge("a", "b", Some("T"))])
         .unwrap();
     ns.commit(&[set(node("b"), "k", Value::Int(2)), set(Target::Edge(EdgeId(0)), "w", Value::Int(1))]).unwrap();
-    let meta = GraphMeta { namespace: ns.name().clone(), catalog: ns.catalog().clone() };
+    let meta = ns.graph_meta();
     let loaded = codec::from_binary(&codec::to_binary(ns.graph(), &meta).unwrap()).unwrap();
     assert_eq!(canonical(&loaded.graph), canonical(ns.graph()));
     assert_eq!(loaded.meta, meta);
     assert!(loaded.index_changes.created.is_empty() && loaded.index_changes.dropped.is_empty());
+}
+
+#[test]
+fn a_namespace_from_a_loaded_file_continues_where_the_original_was() {
+    let mut original = ns();
+    original.commit_catalog(CatalogChange::AddConstraint(unique("P", &["k"]))).unwrap();
+    original.commit(&[upsert("a", &["P"], &[("k", Value::Int(1))]), edge("a", "a", None)]).unwrap();
+    let bytes = codec::to_binary(original.graph(), &original.graph_meta()).unwrap();
+    let mut loaded = Namespace::from_loaded(codec::from_binary_reader(&bytes[..]).unwrap());
+    assert_eq!(loaded.seq(), 2);
+    assert_eq!(loaded.name(), original.name());
+    assert_eq!(loaded.catalog(), original.catalog());
+    assert_eq!(canonical(loaded.graph()), canonical(original.graph()));
+
+    // Same results, including edge ids, versions and the constraint
+    let next = [upsert("b", &["P"], &[("k", Value::Int(2))]), edge("a", "b", Some("T"))];
+    assert_eq!(loaded.commit(&next).unwrap(), original.commit(&next).unwrap());
+    let clash = [upsert("c", &["P"], &[("k", Value::Int(2))])];
+    assert_eq!(loaded.commit(&clash), original.commit(&clash));
+    assert!(loaded.commit(&clash).is_err());
+    assert_eq!(canonical(loaded.graph()), canonical(original.graph()));
 }
 
 #[test]
@@ -697,7 +718,8 @@ fn files_with_reserved_attribute_keys_are_rejected() {
     let mut record = Record::with_attr([("iwdb.version", Value::Int(1))]);
     record.meta.insert(VERSION_KEY.into(), Value::Int(1));
     g.add_node("a", record).unwrap();
-    let meta = GraphMeta { namespace: NamespaceName::new("n").unwrap(), catalog: Default::default() }.to_attrs();
+    let meta =
+        GraphMeta { namespace: NamespaceName::new("n").unwrap(), catalog: Default::default(), seq: 0 }.to_attrs();
     let bytes = format::to_binary(&g, &meta, false).unwrap();
     assert_eq!(
         codec::from_binary(&bytes).unwrap_err(),
@@ -707,7 +729,7 @@ fn files_with_reserved_attribute_keys_are_rejected() {
     // And saving one fails too
     let mut g = DbGraph::new();
     g.add_node("a", DbRecord::with_attr([("iwdb.x", Value::Int(1))])).unwrap();
-    let meta = GraphMeta { namespace: NamespaceName::new("n").unwrap(), catalog: Default::default() };
+    let meta = GraphMeta { namespace: NamespaceName::new("n").unwrap(), catalog: Default::default(), seq: 0 };
     let err = codec::to_binary(&g, &meta).unwrap_err().to_string();
     assert!(err.contains("'iwdb.x' is reserved"), "{}", err);
 }

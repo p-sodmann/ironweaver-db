@@ -84,8 +84,9 @@ pub fn namespace_catalog() -> impl Strategy<Value = NamespaceCatalog> {
 }
 
 pub fn graph_meta() -> impl Strategy<Value = GraphMeta> {
-    ("[a-z][a-z0-9_-]{0,8}", namespace_catalog())
-        .prop_map(|(name, catalog)| GraphMeta { namespace: NamespaceName::new(name).expect("valid name"), catalog })
+    ("[a-z][a-z0-9_-]{0,8}", namespace_catalog(), prop_oneof![Just(0u64), any::<u64>().prop_map(|s| s >> 1)]).prop_map(
+        |(name, catalog, seq)| GraphMeta { namespace: NamespaceName::new(name).expect("valid name"), catalog, seq },
+    )
 }
 
 /// The ops that build a random graph: nodes with labels, edges (parallel

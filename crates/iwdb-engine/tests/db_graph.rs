@@ -101,7 +101,7 @@ fn social() -> (DbGraph, GraphMeta) {
         label: Label::new("Person").unwrap(),
         path: path(&["name"]),
     });
-    (g, GraphMeta { namespace: NamespaceName::new("social").unwrap(), catalog })
+    (g, GraphMeta { namespace: NamespaceName::new("social").unwrap(), catalog, seq: 17 })
 }
 
 /// Every way to load `g` saved with `meta`.
@@ -312,6 +312,31 @@ fn unknown_reserved_keys_and_foreign_graph_meta_are_errors() {
     // A plain Record graph (no versions) is not a database file
     let plain = convert(&g, |r| Record { attr: r.attr.clone(), meta: Attrs::new() });
     assert!(matches!(load_error(&plain, &graph_meta), Error::MissingVersion { .. }));
+}
+
+#[test]
+fn the_seq_in_graph_meta_is_required_and_checked() {
+    let (g, meta) = social();
+    let records = as_records(&g);
+    let with_seq = |seq: Option<Value>| {
+        let mut attrs = meta.to_attrs();
+        attrs.remove("iwdb.seq");
+        if let Some(seq) = seq {
+            attrs.insert("iwdb.seq".into(), seq);
+        }
+        attrs
+    };
+    assert_eq!(load_error(&records, &with_seq(None)), Error::MissingSeq);
+    for (value, found) in [(Value::Int(-1), "Int(-1)"), (Value::from("7"), "String(\"7\")"), (Value::None, "None")] {
+        assert_eq!(load_error(&records, &with_seq(Some(value))), Error::InvalidSeq { found: found.into() });
+    }
+
+    // The largest seq an Int holds round-trips; a larger one isn't saved
+    let top = GraphMeta { seq: i64::MAX as u64, ..meta.clone() };
+    assert_eq!(codec::from_binary(&codec::to_binary(&g, &top).unwrap()).unwrap().meta.seq, i64::MAX as u64);
+    let over = GraphMeta { seq: i64::MAX as u64 + 1, ..meta };
+    let err = codec::to_binary(&g, &over).unwrap_err().to_string();
+    assert!(err.contains("too large to save"), "{}", err);
 }
 
 /// Known core deviation (in the core review, upstream #26): the JSON loader reads `-0.0`

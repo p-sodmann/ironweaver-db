@@ -6,7 +6,8 @@
 //! - each node's and edge's `meta` holds the user's meta entries plus
 //!   `iwdb.version` (an `Int`, so versions above `i64::MAX` can't be saved);
 //! - the graph meta holds `iwdb.catalog`, the namespace and its catalog
-//!   (ADR 0003), and nothing else.
+//!   (ADR 0003), and `iwdb.seq`, the seq of the last commit the file
+//!   reflects (an `Int`), and nothing else.
 //!
 //! So `ironweaver_core::format::from_binary` can read a database file as a
 //! `Record` graph, with the version as a meta entry.
@@ -18,7 +19,8 @@
 //! Loading rejects, with an [`Error`] and never a panic: a node or edge
 //! without a valid `iwdb.version`, unknown `iwdb.*` keys (in meta, or as
 //! top-level attribute keys, which the database reserves too), graph meta other
-//! than the catalog, and an invalid catalog. Files written by other tools
+//! than the catalog and the seq, a missing or invalid seq, and an invalid
+//! catalog. Files written by other tools
 //! (or in format 1) therefore don't load as database files.
 
 use std::io::{Read, Write};
@@ -29,7 +31,7 @@ use ironweaver_core::{Attrs, Value};
 use serde::{Serialize, Serializer};
 
 use crate::catalog::{CatalogError, IndexChanges, NamespaceCatalog, NamespaceName};
-use crate::reserved::{is_reserved, CATALOG_KEY, VERSION_KEY};
+use crate::reserved::{is_reserved, CATALOG_KEY, SEQ_KEY, VERSION_KEY};
 use crate::{DbGraph, DbRecord, Entity, Error};
 
 /// The graph-level data a database file carries.
@@ -39,23 +41,42 @@ pub struct GraphMeta {
     pub namespace: NamespaceName,
     /// The namespace's catalog.
     pub catalog: NamespaceCatalog,
+    /// The seq of the last commit the file reflects (0: none). A checkpoint
+    /// holds exactly the state after the commits up to it, catalog included.
+    /// Saved as an `Int`, so at most `i64::MAX`.
+    pub seq: u64,
 }
 
 impl GraphMeta {
     /// The graph meta map as saved.
+    ///
+    /// A seq above `i64::MAX` can't be stored in an `Int`; it is written as
+    /// `None` here, which loading rejects, and [`DbCodec`] refuses to save
+    /// it. The commit pipeline never gets there (`i64::MAX` commits).
     pub fn to_attrs(&self) -> Attrs {
-        [(CATALOG_KEY.to_owned(), self.catalog.to_meta_value(&self.namespace))].into()
+        let seq = i64::try_from(self.seq).map_or(Value::None, Value::Int);
+        [(CATALOG_KEY.to_owned(), self.catalog.to_meta_value(&self.namespace)), (SEQ_KEY.to_owned(), seq)].into()
     }
 
     /// Read the graph meta of a loaded file.
     pub fn from_load(meta: &LoadAttrs<'_>) -> Result<Self, Error> {
         let mut found = None;
+        let mut seq = None;
         for (key, value) in meta.iter() {
             if key == CATALOG_KEY {
                 if found.is_some() {
                     return Err(CatalogError::Decode(format!("'{}' appears twice", CATALOG_KEY)).into());
                 }
                 found = Some(NamespaceCatalog::from_meta_value(&value.to_value())?);
+            } else if key == SEQ_KEY {
+                let invalid = |found: String| Error::InvalidSeq { found };
+                if seq.is_some() {
+                    return Err(invalid("the key appears twice".into()));
+                }
+                seq = Some(match value.kind() {
+                    LoadKind::Int(v) => u64::try_from(v).map_err(|_| invalid(format!("{:?}", value.to_value())))?,
+                    _ => return Err(invalid(format!("{:?}", value.to_value()))),
+                });
             } else if is_reserved(key) {
                 return Err(Error::UnknownReservedKey { entity: Entity::Graph, key: key.to_owned() });
             } else {
@@ -63,7 +84,8 @@ impl GraphMeta {
             }
         }
         let (namespace, catalog) = found.ok_or(CatalogError::Missing)?;
-        Ok(GraphMeta { namespace, catalog })
+        let seq = seq.ok_or(Error::MissingSeq)?;
+        Ok(GraphMeta { namespace, catalog, seq })
     }
 }
 
@@ -72,14 +94,16 @@ impl GraphMeta {
 /// meta.
 ///
 /// Saving fails (with a `GraphError::Format` naming the problem) if a
-/// record's `meta` has a reserved key or its version is above `i64::MAX`.
+/// record's `meta` has a reserved key, its version is above `i64::MAX`, or
+/// the graph meta's seq is above `i64::MAX`.
 pub struct DbCodec {
     meta: Attrs,
+    seq: u64,
 }
 
 impl DbCodec {
     pub fn new(meta: &GraphMeta) -> Self {
-        DbCodec { meta: meta.to_attrs() }
+        DbCodec { meta: meta.to_attrs(), seq: meta.seq }
     }
 }
 
@@ -97,6 +121,9 @@ impl Codec<DbRecord, DbRecord> for DbCodec {
         EntityMeta(edge).serialize(s)
     }
     fn graph_meta<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if i64::try_from(self.seq).is_err() {
+            return Err(format::ser_error(format_args!("seq {} is too large to save", self.seq)));
+        }
         serialize_sorted(&self.meta, s)
     }
 }

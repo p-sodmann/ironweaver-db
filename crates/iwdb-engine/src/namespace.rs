@@ -5,7 +5,7 @@ use ironweaver_core::GraphError;
 
 use crate::catalog::{AttrPath, ConstraintKind, NamespaceCatalog, NamespaceName};
 use crate::mutation::{CatalogChange, Change, CommitRecord, CommitResult, Mutation};
-use crate::{resolve, DbGraph, Error};
+use crate::{codec, resolve, DbGraph, Error};
 
 /// One namespace in memory: its graph, its catalog and the `seq` of its
 /// last commit.
@@ -80,6 +80,25 @@ impl Namespace {
     /// An empty namespace with an empty catalog, at `seq` 0.
     pub fn new(name: NamespaceName) -> Self {
         Namespace { name, catalog: NamespaceCatalog::new(), graph: DbGraph::new(), seq: 0, poisoned: false }
+    }
+
+    /// A namespace from a loaded database file (a checkpoint): its graph,
+    /// catalog and seq. The loader has already made the graph's indexes
+    /// match the catalog and flushed them ([`codec::Loaded`]), which is the
+    /// invariant every namespace keeps. Commits and replay continue at
+    /// `loaded.meta.seq + 1`.
+    ///
+    /// Recovery (step 5) and the checkpointer build their namespace this
+    /// way; [`new`](Self::new) only makes an empty one.
+    pub fn from_loaded(loaded: codec::Loaded) -> Self {
+        let codec::Loaded { graph, meta, index_changes: _ } = loaded;
+        Namespace { name: meta.namespace, catalog: meta.catalog, graph, seq: meta.seq, poisoned: false }
+    }
+
+    /// The graph meta a checkpoint of this namespace is saved with: its
+    /// name, catalog and seq.
+    pub fn graph_meta(&self) -> codec::GraphMeta {
+        codec::GraphMeta { namespace: self.name.clone(), catalog: self.catalog.clone(), seq: self.seq }
     }
 
     pub fn name(&self) -> &NamespaceName {
