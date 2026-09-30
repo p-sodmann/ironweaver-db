@@ -1,0 +1,604 @@
+//! Step 3 acceptance: random histories of transactions and catalog changes
+//! (many of them failing) against a simple reference model, and the replay
+//! property the WAL relies on: the records of the successful commits,
+//! replayed onto an empty namespace, give the same state.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use ironweaver_core::{Attributes, Attrs, EdgeId, Key, Op, Value};
+use iwdb_engine::catalog::{AttrPath, Constraint, ConstraintKind, IndexDef, Label, NamespaceCatalog, NamespaceName};
+use iwdb_engine::testutil::canonical;
+use iwdb_engine::{
+    CatalogChange, Change, CommitRecord, CommitResult, DbGraph, DbRecord, EdgeKey, Error, Mutation, Namespace,
+    Prepared, Target,
+};
+use proptest::collection::{hash_map, vec};
+use proptest::prelude::*;
+
+// Strategies: small id, key and value spaces, so that mutations collide,
+// conflict and violate constraints often.
+
+fn node_id() -> impl Strategy<Value = String> {
+    prop::sample::select(vec!["a", "b", "c", "d"]).prop_map(str::to_owned)
+}
+
+fn edge_id() -> impl Strategy<Value = EdgeId> {
+    (0u64..8).prop_map(EdgeId)
+}
+
+fn label() -> impl Strategy<Value = String> {
+    prop::sample::select(vec!["A", "B"]).prop_map(str::to_owned)
+}
+
+fn edge_type() -> impl Strategy<Value = Option<String>> {
+    prop::option::of(prop::sample::select(vec!["T", "U"]).prop_map(str::to_owned))
+}
+
+/// Attribute keys, rarely a reserved one.
+fn key() -> impl Strategy<Value = String> {
+    prop_oneof![40 => prop::sample::select(vec!["x", "y"]).prop_map(str::to_owned), 1 => Just("iwdb.k".to_owned())]
+}
+
+fn value() -> impl Strategy<Value = Value> {
+    // Int(1) and Float(1.0) are the same key for unique constraints
+    let scalar = prop_oneof![
+        (0i64..3).prop_map(Value::Int),
+        prop::sample::select(vec![0.0, 1.0, 1.5]).prop_map(Value::Float),
+        prop::sample::select(vec!["s", "t"]).prop_map(Value::from),
+        Just(Value::None),
+    ];
+    prop_oneof![4 => scalar.clone(), 1 => vec(scalar, 0..3).prop_map(Value::List)]
+}
+
+fn attrs() -> impl Strategy<Value = Attrs> {
+    hash_map(key(), value(), 0..3)
+}
+
+/// User meta, rarely with a reserved key.
+fn meta() -> impl Strategy<Value = Attrs> {
+    prop_oneof![
+        30 => Just(Attrs::new()),
+        8 => Just([("m".to_owned(), Value::Int(1))].into()),
+        1 => Just([("iwdb.m".to_owned(), Value::Int(1))].into()),
+    ]
+}
+
+fn expected() -> impl Strategy<Value = Option<u64>> {
+    prop_oneof![12 => Just(None), 1 => (0u64..3).prop_map(Some)]
+}
+
+fn target() -> impl Strategy<Value = Target> {
+    prop_oneof![3 => node_id().prop_map(Target::Node), 1 => edge_id().prop_map(Target::Edge)]
+}
+
+fn mutation() -> impl Strategy<Value = Mutation> {
+    prop_oneof![
+        5 => (node_id(), vec(label(), 0..2), attrs(), meta(), expected()).prop_map(
+            |(id, labels, attr, meta, expected_version)| Mutation::UpsertNode { id, labels, attr, meta, expected_version }
+        ),
+        1 => (node_id(), expected()).prop_map(|(id, expected_version)| Mutation::DeleteNode { id, expected_version }),
+        3 => (node_id(), node_id(), edge_type(), attrs(), meta())
+            .prop_map(|(from, to, ty, attr, meta)| Mutation::AddEdge { from, to, ty, attr, meta }),
+        2 => (
+            prop_oneof![
+                edge_id().prop_map(EdgeKey::Id),
+                (node_id(), node_id(), edge_type()).prop_map(|(from, to, ty)| EdgeKey::Endpoints { from, to, ty })
+            ],
+            attrs(),
+            meta(),
+            expected()
+        )
+            .prop_map(|(key, attr, meta, expected_version)| Mutation::UpsertEdge { key, attr, meta, expected_version }),
+        1 => (edge_id(), expected()).prop_map(|(id, expected_version)| Mutation::DeleteEdge { id, expected_version }),
+        5 => (target(), key(), value(), expected())
+            .prop_map(|(target, key, value, expected_version)| Mutation::SetAttr { target, key, value, expected_version }),
+        1 => (target(), key(), expected())
+            .prop_map(|(target, key, expected_version)| Mutation::RemoveAttr { target, key, expected_version }),
+        1 => (target(), key(), value(), expected()).prop_map(|(target, key, value, expected_version)| {
+            Mutation::AppendAttr { target, key, value, expected_version }
+        }),
+        2 => (node_id(), label(), expected())
+            .prop_map(|(id, label, expected_version)| Mutation::AddLabel { id, label, expected_version }),
+        1 => (node_id(), label(), expected())
+            .prop_map(|(id, label, expected_version)| Mutation::RemoveLabel { id, label, expected_version }),
+        1 => (edge_id(), edge_type(), expected())
+            .prop_map(|(id, ty, expected_version)| Mutation::SetEdgeType { id, ty, expected_version }),
+    ]
+}
+
+fn catalog_change() -> impl Strategy<Value = CatalogChange> {
+    let path = prop::sample::select(vec!["x", "y"]).prop_map(|k| AttrPath::new([k]).unwrap());
+    let constraint = (any::<bool>(), label(), path.clone())
+        .prop_map(|(unique, label, path)| Constraint {
+            kind: if unique { ConstraintKind::Unique } else { ConstraintKind::Required },
+            label: Label::new(label).unwrap(),
+            path,
+        })
+        .boxed();
+    prop_oneof![
+        1 => path.clone().prop_map(|path| CatalogChange::CreateIndex(IndexDef { path })),
+        1 => path.prop_map(|path| CatalogChange::DropIndex(IndexDef { path })),
+        2 => constraint.clone().prop_map(CatalogChange::AddConstraint),
+        1 => constraint.prop_map(CatalogChange::DropConstraint),
+    ]
+}
+
+#[derive(Clone, Debug)]
+enum Step {
+    Tx(Vec<Mutation>),
+    Catalog(CatalogChange),
+}
+
+fn step() -> impl Strategy<Value = Step> {
+    prop_oneof![
+        12 => vec(mutation(), 1..4).prop_map(Step::Tx),
+        1 => Just(Step::Tx(vec![])),
+        3 => catalog_change().prop_map(Step::Catalog),
+    ]
+}
+
+/// A first transaction that creates every node, so that later mutations
+/// mostly find what they address.
+fn seed() -> impl Strategy<Value = Step> {
+    vec((vec(label(), 0..3), attrs()), 4).prop_map(|nodes| {
+        let ids = ["a", "b", "c", "d"];
+        Step::Tx(
+            ids.iter()
+                .zip(nodes)
+                .map(|(id, (labels, attr))| Mutation::UpsertNode {
+                    id: id.to_string(),
+                    labels,
+                    attr: attr.into_iter().filter(|(k, _)| !k.starts_with("iwdb.")).collect(),
+                    meta: Attrs::new(),
+                    expected_version: None,
+                })
+                .collect(),
+        )
+    })
+}
+
+// The reference model: plain maps, whole-state copies, checks written
+// independently of the engine's overlay.
+
+#[derive(Clone, Debug)]
+struct MNode {
+    labels: BTreeSet<String>,
+    attr: Attrs,
+    meta: Attrs,
+    version: u64,
+}
+
+#[derive(Clone, Debug)]
+struct MEdge {
+    from: String,
+    to: String,
+    ty: Option<String>,
+    attr: Attrs,
+    meta: Attrs,
+    version: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct Model {
+    nodes: BTreeMap<String, MNode>,
+    edges: BTreeMap<EdgeId, MEdge>,
+    next_edge: u64,
+    catalog: NamespaceCatalog,
+    seq: u64,
+}
+
+/// The engine's errors, by kind (which of several violations is reported
+/// is the engine's choice; the model only predicts the kind).
+fn kind(e: &Error) -> &'static str {
+    match e {
+        Error::ReservedName { .. } => "ReservedName",
+        Error::Conflict { .. } => "Conflict",
+        Error::NotFound { .. } => "NotFound",
+        Error::AmbiguousEdge { .. } => "AmbiguousEdge",
+        Error::NoMatchingEdge { .. } => "NoMatchingEdge",
+        Error::NotAList { .. } => "NotAList",
+        Error::ConstraintViolation { .. } => "ConstraintViolation",
+        Error::EmptyTransaction => "EmptyTransaction",
+        Error::IndexExists { .. } => "IndexExists",
+        Error::NoSuchIndex { .. } => "NoSuchIndex",
+        Error::ConstraintExists { .. } => "ConstraintExists",
+        Error::NoSuchConstraint { .. } => "NoSuchConstraint",
+        other => panic!("unexpected error {:?}", other),
+    }
+}
+
+type Outcome = Result<CommitResult, &'static str>;
+
+fn reserved(map: &Attrs) -> bool {
+    map.keys().any(|k| k.starts_with("iwdb."))
+}
+
+fn has_value(attr: &Attrs, key: &str) -> Option<Key> {
+    attr.get(key).and_then(Key::of)
+}
+
+impl Model {
+    fn version_of(&self, target: &Target) -> u64 {
+        match target {
+            Target::Node(id) => self.nodes.get(id).map_or(0, |n| n.version),
+            Target::Edge(id) => self.edges.get(id).map_or(0, |e| e.version),
+        }
+    }
+
+    fn exists(&self, target: &Target) -> bool {
+        match target {
+            Target::Node(id) => self.nodes.contains_key(id),
+            Target::Edge(id) => self.edges.contains_key(id),
+        }
+    }
+
+    fn attr_mut(&mut self, target: &Target) -> &mut Attrs {
+        match target {
+            Target::Node(id) => &mut self.nodes.get_mut(id).unwrap().attr,
+            Target::Edge(id) => &mut self.edges.get_mut(id).unwrap().attr,
+        }
+    }
+
+    fn commit(&mut self, mutations: &[Mutation]) -> Outcome {
+        if mutations.is_empty() {
+            return Err("EmptyTransaction");
+        }
+        let before = self.clone();
+        let mut m = self.clone();
+        let mut written = BTreeSet::new();
+        let mut edge_ids = Vec::new();
+        for mutation in mutations {
+            m.apply(&before, mutation, &mut written, &mut edge_ids)?;
+        }
+        let mut versions = Vec::new();
+        for target in written {
+            if m.exists(&target) {
+                let v = before.version_of(&target) + 1;
+                match &target {
+                    Target::Node(id) => m.nodes.get_mut(id).unwrap().version = v,
+                    Target::Edge(id) => m.edges.get_mut(id).unwrap().version = v,
+                }
+                versions.push((target, v));
+            }
+        }
+        for c in m.catalog.constraints() {
+            m.check(c)?;
+        }
+        m.seq += 1;
+        *self = m;
+        Ok(CommitResult { seq: self.seq, edge_ids, versions })
+    }
+
+    /// Whether the whole model satisfies `c`.
+    fn check(&self, c: &Constraint) -> Result<(), &'static str> {
+        let key = &c.path.keys()[0];
+        let nodes = self.nodes.values().filter(|n| n.labels.contains(c.label.as_str()));
+        match c.kind {
+            ConstraintKind::Required => {
+                if nodes.clone().any(|n| n.attr.get(key).is_none_or(|v| *v == Value::None)) {
+                    return Err("ConstraintViolation");
+                }
+            }
+            ConstraintKind::Unique => {
+                let keys: Vec<Key> = nodes.filter_map(|n| has_value(&n.attr, key)).collect();
+                let distinct: BTreeSet<&Key> = keys.iter().collect();
+                if distinct.len() != keys.len() {
+                    return Err("ConstraintViolation");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Check `expected` against the state before the transaction, then
+    /// that the target exists now; mark it written.
+    fn write(
+        &self,
+        before: &Model,
+        target: Target,
+        expected: Option<u64>,
+        written: &mut BTreeSet<Target>,
+    ) -> Result<(), &'static str> {
+        if expected.is_some_and(|e| e != before.version_of(&target)) {
+            return Err("Conflict");
+        }
+        if !self.exists(&target) {
+            return Err("NotFound");
+        }
+        written.insert(target);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_edge(
+        &mut self,
+        from: &str,
+        to: &str,
+        ty: &Option<String>,
+        attr: &Attrs,
+        meta: &Attrs,
+        written: &mut BTreeSet<Target>,
+        edge_ids: &mut Vec<EdgeId>,
+    ) -> Result<(), &'static str> {
+        if reserved(attr) || reserved(meta) {
+            return Err("ReservedName");
+        }
+        if !self.nodes.contains_key(from) || !self.nodes.contains_key(to) {
+            return Err("NotFound");
+        }
+        let id = EdgeId(self.next_edge);
+        self.next_edge += 1;
+        let edge = MEdge {
+            from: from.into(),
+            to: to.into(),
+            ty: ty.clone(),
+            attr: attr.clone(),
+            meta: meta.clone(),
+            version: 0,
+        };
+        self.edges.insert(id, edge);
+        written.insert(Target::Edge(id));
+        edge_ids.push(id);
+        Ok(())
+    }
+
+    fn apply(
+        &mut self,
+        before: &Model,
+        mutation: &Mutation,
+        written: &mut BTreeSet<Target>,
+        edge_ids: &mut Vec<EdgeId>,
+    ) -> Result<(), &'static str> {
+        match mutation {
+            Mutation::UpsertNode { id, labels, attr, meta, expected_version } => {
+                if reserved(attr) || reserved(meta) {
+                    return Err("ReservedName");
+                }
+                let target = Target::Node(id.clone());
+                if expected_version.is_some_and(|e| e != before.version_of(&target)) {
+                    return Err("Conflict");
+                }
+                let node = self.nodes.entry(id.clone()).or_insert(MNode {
+                    labels: BTreeSet::new(),
+                    attr: Attrs::new(),
+                    meta: Attrs::new(),
+                    version: 0,
+                });
+                node.labels.extend(labels.iter().cloned());
+                node.attr = attr.clone();
+                node.meta = meta.clone();
+                written.insert(target);
+            }
+            Mutation::DeleteNode { id, expected_version } => {
+                let target = Target::Node(id.clone());
+                if expected_version.is_some_and(|e| e != before.version_of(&target)) {
+                    return Err("Conflict");
+                }
+                if self.nodes.remove(id).is_none() {
+                    return Err("NotFound");
+                }
+                self.edges.retain(|_, e| e.from != *id && e.to != *id);
+            }
+            Mutation::AddEdge { from, to, ty, attr, meta } => {
+                self.add_edge(from, to, ty, attr, meta, written, edge_ids)?;
+            }
+            Mutation::UpsertEdge { key, attr, meta, expected_version } => {
+                let id = match key {
+                    EdgeKey::Id(id) => *id,
+                    EdgeKey::Endpoints { from, to, ty } => {
+                        let found: Vec<EdgeId> = self
+                            .edges
+                            .iter()
+                            .filter(|(_, e)| e.from == *from && e.to == *to && e.ty == *ty)
+                            .map(|(id, _)| *id)
+                            .collect();
+                        match found[..] {
+                            [] if expected_version.is_some_and(|e| e != 0) => return Err("NoMatchingEdge"),
+                            [] => return self.add_edge(from, to, ty, attr, meta, written, edge_ids),
+                            [id] => id,
+                            _ => return Err("AmbiguousEdge"),
+                        }
+                    }
+                };
+                if reserved(attr) || reserved(meta) {
+                    return Err("ReservedName");
+                }
+                self.write(before, Target::Edge(id), *expected_version, written)?;
+                let edge = self.edges.get_mut(&id).unwrap();
+                edge.attr = attr.clone();
+                edge.meta = meta.clone();
+                edge_ids.push(id);
+            }
+            Mutation::DeleteEdge { id, expected_version } => {
+                if expected_version.is_some_and(|e| e != before.version_of(&Target::Edge(*id))) {
+                    return Err("Conflict");
+                }
+                if self.edges.remove(id).is_none() {
+                    return Err("NotFound");
+                }
+            }
+            Mutation::SetAttr { target, key, value, expected_version } => {
+                if key.starts_with("iwdb.") {
+                    return Err("ReservedName");
+                }
+                self.write(before, target.clone(), *expected_version, written)?;
+                self.attr_mut(target).insert(key.clone(), value.clone());
+            }
+            Mutation::RemoveAttr { target, key, expected_version } => {
+                if key.starts_with("iwdb.") {
+                    return Err("ReservedName");
+                }
+                self.write(before, target.clone(), *expected_version, written)?;
+                self.attr_mut(target).remove(key);
+            }
+            Mutation::AppendAttr { target, key, value, expected_version } => {
+                if key.starts_with("iwdb.") {
+                    return Err("ReservedName");
+                }
+                self.write(before, target.clone(), *expected_version, written)?;
+                let attr = self.attr_mut(target);
+                let mut items = match attr.get(key) {
+                    None | Some(Value::None) => vec![],
+                    Some(Value::List(items)) => items.clone(),
+                    Some(_) => return Err("NotAList"),
+                };
+                items.push(value.clone());
+                attr.insert(key.clone(), Value::List(items));
+            }
+            Mutation::AddLabel { id, label, expected_version } => {
+                self.write(before, Target::Node(id.clone()), *expected_version, written)?;
+                self.nodes.get_mut(id).unwrap().labels.insert(label.clone());
+            }
+            Mutation::RemoveLabel { id, label, expected_version } => {
+                self.write(before, Target::Node(id.clone()), *expected_version, written)?;
+                self.nodes.get_mut(id).unwrap().labels.remove(label);
+            }
+            Mutation::SetEdgeType { id, ty, expected_version } => {
+                self.write(before, Target::Edge(*id), *expected_version, written)?;
+                self.edges.get_mut(id).unwrap().ty.clone_from(ty);
+            }
+        }
+        Ok(())
+    }
+
+    fn change_catalog(&mut self, change: &CatalogChange) -> Outcome {
+        let mut catalog = self.catalog.clone();
+        match change {
+            CatalogChange::CreateIndex(index) => {
+                if !catalog.add_index(index.clone()) {
+                    return Err("IndexExists");
+                }
+            }
+            CatalogChange::DropIndex(index) => {
+                if !catalog.remove_index(index) {
+                    return Err("NoSuchIndex");
+                }
+            }
+            CatalogChange::AddConstraint(c) => {
+                if !catalog.add_constraint(c.clone()) {
+                    return Err("ConstraintExists");
+                }
+                self.check(c)?;
+            }
+            CatalogChange::DropConstraint(c) => {
+                if !catalog.remove_constraint(c) {
+                    return Err("NoSuchConstraint");
+                }
+            }
+        }
+        self.catalog = catalog;
+        self.seq += 1;
+        Ok(CommitResult { seq: self.seq, ..CommitResult::default() })
+    }
+
+    /// The model as a graph, for canonical comparison.
+    fn graph(&self) -> DbGraph {
+        let mut ops: Vec<Op<DbRecord, DbRecord>> = Vec::new();
+        for (id, n) in &self.nodes {
+            let data = DbRecord { attr: n.attr.clone(), meta: n.meta.clone(), version: n.version };
+            ops.push(Op::AddNode { id: id.clone(), labels: n.labels.iter().cloned().collect(), data });
+        }
+        for (id, e) in &self.edges {
+            let data = DbRecord { attr: e.attr.clone(), meta: e.meta.clone(), version: e.version };
+            ops.push(Op::AddEdge { id: *id, from: e.from.clone(), to: e.to.clone(), ty: e.ty.clone(), data });
+        }
+        let mut g = DbGraph::new();
+        g.apply_all(ops).unwrap();
+        g
+    }
+}
+
+fn index_paths(g: &DbGraph) -> BTreeSet<Vec<String>> {
+    g.index_paths().into_iter().map(<[String]>::to_vec).collect()
+}
+
+fn catalog_paths(c: &NamespaceCatalog) -> BTreeSet<Vec<String>> {
+    c.index_paths().into_iter().map(|p| p.keys().to_vec()).collect()
+}
+
+/// The namespace's observable state.
+fn state(ns: &Namespace) -> (Vec<String>, NamespaceCatalog, u64) {
+    (canonical(ns.graph()), ns.catalog().clone(), ns.seq())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
+
+    #[test]
+    fn commits_match_the_model_and_replay_exactly(steps in (seed(), vec(step(), 1..40)).prop_map(|(seed, mut steps)| {
+        steps.insert(0, seed);
+        steps
+    })) {
+        let mut ns = Namespace::new(NamespaceName::new("model").unwrap());
+        let mut model = Model::default();
+        let mut log: Vec<CommitRecord> = Vec::new();
+        let mut committed = 0;
+
+        for step in &steps {
+            let before = state(&ns);
+            let (expected, prepared): (Outcome, Result<Prepared, Error>) = match step {
+                Step::Tx(mutations) => (model.commit(mutations), ns.prepare(mutations)),
+                Step::Catalog(change) => (model.change_catalog(change), ns.prepare_catalog(change.clone())),
+            };
+            let actual = prepared.and_then(|p| {
+                log.push(p.record().clone());
+                ns.apply(p)
+            });
+            match (&actual, &expected) {
+                (Ok(a), Ok(e)) => {
+                    prop_assert_eq!(a, e);
+                    committed += 1;
+                }
+                (Err(a), Err(e)) => {
+                    prop_assert_eq!(kind(a), *e, "{:?}", a);
+                    prop_assert_eq!(state(&ns), before.clone(), "a failed commit changed the namespace");
+                }
+                _ => prop_assert!(false, "engine {:?}, model {:?}, step {:?}", actual, expected, step),
+            }
+            prop_assert_eq!(canonical(ns.graph()), canonical(&model.graph()));
+            prop_assert_eq!(ns.catalog(), &model.catalog);
+            prop_assert_eq!(ns.seq(), model.seq);
+            prop_assert_eq!(index_paths(ns.graph()), catalog_paths(ns.catalog()));
+            prop_assert!(!ns.graph().indexes_dirty());
+            prop_assert!(!ns.is_poisoned());
+        }
+        prop_assert_eq!(log.len(), committed);
+
+        // Replay: the records, through the log's encoding, onto an empty namespace
+        let mut replica = Namespace::new(NamespaceName::new("model").unwrap());
+        for record in &log {
+            let bytes = postcard::to_allocvec(record).unwrap();
+            let decoded: CommitRecord = postcard::from_bytes(&bytes).unwrap();
+            prop_assert_eq!(&decoded, record);
+            replica.replay(decoded).unwrap();
+        }
+        prop_assert_eq!(state(&replica), state(&ns));
+        prop_assert_eq!(index_paths(replica.graph()), index_paths(ns.graph()));
+
+        // The data ops alone, applied with the core's apply_all, give the same graph
+        let mut raw = DbGraph::new();
+        for record in log {
+            if let Change::Data(ops) = record.change {
+                raw.apply_all(ops).unwrap();
+            }
+        }
+        prop_assert_eq!(canonical(&raw), canonical(ns.graph()));
+
+        // Unique constraints hold with the index lookups the engine uses
+        for c in ns.catalog().constraints().filter(|c| c.kind == ConstraintKind::Unique) {
+            let mut seen = BTreeSet::new();
+            for ix in ns.graph().nodes_with_label(c.label.as_str()) {
+                let data = &ns.graph().node(ix).unwrap().data;
+                let Some(v) = data.with_value(c.path.keys(), |v| v.cloned()).unwrap() else { continue };
+                // Only scalars are indexed (and constrained)
+                if let Some(k) = Key::of(&v) {
+                    let found = ns.graph().find_nodes(c.path.keys(), &v).unwrap().unwrap();
+                    prop_assert!(found.contains(&ix));
+                    prop_assert!(seen.insert(k));
+                }
+            }
+        }
+    }
+}
