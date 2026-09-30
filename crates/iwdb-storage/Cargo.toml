@@ -17,8 +17,15 @@ postcard.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
+[features]
+# `failpoint::FailFs`: failpoints on every write-side file operation, for
+# tests and the crash harness (step 6). Normal builds don't have them.
+failpoints = []
+
 [dev-dependencies]
 iwdb-engine = { path = "../iwdb-engine", features = ["testutil"] }
+# Our own tests inject faults through `failpoint::FailFs`
+iwdb-storage = { path = ".", features = ["failpoints"] }
 proptest.workspace = true
 tempfile.workspace = true
 

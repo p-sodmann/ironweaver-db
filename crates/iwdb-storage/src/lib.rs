@@ -8,7 +8,7 @@
 //!   telling a torn tail (the clean end of the log) from corruption.
 //! - [`format`]: the on-disk format (`documentation/formats/wal.md`).
 //! - [`io`]: the file operations behind a trait, the seam for fault
-//!   injection.
+//!   injection; `failpoint` (feature `failpoints`) puts failpoints on it.
 //! - [`LoggedNamespace`]: a namespace whose commits are logged before they
 //!   are applied.
 //! - [`layout`]: the data directory, its marker and lock
@@ -20,6 +20,8 @@
 
 pub mod checkpoint;
 mod error;
+#[cfg(feature = "failpoints")]
+pub mod failpoint;
 pub mod format;
 pub mod io;
 pub mod layout;

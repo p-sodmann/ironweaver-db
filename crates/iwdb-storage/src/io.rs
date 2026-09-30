@@ -1,7 +1,9 @@
 //! The file operations that change the data directory, behind a small
-//! trait: the seam for fault injection. Tests wrap [`StdFs`] to make
-//! writes, fsyncs, renames, directory syncs, checkpoint writes, deletions
-//! or truncations fail; step 6 puts failpoints on the same calls.
+//! trait: the seam for fault injection. With the `failpoints` feature,
+//! `failpoint::FailFs` wraps any [`LogFs`] and makes writes, fsyncs,
+//! renames, directory syncs, checkpoint writes, deletions or truncations
+//! fail, pause, panic or abort (step 6). [`StdFs`] itself has no
+//! failpoints.
 //!
 //! Reading (the WAL reader, loading checkpoints) uses `std::fs` directly:
 //! a failed read changes nothing on disk.
