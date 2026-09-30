@@ -1,0 +1,44 @@
+# cargo-deny configuration: `cargo deny check` (run in CI).
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Every advisory fails the check unless ignored here, with a reason:
+# ignore = [{ id = "RUSTSEC-YYYY-NNNN", reason = "why it does not apply" }]
+ignore = [
+    # bincode 1 is unmaintained. ironweaver-core uses it only to read legacy
+    # format-1 files; our checkpoints are format 2 (postcard). Revisit on every
+    # core bump (upstream may drop or replace it).
+    { id = "RUSTSEC-2025-0141", reason = "only used by ironweaver-core to read legacy format-1 files" },
+]
+
+[licenses]
+# Permissive licenses compatible with shipping Ironweaver DB under MIT.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# Our own unpublished crates (publish = false) need no license check.
+ignore = true
+
+[bans]
+# Duplicates come from upstream crates for now; reported, not fatal.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# ironweaver-core is pinned to a git revision until 0.2.0 is on crates.io (ADR 0002).
+allow-git = ["https://github.com/p-sodmann/Ironweaver"]
