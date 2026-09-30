@@ -27,7 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ADR 0005 (fsync policies and failure behaviour) and `documentation/guarantees.md`.
 - WAL tests: random workloads reread and replayed, fault injection through the `LogFs` seam, truncation at every offset and every bit flip, and a format-1 compatibility fixture. Also a cargo-fuzz target for the reader (`fuzz/`, nightly, run in CI).
 
+- `iwdb` crate, the embedded store (step 5): `Store::open` / `open_with`, `commit`, `commit_catalog`, `node`, `edge`, `catalog`, `seq`, `synced_seq`, `read`, `sync`, `checkpoint`, `close`; a read-only state after WAL or apply failures; a background checkpointer (WAL size and time triggers) and the group commit timer.
+- Data directory layout 1 (`documentation/formats/data-dir.md`): a versioned marker, an exclusive lock (`flock` via `fs4`) that a second open in any process runs into, `checkpoints/` and `wal/`.
+- Checkpoints: binary graph files named by seq, with `iwdb.seq` and `iwdb.catalog` in graph meta, covering only synced commits, written with `write_atomic` plus a checked directory sync. The checkpointer replays the WAL into its own namespace, so commits don't wait for it; it keeps 2 checkpoints by default and deletes the WAL segments they no longer need.
+- Recovery: stale temp files removed, the newest checkpoint that loads (fallback to older ones), WAL replay, torn tail cut; typed errors that leave the files unchanged for corruption, missing WAL, and records that fail to replay. A `RecoveryReport` and log messages say what it did.
+- `WalReader::open_until` (read up to a seq), `Wal::appended_bytes`, and `write_atomic` / `remove_file` / `truncate` in the `LogFs` seam.
+- ADR 0006 (checkpoints, recovery and the lock). Tests: recovery acceptance cases, lock (threads, processes, `kill -9`), checkpoint faults, a random workload with checkpoints and crashes, a layout-1 fixture, and a commit latency measurement during a checkpoint.
+
 ### Changed
+- `GraphMeta` carries the seq (`iwdb.seq`), required when loading a database file; `Namespace::from_loaded` builds a namespace from a loaded file.
+- Upstream issue #32 filed: `write_atomic` ignores a failed directory fsync.
 - The step 3 workload strategies moved to `crates/iwdb-engine/tests/workload/mod.rs`, shared with the WAL tests.
 - Top-level attribute keys starting with `iwdb.` are reserved, like meta keys: commits, `DbRecord`'s serde and the codec reject them (step 3, ADR 0004).
 - Upstream issue #31 filed: `Value`'s serde rejects empty containers at the depth limit that the file format accepts.

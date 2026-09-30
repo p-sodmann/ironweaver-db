@@ -82,6 +82,8 @@ The reader reports where the log ends (`LogEnd`): the next seq, and for the last
 
 Reading from seq `s` fails with `MissingRecords` if the first segment starts after `s`, and with `LogEndsBefore` if the log ends before `s` (its next seq is below `s`). Records before `s` in the first segment read are checked but not returned. An empty directory is an empty log whose next seq is `s`.
 
+A **bounded read** (`WalReader::open_until(dir, s, u)`, step 5) returns the records `s ..= u` and stops right after record `u`, without decoding anything after it. The checkpointer uses it to read the segment the writer is appending to, up to a synced seq: a frame in progress after `u` is never examined, so it can't be mistaken for damage. It fails with `LogEndsBefore` if the log ends before record `u`.
+
 ## Versioning
 
 `version` in the segment header is the format version. A change to anything above bumps it, in `iwdb_storage::format::FORMAT_VERSION`. The reader keeps reading version N-1, and a fixture for each version stays in `tests/fixtures/wal-vN/` (design rule 4). A frame format or payload change needs a new segment version, because the version is only stored per segment.
