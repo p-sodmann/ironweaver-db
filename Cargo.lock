@@ -382,6 +382,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "iwdb-crash"
+version = "0.0.0"
+dependencies = [
+ "iwdb",
+ "iwdb-engine",
+ "iwdb-storage",
+ "tempfile",
+]
+
+[[package]]
 name = "iwdb-engine"
 version = "0.0.0"
 dependencies = [

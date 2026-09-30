@@ -1,0 +1,20 @@
+[package]
+name = "iwdb-crash"
+description = "Ironweaver DB crash harness: kill -9 a store at random points and check recovery (step 6)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+iwdb = { path = "../../crates/iwdb" }
+iwdb-engine = { path = "../../crates/iwdb-engine", features = ["testutil"] }
+iwdb-storage = { path = "../../crates/iwdb-storage", features = ["failpoints"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
