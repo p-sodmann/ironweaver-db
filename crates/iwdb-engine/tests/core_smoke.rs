@@ -8,15 +8,20 @@
 // Test helpers outside `#[test]` functions may panic too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::cell::Cell;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ironweaver_core::algo::{pagerank, PageRank};
 use ironweaver_core::cancel::{self, Token};
-use ironweaver_core::format::{self, GraphWriter, RecordCodec};
+use ironweaver_core::format::{self, GraphWriter, LoadGraph, RecordCodec};
 use ironweaver_core::pathfinding::EdgeCost;
-use ironweaver_core::{Attrs, CmpOp, Date, Direction, EdgeId, Expr, Graph, GraphError, Op, Projection, Record, Value};
+use ironweaver_core::query::Pattern;
+use ironweaver_core::traversal::bfs_limited;
+use ironweaver_core::{
+    Attrs, Budget, CmpOp, Date, Direction, EdgeId, Expr, Graph, GraphError, Op, Projection, Record, Value,
+};
 use iwdb_engine::testutil::canonical;
 
 type G = Graph<Record, Record>;
@@ -296,4 +301,158 @@ fn cancel_token_stops_pagerank_from_another_thread() {
     let opts = PageRank { max_iter: 3, tol: 0.0, ..PageRank::default() };
     let ranks = cancel::run(&Token::new(), || pagerank(&projection, &opts)).expect("not cancelled").expect("ranks");
     assert_eq!(ranks.len(), 50_000);
+}
+
+/// Binary bytes of `g` without a timestamp, so equal graphs give equal bytes.
+fn save(g: &G, meta: &Attrs) -> Vec<u8> {
+    let mut out = Vec::new();
+    GraphWriter::new(g, &RecordCodec { meta, half: false }).with_timestamp(None).write_binary(&mut out).expect("save");
+    out
+}
+
+#[test]
+fn saves_are_deterministic_and_carry_index_definitions() {
+    // Two graphs built the same way have attribute maps with different hash
+    // seeds, so their iteration orders differ; saves are sorted anyway.
+    let build = || {
+        let mut g = G::new();
+        g.apply_all(sample_batch(&g)).expect("setup");
+        g.create_index::<GraphError>(&path("age")).expect("index");
+        g
+    };
+    let mut meta = Attrs::new();
+    for i in 0..32 {
+        meta.insert(format!("k{}", i), Value::Int(i));
+    }
+    let (a, b) = (build(), build());
+    let bytes = save(&a, &meta);
+    assert_eq!(bytes, save(&b, &meta));
+    assert_eq!(bytes, save(&a, &meta.clone()));
+
+    // Index definitions travel in `metadata.indexes`; loaders recreate them
+    // unflushed, and the Record convenience loaders flush them.
+    let doc = LoadGraph::from_binary_slice(&bytes).expect("parse");
+    assert_eq!(doc.index_paths().expect("paths"), vec![path("age")]);
+    let built: G = doc
+        .build(
+            |n| Ok::<_, GraphError>(Record { attr: n.attr().to_attrs(), meta: n.meta().to_attrs() }),
+            |e| Ok(Record { attr: e.attr().to_attrs(), meta: e.meta().to_attrs() }),
+        )
+        .expect("build");
+    assert!(built.has_index(&path("age")));
+    assert!(built.indexes_dirty());
+    let (loaded, _) = format::from_binary(&bytes).expect("load");
+    assert!(!loaded.indexes_dirty());
+    let found = loaded.find_nodes(&path("age"), &Value::Int(30)).expect("lookup").expect("indexed");
+    assert_eq!(ids(&loaded, found), ["alice"]);
+}
+
+#[test]
+fn streaming_loader_matches_the_slice_loader() {
+    let mut g = G::new();
+    g.apply_all(sample_batch(&g)).expect("setup");
+    let mut meta = Attrs::new();
+    meta.insert("iwdb.seq".into(), Value::Int(7));
+    let bytes = save(&g, &meta);
+
+    let (streamed, streamed_meta) = format::from_binary_reader(&bytes[..]).expect("stream");
+    let (sliced, sliced_meta) = format::from_binary(&bytes).expect("slice");
+    assert_eq!(canonical(&streamed), canonical(&sliced));
+    assert_eq!(streamed_meta, sliced_meta);
+    assert_eq!(streamed.next_edge_id(), g.next_edge_id());
+
+    // The checksum is checked at the end: a damaged file is an error, and
+    // the partly built graph is never returned
+    let mut corrupt = bytes.clone();
+    let mid = corrupt.len() / 2;
+    corrupt[mid] ^= 0xff;
+    assert!(matches!(format::from_binary_reader(&corrupt[..]), Err(GraphError::Format(_))));
+    assert!(matches!(format::from_binary_reader(&bytes[..bytes.len() - 3]), Err(GraphError::Format(_))));
+}
+
+#[test]
+fn memory_usage_leaves_out_payloads() {
+    let build = |text: &str| {
+        let mut g = G::new();
+        for i in 0..100 {
+            g.add_node(format!("n{}", i), rec([("text", Value::String(text.repeat(1000)))])).expect("add");
+        }
+        g
+    };
+    // Attribute maps are owned by the payload: the database must add them
+    assert_eq!(build("").memory_usage(), build("x").memory_usage());
+}
+
+/// Known gap (documented in the review): `max_visited` counts nodes
+/// expanded, not edges examined, and the cancel token is checked per node.
+/// A hub's whole edge list is scanned under `max_visited(1)`, even when
+/// cancelled on the first edge. When this test fails, upstream has closed
+/// the gap: drop the edge-counting workaround and update the review.
+#[test]
+fn visit_budget_counts_nodes_not_edges() {
+    const FAN: usize = 10_000;
+    let mut g = G::new();
+    let hub = g.add_node("hub", Record::default()).expect("add");
+    let leaf = g.add_node("leaf", Record::default()).expect("add");
+    for _ in 0..FAN {
+        g.add_edge(hub, leaf, Record::default()).expect("edge");
+    }
+
+    let calls = Cell::new(0usize);
+    let counting = |_, _: &_| {
+        calls.set(calls.get() + 1);
+        Ok::<_, GraphError>(true)
+    };
+    let _ = bfs_limited(&g, hub, None, Budget::default().max_visited(1).truncate(), counting).expect("bfs");
+    assert_eq!(calls.get(), FAN, "the budget does not bound edges examined");
+
+    calls.set(0);
+    let token = Token::new();
+    let cancelling = |_, _: &_| {
+        calls.set(calls.get() + 1);
+        token.cancel();
+        Ok::<_, GraphError>(true)
+    };
+    let _ = cancel::run(&token, || bfs_limited(&g, hub, None, Budget::UNLIMITED, cancelling));
+    assert_eq!(calls.get(), FAN, "cancellation is checked per node, not per edge");
+
+    // The workaround: count edges in the closure and fail from it
+    calls.set(0);
+    let bounded = |_, _: &_| {
+        calls.set(calls.get() + 1);
+        if calls.get() > 100 {
+            return Err(GraphError::BudgetExceeded { visited: 1, results: 0 });
+        }
+        Ok(true)
+    };
+    let result = bfs_limited(&g, hub, None, Budget::UNLIMITED, bounded);
+    assert!(matches!(result, Err(GraphError::BudgetExceeded { .. })));
+    assert_eq!(calls.get(), 101);
+}
+
+#[test]
+fn expr_and_pattern_round_trip() {
+    let expr = Expr::And(vec![
+        Expr::Label("Person".into()),
+        Expr::Not(Box::new(Expr::Compare { path: path("age"), op: CmpOp::Lt, value: Value::Int(18) })),
+        Expr::Exists { path: vec!["address".into(), "city".into()] },
+    ]);
+    let json = serde_json::to_string(&expr).expect("json");
+    assert_eq!(serde_json::from_str::<Expr>(&json).expect("json decode"), expr);
+    let bytes = postcard::to_stdvec(&expr).expect("postcard");
+    assert_eq!(postcard::from_bytes::<Expr>(&bytes).expect("postcard decode"), expr);
+
+    // Too deep is an error, not a stack overflow. Nit (in the review): under
+    // postcard the error loses its message.
+    let mut deep = Expr::Const(true);
+    for _ in 0..200 {
+        deep = Expr::Not(Box::new(deep));
+    }
+    let json_err = serde_json::to_string(&deep).expect_err("too deep").to_string();
+    assert!(json_err.contains("nested more than"), "{}", json_err);
+    let postcard_err = postcard::to_stdvec(&deep).expect_err("too deep").to_string();
+    assert!(!postcard_err.contains("nested more than"), "{}", postcard_err);
+
+    let pattern = Pattern::parse("(a:Person)-[:KNOWS*1..3]->(b)").expect("parse");
+    assert_eq!(Pattern::parse(&pattern.to_string()).expect("reparse"), pattern);
 }
