@@ -74,7 +74,7 @@ All seven are **done upstream**: implemented in PR #25, merged as `a14149e`, and
 - **Nits.**
   - New `.expect("live nodes are indexed")` in `Graph::remove_node` / `rename_node`, reached from `apply`. It is believed unreachable, but it is on the apply path that PR #25 otherwise made panic-free.
   - `Expr` serde errors (depth limit) are raised with `serde::ser::Error::custom`, not `format::ser_error`, so under postcard the message is lost (postcard drops custom messages). JSON keeps it. Pinned in `expr_and_pattern_round_trip`.
-  - The JSON loader reads `Float(-0.0)` back as `Float(0.0)`: the saver writes `-0.0`, the sign is lost on parsing. The binary format keeps it. Harmless for checkpoints (binary), a small inexactness in JSON export. Found in step 2 and pinned in `tests/db_graph.rs` (`json_loses_the_sign_of_negative_zero`). Worth a small upstream issue.
+  - The JSON loader reads `Float(-0.0)` back as `Float(0.0)`: the saver writes `-0.0`, the sign is lost on parsing. The binary format keeps it. Harmless for checkpoints (binary), a small inexactness in JSON export. Found in step 2 and pinned in `tests/db_graph.rs` (`json_loses_the_sign_of_negative_zero`). Cause: sonic-rs 0.5.10 parses `-0.0` as `+0.0`. Upstream issue: [draft 9](upstream-issues.md#9-json-loader-reads--00-back-as-00), not filed yet.
   - `Record::at` (the attribute-path lookup behind `Attributes`) is still private, so payloads that want the same path rules copy it. `iwdb-engine` does so for `DbRecord` (step 2), with a proptest in `tests/db_record.rs` that checks every `Attributes` method against `Record`. Possible upstream request: a public `record::lookup(&Attrs, path)`.
 
 ## Design consequences for the database

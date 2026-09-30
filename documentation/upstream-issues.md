@@ -1,8 +1,8 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Draft 8 comes from that review, is **drafted, pending review** and **not filed**. After review, file it in [p-sodmann/Ironweaver](https://github.com/p-sodmann/Ironweaver/issues) and replace "not filed" with the issue link, here and in the core review.
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Draft 8 comes from that review, is **drafted, pending review** and **not filed**. Draft 9 comes from step 2 and is to be filed (see AGENTS.md, *Findings in ironweaver-core*). After review, file it in [p-sodmann/Ironweaver](https://github.com/p-sodmann/Ironweaver/issues) and replace "not filed" with the issue link, here and in the core review.
 
-Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, draft 8 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
+Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8 and 9 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
 
 | # | Title | Status |
 |---|---|---|
@@ -14,6 +14,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, draft 8 agains
 | 6 | [No panic in `apply_all` rollback](#6-no-panic-in-apply_all-rollback) | done upstream (PR #25, `a14149e`) |
 | 7 | [(Optional) Save index definitions in the file format](#7-optional-save-index-definitions-in-the-file-format) | done upstream (PR #25, `a14149e`) |
 | 8 | [Edge budget and per-edge cancellation in `bfs` and `expand`](#8-edge-budget-and-per-edge-cancellation-in-bfs-and-expand) | drafted, not filed |
+| 9 | [JSON loader reads `-0.0` back as `0.0`](#9-json-loader-reads--00-back-as-00) | not filed yet (no GitHub credentials in the session that found it) |
 
 ---
 
@@ -161,3 +162,37 @@ A caller can bound `bfs_limited` by counting in `edge_ok` and returning an error
 **Why the database needs it**
 
 Ironweaver DB promises that every remote read is bounded. Graphs with supernodes (a popular account, a shared category) are common, and a neighbourhood query from one of them is exactly the request that must be bounded. Until this lands, the database counts edges in the `bfs` filter itself and doesn't offer `expand` to remote callers.
+
+---
+
+## 9. JSON loader reads `-0.0` back as `0.0`
+
+**Problem**
+
+A `Value::Float(-0.0)` doesn't survive a JSON round trip. The saver writes `{"Float":-0.0}` correctly, but `LoadGraph::from_json_slice` (so also `format::from_json`) reads it back as `Float(0.0)`. The binary format keeps the sign.
+
+The cause is the JSON parser: sonic-rs 0.5.10 parses `-0.0`, `-0` and `-0e0` as positive zero (serde_json keeps the sign). Reproduction, with only sonic-rs:
+
+```rust
+let x: f64 = sonic_rs::from_str("-0.0").unwrap();
+assert!(x.is_sign_negative()); // fails with sonic-rs 0.5.10
+```
+
+Through the core (`a14149e`):
+
+```rust
+let mut g: Graph<Record, Record> = Graph::new();
+g.add_node("a", Record::with_attr([("x", Value::Float(-0.0))])).unwrap();
+let json = format::to_json(&g, &Attrs::new(), false).unwrap(); // contains {"Float":-0.0}
+let (h, _) = format::from_json(&json).unwrap();
+// h's "x" is Float(0.0): the sign is lost
+```
+
+**Proposal**
+
+- Report it to sonic-rs and bump once fixed. Until then, work around it in the loader: parse float tokens that are a negative zero (`-0`, `-0.0`, `-0e0`, ...) as `-0.0`, for example by checking the sign of the raw number text for a zero result.
+- Add `-0.0` (and the other special floats that the format can hold) to the JSON round-trip tests.
+
+**Why the database needs it**
+
+Not for correctness of checkpoints: they use the binary format. But JSON export and import, and the JSON compatibility fixtures, should reproduce values exactly. Ironweaver DB compares graphs bit for bit in its round-trip tests (`Float(-0.0)` and `Float(0.0)` differ in the canonical form), and currently has to leave `-0.0` out of its random JSON tests.
