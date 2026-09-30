@@ -219,6 +219,33 @@ fn graph_meta_survives_write_atomic_and_binary_format() {
     assert!(matches!(format::from_binary(&bytes[..bytes.len() - 3]), Err(GraphError::Format(_))));
 }
 
+/// Known core behaviour (upstream #32): `write_atomic` syncs the directory
+/// after the rename on a best-effort basis and ignores failures, so `Ok`
+/// doesn't mean the rename is durable. Pinned with a directory that can be
+/// written to but not opened for reading (mode 0o300): creating the
+/// temporary file and renaming it work, opening the directory to fsync it
+/// fails, and the save still returns `Ok`. When this fails, upstream
+/// reports the error: drop the extra directory sync after checkpoint writes
+/// in `iwdb_storage::checkpoint` (see `documentation/steps/upstream-check.md`).
+#[cfg(unix)]
+#[test]
+fn write_atomic_ignores_a_failed_directory_sync() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("smoke-dirsync");
+    let sub = dir.0.join("sub");
+    std::fs::create_dir(&sub).expect("mkdir");
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o300)).expect("chmod");
+    if std::fs::File::open(&sub).is_ok() {
+        // Running as root: permissions don't apply, nothing to show
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        return;
+    }
+    let result = format::write_atomic(sub.join("file"), |out| out.write_all(b"data"));
+    std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    assert!(result.is_ok(), "{:?}", result);
+    assert_eq!(std::fs::read(sub.join("file")).expect("read"), b"data");
+}
+
 #[test]
 fn property_index_lookups() {
     let mut g = G::new();

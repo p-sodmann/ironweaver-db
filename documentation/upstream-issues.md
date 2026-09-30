@@ -1,8 +1,8 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3; all are filed (links in the table).
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5; all are filed (links in the table).
 
-Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–13 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
+Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–14 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
 
 | # | Title | Status |
 |---|---|---|
@@ -19,6 +19,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–13 
 | 11 | [`Expr` depth-limit errors lose their message under postcard](#11-expr-depth-limit-errors-lose-their-message-under-postcard) | filed: [#29](https://github.com/p-sodmann/Ironweaver/issues/29) |
 | 12 | [Small API and dependency cleanups: public attribute lookup, optional bincode, doc comments](#12-small-api-and-dependency-cleanups-public-attribute-lookup-optional-bincode-doc-comments) | filed: [#30](https://github.com/p-sodmann/Ironweaver/issues/30) |
 | 13 | [`Value` serde rejects empty containers at the depth limit that the file format accepts](#13-value-serde-rejects-empty-containers-at-the-depth-limit-that-the-file-format-accepts) | filed: [#31](https://github.com/p-sodmann/Ironweaver/issues/31) |
+| 14 | [`write_atomic` ignores a failed directory fsync after the rename](#14-write_atomic-ignores-a-failed-directory-fsync-after-the-rename) | filed: [#32](https://github.com/p-sodmann/Ironweaver/issues/32) |
 
 ---
 
@@ -295,3 +296,31 @@ Make `Value`'s serde count depth like the file format: fail when a value's depth
 **Why the database needs it**
 
 Ironweaver DB writes its log with `Value`'s serde (postcard) and saves checkpoints through a custom `Codec` that also serializes attributes with `Value`'s serde. So a graph file that holds an empty list at depth 100 loads, but can't be checkpointed or logged again: saving it fails with "nested more than 100 levels deep". Our commit pipeline avoids this by counting an empty container as if it held a scalar (one level stricter than the file format), and imports will have to apply the same check. With one depth rule for both encoders, everything that loads can be saved and logged again.
+
+## 14. `write_atomic` ignores a failed directory fsync after the rename
+
+Found in step 5 (filed as [#32](https://github.com/p-sodmann/Ironweaver/issues/32)), checked against `a14149e`.
+
+**Problem**
+
+`format::write_atomic` makes the rename durable only on a best-effort basis: after `fs::rename(&tmp, path)` it opens the parent directory and calls `sync_all`, but ignores both errors (`if let Ok(d) = File::open(dir) { let _ = d.sync_all(); }`). So `Ok(())` means the new file's contents are durable, but not that the directory entry pointing to it is. After a power loss the old file (or no file) can reappear, and the caller had no way to know.
+
+Reproduction (`a14149e`, Unix, not as root): a directory that can be written to but not opened for reading (mode `0o300`). Creating the temporary file and renaming it work, opening the directory to fsync it fails, and the save still returns `Ok`:
+
+```rust
+use std::os::unix::fs::PermissionsExt;
+std::fs::create_dir("sub").unwrap();
+std::fs::set_permissions("sub", std::fs::Permissions::from_mode(0o300)).unwrap();
+let result = ironweaver_core::format::write_atomic("sub/file", |out| out.write_all(b"data"));
+assert!(result.is_ok()); // the directory was never synced
+```
+
+A failing `fsync` of the directory (EIO) is ignored the same way. After a failed fsync, a retry can succeed without writing anything (the "fsyncgate" behaviour of Linux), so an ignored failure can't be made up for later by syncing again.
+
+**Proposal**
+
+Return the error of the directory sync on Unix, as for every other step. Where it isn't possible (Windows), document that it isn't done. If the best-effort behaviour is wanted for some callers, keep it as a separate function or an option (for example `write_atomic_with(path, SyncDir::Required | SyncDir::BestEffort, write)`), with the strict one as the default. The doc comment should say what `Ok` guarantees: contents fsynced, rename done, rename durable.
+
+**Why the database needs it**
+
+Ironweaver DB writes checkpoints with `write_atomic` and then deletes the WAL segments and older checkpoints the new checkpoint covers. That is only safe if the new checkpoint's directory entry is durable before anything is deleted. If the rename were lost in a crash after the deletions, the data would be gone. Until this is fixed, we call our own directory fsync after `write_atomic` and check its result, which means a second directory sync per checkpoint and a failure mode that `write_atomic` could report itself.
