@@ -9,7 +9,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [3](step_3.md) | Commit pipeline (in memory) | M0 | done |
 | [4](step_4.md) | Write-ahead log | M1 | done |
 | [5](step_5.md) | Checkpoints, recovery and `Store::open` | M1 | done |
-| [6](step_6.md) | Crash and fault-injection suite | M1 | todo |
+| [6](step_6.md) | Crash and fault-injection suite | M1 | done |
 | [7](step_7.md) | Backup, PITR, `verify` and Python embedded bindings | M1 | todo |
 | [8](step_8.md) | Concurrency, idempotency and read-your-writes | M2 | todo |
 | [9](step_9.md) | Catalog operations and namespaces | M2 | todo |

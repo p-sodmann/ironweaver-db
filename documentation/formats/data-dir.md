@@ -69,6 +69,8 @@ A checkpoint is durable before anything is removed, and the WAL always holds eve
 
 **Failures.** If step 1 or 2 fails, nothing is removed, the previous checkpoints are untouched (`write_atomic` removes its temporary file), and the next checkpoint retries. If step 3, 4 or 5 fails, the store disables checkpoints until it is reopened (`CheckpointsDisabled`). A failed directory fsync is never retried, because a retry can succeed without persisting the entries. Commits are not affected; the WAL just isn't cut.
 
+**Interrupted cleanup.** A crash or a failure after step 2 leaves checkpoints and WAL segments that steps 4 and 5 would have removed. The next checkpoint that writes a new file removes them. A run with nothing new to write (the newest checkpoint is at the target) removes nothing. Its newest checkpoint may be one whose directory entry was never synced (a crash between steps 2 and 3), and removing files on the strength of it could lose data after an OS crash. The extra files cost space only. Recovery reads them correctly, and the step 6 crash tests cover these points.
+
 ## Recovery
 
 `Store::open` (`iwdb_storage::recover`) does this:

@@ -33,11 +33,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recovery: stale temp files removed, the newest checkpoint that loads (fallback to older ones), WAL replay, torn tail cut; typed errors that leave the files unchanged for corruption, missing WAL, and records that fail to replay. A `RecoveryReport` and log messages say what it did.
 - `WalReader::open_until` (read up to a seq), `Wal::appended_bytes`, and `write_atomic` / `remove_file` / `truncate` in the `LogFs` seam.
 - ADR 0006 (checkpoints, recovery and the lock). Tests: recovery acceptance cases, lock (threads, processes, `kill -9`), checkpoint faults, a random workload with checkpoints and crashes, a layout-1 fixture, and a commit latency measurement during a checkpoint.
+- Crash and fault-injection suite (step 6, ADR 0007): `iwdb_storage::failpoint::FailFs` (feature `failpoints`), failpoints on every write-side file operation that fail, report a full disk, tear a write, pause, panic or abort; a fault test for each through the store (`crates/iwdb/tests/faults.rs`); the kill -9 harness `iwdb-crash` (`tests/crash`) with an OS-crash simulation, a reference model and deterministic crash points; a short run on every PR and a nightly long run in CI.
+- `iwdb_engine::testutil::workload` (feature `testutil`): the random workload strategies, a seeded fixed workload and an endless `Stream`, shared by the tests and the harness.
+- ADR 0008 and `documentation/guarantees.md`, "Crashes and simulated failures": the defined behaviour of each simulated failure.
 
 ### Changed
+- A panic while the store changes its namespace or WAL (a commit, an fsync, the group commit timer) aborts the process, and the next open recovers (ADR 0008). Before, the store turned read-only, and readers could have seen part of a transaction.
 - `GraphMeta` carries the seq (`iwdb.seq`), required when loading a database file; `Namespace::from_loaded` builds a namespace from a loaded file.
 - Upstream issue #32 filed: `write_atomic` ignores a failed directory fsync.
 - The step 3 workload strategies moved to `crates/iwdb-engine/tests/workload/mod.rs`, shared with the WAL tests.
 - Top-level attribute keys starting with `iwdb.` are reserved, like meta keys: commits, `DbRecord`'s serde and the codec reject them (step 3, ADR 0004).
 - Upstream issue #31 filed: `Value`'s serde rejects empty containers at the depth limit that the file format accepts.
 - Bumped `ironweaver-core` from `02cefab` to `a14149e` (PR #25, which implements all seven upstream drafts). Core review updated; follow-up draft 8 (edge budget) added.
+
+### Fixed
+- Under the `off` fsync policy, `Wal::sync` (and so `Store::sync`, `checkpoint` and `close`) fsynced only the current segment and no directory, and a new writer claimed the whole log synced; now a sync covers every segment with unsynced records and the directory, and a writer under `off` starts with `synced_seq` 0 (step 6).
+- A panic inside a `Store::read` closure made the store read-only (step 6).

@@ -85,13 +85,22 @@ All seven are **done upstream**: implemented in PR #25, merged as `a14149e`, and
 - **Index reconciliation** after loading matches ADR 0003: for checkpoints the database wrote, `IndexChanges` is empty in every recovery test.
 - **#28 and #31 workarounds still hold for recovery.** Replay applies the same logged ops as the live path, so #28's `expect` stays unreachable from them; a panic during recovery is a crash and the next open retries. Checkpoints are saved only from graphs built by replaying logged records or loading our own checkpoints, whose values the commit pipeline limited (#31), so they save again.
 
+## Findings from step 6
+
+Checked under the crash and fault-injection suite ([ADR 0007](adr/0007-failpoints-and-crash-harness.md)) at `a14149e`. No new deviation from documented behaviour, so no new upstream issue.
+
+- **`write_atomic` under faults** behaves as the step 5 review says. A failure before it, halfway through the writer, or when the writer is done removes the temporary file and leaves the target untouched (`failpoint.rs` unit tests, `faults.rs`). A kill at any point leaves either the previous file and a temporary file, or the new file in place. Its best-effort directory sync (#32) is still ignored: the checkpointer's own checked `sync_dir` is what counts. The kill tests between the rename and that sync (`crash_points.rs`), and the fault tests for a failed sync, show that the workaround holds: nothing is removed before it succeeds. A panic inside our writer leaves the temporary file, because the core doesn't clean up while unwinding. That is not a documented guarantee, and our commit path aborts on panics anyway. The next open removes it.
+- **The streaming loader** was run on every checkpoint recovery in the harness (thousands of loads), and never failed on a checkpoint the database wrote.
+- **#28** (an `expect` on the apply path): the workaround changed. A panic in the commit path now aborts the process (ADR 0008) instead of poisoning the store. Before, readers could have seen a half-applied transaction. The harness and `panics.rs` check that recovery after the abort restores the state. Replay applies the same ops, so the `expect` is still unreachable from recovery.
+- **`apply_all` rollback** is not reached by storage faults: faults happen before apply (in the WAL) or outside the live namespace (checkpoints). The step 3 tests cover it.
+
 ## Design consequences for the database
 
 - **A failed `apply_all` can advance the edge id counter.** Rollback restores ids, labels, types and payloads, but `next_edge_id()` stays above any explicit id the failed batch used *(step 1; now documented upstream)*. Ids are still never reused, and the WAL carries explicit ids, so replay is exact; but the counter is not comparable between a primary and a replayed graph, and the canonical-state helper leaves it out.
 - **`GraphError::Internal` from `apply_all` means the graph may be inconsistent.** The database fails the transaction and reloads the namespace from checkpoint + WAL instead of continuing on it *(a14149e)*.
 - **Iteration order is not part of the contract.** Slots are reused and save/load compacts them, so order after recovery differs from order before. Database results that need an order sort by id; recovery tests compare a canonical form of the state.
 - **The write path owns the graph.** Users of the database never get `node_mut` / `edge_mut`; all changes go through ops, so the WAL, indexes and versions stay consistent.
-- **Panics in the core are fatal for the process**, not for the data: the database treats a panic during commit as a crash and relies on recovery from checkpoint + WAL.
+- **Panics in the core are fatal for the process**, not for the data: the store aborts the process on a panic in the commit path and relies on recovery from checkpoint + WAL (ADR 0008, step 6).
 - **Pin a git revision of `ironweaver-core`** until 0.2.0 is on crates.io; bump deliberately and run the full crash and compatibility suites on every bump.
 
 ## Notes (not upstream requests yet)
