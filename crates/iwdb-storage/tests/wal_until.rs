@@ -118,7 +118,9 @@ fn reads_up_to_the_synced_seq_while_the_writer_appends() {
         })
     };
     let mut reads = 0;
-    while !stop.load(Ordering::SeqCst) || reads == 0 {
+    // At least two reads, however fast the writer is (it may finish before
+    // the second one under load)
+    while !stop.load(Ordering::SeqCst) || reads < 2 {
         let until = logged.lock().unwrap().wal().synced_seq();
         let from = until.saturating_sub(30).max(1);
         assert_eq!(seqs(WalReader::open_until(dir.path(), from, until).unwrap()), (from..=until).collect::<Vec<_>>());
