@@ -17,9 +17,7 @@ use iwdb_engine::{
 use proptest::collection::vec;
 use proptest::prelude::*;
 
-mod workload;
-
-use workload::{seed, step, Step};
+use iwdb_engine::testutil::workload::{seed, step, Step};
 
 // The reference model: plain maps, whole-state copies, checks written
 // independently of the engine's overlay.

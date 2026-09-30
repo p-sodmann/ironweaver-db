@@ -12,8 +12,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod support;
-#[path = "../../iwdb-engine/tests/workload/mod.rs"]
-mod workload;
 
 use std::fs;
 use std::path::{Path, PathBuf};

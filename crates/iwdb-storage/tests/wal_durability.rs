@@ -6,14 +6,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
-#[path = "../../iwdb-engine/tests/workload/mod.rs"]
-mod workload;
 
 use std::fs;
 use std::time::Duration;
 
 use common::{namespace, replay, segments, state, upsert, Call, TestFs};
 use ironweaver_core::Value;
+use iwdb_engine::testutil::workload::{seed, step, Step};
 use iwdb_engine::{CommitRecord, Namespace};
 use iwdb_storage::format::{MAX_RECORD_LEN, SEGMENT_HEADER_LEN};
 use iwdb_storage::{
@@ -21,7 +20,6 @@ use iwdb_storage::{
 };
 use proptest::collection::vec;
 use proptest::prelude::*;
-use workload::{seed, step, Step};
 
 fn options(fsync: FsyncPolicy, segment_size: u64) -> WalOptions {
     WalOptions { fsync, segment_size }

@@ -1,7 +1,7 @@
 //! Helpers for the store tests: options, running a workload against a
 //! store and a reference namespace, and reading files.
 
-#![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
+#![allow(dead_code, unused_imports, clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ use iwdb_engine::catalog::NamespaceName;
 use iwdb_engine::testutil::canonical;
 use iwdb_storage::MIN_SEGMENT_SIZE;
 
-use crate::workload::Step;
+pub use iwdb_engine::testutil::workload::{self, pad, Step};
 
 /// `always`, 1 KiB segments (many rotations), no background threads, keep
 /// `keep` checkpoints.
@@ -111,39 +111,8 @@ pub fn frame(seq: u64, synced_seq: u64, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A fixed workload: a seed and `n` deterministic steps from the proptest
-/// strategies, each followed by a commit that writes a 200-byte string to
-/// one of three padding nodes, so that the WAL rotates 1 KiB segments
-/// every few commits.
+/// A fixed workload of `n` steps from `seed`, padded so that 1 KiB
+/// segments rotate every few commits ([`workload::seeded`]).
 pub fn workload(n: usize, seed: u64) -> Vec<Step> {
-    use proptest::strategy::{Strategy, ValueTree};
-    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
-    let mut bytes = [0u8; 32];
-    bytes[..8].copy_from_slice(&seed.to_le_bytes());
-    let rng = TestRng::from_seed(RngAlgorithm::ChaCha, &bytes);
-    let mut runner = TestRunner::new_with_rng(Config::default(), rng);
-    let strategy = (crate::workload::seed(), proptest::collection::vec(crate::workload::step(), n)).prop_map(
-        |(seed, mut steps)| {
-            steps.insert(0, seed);
-            steps
-        },
-    );
-    let steps = strategy.new_tree(&mut runner).unwrap().current();
-    let mut padded = Vec::with_capacity(2 * steps.len());
-    for (i, step) in steps.into_iter().enumerate() {
-        padded.push(step);
-        padded.push(pad(i));
-    }
-    padded
-}
-
-/// Upsert padding node `p<i % 3>` with a 200-byte string.
-pub fn pad(i: usize) -> Step {
-    Step::Tx(vec![iwdb::Mutation::UpsertNode {
-        id: format!("p{}", i % 3),
-        labels: vec![],
-        attr: [("pad".to_owned(), iwdb::Value::from(format!("{:0>200}", i)))].into(),
-        meta: Default::default(),
-        expected_version: None,
-    }])
+    workload::seeded(n, seed)
 }

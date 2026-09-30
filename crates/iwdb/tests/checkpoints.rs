@@ -9,8 +9,6 @@
 #[path = "../../iwdb-storage/tests/common/mod.rs"]
 mod common;
 mod support;
-#[path = "../../iwdb-engine/tests/workload/mod.rs"]
-mod workload;
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -305,8 +303,8 @@ fn a_wal_failure_makes_the_store_read_only_until_reopened() {
 
 fn support_pad(i: usize) -> Vec<iwdb::Mutation> {
     match pad(i) {
-        workload::Step::Tx(m) => m,
-        workload::Step::Catalog(_) => unreachable!(),
+        support::Step::Tx(m) => m,
+        support::Step::Catalog(_) => unreachable!(),
     }
 }
 

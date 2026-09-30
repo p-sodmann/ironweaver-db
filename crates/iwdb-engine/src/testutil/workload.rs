@@ -1,18 +1,23 @@
-//! Proptest strategies for random commit workloads: transactions and
-//! catalog changes over small id, key and value spaces, so that mutations
-//! collide, conflict and violate constraints often.
+//! Random commit workloads (feature `testutil`): proptest strategies for
+//! transactions and catalog changes over small id, key and value spaces, so
+//! that mutations collide, conflict and violate constraints often; and
+//! deterministic workloads generated from a seed ([`seeded`], [`Stream`]),
+//! which a crash harness can regenerate in another process.
 //!
-//! Shared by the step 3 model test (`commit_model.rs`) and the WAL tests in
-//! `iwdb-storage`, which include this file with `#[path]`.
+//! Used by the step 3 model test, the WAL and store tests, and the crash
+//! harness (`tests/crash`). Not part of the database's API.
 
-// Each test binary uses a different subset.
-#![allow(dead_code, clippy::unwrap_used)]
+// The strategies build attribute paths and labels from constants, which
+// are valid.
+#![allow(clippy::unwrap_used)]
 
+use crate::catalog::{AttrPath, Constraint, ConstraintKind, IndexDef, Label};
+use crate::{CatalogChange, EdgeKey, Mutation, Target};
 use ironweaver_core::{Attrs, EdgeId, Value};
-use iwdb_engine::catalog::{AttrPath, Constraint, ConstraintKind, IndexDef, Label};
-use iwdb_engine::{CatalogChange, EdgeKey, Mutation, Target};
 use proptest::collection::{hash_map, vec};
 use proptest::prelude::*;
+use proptest::strategy::ValueTree;
+use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 
 pub fn node_id() -> impl Strategy<Value = String> {
     prop::sample::select(vec!["a", "b", "c", "d"]).prop_map(str::to_owned)
@@ -119,7 +124,7 @@ pub fn catalog_change() -> impl Strategy<Value = CatalogChange> {
     ]
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Step {
     Tx(Vec<Mutation>),
     Catalog(CatalogChange),
@@ -151,4 +156,100 @@ pub fn seed() -> impl Strategy<Value = Step> {
                 .collect(),
         )
     })
+}
+
+/// A test runner whose random choices depend only on `seed`, the same in
+/// every process and on every platform (ChaCha).
+pub fn runner(seed: u64) -> TestRunner {
+    let mut bytes = [0u8; 32];
+    bytes[..8].copy_from_slice(&seed.to_le_bytes());
+    TestRunner::new_with_rng(Config::default(), TestRng::from_seed(RngAlgorithm::ChaCha, &bytes))
+}
+
+/// One value of `strategy`, drawn with `runner`.
+fn draw<S: Strategy>(runner: &mut TestRunner, strategy: &S) -> S::Value {
+    // Only fails when a strategy rejects every value, which none here does
+    strategy.new_tree(runner).unwrap().current()
+}
+
+/// A fixed workload: the [`seed`] step and `n` random steps from `seed`,
+/// each followed by a [`pad`] commit, so that 1 KiB WAL segments rotate
+/// every few commits.
+pub fn seeded(n: usize, seed: u64) -> Vec<Step> {
+    let mut runner = runner(seed);
+    let strategy = (self::seed(), vec(step(), n)).prop_map(|(seed, mut steps)| {
+        steps.insert(0, seed);
+        steps
+    });
+    let steps = draw(&mut runner, &strategy);
+    let mut padded = Vec::with_capacity(2 * steps.len());
+    for (i, step) in steps.into_iter().enumerate() {
+        padded.push(step);
+        padded.push(pad(i));
+    }
+    padded
+}
+
+/// Upsert padding node `p<i % 3>` with a 200-byte string.
+pub fn pad(i: usize) -> Step {
+    Step::Tx(vec![Mutation::UpsertNode {
+        id: format!("p{}", i % 3),
+        labels: vec![],
+        attr: [("pad".to_owned(), Value::from(format!("{:0>200}", i)))].into(),
+        meta: Attrs::new(),
+        expected_version: None,
+    }])
+}
+
+/// An endless workload from a seed: the [`seed`] step, then random
+/// [`step`]s, each followed by a [`pad`] commit. The same seed gives the
+/// same steps in every process, which is how a crash harness rebuilds what
+/// a killed child committed.
+pub struct Stream {
+    runner: TestRunner,
+    step: BoxedStrategy<Step>,
+    next: usize,
+}
+
+impl Stream {
+    pub fn new(seed: u64) -> Self {
+        Stream { runner: runner(seed), step: step().boxed(), next: 0 }
+    }
+}
+
+impl std::fmt::Debug for Stream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stream").field("next", &self.next).finish_non_exhaustive()
+    }
+}
+
+impl Iterator for Stream {
+    type Item = Step;
+
+    fn next(&mut self) -> Option<Step> {
+        let i = self.next;
+        self.next += 1;
+        Some(match i {
+            0 => draw(&mut self.runner, &seed()),
+            i if i % 2 == 0 => pad(i / 2),
+            _ => draw(&mut self.runner, &self.step),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream(seed: u64) -> Vec<Step> {
+        Stream::new(seed).take(50).collect()
+    }
+
+    #[test]
+    fn workloads_depend_only_on_the_seed() {
+        assert_eq!(seeded(20, 7), seeded(20, 7));
+        assert_ne!(seeded(20, 7), seeded(20, 8));
+        assert_eq!(stream(3), stream(3));
+        assert_ne!(stream(3), stream(4));
+    }
 }

@@ -11,8 +11,6 @@
 #[path = "../../iwdb-storage/tests/common/mod.rs"]
 mod common;
 mod support;
-#[path = "../../iwdb-engine/tests/workload/mod.rs"]
-mod workload;
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;

@@ -5,8 +5,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod support;
-#[path = "../../iwdb-engine/tests/workload/mod.rs"]
-mod workload;
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -76,8 +74,8 @@ fn child_holds_the_lock() {
 
 fn pad_mutation() -> iwdb::Mutation {
     match pad(0) {
-        workload::Step::Tx(mut m) => m.remove(0),
-        workload::Step::Catalog(_) => unreachable!(),
+        support::Step::Tx(mut m) => m.remove(0),
+        support::Step::Catalog(_) => unreachable!(),
     }
 }
 

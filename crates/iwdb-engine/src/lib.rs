@@ -8,7 +8,8 @@
 //!   core's file format, with the catalog in the graph meta.
 //! - [`mutation`]: the write vocabulary, commit records and results.
 //! - [`Namespace`]: a graph changed only through the commit pipeline.
-//! - [`testutil`]: canonical graph comparison for tests.
+//! - [`testutil`]: canonical graph comparison for tests, and random
+//!   workloads with the `testutil` feature.
 
 pub mod catalog;
 pub mod codec;

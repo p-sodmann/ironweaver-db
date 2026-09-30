@@ -13,8 +13,17 @@ ironweaver-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# Only with `testutil`: the random workload strategies
+proptest = { workspace = true, optional = true }
+
+[features]
+# Test helpers for other crates' tests and the crash harness: the random
+# workload strategies in `testutil::workload`. Never needed at run time.
+testutil = ["dep:proptest"]
 
 [dev-dependencies]
+# Our own tests use the workload strategies
+iwdb-engine = { path = ".", features = ["testutil"] }
 postcard.workspace = true
 proptest.workspace = true
 

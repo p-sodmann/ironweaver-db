@@ -8,17 +8,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod support;
-#[path = "../../iwdb-engine/tests/workload/mod.rs"]
-mod workload;
 
 use std::fs::OpenOptions;
 use std::io::Write;
 
 use iwdb::Store;
+use iwdb_engine::testutil::workload::{seed, step, Step};
 use proptest::collection::vec;
 use proptest::prelude::*;
 use support::{checkpoints, frame, last_segment, options, pad, reference, run, segment_seqs, state, store_state};
-use workload::{seed, step, Step};
 
 #[derive(Clone, Debug)]
 enum Action {

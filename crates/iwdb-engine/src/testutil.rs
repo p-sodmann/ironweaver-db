@@ -1,4 +1,5 @@
-//! Helpers for tests: an order-independent, canonical form of a graph.
+//! Helpers for tests: an order-independent, canonical form of a graph, and
+//! (with the `testutil` feature) random workloads ([`workload`]).
 //!
 //! The core's iteration order is not part of our contract (slots are reused,
 //! save/load compacts them, rollback can reorder adjacency lists). Tests that
@@ -6,6 +7,9 @@
 //! [`canonical`] forms instead.
 
 use std::fmt::Write as _;
+
+#[cfg(feature = "testutil")]
+pub mod workload;
 
 use ironweaver_core::{Attrs, Graph, Record, Value};
 
