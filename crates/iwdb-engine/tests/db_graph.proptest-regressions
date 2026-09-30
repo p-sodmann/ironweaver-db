@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 76167afbc1e36d2ff2ed1b6b0d4d949abea975d90c3390fee8905d9dc4f65841 # shrinks to ops = [AddNode { id: "n0", labels: [], data: DbRecord { attr: {}, meta: {}, version: 0 } }, AddEdge { id: EdgeId(1), from: "n0", to: "n0", ty: None, data: DbRecord { attr: {}, meta: {}, version: 0 } }, AddEdge { id: EdgeId(2), from: "n0", to: "n0", ty: None, data: DbRecord { attr: {}, meta: {}, version: 0 } }, AddEdge { id: EdgeId(3), from: "n0", to: "n0", ty: None, data: DbRecord { attr: {}, meta: {}, version: 0 } }, AddEdge { id: EdgeId(4), from: "n0", to: "n0", ty: None, data: DbRecord { attr: {"ca": List([]), "c": List([]), "aa": List([Float(-1.0), List([Bytes([184, 232, 175]), Float(-0.0), None])])}, meta: {"mb": DateTime(DateTime { micros: 15001958474837, offset: None })}, version: 9223372036854775807 } }, RemoveEdge { id: EdgeId(2) }], meta = GraphMeta { namespace: NamespaceName("b_b_6_-g"), catalog: NamespaceCatalog { indexes: {}, constraints: {Constraint { kind: Unique, label: Label("C"), path: AttrPath(["b"]) }, Constraint { kind: Required, label: Label("C"), path: AttrPath(["ab"]) }} } }
