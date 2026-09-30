@@ -18,11 +18,12 @@ pub enum Error {
     Engine(#[from] iwdb_engine::Error),
 
     // Writing
-    /// An I/O operation of the log failed. When it happened while writing
-    /// or syncing, the log is now failed (read-only until reopened) and the
+    /// An I/O operation failed. When it happened while writing or syncing
+    /// the log, the log is now failed (read-only until reopened) and the
     /// commit was not applied; its outcome is unknown (see
-    /// `documentation/guarantees.md`).
-    #[error("WAL {op} failed on '{}': {source}", path.display())]
+    /// `documentation/guarantees.md`). For checkpoints and recovery, see
+    /// the operation that returned it.
+    #[error("{op} failed on '{}': {source}", path.display())]
     Io {
         op: &'static str,
         path: PathBuf,

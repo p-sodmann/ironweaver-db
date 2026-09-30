@@ -111,6 +111,8 @@ pub struct Wal<F: LogFs = StdFs> {
     oldest_unsynced: Option<Instant>,
     failed: Option<String>,
     frame: Vec<u8>,
+    /// Bytes of record frames this writer has appended.
+    appended: u64,
 }
 
 impl<F: LogFs> std::fmt::Debug for Wal<F> {
@@ -188,6 +190,7 @@ impl<F: LogFs> Wal<F> {
             oldest_unsynced: None,
             failed: None,
             frame: Vec::new(),
+            appended: 0,
         })
     }
 
@@ -223,6 +226,7 @@ impl<F: LogFs> Wal<F> {
             return Err(self.fail("append", e));
         }
         self.segment_len += frame_len;
+        self.appended += frame_len;
         self.segment_records += 1;
         self.next_seq += 1;
         let now = Instant::now();
@@ -284,6 +288,12 @@ impl<F: LogFs> Wal<F> {
     /// synced. Records after it are written but may be lost in a crash.
     pub fn synced_seq(&self) -> u64 {
         self.synced_seq
+    }
+
+    /// Bytes of record frames appended by this writer since it was
+    /// created (the log's growth; the checkpointer's size trigger).
+    pub fn appended_bytes(&self) -> u64 {
+        self.appended
     }
 
     /// Why the log failed, if it did (it accepts no more appends then).

@@ -267,9 +267,15 @@ pub fn list_segments(dir: &Path) -> Result<Vec<(u64, PathBuf)>, Error> {
 /// - After the iterator returns `None`, [`end`](Self::end) says where the
 ///   log ends and whether its last segment has a torn tail.
 /// - After an error, the iterator returns `None` and `end` stays `None`.
+/// - A bounded reader ([`open_until`](Self::open_until)) stops after a
+///   given record, without looking at anything after it.
 #[derive(Debug)]
 pub struct WalReader {
     from: u64,
+    /// The last seq to return (`u64::MAX`: read to the end of the log).
+    until: u64,
+    /// The seq of the next record to return.
+    wanted: u64,
     segments: Vec<(u64, PathBuf)>,
     /// Index of the next segment to open.
     next_segment: usize,
@@ -283,6 +289,8 @@ pub struct WalReader {
 enum Step {
     Record(CommitRecord),
     End(LogEnd),
+    /// A bounded reader returned its last record.
+    Stopped,
 }
 
 impl WalReader {
@@ -290,6 +298,21 @@ impl WalReader {
     /// (`from` 0 is read as 1). Fails with [`Error::MissingRecords`] if
     /// the log starts after `from`.
     pub fn open(dir: &Path, from: u64) -> Result<Self, Error> {
+        Self::open_until(dir, from, u64::MAX)
+    }
+
+    /// A reader of the records `from ..= until` of the log in `dir`
+    /// (`from` 0 is read as 1): a log that another thread is appending to
+    /// can be read up to a record known to be complete.
+    ///
+    /// It stops right after returning record `until`, and never decodes
+    /// the bytes after it, so a frame being written after it is never
+    /// mistaken for damage. [`end`](Self::end) stays `None` then, because
+    /// the end of the log was not read. If `until < from` it returns
+    /// nothing. Fails with [`Error::MissingRecords`] if the log starts after
+    /// `from`, and (from the iterator) with [`Error::LogEndsBefore`] naming
+    /// `until` if the log ends before record `until`.
+    pub fn open_until(dir: &Path, from: u64, until: u64) -> Result<Self, Error> {
         let from = from.max(1);
         let mut segments = list_segments(dir)?;
         // Start at the last segment that starts at or before `from`
@@ -300,7 +323,17 @@ impl WalReader {
             }
             segments.drain(..start - 1);
         }
-        Ok(WalReader { from, segments, next_segment: 0, current: None, next_seq: None, end: None, done: false })
+        Ok(WalReader {
+            from,
+            until,
+            wanted: from,
+            segments,
+            next_segment: 0,
+            current: None,
+            next_seq: None,
+            end: None,
+            done: false,
+        })
     }
 
     /// Where the log ends, once the iterator has returned `None` without
@@ -310,14 +343,18 @@ impl WalReader {
     }
 
     fn step(&mut self) -> Result<Step, Error> {
+        if self.wanted > self.until {
+            return Ok(Step::Stopped);
+        }
         if self.segments.is_empty() {
-            return Ok(Step::End(LogEnd { next_seq: self.from, last_segment: None }));
+            return self.finish(LogEnd { next_seq: self.from, last_segment: None });
         }
         loop {
             if let Some((bytes, cursor)) = &mut self.current {
                 let path = &self.segments[self.next_segment - 1].1;
                 while let Some(record) = cursor.next(path, bytes)? {
                     if record.seq >= self.from {
+                        self.wanted = record.seq + 1;
                         return Ok(Step::Record(record));
                     }
                 }
@@ -326,13 +363,23 @@ impl WalReader {
                         return Err(Error::LogEndsBefore { from: self.from, next_seq: cursor.next_seq });
                     }
                     let last_segment = Some(cursor.segment_end(path, bytes.len()));
-                    return Ok(Step::End(LogEnd { next_seq: cursor.next_seq, last_segment }));
+                    let end = LogEnd { next_seq: cursor.next_seq, last_segment };
+                    return self.finish(end);
                 }
                 self.next_seq = Some(cursor.next_seq);
                 self.current = None;
             }
             self.open_next()?;
         }
+    }
+
+    /// The end of the log: an error for a bounded reader that hasn't
+    /// reached its last record.
+    fn finish(&self, end: LogEnd) -> Result<Step, Error> {
+        if self.until != u64::MAX && end.next_seq <= self.until {
+            return Err(Error::LogEndsBefore { from: self.until, next_seq: end.next_seq });
+        }
+        Ok(Step::End(end))
     }
 
     fn open_next(&mut self) -> Result<(), Error> {
@@ -365,6 +412,10 @@ impl Iterator for WalReader {
                 self.done = true;
                 None
             }
+            Ok(Step::Stopped) => {
+                self.done = true;
+                None
+            }
             Err(e) => {
                 self.done = true;
                 Some(Err(e))
@@ -383,6 +434,8 @@ pub fn read_log(dir: &Path, from: u64) -> Result<(Vec<CommitRecord>, LogEnd), Er
         match reader.step()? {
             Step::Record(record) => records.push(record),
             Step::End(end) => return Ok((records, end)),
+            // An unbounded reader stops only at u64::MAX, which no record has
+            Step::Stopped => return Err(Error::LogEndsBefore { from: u64::MAX, next_seq: reader.wanted }),
         }
     }
 }

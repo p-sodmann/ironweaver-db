@@ -1,11 +1,12 @@
 //! Shared helpers for the WAL tests: a [`LogFs`] that counts calls and
-//! fails the ones a test asks it to, and small builders.
+//! fails the ones a test asks it to, and small builders. The store tests
+//! (`crates/iwdb/tests`) include this file with `#[path]`.
 
 // Each test binary uses a different subset.
 #![allow(dead_code)]
 
 use std::fs::File;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -24,6 +25,9 @@ pub enum Call {
     SyncDir,
     Write,
     Sync,
+    WriteAtomic,
+    RemoveFile,
+    Truncate,
 }
 
 /// How the next matching call fails.
@@ -31,11 +35,16 @@ pub enum Call {
 pub enum Fault {
     /// Fail without doing anything.
     Fail,
-    /// For writes: write the first half of the bytes, then fail.
+    /// For writes: write the first half of the bytes, then fail. For
+    /// atomic writes: fail in the middle of writing the temporary file.
     Partial,
 }
 
-#[derive(Debug, Default)]
+/// Called with every call before it runs (outside the state's lock), for
+/// tests that pause a thread at a given call.
+pub type Hook = Arc<dyn Fn(Call, &Path) + Send + Sync>;
+
+#[derive(Default)]
 pub struct State {
     /// Every call, in order (failed ones included).
     pub calls: Vec<Call>,
@@ -43,6 +52,13 @@ pub struct State {
     pub faults: Vec<(Call, Fault)>,
     /// Calls that failed.
     pub failed: Vec<Call>,
+    pub hook: Option<Hook>,
+}
+
+impl std::fmt::Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("State").field("calls", &self.calls).field("faults", &self.faults).finish_non_exhaustive()
+    }
 }
 
 impl State {
@@ -72,8 +88,20 @@ impl TestFs {
         self.state().count(call)
     }
 
+    pub fn set_hook(&self, hook: Option<Hook>) {
+        self.state().hook = hook;
+    }
+
     /// Record `call`; the fault to inject, if any.
     fn enter(&self, call: Call) -> Option<Fault> {
+        self.enter_at(call, Path::new(""))
+    }
+
+    fn enter_at(&self, call: Call, path: &Path) -> Option<Fault> {
+        let hook = self.state().hook.clone();
+        if let Some(hook) = hook {
+            hook(call, path);
+        }
         let mut state = self.state();
         state.calls.push(call);
         let at = state.faults.iter().position(|(c, _)| *c == call)?;
@@ -112,10 +140,58 @@ impl LogFs for TestFs {
     }
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
-        if self.enter(Call::SyncDir).is_some() {
+        if self.enter_at(Call::SyncDir, dir).is_some() {
             return Err(injected(Call::SyncDir));
         }
         StdFs.sync_dir(dir)
+    }
+
+    fn write_atomic(&self, path: &Path, write: &mut dyn FnMut(&mut dyn Write) -> io::Result<()>) -> io::Result<()> {
+        match self.enter_at(Call::WriteAtomic, path) {
+            None => StdFs.write_atomic(path, write),
+            Some(Fault::Fail) => Err(injected(Call::WriteAtomic)),
+            Some(Fault::Partial) => StdFs.write_atomic(path, &mut |out| {
+                let mut half = HalfWriter { inner: out, budget: None };
+                write(&mut half)
+            }),
+        }
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        if self.enter_at(Call::RemoveFile, path).is_some() {
+            return Err(injected(Call::RemoveFile));
+        }
+        StdFs.remove_file(path)
+    }
+
+    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+        if self.enter_at(Call::Truncate, path).is_some() {
+            return Err(injected(Call::Truncate));
+        }
+        StdFs.truncate(path, len)
+    }
+}
+
+/// Passes through the first 4 KiB written (or the first write's first
+/// half, if smaller), then fails every write.
+struct HalfWriter<'a> {
+    inner: &'a mut dyn Write,
+    budget: Option<usize>,
+}
+
+impl Write for HalfWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let budget = *self.budget.get_or_insert((buf.len() / 2).min(4096));
+        if budget == 0 {
+            return Err(injected(Call::WriteAtomic));
+        }
+        let n = self.inner.write(&buf[..budget.min(buf.len())])?;
+        self.budget = Some(budget - n);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -127,10 +203,10 @@ pub struct TestFile {
 impl LogFile for TestFile {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         match self.fs.enter(Call::Write) {
-            None => self.inner.write_all(bytes),
+            None => LogFile::write_all(&mut self.inner, bytes),
             Some(Fault::Fail) => Err(injected(Call::Write)),
             Some(Fault::Partial) => {
-                self.inner.write_all(&bytes[..bytes.len() / 2])?;
+                LogFile::write_all(&mut self.inner, &bytes[..bytes.len() / 2])?;
                 Err(injected(Call::Write))
             }
         }
