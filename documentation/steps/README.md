@@ -23,6 +23,10 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [17](step_17.md) | Release 1.0 | M4 | todo |
 | [18](step_18.md) | Replication and high availability | M5 | todo |
 
+## Recurring gate: upstream check
+
+[upstream-check.md](upstream-check.md) tracks our open issues in `ironweaver-core`: what each blocks, its workaround, and what to remove once it's fixed. Run it before steps 10, 11, 13 and 17 and with every core bump (each of those steps starts with it).
+
 ## Milestone completion
 
 | Milestone | Steps | Status |

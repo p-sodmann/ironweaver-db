@@ -10,6 +10,7 @@ A server process that serves the `Database` trait over gRPC, with the proto file
 
 ## Tasks
 
+- [ ] First: run the [upstream check](upstream-check.md). Issues this step depends on: #27, #28, #29.
 - [ ] `proto/ironweaver_db/v1/*.proto`: values, entities, mutations, commit, reads, match, analytics jobs, catalog, errors (status codes + details). `buf lint` and `buf breaking` in CI.
 - [ ] Create `crates/iwdb-server` (tonic): config file, data directory, adapters from protos to the trait.
 - [ ] Server-streaming for large results (subgraph, match, traversal).

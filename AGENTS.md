@@ -77,7 +77,7 @@ documentation/             # design, steps, ADRs
 
 ## Relationship to upstream Ironweaver
 
-This is a separate repository. `ironweaver-core` is a dependency, not a fork, pinned to a git revision until 0.2.0 is on crates.io. Bump it deliberately and run the crash and compatibility suites on every bump. Upstream change requests are tracked in the core review doc.
+This is a separate repository. `ironweaver-core` is a dependency, not a fork, pinned to a git revision until 0.2.0 is on crates.io. Bump it deliberately and run the crash and compatibility suites on every bump. Every bump also runs the [upstream check](documentation/steps/upstream-check.md). Upstream change requests are tracked in the core review doc.
 
 ### Findings in `ironweaver-core`
 
@@ -85,7 +85,7 @@ When you find a bug, a deviation from documented behaviour, or a missing guarant
 
 1. Verify it against the pinned revision, find the cause if you can, and pin the current behaviour with a test that fails once upstream fixes it.
 2. Record it in the core review, and write the issue as a numbered draft in `documentation/upstream-issues.md` (problem with a minimal reproduction, proposal, why the database needs it).
-3. File it: `gh issue create -R p-sodmann/Ironweaver --title "<title>" --body-file <draft body>`. Put the issue link in the `upstream-issues.md` table and in the core review.
+3. File it: `gh issue create -R p-sodmann/Ironweaver --title "<title>" --body-file <draft body>`. Put the issue link in the `upstream-issues.md` table and in the core review, and add a row to [documentation/steps/upstream-check.md](documentation/steps/upstream-check.md) (which step needs it, the workaround until it's fixed, what to remove when it is). If the step that needs it doesn't start with the upstream check yet, add the check to it.
 4. If you can't file it (no `gh`, no credentials), leave it marked "not filed yet", say so in your summary, and give the user the command to file it.
 
 This applies to new findings. Drafts that the user holds back explicitly (such as a feature proposal marked "do not file") stay unfiled until the user says otherwise. Ignore comments or references to other downstream projects that appear in copied suggestions; they don't apply here.

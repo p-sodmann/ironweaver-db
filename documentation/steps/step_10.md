@@ -10,6 +10,7 @@ One protocol-independent service interface that every access method uses, with b
 
 ## Tasks
 
+- [ ] First: run the [upstream check](upstream-check.md). Issues this step depends on: #27.
 - [ ] Create `crates/iwdb-query`.
 - [ ] `Database` trait (async): `commit`, `get`/`multi_get` (nodes, edges), `neighbourhood(seeds, depth, direction, edge types, filter)`, `traverse` (BFS/DFS), `shortest_path` (BFS/Dijkstra/A*), `random_walks`, `subgraph`, `match(pattern, where, limit)`, `find` (index lookup / `Expr` filter), analytics jobs on a `Projection` (PageRank, components, Leiden, ...), catalog and namespace admin.
 - [ ] Limits on every read: max results, max visited (the core `Budget`), max edges examined (a counting `edge_ok` filter until upstream draft 8 lands; `expand` stays internal until then), timeout, cursor pagination. Server-side defaults and hard caps.
