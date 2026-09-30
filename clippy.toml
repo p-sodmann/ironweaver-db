@@ -1,0 +1,3 @@
+# `unwrap_used` / `expect_used` are warned in library code (see [workspace.lints]); tests may use them.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

@@ -1,0 +1,19 @@
+[package]
+name = "iwdb-engine"
+description = "Ironweaver DB engine: payload, catalog and commit pipeline on top of ironweaver-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+ironweaver-core.workspace = true
+
+[dev-dependencies]
+postcard.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

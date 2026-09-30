@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/iwdb-engine"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+repository = "https://github.com/p-sodmann/ironweaver-db"
+
+[workspace.dependencies]
+# Pinned git revision until 0.2.0 is on crates.io; see documentation/adr/0002-ironweaver-core-dependency.md.
+ironweaver-core = { git = "https://github.com/p-sodmann/Ironweaver", rev = "02cefabaaf99c796e828fef616a3e792945aca17" }
+thiserror = "2"
+proptest = "1"
+criterion = "0.8"
+# Test-only: the encodings the core's `Op` and `Value` round-trip through
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+serde_json = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
