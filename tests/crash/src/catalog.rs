@@ -586,7 +586,7 @@ pub fn run_with(
     plans: &[Plan],
 ) -> Result<CatalogSummary, String> {
     let start = Instant::now();
-    let mut rng = Rng::new(seed ^ 0xCA7A_106);
+    let mut rng = Rng::new(seed ^ 0x0CA7_A106);
     let mut summary = CatalogSummary::default();
     fs::create_dir_all(work).map_err(|e| format!("create {}: {}", work.display(), e))?;
     let mut directories = 0;
