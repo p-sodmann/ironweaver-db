@@ -2,7 +2,7 @@
 
 Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7; all are filed (links in the table).
 
-Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–15 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
+Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
 
 | # | Title | Status |
 |---|---|---|
@@ -21,6 +21,8 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–15 
 | 13 | [`Value` serde rejects empty containers at the depth limit that the file format accepts](#13-value-serde-rejects-empty-containers-at-the-depth-limit-that-the-file-format-accepts) | filed: [#31](https://github.com/p-sodmann/Ironweaver/issues/31) |
 | 14 | [`write_atomic` ignores a failed directory fsync after the rename](#14-write_atomic-ignores-a-failed-directory-fsync-after-the-rename) | filed: [#32](https://github.com/p-sodmann/Ironweaver/issues/32) |
 | 15 | [Binary format: the header's flags and reserved bytes are never checked](#15-binary-format-the-headers-flags-and-reserved-bytes-are-never-checked) | filed: [#33](https://github.com/p-sodmann/Ironweaver/issues/33) |
+| 16 | [No way to build an index off the graph and install it in O(1)](#16-no-way-to-build-an-index-off-the-graph-and-install-it-in-o1) | filed: [#34](https://github.com/p-sodmann/Ironweaver/issues/34) |
+| 17 | [No per-index entry count or memory accessor](#17-no-per-index-entry-count-or-memory-accessor) | filed: [#35](https://github.com/p-sodmann/Ironweaver/issues/35) |
 
 ---
 
@@ -357,3 +359,39 @@ In `check_version` (used by both `binary_payload` and `build_from_reader`), reje
 **Why the database needs it**
 
 Ironweaver DB's checkpoints are binary files, and `verify` (like SQLite's `PRAGMA integrity_check`) promises to find any damaged byte in them. Until the loader checks the header, we read the 16 header bytes ourselves in `verify` and report non-zero `flags` or `reserved` as damage. Recovery keeps loading such a checkpoint: its data is intact.
+
+## 16. No way to build an index off the graph and install it in O(1)
+
+Found in step 9 while building online index builds (filed as [#34](https://github.com/p-sodmann/Ironweaver/issues/34)), checked against `a14149e`.
+
+**Problem**
+
+An index can only be built through `&mut Graph`. `create_index` reads every node's payload and inserts every key; `create_index_with_keys(path, keys)` lets the caller read the keys beforehand, but the keys are still inserted into the new index inside the `&mut` call, which is O(n log n) for a `BTreeMap`-backed index. A database that keeps the graph behind an `RwLock` therefore holds the write lock (blocking every reader and the next commit) for the whole insertion, however the keys were read. Measured with 500 000 nodes (release build): the build inside one lock hold takes 183 ms; reading the keys outside the lock and inserting them under it still stalls writers for about 105 ms.
+
+Building incrementally through the dirty set doesn't help: while any node is dirty, every index lookup scans all dirty nodes, so a half-built index makes every lookup O(backlog).
+
+Reproduction: `create_index_with_keys` needs `&mut self`, leaves nodes missing from `keys` dirty, and inserts the given keys during the call (see `index.rs`).
+
+**Proposal**
+
+A way to build an index without touching the graph, then install it in O(1): for example `PropertyIndex::build(path, keys) -> PropertyIndex` (or `Graph::build_index(&self, path) -> BuiltIndex`, taking only `&self`), plus `Graph::install_index(&mut self, BuiltIndex) -> Result<..>` that checks the index was built from the current node set (or lists the nodes that changed, which are then marked dirty) and swaps it in.
+
+**Why the database needs it**
+
+Creating an index or a unique constraint on a large namespace must not stall commits and reads for the whole build. Until this exists we scan keys in chunks under the read lock and insert them under the write lock (ADR 0019), which shortens but doesn't remove the stall.
+
+## 17. No per-index entry count or memory accessor
+
+Found in step 9 while adding catalog status views (filed as [#35](https://github.com/p-sodmann/Ironweaver/issues/35)), checked against `a14149e`.
+
+**Problem**
+
+The core exposes `Graph::memory_usage()` for the whole graph (indexes included) and `index_paths()`, but nothing per index: neither the number of entries nor the memory an index uses. `has_index` and `find_nodes` are the only other accessors.
+
+**Proposal**
+
+Add `Graph::index_stats(path) -> Option<IndexStats { entries, memory_bytes, ... }>` (O(1) if the index keeps a counter, otherwise documented as O(entries)), or an iterator over the index's entries.
+
+**Why the database needs it**
+
+Status views list each index with its size and memory. We currently count entries with range scans over the index (a range below and one above each key kind enumerate an index completely), which is O(entries) and ignores dirty nodes, and report only whole-graph memory.

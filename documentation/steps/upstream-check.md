@@ -16,7 +16,7 @@ Find out which of our upstream issues have been fixed, adopt the fixes, and remo
 
 ## Open issues
 
-Last checked: 2026-09-30 (all open).
+Last checked: 2026-10-01 (all open).
 
 | Issue | Finding | Needed before | Until fixed | When fixed |
 |---|---|---|---|---|
@@ -28,6 +28,8 @@ Last checked: 2026-09-30 (all open).
 | [#32](https://github.com/p-sodmann/Ironweaver/issues/32) | `write_atomic` ignores a failed directory fsync after the rename | Step 5 (checkpoints; worked around, checked by the step 6 crash points and fault tests) | The checkpointer calls `LogFs::sync_dir` on `checkpoints/` after `write_atomic` and checks it before deleting anything; a failure disables checkpoints until reopened | Drop the extra `sync_dir` after `write_checkpoint` in `iwdb_storage::checkpoint` (keep the one after removals); update `write_atomic_ignores_a_failed_directory_sync` in `core_smoke.rs` and the `LogFs::write_atomic` doc comment |
 | [#33](https://github.com/p-sodmann/Ironweaver/issues/33) | The binary header's `flags` and `reserved` bytes are never checked (and not covered by the CRC) | Step 7 (`verify` must find any damaged byte of a checkpoint; worked around) | `verify` reads every checkpoint's 16 header bytes and reports non-zero flags or reserved as damage (`check_checkpoint_header` in `iwdb_storage::verify`) | Drop `check_checkpoint_header`; update `binary_header_flags_and_reserved_bytes_are_not_checked` in `core_smoke.rs` |
 | [#31](https://github.com/p-sodmann/Ironweaver/issues/31) | `Value` serde rejects empty containers at depth 100 that the file format accepts | Step 13 (bulk import: imported values must stay loggable and checkpointable) | The commit pipeline counts an empty container as holding a scalar (`MAX_VALUE_DEPTH`); imports must apply the same depth check | Keep or relax the pipeline's check to the core's rule; update `value_serde_rejects_empty_containers_at_the_depth_limit` in `core_smoke.rs` and the depth tests in `resolve.rs` and `tests/commit.rs` |
+| [#34](https://github.com/p-sodmann/Ironweaver/issues/34) | No way to build an index off the graph and install it in O(1) | Step 9 (online index build; worked around, measured) | `Namespace::apply_built` inserts pre-read keys under the write lock with `create_index_with_keys` (ADR 0019): ~40 % shorter stall than a plain build | Build the index off-graph and install it; drop the insertion under the lock; update `an_index_is_built_inside_a_mutable_borrow_and_leaves_unseen_nodes_dirty` in `core_smoke.rs` and the numbers in ADR 0019 |
+| [#35](https://github.com/p-sodmann/Ironweaver/issues/35) | No per-index entry count or memory accessor | Step 9 (status views; worked around) | `Ns::index_entries` counts entries with range scans; status reports whole-graph memory only | Use the core's accessor in `Ns::index_entries` and report per-index memory in `IndexStatus`; update `index_memory_is_only_reported_for_the_whole_graph` |
 
 ## Closed issues
 

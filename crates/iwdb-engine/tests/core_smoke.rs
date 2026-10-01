@@ -279,6 +279,55 @@ fn binary_header_flags_and_reserved_bytes_are_not_checked() {
     assert_eq!(canonical(&streamed), canonical(&g));
 }
 
+/// #34: an index can only be built through `&mut Graph`: even from keys
+/// read beforehand (`create_index_with_keys`) the keys are inserted into
+/// the index inside that call, and nodes without a key are left dirty (so
+/// every lookup scans the dirty set until `flush_indexes`). There is no
+/// way to build an index off the graph and install it in O(1), which the
+/// online index build (ADR 0019) would need to keep the write lock short.
+/// The absence of such a call can't be pinned by a failing test: when
+/// upstream adds it, adopt it in `Namespace::apply_built` and update this
+/// test and `documentation/steps/upstream-check.md`.
+#[test]
+fn an_index_is_built_inside_a_mutable_borrow_and_leaves_unseen_nodes_dirty() {
+    let mut g = G::new();
+    for i in 0..4 {
+        g.apply(Op::AddNode { id: format!("n{}", i), labels: vec![], data: rec([("v", Value::Int(i))]) })
+            .expect("add");
+    }
+    let age = path("v");
+    let handles: Vec<_> = g.node_indices().collect();
+    let keys = handles.iter().take(3).map(|&ix| {
+        let key = g.node(ix).and_then(|n| n.data.attr.get("v")).and_then(ironweaver_core::Key::of);
+        (ix, key)
+    });
+    let keys: Vec<_> = keys.collect();
+    assert!(g.create_index_with_keys(&age, keys).expect("build"));
+    assert!(g.indexes_dirty(), "the node without a key is dirty until the next flush");
+    // Lookups are right meanwhile (they scan the dirty set)
+    let found = g.find_nodes(&age, &Value::Int(3)).expect("lookup").expect("indexed");
+    assert_eq!(ids(&g, found), ["n3"]);
+    g.flush_indexes().expect("flush");
+    assert!(!g.indexes_dirty());
+}
+
+/// #35: the core reports memory for the whole graph (indexes included) but
+/// not per index, and has no accessor for the number of entries in an
+/// index. `Ns::index_entries` counts them with range scans and the status
+/// shows whole-graph memory only. Pinned: an index raises `memory_usage`.
+#[test]
+fn index_memory_is_only_reported_for_the_whole_graph() {
+    let mut g = G::new();
+    for i in 0..200 {
+        g.apply(Op::AddNode { id: format!("n{}", i), labels: vec![], data: rec([("v", Value::Int(i))]) })
+            .expect("add");
+    }
+    let before = g.memory_usage();
+    assert!(g.create_index::<GraphError>(&path("v")).expect("create"));
+    g.flush_indexes().expect("flush");
+    assert!(g.memory_usage() > before, "the index is part of memory_usage");
+}
+
 #[test]
 fn property_index_lookups() {
     let mut g = G::new();

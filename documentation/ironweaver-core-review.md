@@ -101,6 +101,13 @@ Checked under the crash and fault-injection suite ([ADR 0007](adr/0007-failpoint
 - **The streaming loader** loaded every checkpoint verify, backups and restores read (thousands in the harness) without a failure on a file the database wrote, and failed on every damaged byte the verify tests flip, except the header bytes above.
 - **#30** (private `Record::at`, bincode) and **#28** (`expect` on the apply path) are unchanged by this step: verify and restore replay through the same `Namespace::replay` as recovery, so #28's `expect` stays unreachable from them, and a panic there unwinds to the caller of `verify` or `restore` (not on the commit path, so not an abort).
 
+## Findings from step 9
+
+- **No off-graph index build.** `create_index` and `create_index_with_keys` both insert every key inside a `&mut Graph` call, and building through the dirty set makes every lookup O(backlog). The online build (ADR 0019) reads keys outside the writer and the write lock and inserts them under the write lock: measured 105 ms longest commit stall against 183 ms for a plain build at 500 000 nodes. Pinned in `an_index_is_built_inside_a_mutable_borrow_and_leaves_unseen_nodes_dirty` (`core_smoke.rs`). Upstream issue: [#34](https://github.com/p-sodmann/Ironweaver/issues/34) ([draft 16](upstream-issues.md#16-no-way-to-build-an-index-off-the-graph-and-install-it-in-o1)).
+- **No per-index statistics.** Only whole-graph `memory_usage()` (indexes included) exists. Index entry counts come from range scans (`Ns::index_entries`). Pinned in `index_memory_is_only_reported_for_the_whole_graph`. Upstream issue: [#35](https://github.com/p-sodmann/Ironweaver/issues/35) ([draft 17](upstream-issues.md#17-no-per-index-entry-count-or-memory-accessor)).
+- **Many graphs per process** (one per namespace) cost nothing special: `Graph` is `Send + Sync`, has no global state, and the per-namespace checkpointer loads and saves its own graph, as for one namespace. `memory_usage()` is O(1), so the status of every namespace is cheap.
+- **#28, #31** workarounds are unchanged: replay and namespace recovery go through the same `Namespace::replay`.
+
 ## Design consequences for the database
 
 - **A failed `apply_all` can advance the edge id counter.** Rollback restores ids, labels, types and payloads, but `next_edge_id()` stays above any explicit id the failed batch used *(step 1; now documented upstream)*. Ids are still never reused, and the WAL carries explicit ids, so replay is exact; but the counter is not comparable between a primary and a replayed graph, and the canonical-state helper leaves it out.
