@@ -69,9 +69,19 @@ fn copy_dir(from: &Path, to: &Path) {
 }
 
 /// Writes the fixture of the current layout, if it doesn't exist yet.
+///
+/// Layout 4: the default namespace as in layout 3, then `people` (a
+/// unique constraint, an index, keyed commits before and after its
+/// checkpoint), `scratch` (commits, no checkpoint) and `gone` (created
+/// with a key, filled, dropped with a key). `expected.txt` is the default
+/// namespace's description and `history`, then a `namespace <name> <id>`
+/// line and the description of each other live namespace, and a `dropped
+/// <name> <id>` line.
 #[test]
 #[ignore = "writes the fixture"]
 fn generate_fixture() {
+    use iwdb::{AttrPath, CatalogChange, CommitOptions, Constraint, ConstraintKind, IdempotencyKey, IndexDef, Label};
+    use iwdb::{Mutation, Value};
     let dir = fixture(LAYOUT_VERSION);
     if dir.exists() {
         return;
@@ -88,10 +98,58 @@ fn generate_fixture() {
     run_keyed(&store, &mut reference, &[pad(1000), pad(1001)], "after-");
     // A retry: the store answers it from the table, nothing is logged
     run_keyed(&store, &mut reference, &[pad(1000)], "after-");
+
+    let key = |k: &str| IdempotencyKey::new(k).unwrap();
+    let keyed = |k: &str| CommitOptions { idempotency_key: Some(key(k)) };
+    let person = |i: i64| Mutation::UpsertNode {
+        id: format!("p{}", i),
+        labels: vec!["Person".into()],
+        attr: [("email".to_owned(), Value::from(format!("p{}@example.org", i)))].into(),
+        meta: Default::default(),
+        expected_version: None,
+    };
+    store.create_namespace("people", Some(&key("mk-people"))).unwrap();
+    store.create_namespace("scratch", None).unwrap();
+    store.create_namespace("gone", Some(&key("mk-gone"))).unwrap();
+    let people = store.namespace("people").unwrap();
+    let path = AttrPath::new(["email"]).unwrap();
+    people
+        .commit_catalog(CatalogChange::AddConstraint(Constraint {
+            kind: ConstraintKind::Unique,
+            label: Label::new("Person").unwrap(),
+            path: path.clone(),
+        }))
+        .unwrap();
+    people.commit_catalog(CatalogChange::CreateIndex(IndexDef { path })).unwrap();
+    for i in 0..6 {
+        people.commit_with(&[person(i)], &keyed(&format!("person-{}", i))).unwrap();
+    }
+    people.checkpoint().unwrap();
+    for i in 6..9 {
+        people.commit_with(&[person(i)], &keyed(&format!("person-{}", i))).unwrap();
+    }
+    let scratch = store.namespace("scratch").unwrap();
+    for i in 0..5 {
+        scratch.commit(&[person(100 + i)]).unwrap();
+    }
+    let gone = store.namespace("gone").unwrap();
+    for i in 0..3 {
+        gone.commit(&[person(200 + i)]).unwrap();
+    }
+    store.drop_namespace("gone", Some(&key("rm-gone"))).unwrap();
+
     let history = store.history();
+    let mut expected = describe(&reference) + &format!("history {}\n", history);
+    for info in store.namespaces() {
+        if info.name.as_str() != "default" {
+            let ns = store.namespace(info.name.as_str()).unwrap();
+            expected += &format!("namespace {} {}\n{}", info.name, info.id, ns.read(describe));
+        }
+    }
+    expected += "dropped gone 4\n";
     // No close: the WAL holds records after the checkpoint
     drop(store);
-    fs::write(dir.join("expected.txt"), describe(&reference) + &format!("history {}\n", history)).unwrap();
+    fs::write(dir.join("expected.txt"), expected).unwrap();
 }
 
 /// Open a copy of the fixture of layout `version`; check its state.
@@ -189,4 +247,64 @@ fn a_failed_marker_upgrade_fails_the_open_and_the_next_one_finishes_it() {
             assert_eq!(read_marker(dir.path()).unwrap().unwrap().version, LAYOUT_VERSION);
         }
     }
+}
+
+/// The layout 4 fixture: every namespace comes back with its state and
+/// keys, the dropped one stays dropped, and its id isn't reused.
+#[test]
+fn the_v4_fixture_opens_with_all_its_namespaces() {
+    let dir = tempfile::tempdir().unwrap();
+    copy_dir(&fixture(4).join("store"), dir.path());
+    let before = snapshot(&fixture(4));
+    let store = Store::open(dir.path(), options(2)).unwrap();
+    assert_eq!(snapshot(&fixture(4)), before, "the fixture itself is unchanged");
+    let expected = fs::read_to_string(fixture(4).join("expected.txt")).unwrap();
+    // Split into the default's part and one part per `namespace` line
+    let mut parts: Vec<(String, String)> = Vec::new();
+    let mut history = String::new();
+    for line in expected.split_inclusive('\n') {
+        if let Some(h) = line.strip_prefix("history ") {
+            history = h.trim().to_owned();
+            parts.insert(0, ("default".into(), String::new()));
+            // The lines before it were the default's
+            let before = expected[..expected.find("history ").unwrap()].to_owned();
+            parts[0].1 = before;
+        } else if let Some(rest) = line.strip_prefix("namespace ") {
+            parts.push((rest.split(' ').next().unwrap().to_owned(), String::new()));
+        } else if line.starts_with("dropped ") {
+        } else if parts.len() > 1 {
+            parts.last_mut().unwrap().1.push_str(line);
+        }
+    }
+    assert_eq!(history.parse::<HistoryId>().unwrap(), store.history());
+    let names: Vec<_> = store.namespaces().iter().map(|n| n.name.to_string()).collect();
+    assert_eq!(names, ["default", "people", "scratch"]);
+    for (name, text) in &parts {
+        assert_eq!(&store.namespace(name).unwrap().read(describe), text, "{}", name);
+    }
+    // The key table of `people`, from its checkpoint and its WAL
+    let people = store.namespace("people").unwrap();
+    for key in ["person-0", "person-8"] {
+        assert!(people.read(|ns| ns.keys().get(&iwdb::IdempotencyKey::new(key).unwrap()).is_some()), "{}", key);
+    }
+    // The constraint and the index are live
+    let duplicate = iwdb::Mutation::UpsertNode {
+        id: "other".into(),
+        labels: vec!["Person".into()],
+        attr: [("email".to_owned(), iwdb::Value::from("p1@example.org"))].into(),
+        meta: Default::default(),
+        expected_version: None,
+    };
+    assert!(people.commit(&[duplicate]).is_err());
+    assert_eq!(people.status().indexes.len(), 1);
+    // Keys of namespace operations answer after the reopen, also for the dropped one
+    let key = |k: &str| iwdb::IdempotencyKey::new(k).unwrap();
+    let again = store.create_namespace("gone", Some(&key("mk-gone"))).unwrap();
+    assert!(again.deduplicated);
+    assert!(store.drop_namespace("gone", Some(&key("rm-gone"))).unwrap().deduplicated);
+    assert!(store.namespace("gone").is_err());
+    // Ids aren't reused
+    let next = store.create_namespace("fresh", None).unwrap();
+    assert_eq!(next.event.id, 5);
+    assert_eq!(store.recovery().upgraded_from, None);
 }
