@@ -35,9 +35,9 @@ pub use iwdb_engine::catalog::{AttrPath, Constraint, ConstraintKind, IndexDef, L
 pub use iwdb_engine::{CatalogChange, CommitResult, EdgeKey, Mutation, Namespace, Target};
 pub use iwdb_storage::io::{LogFs, StdFs};
 pub use iwdb_storage::{
-    BackupReport, CheckpointOutcome, CommitTime, CutTail, Error, Finding, FsyncPolicy, HistoryId, Kind, RecoveryReport,
-    RestoreReport, RestoreSources, RestoreTarget, SkippedCheckpoint, VerifyReport, WalOptions,
+    BackupReport, CheckpointOutcome, CommitTime, CutTail, DirStatus, Error, Finding, FsyncPolicy, HistoryId, Kind,
+    RecoveryReport, RestoreReport, RestoreSources, RestoreTarget, SkippedCheckpoint, VerifyReport, WalOptions,
 };
-pub use ops::{restore, restore_with, verify};
+pub use ops::{restore, restore_with, status, verify, Status};
 pub use options::{CheckpointOptions, StoreOptions};
-pub use store::{Edge, Node, Store, NAMESPACE};
+pub use store::{Edge, Node, Store, StoreStatus, NAMESPACE};

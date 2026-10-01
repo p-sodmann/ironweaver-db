@@ -47,6 +47,29 @@ pub struct Edge {
     pub version: u64,
 }
 
+/// What an open store reports about itself ([`Store::status`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreStatus {
+    /// The seq of the last applied commit.
+    pub seq: u64,
+    /// The highest seq known to be durable; `None` under
+    /// [`FsyncPolicy::Off`], which knows of no fsync until an explicit
+    /// sync (so it never claims a durable seq it doesn't have).
+    pub synced_seq: Option<u64>,
+    /// The newest checkpoint's seq.
+    pub checkpoint: Option<u64>,
+    /// Why the store is read-only, if it is.
+    pub read_only: Option<String>,
+    /// The last checkpoint error, if the last checkpoint failed.
+    pub checkpoint_failure: Option<String>,
+    pub history: HistoryId,
+    pub fsync: FsyncPolicy,
+    /// The WAL archive, if the store archives.
+    pub archive: Option<std::path::PathBuf>,
+    /// What recovery did when the store was opened.
+    pub recovery: RecoveryReport,
+}
+
 /// Coordination between the store and its background threads.
 #[derive(Debug, Default)]
 struct Signal {
@@ -313,6 +336,23 @@ where
     /// belongs to one history.
     pub fn history(&self) -> HistoryId {
         self.dir.history()
+    }
+
+    /// The store's state at a glance (what `iwctl status` shows).
+    pub fn status(&self) -> StoreStatus {
+        let fsync = self.shared.options.wal.fsync;
+        let synced = self.synced_seq();
+        StoreStatus {
+            seq: self.seq(),
+            synced_seq: (fsync != FsyncPolicy::Off || synced > 0).then_some(synced),
+            checkpoint: self.checkpoint_seq(),
+            read_only: self.read_only(),
+            checkpoint_failure: self.checkpoint_failure(),
+            history: self.history(),
+            fsync,
+            archive: self.shared.options.archive.clone(),
+            recovery: self.report.clone(),
+        }
     }
 
     /// What recovery found and did when the store was opened.

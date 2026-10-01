@@ -1,14 +1,14 @@
-//! Operations on directories that don't need an open store: verify and
-//! restore.
+//! Operations on directories that don't need an open store: status,
+//! verify and restore.
 
 use std::path::Path;
 
 use iwdb_engine::catalog::NamespaceName;
 use iwdb_storage::archive::{verify_archive, ARCHIVE_MARKER_NAME};
 use iwdb_storage::io::{LogFs, StdFs};
-use iwdb_storage::{Error, RestoreReport, RestoreSources, RestoreTarget, VerifyReport};
+use iwdb_storage::{inspect, DirStatus, Error, Kind, RestoreReport, RestoreSources, RestoreTarget, VerifyReport};
 
-use crate::NAMESPACE;
+use crate::{Store, StoreOptions, StoreStatus, NAMESPACE};
 
 fn namespace() -> Result<NamespaceName, Error> {
     Ok(NamespaceName::new(NAMESPACE).map_err(iwdb_engine::Error::from)?)
@@ -60,4 +60,36 @@ pub fn restore_with<F: LogFs>(
         report.replayed
     );
     Ok(report)
+}
+
+/// What [`status`] found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Status {
+    /// What the files say (after recovery, if the store was opened).
+    pub files: DirStatus,
+    /// The store as it opened, for a data directory that no store had open.
+    pub store: Option<StoreStatus>,
+}
+
+/// The status of a data directory, a backup or a WAL archive. A data
+/// directory that no store has open is **opened** with `options` (which
+/// runs recovery: it may cut a torn tail, remove temporary files and
+/// upgrade a layout 1 directory) and closed again without a checkpoint;
+/// the store's status says what recovery did. One that a store has open
+/// (`files.in_use`), a backup and an archive are only read.
+///
+/// `options.create_if_missing` is ignored: status never creates a store.
+pub fn status(dir: &Path, options: StoreOptions) -> Result<Status, Error> {
+    let files = inspect(dir)?;
+    if files.kind != Kind::DataDir || files.in_use {
+        return Ok(Status { files, store: None });
+    }
+    let mut options = options;
+    options.create_if_missing = false;
+    options.checkpoint.background = false;
+    options.checkpoint.on_close = false;
+    let store = Store::open(dir, options)?;
+    let status = store.status();
+    drop(store);
+    Ok(Status { files: inspect(dir)?, store: Some(status) })
 }

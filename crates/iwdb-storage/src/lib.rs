@@ -26,6 +26,7 @@ mod error;
 pub mod failpoint;
 pub mod format;
 mod history;
+mod inspect;
 pub mod io;
 pub mod layout;
 mod logged;
@@ -40,6 +41,7 @@ pub use backup::BackupReport;
 pub use checkpoint::{CheckpointOutcome, Checkpointer, SkippedCheckpoint};
 pub use error::Error;
 pub use history::HistoryId;
+pub use inspect::{inspect, DirStatus};
 pub use logged::LoggedNamespace;
 pub use reader::{
     list_segments, read_log, read_segment, segment_prefix, LogEnd, SegmentEnd, TornTail, WalReader,
