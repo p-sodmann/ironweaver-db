@@ -47,9 +47,55 @@ What happens at each failure the storage layer can meet. Each row has a failpoin
 | **A failure after a checkpoint's rename**: the directory fsync of `checkpoints/` or `wal/`, removing an old checkpoint or a WAL segment | The checkpoint fails. The new file stays, and what wasn't removed yet stays. Checkpoints are disabled until the store is reopened (`CheckpointsDisabled`), because a retried directory fsync can succeed without persisting anything. Commits go on, and recovery uses the new checkpoint |
 | **A failure while opening**: removing temporary files, cutting the torn tail (or its fsync), removing a headerless segment, starting the writer, initializing | Open fails with `Io` and releases the lock. What it did is part of recovery's defined repairs, and the next open finishes the rest |
 | **A panic in the commit path** | The process aborts (ADR 0008), which is a process crash (first row) |
+| **A crash or a failure during an online backup** (step 7): any file write, fsync, directory sync, the manifest, the marker | The backup fails (or the process dies), and the store is unaffected: a backup only reads the store's files. The backup directory has no marker until its last step, and holds an empty `BACKUP` from its first: a store, `verify` and restore all refuse it (`NotADataDir`). A failure after the marker's rename leaves a complete backup |
+| **A crash or a failure while archiving** (step 7): a segment's copy (create, write, fsync, rename) or the archive's directory sync | No segment leaves `wal/` before it is durable in the archive, so none is lost. A failed copy fails the checkpoint and is retried by the next one; a failed directory sync disables checkpoints until reopening. A crash between archiving and removal leaves a segment in both places, archived again (idempotently) by the next checkpoint |
+| **A crash or a failure during a restore** (step 7) | The target is refused by the next open (`InterruptedRestore` while `RESTORING` exists; `NotADataDir` for a checkpoint without a marker), or is empty, or complete once its marker is in place. Never a wrong state. The sources are only read |
 | **OS crash or power loss** | Per policy (table above). Checked by simulation: the harness cuts or zeroes the unsynced end of the last segment. With `always` every acknowledged commit survives. With `group` at least those up to the last completed fsync survive. With `off` recovery may refuse only as the table says |
 
 **How it is checked (step 6).** The harness kills a child process running a random workload with background checkpoints, at random moments and at failpoints on every write-side call. Sometimes it also simulates an OS crash. Then it recovers and compares the seq, the canonical state and the catalog with a reference model at the recovered seq. Every run prints its seed. `cargo test` runs a short run and the crash points step 5 listed. CI runs 150 cycles per policy on every PR, and thousands nightly (step_6.md has the numbers). No acknowledged commit was ever lost and no partial transaction seen, except commits after the last completed fsync under `group` and `off` in the simulated OS crashes, which those policies allow.
+
+## Backup, archiving and restore (step 7)
+
+[ADR 0009](adr/0009-backup-archive-restore.md); formats: [data-dir.md](formats/data-dir.md), [backup.md](formats/backup.md), [archive.md](formats/archive.md).
+
+**Online backup** (`Store::backup`, `iwctl backup`, `store.backup()` in Python):
+
+- **What it reaches**: the WAL is fsynced first; the backup holds every commit up to the seq that was then synced, which is the last commit (if the store is read-only, its synced seq). It never holds a commit the store could still lose in a crash, so its history is a prefix of the store's.
+- **What it holds**: every checkpoint at or below that seq (not those known to be damaged), and the WAL from the oldest of them up to the seq, cut right after it. It restores to any seq in that range.
+- **Consistent while the store runs**: it holds the checkpointer's lock, so no checkpoint or segment it copies is removed during the copy. Commits wait only for the fsync; checkpoints wait for the copy, and the WAL grows meanwhile.
+- **Complete or refused**: every file is fsynced, then the manifest, then the marker; an interrupted backup is refused by a store, `verify` and restore. The manifest's lengths and CRC32Cs let `verify` find a missing, extra or truncated file.
+- A store refuses to open a backup (`IsBackup`): it is restored instead.
+
+**Continuous WAL archiving** (`StoreOptions::archive`):
+
+- A WAL segment leaves `wal/` only after its copy is in the archive and both the copy and the archive's directory are fsynced. No segment the checkpointer removes is lost: the archive and the WAL together always hold the history from the archive's first segment (seq 1 for an archive set up with the store).
+- Archiving is idempotent: a segment left in both places by a crash is archived again (rewritten, its bytes compared first) and then removed.
+- **If archiving fails**, nothing is removed from `wal/`: the WAL grows, `Store::checkpoint_failure` reports the error, and the next checkpoint that writes a file retries. A failed fsync of the archive's directory isn't retried: checkpoints stay off until the store is reopened. Commits go on in every case.
+- An archive belongs to one history: a store refuses an archive of another (`ArchiveMismatch`), and two stores never write one archive (its lock).
+
+**Restore and point-in-time recovery** (`iwdb::restore`, `iwctl restore`, `iwdb.restore()` in Python):
+
+- A restore to seq `N` (from a backup, an archive, or both, of the same history) gives exactly the state after the commits `1 ..= N`: data, versions and catalog. The restored store's next commit is `N + 1`.
+- To a time `T`: the state after the last commit, in seq order, whose commit time is at or before `T` ([ADR 0010](adr/0010-commit-times.md)). Commit times are the writer's wall clock, made non-decreasing, in microseconds.
+- Every restore starts a **new history**: the restored store's commits after `N` can't be mixed up with the original's. It needs a new archive directory.
+- A restore never writes to its sources, and an interrupted restore is never opened as a store (table above).
+- How it is checked: PITR to random mid-history seqs and times from a backup alone, an archive alone and both (`crates/iwdb/tests/pitr.rs`), failpoints on every write of backups, archiving and restores (`backup.rs`, `archive.rs`, `pitr.rs`), and the kill -9 harness, which kills children during backups, archiving and restores and restores to random seqs (step_7.md has the numbers).
+
+## Verify (step 7)
+
+`iwdb::verify` (`iwctl verify`, `iwdb.verify()`; [ADR 0011](adr/0011-verify.md)):
+
+- **Never writes** anything, and never creates `LOCK`. It takes a shared lock, so it fails with `Locked` while a store has the directory open, and a store can't open it while verify runs.
+- Finds damage in any file the database writes: every checksum (marker, WAL headers and frames, checkpoints, manifest, archive marker), a checkpoint whose state differs from what the WAL replays to, a WAL that doesn't reach a checkpoint, and broken invariants (edge endpoints, versions, reserved keys, value depth, indexes against a scan, constraints). The tests flip bytes in every kind of file and plant states that violate each invariant.
+- Reports what a crash leaves (a torn tail, temporary files, an interrupted cleanup) as notes, not damage, and changes nothing about it. The harness runs verify before every recovery it checks: it finds no problem exactly when recovery succeeds, and reaches the same seq.
+
+## Python (step 7)
+
+The Python bindings ([python-api.md](python-api.md), [ADR 0013](adr/0013-python-bindings.md)) give the same guarantees as the store: a transaction is one commit, all or nothing; nothing is committed when its `with` block raises. A panic in the commit path aborts the interpreter (a crash, recovered by the next open); any other panic raises `iwdb.InternalError`. A child forked without exec inherits the store's lock and must not use the store.
+
+## Platforms (step 7)
+
+Linux and macOS. **Windows is not supported yet**: there the directory fsync is a no-op, so after an OS crash a rotation, a checkpoint, a backup or a restore can lose a directory entry, and none of this is tested on Windows. No Windows wheel is shipped (ADR 0013).
 
 ## Recovery (step 5)
 
@@ -60,7 +106,7 @@ What happens at each failure the storage layer can meet. Each row has a failpoin
 - **A crash during a checkpoint** leaves either the previous checkpoints and a temporary file (removed on open), or the new checkpoint without the WAL cut yet. Either way nothing is lost.
 - **A damaged checkpoint** (checksum, truncation, format) is skipped, and recovery falls back to the next older one and replays more WAL. The WAL is kept from the oldest kept checkpoint on (2 by default), so this works as long as one kept checkpoint loads.
 - **It refuses rather than repairs.** Corruption in the WAL, WAL records missing behind the newest usable checkpoint, a WAL that ends before a checkpoint, or a record that fails to replay: open fails with a typed error and changes no data file.
-- **The lock**: a second `Store::open` of the same directory fails with `Locked`, in the same process or another one. The lock is released by `close`, by dropping the store, and when the process exits, also on `kill -9`.
+- **The lock**: a second `Store::open` of the same directory fails with `Locked`, in the same process or another one. The lock is released by `close`, by dropping the store, and when the process exits, also on `kill -9`. An open retries a held lock for about 80 ms first, so that a process another thread is spawning (which holds a copy of the lock file until its exec) doesn't make a reopen fail (step 7).
 
 ## Checkpoints (step 5)
 
@@ -70,7 +116,7 @@ What happens at each failure the storage layer can meet. Each row has a failpoin
 
 ## Integrity of the log (step 4)
 
-- Every record and segment header is checksummed (CRC32C over all of its fields and payload).
+- Every record and segment header is checksummed (CRC32C over all of its fields and payload, the commit time included since WAL format 2, step 7).
 - A torn or damaged record at the end of the log (from a crash during a write) marks the end of the log. The records before it are intact, and its position is reported for recovery to truncate.
 - Damage anywhere else is never skipped silently: in an earlier segment, before a record that proves the damaged one was synced, a gap or a repeat in `seq`, or an unreadable record with a valid checksum. The reader reports it as an error.
 - Reading never panics on corrupt input and never allocates more than the file's size for a corrupt length.

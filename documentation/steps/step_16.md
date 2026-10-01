@@ -17,6 +17,9 @@ Operators can configure, monitor and administer the server without reading the c
 - [ ] `status` views (like `pg_stat_*`): namespaces, sizes, indexes, active requests, replication/stream consumers.
 - [ ] `iwctl` against a running server: status, checkpoint, backup, restore, verify, index and constraint management, namespaces, cancel a request.
 - [ ] Memory-limit behaviour: reject writes and alert before the OS kills the process.
+- [ ] Windows (moved here from step 7, [ADR 0013](../adr/0013-python-bindings.md)): a directory fsync (`FILE_FLAG_BACKUP_SEMANTICS` and `FlushFileBuffers`, checked on NTFS), a CI job that builds and tests the workspace and the Python bindings on Windows, a crash harness mode that kills with `TerminateProcess`, then Windows wheels and the platform row in [guarantees.md](../guarantees.md).
+- [ ] A WAL archive pruning command (`iwctl archive prune --before <backup>`), and optionally recording the store's archive in the data directory so that `iwctl checkpoint` needn't be told ([ADR 0012](../adr/0012-iwctl.md)).
+- [ ] Throttling for online backups of large stores (checkpoints wait for a backup's copy, ADR 0009).
 - [ ] Operations guide `documentation/operations.md`.
 
 ## Acceptance criteria

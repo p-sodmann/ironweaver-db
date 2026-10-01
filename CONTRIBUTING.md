@@ -17,6 +17,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+## Python bindings
+
+The bindings (`crates/iwdb-python`) are built with maturin and tested with pytest, in a virtualenv (`.venv` is ignored by git):
+
+```
+uv venv .venv --python 3.12        # or: python3 -m venv .venv
+uv pip install --python .venv/bin/python maturin pytest hypothesis
+.venv/bin/maturin develop -m crates/iwdb-python/Cargo.toml
+.venv/bin/python -m pytest crates/iwdb-python/tests
+```
+
 ## Fuzzing
 
 The cargo-fuzz targets live in [`fuzz/`](fuzz/), a separate workspace that needs nightly, so the stable build, clippy, `cargo deny` and the MSRV check don't include it. CI runs each target for a minute; run them longer locally when you change a decoder:

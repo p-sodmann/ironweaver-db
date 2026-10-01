@@ -10,7 +10,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [4](step_4.md) | Write-ahead log | M1 | done |
 | [5](step_5.md) | Checkpoints, recovery and `Store::open` | M1 | done |
 | [6](step_6.md) | Crash and fault-injection suite | M1 | done |
-| [7](step_7.md) | Backup, PITR, `verify` and Python embedded bindings | M1 | todo |
+| [7](step_7.md) | Backup, PITR, `verify` and Python embedded bindings | M1 | done (PyPI publish of 0.1.0 pending: [releasing.md](../releasing.md)) |
 | [8](step_8.md) | Concurrency, idempotency and read-your-writes | M2 | todo |
 | [9](step_9.md) | Catalog operations and namespaces | M2 | todo |
 | [10](step_10.md) | Query layer and the `Database` service trait | M2 | todo |
@@ -32,7 +32,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | Milestone | Steps | Status |
 |---|---|---|
 | M0 Foundation | 1–3 | done |
-| M1 Embedded durable | 4–7 | todo |
+| M1 Embedded durable | 4–7 | done, except the PyPI publish of 0.1.0 (prepared; the owner publishes) |
 | M2 Service | 8–10 | todo |
 | M3 Network access | 11–14 | todo |
 | M4 Production 1.0 | 15–17 | todo |

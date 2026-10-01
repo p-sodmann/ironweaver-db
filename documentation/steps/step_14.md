@@ -15,6 +15,11 @@ Complete M3: a typed Python client with the same API as the embedded bindings, a
 - [ ] `iwctl shell` (like `psql` / `redis-cli`): connect to a server, run `match` patterns, lookups and admin commands, table/JSON output.
 - [ ] Benchmarks (criterion + load generator): 100k / 1M / 10M nodes; load, commit throughput per fsync policy, neighbourhood depth 2, shortest path, `match`, PageRank, memory per node/edge. Regression gate on the 100k set; results in `documentation/benchmarks.md`.
 
+## Notes from step 7
+
+- The Python API is a contract: [python-api.md](../python-api.md) (ADR 0013). The remote client implements it without the local-path calls (`Store.open`, `backup`, `verify`, `restore`), from `iwdb.connect(...)`, with the same result dicts and exceptions.
+- The embedded test suite is `crates/iwdb-python/tests` (pytest). To run it against a server, factor the `store` fixture in `conftest.py` so it yields either an embedded store or a remote one; most tests use only that fixture.
+
 ## Acceptance criteria
 
 - Same Python tests green for embedded and remote.

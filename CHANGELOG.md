@@ -37,7 +37,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `iwdb_engine::testutil::workload` (feature `testutil`): the random workload strategies, a seeded fixed workload and an endless `Stream`, shared by the tests and the harness.
 - ADR 0008 and `documentation/guarantees.md`, "Crashes and simulated failures": the defined behaviour of each simulated failure.
 
+- Online backups (step 7, ADR 0009): `Store::backup` copies a running store's checkpoints and WAL up to the synced seq into a new directory, holding the checkpointer's lock so that nothing is removed during the copy; a `BACKUP` manifest (format version 1, `documentation/formats/backup.md`) lists every file with its length and CRC32C. A store refuses to open a backup.
+- Continuous WAL archiving (`StoreOptions::archive`, `documentation/formats/archive.md`): every segment is durable in the archive before the checkpointer removes it; idempotent after a crash; an archive belongs to one history.
+- Restore and point-in-time recovery (`iwdb::restore`): to a seq, a time or the latest, from a backup, an archive or both, written as a new directory with one checkpoint at the target and a new history id.
+- `verify` (`iwdb::verify`, ADR 0011): every checksum, every checkpoint, the WAL from its first segment replayed against the newer checkpoints, and the namespace invariants (`iwdb_engine::invariants`), without writing; a torn tail, temporary files and an interrupted cleanup are notes, not damage.
+- `iwctl` (`crates/iwctl`, ADR 0012, `documentation/iwctl.md`): `status`, `checkpoint`, `backup`, `restore` and `verify` for local directories, with `--json` and exit codes per outcome.
+- Python embedded bindings (`crates/iwdb-python`, package `ironweaver-db`, module `iwdb`, ADR 0013, `documentation/python-api.md`): `Store`, transactions as context managers, reads as plain Python values, backups, `verify`, `restore`; abi3 wheels for CPython 3.9 and later on Linux and macOS (x86_64, arm64), built and tested in CI; a release workflow for PyPI (`documentation/releasing.md`).
+- `Store::status`, `iwdb::status`, `iwdb_storage::inspect`; `CommitTime` and `HistoryId`.
+- The crash harness runs `verify` before every recovery it checks, archives most data directories, takes backups in the child's script, and restores to random seqs in a child that it kills; new crash points for backups, archiving and restores.
+
 ### Changed
+- WAL format 2 (step 7, ADR 0010): every record carries its commit time, covered by its CRC; format 1 segments are still read, and a format 1 log continues in format 2 (fixture `wal-v2`).
+- Data directory layout 2 (step 7): the marker holds a history id; `BACKUP` and `RESTORING` files. A layout 1 directory is upgraded when a store opens it, after recovery succeeded (fixture `data-dir-v2`).
+- The workspace version is 0.1.0.
+- Upstream issue #33 filed: the core's binary header's flags and reserved bytes are never checked (worked around in `verify`).
 - A panic while the store changes its namespace or WAL (a commit, an fsync, the group commit timer) aborts the process, and the next open recovers (ADR 0008). Before, the store turned read-only, and readers could have seen part of a transaction.
 - `GraphMeta` carries the seq (`iwdb.seq`), required when loading a database file; `Namespace::from_loaded` builds a namespace from a loaded file.
 - Upstream issue #32 filed: `write_atomic` ignores a failed directory fsync.
@@ -47,5 +60,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bumped `ironweaver-core` from `02cefab` to `a14149e` (PR #25, which implements all seven upstream drafts). Core review updated; follow-up draft 8 (edge budget) added.
 
 ### Fixed
+- Reopening a store right after closing it could fail with `Locked` while another thread of the process spawned processes (a spawned process holds a copy of the lock file until its exec): taking a lock now retries for about 80 ms (a step 5 bug, found in step 7).
 - Under the `off` fsync policy, `Wal::sync` (and so `Store::sync`, `checkpoint` and `close`) fsynced only the current segment and no directory, and a new writer claimed the whole log synced; now a sync covers every segment with unsynced records and the directory, and a writer under `off` starts with `synced_seq` 0 (step 6).
 - A panic inside a `Store::read` closure made the store read-only (step 6).
