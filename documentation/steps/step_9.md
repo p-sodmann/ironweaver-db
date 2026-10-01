@@ -36,3 +36,30 @@ Multiple named graphs per store, and index and constraint definitions managed li
 - The task said "WAL stream position and checkpoint" per namespace; with one WAL per namespace (ADR 0017) each namespace has its own seq space, WAL and checkpoints, so there is no stream position. The ADR also settles the note "with a shared WAL, the WAL format changes (format 4)": it doesn't, because the WAL isn't shared.
 - "Unique constraints hold under concurrent writers while every commit runs under the writer mutex" (step 8 note) holds per namespace, which is the scope of a unique constraint.
 - The online build is only partly online (ADR 0019): the scan is, the insertion into the index isn't, because the core can only build an index inside `&mut Graph` (upstream #34). It was measured instead of promised.
+
+## Bugs found in earlier steps
+
+- `verify` reported a layout 1-3 directory whose upgrade to layout 4 had been interrupted (files already moved under `ns/`) as damaged, though a store opens it fine. Found by killing the upgrade at each file operation (`namespace_points.rs`); fixed (`layout::legacy_paths_at`). The same state can't arise from step 8 code, so no earlier release is affected.
+- No bug in steps 1-8 needed a fix. One design flaw was caught in this step's own first draft: damage to the last event of the namespace log looks like a torn tail, and recovery would then have removed that namespace's directory as an orphan. Open now refuses (`NamespaceDamaged`) and `verify` reports it.
+
+## Findings in ironweaver-core
+
+Two, both filed: [#34](https://github.com/p-sodmann/Ironweaver/issues/34) (no off-graph index build and O(1) install) and [#35](https://github.com/p-sodmann/Ironweaver/issues/35) (no per-index entry count or memory accessor), pinned in `core_smoke.rs`, in the core review and in [upstream-check.md](upstream-check.md). Open issues: #26-#35.
+
+## Results
+
+**Long run** (`iwdb-crash --policy all --seeds 2 --cycles 1000`, seeds 930001 and 930002, release build, Apple silicon laptop, macOS, 2026-10-01). All six policy/seed runs passed: **6000 kill/recover cycles, no lost acknowledged commit, no partial transaction, no key applied twice**, plus **1998 cycles of the new catalog scenario** (a third of the cycles, run after each policy's). Cycle time 1941 s (32 min: `always` 350 s and 358 s, `group` 336 s and 330 s, `off` 283 s and 284 s, each including its catalog cycles); wall time 2932 s (48.9 min).
+
+Catalog scenario in all (six runs): 1998 cycles, 644 recoveries by the parent checked; 114 456 acts acknowledged: 2978 namespaces created, 2854 dropped, 34 175 commits (data, indexes and constraints) into up to 5 namespaces at once; 462 keyed acts answered from their key after a kill; 587 acts in flight at a kill were found complete (the rest not applied; each was retried by key and applied once). Kills landed at the namespace log (`write`, `sync`, `open_append`), namespace directories (`create_dir`, `remove_dir_all`, `sync_dir` on `ns/`), WAL, checkpoint and archive files.
+
+**Short run** (as CI, `--policy all --cycles 150`): 450 cycles plus 150 catalog cycles; `always` 58 s, `group` 55 s, `off` 41 s. (One run showed 735 s of wall time with the same cycle times; the machine was busy with other jobs and a stuck background process, not reproduced.)
+
+**Online index build** (ADR 0019, `latency.rs`, 500 000 nodes, release): plain build in one lock hold 183 ms; online: build 156 ms, longest commit stall 105 ms (about 40 % shorter); unique constraint: 406 ms, stall 345 ms.
+
+**`cargo test --workspace`**: **151 s of test time** (108 s in step 8; the target was about 110 s and this misses it), 245 s of wall time with the build. The growth is new coverage: `namespaces.rs` 13.6 s (every file operation of create, drop and the upgrade failing, in parallel threads, 28 s of CPU), `namespace_points.rs` 19 s (kills at namespace operations and in the upgrade), `crash_points.rs` 28 s, `model.rs` 11 s, `backup.rs` 10 s, `faults.rs` 10 s. Also clean: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo deny check`, the build with Rust 1.85 (`--locked`).
+
+**Python** (`pytest crates/iwdb-python/tests`, 87 tests, 9 of them new in `test_namespaces.py`): passed on macOS arm64.
+
+## Notes for step 10
+
+See [step_10.md](step_10.md#notes-from-step-9).
