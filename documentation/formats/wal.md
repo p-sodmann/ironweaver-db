@@ -4,7 +4,7 @@ Status: stable contract (design rule 4). Implemented in `crates/iwdb-storage` (`
 
 Version 3 (step 8, [ADR 0015](../adr/0015-idempotency-keys.md)) puts a record's idempotency key and result at the start of its payload. Version 2 (step 7, [ADR 0010](../adr/0010-commit-times.md)) added a commit time to every frame. [Older versions](#older-versions) below lists the differences.
 
-The write-ahead log of a namespace is a directory of **segment files**. Each segment holds a header and then a sequence of **record frames**, one per committed transaction (`iwdb_engine::CommitRecord`). Records are numbered by `seq`, without gaps, across segments.
+The write-ahead log of a namespace is a directory of **segment files**: `ns/<id>/wal/` in a layout 4 data directory ([data-dir.md](data-dir.md)), one per namespace, each with its own seq space. **Step 9 (namespaces) didn't change this format**: the version stays 3, and a segment doesn't know which namespace it belongs to (its directory says). Each segment holds a header and then a sequence of **record frames**, one per committed transaction (`iwdb_engine::CommitRecord`). Records are numbered by `seq`, without gaps, across segments.
 
 ## Conventions
 

@@ -1,22 +1,27 @@
-# Data directory, layout version 3
+# Data directory, layout version 4
 
-Status: stable contract (design rule 4). Implemented in `crates/iwdb-storage` (`layout.rs`, `history.rs`, `checkpoint.rs`, `recovery.rs`) and `iwdb_engine::codec` / `idempotency`, used by `iwdb::Store`. Fixtures: `crates/iwdb/tests/fixtures/data-dir-v3/` and, for older layouts, `data-dir-v2/` and `data-dir-v1/`. Decisions and alternatives: [ADR 0006](../adr/0006-checkpoints-and-recovery.md) (layout 1), [ADR 0009](../adr/0009-backup-archive-restore.md) (layout 2: histories, backups, restore) and [ADR 0015](../adr/0015-idempotency-keys.md) (layout 3: the idempotency key table in checkpoints).
+Status: stable contract (design rule 4). Implemented in `crates/iwdb-storage` (`layout.rs`, `history.rs`, `checkpoint.rs`, `recovery.rs`) and `iwdb_engine::codec` / `idempotency`, used by `iwdb::Store`. Fixtures: `crates/iwdb/tests/fixtures/data-dir-v4/` (three namespaces and a dropped one) and, for older layouts, `data-dir-v3/`, `data-dir-v2/` and `data-dir-v1/`. Decisions and alternatives: [ADR 0006](../adr/0006-checkpoints-and-recovery.md) (layout 1), [ADR 0009](../adr/0009-backup-archive-restore.md) (layout 2: histories, backups, restore) [ADR 0015](../adr/0015-idempotency-keys.md) (layout 3: the idempotency key table in checkpoints) and [ADR 0017](../adr/0017-namespaces.md), [ADR 0018](../adr/0018-namespace-keys-and-restore.md) (layout 4: namespaces).
 
-A store keeps one namespace (step 9 adds more) in one directory:
+A store keeps its namespaces in one directory, each with its own WAL and checkpoints:
 
 ```
 <dir>/
   IWDB                          marker: magic, layout version, history id, CRC32C (32 bytes)
   LOCK                          empty; held with an exclusive lock while a store has the directory open
-  checkpoints/
-    <seq, 20 digits>.ckpt       checkpoints (below)
-  wal/
-    <first seq, 20 digits>.wal  WAL segments (formats/wal.md)
+  NAMESPACES                    the namespace log: every namespace ever created or dropped (below)
+  ns/
+    <id, 20 digits>/            one directory per live namespace
+      checkpoints/
+        <seq, 20 digits>.ckpt   checkpoints (below)
+      wal/
+        <first seq, 20 digits>.wal  WAL segments (formats/wal.md)
   BACKUP                        only in a backup: its manifest (formats/backup.md)
   RESTORING                     only while a restore writes the directory (Restore, below)
 ```
 
-Layout 3 (step 8) differs from layout 2 in the checkpoints' graph meta, which holds the idempotency key table (`iwdb.keys`), and in the marker's version. Layout 2 (step 7) differed from layout 1 (step 5) in the marker, which holds a history id since, and in the `BACKUP` and `RESTORING` files. The WAL segments carry their own format version (formats/wal.md).
+Layout 4 (step 9) differs from layout 3 in the directory structure (`checkpoints/` and `wal/` moved under `ns/<id>/`, `NAMESPACES` added) and the marker's version. Checkpoints and WAL segments are unchanged byte for byte: **the WAL format stays at 3**, and a checkpoint's contents are those of layout 3. Layout 3 (step 8) differed from layout 2 in the checkpoints' graph meta, which holds the idempotency key table (`iwdb.keys`). Layout 2 (step 7) differed from layout 1 (step 5) in the marker, which holds a history id since, and in the `BACKUP` and `RESTORING` files. The WAL segments carry their own format version (formats/wal.md).
+
+**One WAL per namespace** ([ADR 0017](../adr/0017-namespaces.md)): every namespace has its own seq space (its commits are `1, 2, ...`), its own segments and checkpoints, its own idempotency key table, indexes and constraints. A commit goes to one namespace. The history id is the store's, shared by all of them.
 
 Temporary files end in `.tmp`: `.<name>.<pid>.<n>.tmp` (the core's `write_atomic`, for checkpoints and the marker) and `<segment>.tmp` (a WAL segment being created). They are never read, and are removed when a store opens.
 
@@ -27,7 +32,7 @@ All integers little endian.
 | Offset | Size | Field | Value |
 |---|---|---|---|
 | 0 | 8 | magic | `IWDBDIR\n` (`49 57 44 42 44 49 52 0a`) |
-| 8 | 4 | version | `3`, the layout version (`2` in a layout 2 marker, otherwise the same) |
+| 8 | 4 | version | `4`, the layout version (`2` or `3` in an older marker, otherwise the same) |
 | 12 | 16 | history | the history id: 16 random bytes (printed as 32 hex digits) |
 | 28 | 4 | crc | CRC32C of bytes 0..28 |
 
@@ -41,13 +46,32 @@ Opening a directory:
 
 - **It has a `RESTORING` file**: refused with `InterruptedRestore`, before anything is changed (Restore, below).
 - **It has a marker and a `BACKUP` file**: a backup, refused with `IsBackup`. A backup is restored, not opened: so it stays as it was, and two stores never continue one history.
-- **It has a marker** with a valid CRC and version 3: open it. `wal/` and `checkpoints/` must exist (otherwise `InvalidDataDir`).
-- **Version 1 or 2**: open it. Once recovery has read it successfully (and before the WAL writer starts), its marker is replaced by a layout 3 marker (`write_atomic`, then a directory sync): with the same history id (layout 2), or a new random one (layout 1, which has none). Nothing else changes: its checkpoints have no `iwdb.keys` and load with an empty key table. The recovery report says `upgraded_from: 1` or `2`. A crash leaves either marker. A failed open leaves the old one. Older versions can't open the directory afterwards (step 7 refuses layout 3 with `UnsupportedLayout`).
-- **Version above 3**: refused with `UnsupportedLayout`, before anything is changed.
+- **It has a marker** with a valid CRC and version 4: open it. `NAMESPACES` and `ns/` must exist, and every live namespace's `checkpoints/` and `wal/` (otherwise `InvalidDataDir` or `NamespaceDamaged`).
+- **Version 1, 2 or 3**: open it. Recovery reads its one namespace where it is (`checkpoints/` and `wal/` in the directory itself, or already under `ns/00000000000000000001/` if an earlier upgrade was interrupted), and once that has succeeded the **upgrade** runs, each step repeatable: create `ns/` and `ns/00000000000000000001/` and sync; rename `checkpoints/` and `wal/` into it (each rename is atomic) and sync; write `NAMESPACES` with one create event for `default` (id 1, time 0) and sync; replace the marker with a layout 4 one (`write_atomic`, then a directory sync), with the same history id (layouts 2 and 3) or a new one (layout 1, which has none). **The marker is the commit point**: a crash before it leaves the old marker and the next open finds the files where they are and does the rest (the crash tests kill the upgrade at each file operation). A failed open leaves the old marker. The namespace is `default` with its history, seq, checkpoints, key table and keys unchanged. The recovery report says `upgraded_from: 1`, `2` or `3`. Older versions can't open the directory afterwards (step 8 refuses layout 4 with `UnsupportedLayout`).
+- **Version above 4**: refused with `UnsupportedLayout`, before anything is changed.
 - **Our magic, a wrong length or CRC**: refused with `InvalidDataDir`.
 - **Another file named `IWDB`**: refused with `NotADataDir`.
 - **No marker**: the directory may only hold what an interrupted initialization leaves (`LOCK`, empty `checkpoints/` and `wal/`, `*.tmp` files). With `create_if_missing` (the default), it is initialized; otherwise it is refused with `NotADataDir`. Anything else is refused with `NotADataDir`, and nothing is created in it, not even `LOCK`: an interrupted backup or restore leaves such a directory. A missing directory is created (with its parents) if `create_if_missing` is set.
-- **Initialization**: take the lock, check again that there is no marker, create `checkpoints/` and `wal/`, sync the directory, write the marker (layout 3, a new random history id) with `write_atomic`, sync the directory. The marker comes last, so a directory with a marker is complete.
+- **Initialization**: take the lock, check again that there is no marker, create `ns/` and the `default` namespace's directory (`ns/00000000000000000001/{checkpoints,wal}`), write `NAMESPACES` with the create event of `default` (id 1), sync the directory, write the marker (layout 4, a new random history id) with `write_atomic`, sync the directory. The marker comes last, so a directory with a marker is complete.
+
+## Namespaces (`NAMESPACES`, `ns/`)
+
+**The log** is the only truth about which namespaces exist. It is small and append-only; every event is fsynced before it is acknowledged. All integers little endian.
+
+| Part | Size | Content |
+|---|---|---|
+| header | 16 | magic `IWDBNSL\n`, version `u32` (`1`), CRC32C of the 12 bytes before |
+| frame | 24 + len | `len u32`, `seq u64`, `time i64`, CRC32C `u32`, payload (JSON, at most 64 KiB) |
+
+The CRC covers `len`, `seq`, `time` and the payload. `seq` numbers the events `1, 2, ...` without gaps. `time` is microseconds since 1970 UTC (non-decreasing; 0 for the `default` event of an upgraded store). The payload is `{"op": "create" | "drop", "id": <u64>, "name": "...", "key": "...", "fingerprint": <u32>}` (`key` and `fingerprint` only if the request had an idempotency key; unknown fields are refused). A **name** is 1 to 64 ASCII letters, digits, `_` or `-`, starting with a letter or digit; names are case sensitive. An **id** is assigned at creation (the next after the largest ever logged) and never reused; `default` is id 1 and can't be dropped.
+
+**Torn tail.** Events are fsynced one at a time, so an incomplete last frame, or a complete last frame with a wrong CRC, is an event that was never acknowledged: recovery cuts it. Damage followed by a valid frame is corruption (`InvalidNamespaceLog`).
+
+**Create.** (1) create `ns/<id>/` with its `checkpoints/` and `wal/`, and sync; (2) append the create event: **the commit point**. A crash before (2) leaves an empty directory the log doesn't know, which the next open removes. **Drop.** (1) mark the namespace dropped (commits and waits on it fail with `NamespaceDropped`; a read that started finishes) and fsync its WAL; (2) with an archive, copy its remaining segments there; (3) append the drop event: **the commit point**; (4) remove `ns/<id>/` and sync `ns/`. A crash after (3) leaves a directory of a dropped namespace, which the next open removes.
+
+**On open**, recovery reads the log, recovers every live namespace, and removes directories the log doesn't list: always for a dropped namespace; for one the log never mentions only if it holds no data. A directory with data that the log doesn't list means the log lost its create event (damage to the last event looks like a torn tail), and removing it would destroy a namespace: the open fails with `NamespaceDamaged`, changing nothing. A live namespace whose directory is missing is also `NamespaceDamaged`. `verify` reports all of these.
+
+**Idempotency keys** of creates and drops live in the log ([ADR 0018](../adr/0018-namespace-keys-and-restore.md)); the keys of data and catalog commits stay in each namespace's key table.
 
 ## Lock (`LOCK`)
 
@@ -59,7 +83,7 @@ The store opens `LOCK` (creating it if needed) and takes an exclusive, non-block
 - The lock is taken after the marker is checked and before anything is changed, apart from creating `LOCK` itself.
 - **Readers** that must not run while a store has the directory open (`verify`, and restore reading a data directory or backup) take a **shared** lock (`flock(LOCK_SH | LOCK_NB)`) on `LOCK` if the file exists, and never create it. They fail with `Locked` while a store has the directory open, and keep stores out while they read. Shared locks don't exclude each other.
 
-## Checkpoints (`checkpoints/<seq>.ckpt`)
+## Checkpoints (`ns/<id>/checkpoints/<seq>.ckpt`)
 
 Name: the seq, as 20 decimal digits zero-padded, then `.ckpt`. Names sort like seqs. Only this exact form is a checkpoint.
 
@@ -91,11 +115,11 @@ A checkpoint is durable before anything is removed, and the WAL always holds eve
 `Store::open` (`iwdb_storage::recover`) does this:
 
 1. Open the directory and take the lock (above).
-2. Remove stale `*.tmp` files in the directory, `checkpoints/` and `wal/`, and fsync each directory it removed one from.
+2. Read `NAMESPACES` (cut a torn tail), remove the namespace directories it doesn't list (above), and remove stale `*.tmp` files in the directory, `ns/` and each namespace's `checkpoints/` and `wal/`, fsyncing each directory it removed one from. Steps 3 to 7 run for every live namespace (in parallel in the store's open, one WAL writer each).
 3. Load the newest checkpoint that loads, streaming (`codec::from_binary_reader`: peak memory is the graph plus a buffer). A checkpoint that fails to load is **skipped**, and recovery tries the next older one, or an empty namespace at seq 0 if none is left. Failing to load means a checksum, length or format error, a catalog or version error, a seq that differs from the name, or another namespace's name. Skipped checkpoints are reported and left in place. The indexes are rebuilt from the loaded catalog (`NamespaceCatalog::apply_indexes`); differences from the indexes saved in the file are reported as `IndexChanges`, which are always empty for files the database wrote.
 4. Replay the WAL from the checkpoint's seq + 1 to its end with `Namespace::replay`.
 5. If the last segment has a torn tail, cut it: `set_len(valid_len)` and fsync. If `valid_len` is 0 (not even the header is valid), remove the segment and fsync `wal/`. The report includes the damage and `discarded_frames`: complete frames after the damage that were written before it was synced. That is possible only with `group` or `off` after an OS crash, and those commits were never durable.
-6. If the directory is in layout 1, upgrade its marker (Marker, above).
+6. If the directory is in layout 1 to 3, upgrade it (Marker, above).
 7. Start the WAL writer at the log's next seq, in a new segment.
 
 The result is the state after the last complete commit in the log. With `always`, that is every acknowledged commit. With `group`, it is every acknowledged commit except those an OS crash lost within the policy's window ([guarantees.md](../guarantees.md)).
@@ -123,12 +147,12 @@ A panic during recovery (a core bug, upstream #28) is a crash: nothing was chang
 
 1. **Sources.** A backup is read under a shared lock on its `LOCK` (`Locked` if a store has it open) and must have a marker (an interrupted backup has none: `NotADataDir`) and, if it has one, a valid manifest ([backup.md](backup.md)). An archive must have its marker. Their history ids must be equal (`HistoryMismatch`; a layout 1 directory has none, so it can't be combined with an archive).
 2. **One log.** The backup's and the archive's segments are read as one log. Where both have a segment of the same name, one must be a prefix of the other (the backup's copy of the segment it cut), and the longer is used; otherwise `ArchiveConflict`.
-3. **Target.** A seq; a time: the last record in seq order whose commit time is at or before it ([wal.md](wal.md), "Commit time"; `NoCommitAtOrBefore` if there is none); or the latest seq the sources reach (a backup alone: its manifest's seq).
+3. **Target.** Every namespace that existed at the target is restored (or just those named in `only`). A seq is one namespace's seq, so it needs exactly one namespace (`AmbiguousTarget` otherwise); a time: the last record in seq order whose commit time is at or before it ([wal.md](wal.md), "Commit time"; `NoCommitAtOrBefore` if there is none); or the latest seq the sources reach, in each namespace (a backup alone: its manifest's seqs). A namespace created at or before a time target with no commit by then is restored empty, at seq 0; one dropped before it is not restored. A restored store without `default` gets an empty one when it is opened.
 4. **Replay.** The newest backup checkpoint at or below `N` that loads (older ones on failure, then an empty namespace at seq 0) is loaded and the log replayed onto it up to `N`. `MissingRecords` if the log doesn't reach back to the checkpoint's seq + 1; `LogEndsBefore` if it ends before `N`.
-5. **Write.** The destination must be missing or empty, and not inside a source. In this order, through `LogFs`: a `RESTORING` file, fsynced; `LOCK` (locked), `checkpoints/` and `wal/`; the directory synced; the checkpoint at `N` (`write_atomic`; none if `N` is 0) and `checkpoints/` synced; `RESTORING` removed and the directory synced; the marker with a **new** history id (`write_atomic`) and the directory synced.
+5. **Write.** The destination must be missing or empty, and not inside a source. In this order, through `LogFs`: a `RESTORING` file, fsynced; `LOCK` (locked) and `ns/`, the directory synced; for each restored namespace its directory with `checkpoints/` and `wal/`, its checkpoint at its target (`write_atomic`; none at seq 0) and `checkpoints/` synced; `NAMESPACES` (the log's events up to the target, with their keys) and the directory synced; `RESTORING` removed and the directory synced; the marker with a **new** history id (`write_atomic`) and the directory synced.
 
 The result opens as a store at `N` with an empty WAL: its first commit is `N + 1`, in a new history, which needs a new archive directory. Its checkpoint holds the key table at `N`: the keys of the restored commits, and none of the commits after `N`, which the new history doesn't contain (ADR 0015). An interrupted restore leaves either `RESTORING` (open refuses with `InterruptedRestore`), or a checkpoint without a marker (`NotADataDir`), or, for a restore to seq 0 or a failure before anything was written, an empty directory. It is never finished by the next open: remove the directory and restore again. A restore never writes to its sources.
 
 ## Versioning
 
-Layout version 3 is this document. Layout 2 is the same without `iwdb.keys` in checkpoints; layout 1 is layout 2 without the history id in the marker and without `BACKUP` and `RESTORING`. Both are upgraded when a store opens them, and read as they are by `verify` and restore. Checkpoints have no version of their own: the core's binary format version is checked by the core, and the meta keys and their encoding belong to the layout version (the catalog JSON also has its own `format`). A newer writer that adds a meta key, changes a file name or adds a directory must bump the layout version, so that an older reader refuses the directory instead of skipping its checkpoints as damaged.
+Layout version 4 is this document. Layout 3 is the same with one namespace and no `NAMESPACES`, its `checkpoints/` and `wal/` in the directory itself; layout 2 is layout 3 without `iwdb.keys` in checkpoints; layout 1 is layout 2 without the history id in the marker and without `BACKUP` and `RESTORING`. All are upgraded when a store opens them, and read as they are by `verify` and restore. Checkpoints have no version of their own: the core's binary format version is checked by the core, and the meta keys and their encoding belong to the layout version (the catalog JSON also has its own `format`). A newer writer that adds a meta key, changes a file name or adds a directory must bump the layout version, so that an older reader refuses the directory instead of skipping its checkpoints as damaged.

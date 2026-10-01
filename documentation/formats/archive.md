@@ -1,6 +1,6 @@
-# WAL archive, version 1
+# WAL archive, version 2
 
-Status: stable contract (design rule 4). Implemented in `crates/iwdb-storage/src/archive.rs` and used by the checkpointer (`StoreOptions::archive`), `iwdb::verify` and `iwdb::restore`. Fixture: `crates/iwdb/tests/fixtures/archive-v1/`. Decisions: [ADR 0009](../adr/0009-backup-archive-restore.md).
+Status: stable contract (design rule 4). Implemented in `crates/iwdb-storage/src/archive.rs` and used by the checkpointer (`StoreOptions::archive`), `iwdb::verify` and `iwdb::restore`. Fixtures: `crates/iwdb/tests/fixtures/archive-v2/` (three namespaces, one dropped) and `archive-v1/` (still read). Decisions: [ADR 0009](../adr/0009-backup-archive-restore.md), [ADR 0017](../adr/0017-namespaces.md).
 
 A store with `StoreOptions::archive` copies every WAL segment into its archive directory before its checkpointer removes the segment from `wal/`. With a backup, the archive allows restoring to any later seq it holds; an archive that a store wrote from its creation holds its whole history, from seq 1.
 
@@ -8,9 +8,15 @@ A store with `StoreOptions::archive` copies every WAL segment into its archive d
 <archive>/
   IWDBARCH                      marker: magic, version, history id, CRC32C (32 bytes)
   LOCK                          held with an exclusive lock by the store that archives into it
-  <first seq, 20 digits>.wal    archived WAL segments, byte for byte (formats/wal.md)
-  <first seq, 20 digits>.wal.tmp a segment being archived
+  NAMESPACES                    a copy of the store's namespace log, kept up to date (best effort)
+  ns/<id, 20 digits>/
+    <first seq, 20 digits>.wal  archived WAL segments of the namespace, byte for byte (formats/wal.md)
+    <first seq, 20 digits>.wal.tmp a segment being archived
 ```
+
+Every namespace archives into its own `ns/<id>/`: a seq space is per namespace, so each directory is one log from the first archived segment on. **A dropped namespace's directory stays**, with the segments up to and including the ones the drop archived (its remaining segments are archived before the drop event is logged), so the archive holds the history of namespaces that no longer exist and a restore to a time before the drop can bring them back. The copy of the namespace log tells restore which namespaces existed when; it is rewritten after each create or drop, and a failure to update it is logged and doesn't fail the operation (the store's own log is the truth, and the next create or drop rewrites the copy).
+
+A **version 1** archive (steps 7 and 8: one namespace, segments at the top, no `NAMESPACES`) is namespace 1's, read as such. A store that archives into one upgrades it in place when it opens it (`Archive::open`): `ns/` and `ns/00000000000000000001/` are created, the segments renamed into it, and the marker replaced with a version 2 one (the commit point; a crash before it leaves a version 1 archive some of whose segments have moved, which the next open finishes).
 
 ## Marker (`IWDBARCH`, 32 bytes)
 
@@ -19,7 +25,7 @@ All integers little endian.
 | Offset | Size | Field | Value |
 |---|---|---|---|
 | 0 | 8 | magic | `IWDBARC\n` (`49 57 44 42 41 52 43 0a`) |
-| 8 | 4 | version | `1` |
+| 8 | 4 | version | `2` (`1` is still read) |
 | 12 | 16 | history | the history id of the store whose segments it holds ([data-dir.md](data-dir.md)) |
 | 28 | 4 | crc | CRC32C of bytes 0..28 |
 
@@ -27,13 +33,13 @@ An archive holds the segments of **one history**. A store opens its archive only
 
 ## Segments
 
-Archived segments are copies of the store's segments, in the format they were written in (WAL format 1 or 2), named like them. They are complete: a segment is archived only when the checkpointer removes it, which is never the last one, and closed segments have no torn tail. They follow each other from the first archived segment to the last, like the segments of a log; an archive that a store started using later begins with the first segment it removed after that.
+Archived segments are copies of the namespace's segments, in the format they were written in (WAL format 1 or 2), named like them. They are complete: a segment is archived only when the checkpointer removes it, which is never the last one, and closed segments have no torn tail. They follow each other from the first archived segment to the last, like the segments of a log; an archive that a store started using later begins with the first segment it removed after that.
 
 ## Archiving
 
 When a checkpoint run removes WAL segments (data-dir.md, step 5 of Writing), it first archives them:
 
-1. for each segment: if the archive has a file of the same name, it must have the same bytes (otherwise `ArchiveConflict`, and nothing more happens); the segment is copied to `<name>.tmp` in 1 MiB chunks, fsynced, and renamed to `<name>`;
+1. for each segment of the namespace: if the archive has a file of the same name, it must have the same bytes (otherwise `ArchiveConflict`, and nothing more happens); the segment is copied to `<name>.tmp` in 1 MiB chunks, fsynced, and renamed to `<name>`;
 2. the archive directory is synced;
 3. then the segments are removed from `wal/`, and `wal/` is synced.
 
@@ -45,4 +51,4 @@ So a segment leaves `wal/` only once its copy and its directory entry are durabl
 
 ## Versioning
 
-A change to the archive's marker or layout bumps `ARCHIVE_VERSION`, keeps a reader for version N-1, and adds a fixture next to `archive-v1/`. The segments carry their own WAL format version.
+A change to the archive's marker or layout bumps `ARCHIVE_VERSION`, keeps a reader for version N-1, and adds a fixture next to `archive-v2/`. The segments carry their own WAL format version.
