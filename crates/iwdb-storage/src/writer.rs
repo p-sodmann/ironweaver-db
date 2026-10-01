@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use iwdb_engine::CommitRecord;
 
-use crate::format::{self, FRAME_HEADER_LEN, SEGMENT_HEADER_LEN};
+use crate::format::{self, FrameHeader, FORMAT_VERSION, FRAME_HEADER_LEN, SEGMENT_HEADER_LEN};
 use crate::io::{LogFile, LogFs, StdFs};
+use crate::time::CommitTime;
 use crate::{reader, Error};
 
 /// Smallest segment size (1 KiB).
@@ -116,6 +117,9 @@ pub struct Wal<F: LogFs = StdFs> {
     frame: Vec<u8>,
     /// Bytes of record frames this writer has appended.
     appended: u64,
+    /// The commit time of the last record in the log, as far as this
+    /// writer knows: the floor for the next one.
+    last_time: CommitTime,
 }
 
 impl<F: LogFs> std::fmt::Debug for Wal<F> {
@@ -160,6 +164,7 @@ impl<F: LogFs> Wal<F> {
         if next_seq == 0 || next_seq == u64::MAX {
             return Err(Error::InvalidOptions(format!("the log can't start at seq {}", next_seq)));
         }
+        let mut last_time = CommitTime(i64::MIN);
         if let Some((first_seq, path)) = reader::list_segments(dir)?.pop() {
             if first_seq > next_seq {
                 return Err(Error::LogAhead { next_seq, first_seq, path });
@@ -174,6 +179,7 @@ impl<F: LogFs> Wal<F> {
             if end.next_seq < next_seq {
                 return Err(Error::LogEndsBefore { from: next_seq, next_seq: end.next_seq });
             }
+            last_time = end.last_time.unwrap_or(last_time);
             if options.fsync != FsyncPolicy::Off {
                 let mut file = fs.open_append(&path).map_err(|e| Error::io("open", &path, e))?;
                 file.sync().map_err(|e| Error::io("fsync", &path, e))?;
@@ -196,6 +202,7 @@ impl<F: LogFs> Wal<F> {
             failed: None,
             frame: Vec::new(),
             appended: 0,
+            last_time,
         })
     }
 
@@ -212,7 +219,19 @@ impl<F: LogFs> Wal<F> {
     ///   after reopening), so the commit's outcome is unknown; it must not
     ///   be applied;
     /// - [`Error::ReadOnly`]: the log failed earlier.
+    ///
+    /// The record's commit time is the system clock's, but never earlier
+    /// than the previous record's ([`CommitTime`]).
     pub fn append(&mut self, record: &CommitRecord) -> Result<(), Error> {
+        let time = CommitTime::now().max(self.last_time);
+        self.append_at(record, time)
+    }
+
+    /// [`append`](Self::append) with an explicit commit time, written as
+    /// given (it need not be later than the previous record's; readers
+    /// don't require commit times to be ordered). For fixtures and tests,
+    /// and for copying records with their original time.
+    pub fn append_at(&mut self, record: &CommitRecord, time: CommitTime) -> Result<(), Error> {
         self.check_usable()?;
         if record.seq != self.next_seq {
             return Err(Error::OutOfOrder { expected: self.next_seq, found: record.seq });
@@ -226,7 +245,8 @@ impl<F: LogFs> Wal<F> {
             self.rotate()?;
         }
         self.frame.clear();
-        format::encode_frame(&mut self.frame, record.seq, self.synced_seq, kind, &payload);
+        let header = FrameHeader { seq: record.seq, synced_seq: self.synced_seq, time: time.0, kind };
+        format::encode_frame(&mut self.frame, FORMAT_VERSION, header, &payload);
         if let Err(e) = self.file.write_all(&self.frame) {
             return Err(self.fail("append", e));
         }
@@ -234,6 +254,7 @@ impl<F: LogFs> Wal<F> {
         self.appended += frame_len;
         self.segment_records += 1;
         self.next_seq += 1;
+        self.last_time = self.last_time.max(time);
         let now = Instant::now();
         let oldest = *self.oldest_unsynced.get_or_insert(now);
         let due = match self.options.fsync {

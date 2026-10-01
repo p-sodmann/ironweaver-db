@@ -1,8 +1,12 @@
 //! Format compatibility (design rule 4): a committed segment written in
-//! WAL format 1 must keep reading as the same records, and writing those
-//! records must keep producing the same bytes. If either test fails, the
-//! format changed: bump `FORMAT_VERSION`, keep a reader for version 1 and
-//! keep this fixture (see `documentation/formats/wal.md`).
+//! each WAL format must keep reading as the same records (and, from format
+//! 2 on, commit times), and writing the records must keep producing the
+//! bytes of the current format's fixture. If that fails, the format
+//! changed: bump `FORMAT_VERSION`, keep a reader for the previous version
+//! and keep its fixture (see `documentation/formats/wal.md`).
+//!
+//! - `wal-v1/`: format 1 (step 4), frames without a commit time;
+//! - `wal-v2/`: format 2 (step 7), with a commit time per frame.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -14,7 +18,7 @@ use iwdb_engine::catalog::{AttrPath, Constraint, ConstraintKind, IndexDef, Label
 use iwdb_engine::reserved::VERSION_KEY;
 use iwdb_engine::{CatalogChange, Change, CommitRecord, DbRecord};
 use iwdb_storage::format::FORMAT_VERSION;
-use iwdb_storage::{read_log, FsyncPolicy, Wal, WalOptions};
+use iwdb_storage::{read_log, CommitTime, FsyncPolicy, Wal, WalOptions, WalReader};
 
 fn fixture_dir(version: u32) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/wal-v{}", version))
@@ -97,33 +101,79 @@ fn fixture_records() -> Vec<CommitRecord> {
     changes.into_iter().zip(1..).map(|(change, seq)| CommitRecord { seq, change }).collect()
 }
 
+/// The commit times of the fixture records: fixed, and once going
+/// backwards (times are written as given).
+fn fixture_time(seq: u64) -> CommitTime {
+    let base = 1_759_312_800_000_000; // 2025-10-01T10:00:00Z
+    CommitTime(if seq == 5 { base } else { base + seq as i64 * 1_500_250 })
+}
+
 /// Write the fixture records with `always` into `dir`.
 fn write(dir: &std::path::Path) {
     let options = WalOptions { fsync: FsyncPolicy::Always, ..WalOptions::default() };
     let mut wal = Wal::create(dir, options, 1).unwrap();
     for record in fixture_records() {
-        wal.append(&record).unwrap();
+        let time = fixture_time(record.seq);
+        wal.append_at(&record, time).unwrap();
     }
     wal.close().unwrap();
 }
 
+/// The records of the log in `dir`, with their commit times.
+fn read_timed(dir: &std::path::Path) -> Vec<(CommitRecord, Option<CommitTime>)> {
+    let mut reader = WalReader::open(dir, 1).unwrap();
+    let mut out = Vec::new();
+    while let Some(record) = reader.next() {
+        out.push((record.unwrap(), reader.time()));
+    }
+    assert!(reader.end().unwrap().torn().is_none());
+    out
+}
+
 #[test]
-fn the_v1_fixture_reads_as_its_records() {
+fn the_v1_fixture_reads_as_its_records_without_times() {
     let (records, end) = read_log(&fixture_dir(1), 1).unwrap();
     assert_eq!(records, fixture_records());
     assert_eq!(end.next_seq, fixture_records().len() as u64 + 1);
     assert!(end.torn().is_none());
+    assert!(read_timed(&fixture_dir(1)).iter().all(|(_, time)| time.is_none()));
 }
 
 #[test]
-fn writing_the_records_gives_the_v1_fixture_bytes() {
-    assert_eq!(FORMAT_VERSION, 1, "a new format version needs its own fixture next to wal-v1");
+fn the_v2_fixture_reads_as_its_records_and_times() {
+    let expected: Vec<_> = fixture_records().into_iter().map(|r| (r.clone(), Some(fixture_time(r.seq)))).collect();
+    assert_eq!(read_timed(&fixture_dir(2)), expected);
+}
+
+#[test]
+fn writing_the_records_gives_the_current_fixture_bytes() {
+    assert_eq!(FORMAT_VERSION, 2, "a new format version needs its own fixture next to wal-v1 and wal-v2");
     let dir = tempfile::tempdir().unwrap();
     write(dir.path());
     let name = "00000000000000000001.wal";
     let written = fs::read(dir.path().join(name)).unwrap();
-    let fixture = fs::read(fixture_dir(1).join(name)).unwrap();
+    let fixture = fs::read(fixture_dir(FORMAT_VERSION).join(name)).unwrap();
     assert!(written == fixture, "the WAL format changed: bump FORMAT_VERSION and add a fixture");
+}
+
+/// A log written in format 1 continues in format 2: a new writer starts a
+/// new segment in the current format, and the reader reads both as one log.
+#[test]
+fn a_v1_log_continues_in_the_current_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let name = "00000000000000000001.wal";
+    fs::copy(fixture_dir(1).join(name), dir.path().join(name)).unwrap();
+    let next = fixture_records().len() as u64 + 1;
+    let mut wal = Wal::create(dir.path(), WalOptions::default(), next).unwrap();
+    let record = CommitRecord { seq: next, change: Change::Data(vec![]) };
+    wal.append(&record).unwrap();
+    wal.close().unwrap();
+    let read = read_timed(dir.path());
+    assert_eq!(read.len() as u64, next);
+    assert!(read[..read.len() - 1].iter().all(|(_, time)| time.is_none()));
+    let (last, time) = read.last().unwrap();
+    assert_eq!(last, &record);
+    assert!(time.is_some_and(|t| t > CommitTime(1_700_000_000_000_000)), "{:?}", time);
 }
 
 /// Writes the fixture of the current format version, if it doesn't exist

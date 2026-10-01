@@ -19,7 +19,6 @@ iwdb-storage = { path = "../iwdb-storage", features = ["failpoints"] }
 iwdb-engine = { path = "../iwdb-engine", features = ["testutil"] }
 proptest.workspace = true
 tempfile.workspace = true
-crc32c.workspace = true
 
 [lints]
 workspace = true

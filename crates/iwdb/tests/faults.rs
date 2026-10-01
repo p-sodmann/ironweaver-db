@@ -209,12 +209,23 @@ fn a_failed_group_commit_timer_fsync_makes_the_store_read_only() {
 // Opening: recovery and initialization. A failed open changes nothing
 // that the next open doesn't finish, and releases the lock.
 
+/// A store whose last commit failed halfway through its frame, leaving a
+/// torn tail. (If the commit rotates first, the failure tears the new
+/// segment's header in its temporary file instead: then the next seed.)
 fn crashed_with_torn_tail(seed: u64) -> (TempDir, Namespace) {
-    let c = case(seed);
-    c.fs.add(Rule::new(Call::Write, When::Midway, Action::Fail));
-    c.failed_commit(&tx(pad(9)));
-    drop(c.store);
-    (c.dir, c.reference)
+    for seed in seed.. {
+        let c = case(seed);
+        c.fs.add(Rule::new(Call::Write, When::Midway, Action::Fail));
+        c.failed_commit(&tx(pad(9)));
+        drop(c.store);
+        let wal = c.dir.path().join("wal");
+        let first = iwdb_storage::list_segments(&wal).unwrap()[0].0;
+        let (_, end) = iwdb_storage::read_log(&wal, first).unwrap();
+        if end.torn().is_some() {
+            return (c.dir, c.reference);
+        }
+    }
+    unreachable!()
 }
 
 fn open_fails(dir: &Path, rule: Rule) -> Error {

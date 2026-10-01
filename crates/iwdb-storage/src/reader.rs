@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use iwdb_engine::CommitRecord;
 
 use crate::format::{self, Damage, Header, Invalid, FRAME_HEADER_LEN, MAX_RECORD_LEN, SEGMENT_HEADER_LEN};
+use crate::time::CommitTime;
 use crate::writer::MAX_SEGMENT_SIZE;
 use crate::Error;
 
@@ -47,6 +48,11 @@ pub struct SegmentEnd {
     /// Set if the segment has a torn tail: its header or a record at
     /// `valid_len` is incomplete or damaged.
     pub torn: Option<TornTail>,
+    /// The segment's format version (`None` if its header is damaged).
+    pub version: Option<u32>,
+    /// The commit time of its last valid record (`None` without records,
+    /// or in format 1).
+    pub last_time: Option<CommitTime>,
 }
 
 /// A torn tail at the end of the last segment, from offset
@@ -84,8 +90,12 @@ impl LogEnd {
 struct Cursor {
     first_seq: u64,
     last: bool,
+    /// The format version from the header (`None` if it is damaged).
+    version: Option<u32>,
     pos: usize,
     next_seq: u64,
+    /// The commit time of the last record returned.
+    last_time: Option<CommitTime>,
     end: Option<(usize, Option<TornTail>)>,
 }
 
@@ -93,10 +103,18 @@ impl Cursor {
     /// Check the header. A damaged header is a torn tail at offset 0 in the
     /// last segment, if no valid frame follows it.
     fn new(path: &Path, bytes: &[u8], first_seq: u64, last: bool) -> Result<Self, Error> {
-        let mut cursor = Cursor { first_seq, last, pos: SEGMENT_HEADER_LEN, next_seq: first_seq, end: None };
+        let mut cursor = Cursor {
+            first_seq,
+            last,
+            version: None,
+            pos: SEGMENT_HEADER_LEN,
+            next_seq: first_seq,
+            last_time: None,
+            end: None,
+        };
         match format::decode_segment_header(bytes) {
-            Header::Valid { first_seq: found } if found == first_seq => {}
-            Header::Valid { first_seq: found } => {
+            Header::Valid { first_seq: found, version } if found == first_seq => cursor.version = Some(version),
+            Header::Valid { first_seq: found, .. } => {
                 return Err(Error::HeaderMismatch { path: path.into(), expected: first_seq, found })
             }
             Header::UnsupportedVersion(version) => {
@@ -120,7 +138,9 @@ impl Cursor {
             self.end = Some((self.pos, None));
             return Ok(None);
         };
-        let frame = match format::read_frame(rest) {
+        // A cursor with a damaged header ended in `new`
+        let version = self.version.unwrap_or(format::FORMAT_VERSION);
+        let frame = match format::read_frame(rest, version) {
             Ok(frame) => frame,
             Err(damage) => {
                 // A frame written after this one was synced proves it was
@@ -143,6 +163,7 @@ impl Cursor {
         })?;
         self.pos += frame.len;
         self.next_seq = frame.seq + 1;
+        self.last_time = frame.time.map(CommitTime);
         Ok(Some(record))
     }
 
@@ -154,7 +175,13 @@ impl Cursor {
             return Err(Error::Corrupt { path: path.into(), offset: offset as u64, damage });
         }
         let mut discarded_frames = 0;
-        for frame in frames_after(bytes, offset, self.next_seq) {
+        // After a damaged header, frames of either version count as proof
+        let versions = match self.version {
+            Some(version) => vec![version],
+            None => format::READ_VERSIONS.to_vec(),
+        };
+        let found = versions.into_iter().flat_map(|version| frames_after(bytes, offset, self.next_seq, version));
+        for frame in found {
             if frame.synced_seq >= proof {
                 return Err(Error::Corrupt { path: path.into(), offset: offset as u64, damage });
             }
@@ -174,6 +201,8 @@ impl Cursor {
             valid_len: valid_len as u64,
             file_len: file_len as u64,
             torn,
+            version: self.version,
+            last_time: self.last_time,
         }
     }
 }
@@ -183,15 +212,16 @@ impl Cursor {
 /// plus the number of frames that fit into the rest of the file. The seq
 /// window rejects almost every offset before any checksum is computed, so
 /// this is O(bytes) for anything but crafted input.
-fn frames_after(bytes: &[u8], damage: usize, lowest: u64) -> impl Iterator<Item = format::Frame<'_>> {
-    let highest = lowest.saturating_add((bytes.len() / (FRAME_HEADER_LEN + 1)) as u64);
+fn frames_after(bytes: &[u8], damage: usize, lowest: u64, version: u32) -> impl Iterator<Item = format::Frame<'_>> {
+    let header_len = format::frame_header_len(version);
+    let highest = lowest.saturating_add((bytes.len() / (header_len + 1)) as u64);
     let mut pos = damage + 1;
     std::iter::from_fn(move || {
-        while pos + FRAME_HEADER_LEN <= bytes.len() {
+        while pos + header_len <= bytes.len() {
             let rest = &bytes[pos..];
-            let in_window = format::peek_seq(rest).is_some_and(|seq| (lowest..=highest).contains(&seq));
+            let in_window = format::peek_seq(rest, version).is_some_and(|seq| (lowest..=highest).contains(&seq));
             if in_window {
-                if let Ok(frame) = format::read_frame(rest) {
+                if let Ok(frame) = format::read_frame(rest, version) {
                     pos += frame.len;
                     return Some(frame);
                 }
@@ -242,6 +272,32 @@ pub(crate) fn read_segment_file(path: &Path, first_seq: u64, last: bool) -> Resu
     Ok(cursor.segment_end(path, bytes.len()))
 }
 
+/// The bytes of the segment file `path` (first seq `first_seq`) through
+/// the end of record `until`: its header and every frame up to `until`,
+/// each checked (checksum, seq, contents) as in a segment that is not the
+/// last, so damage before `until` is an error ([`Error::Corrupt`]). The
+/// bytes after record `until` are never decoded, so a writer may be
+/// appending to the file meanwhile. A backup copies the segment that holds
+/// its last record this way.
+///
+/// Fails with [`Error::LogEndsBefore`] if the segment ends before record
+/// `until`. Holds the file in memory (at most [`MAX_SEGMENT_FILE_LEN`]).
+pub fn segment_prefix(path: &Path, first_seq: u64, until: u64) -> Result<Vec<u8>, Error> {
+    let mut bytes = read_file(path)?;
+    let mut cursor = Cursor::new(path, &bytes, first_seq, false)?;
+    if until >= first_seq {
+        loop {
+            match cursor.next(path, &bytes)? {
+                Some(record) if record.seq == until => break,
+                Some(_) => {}
+                None => return Err(Error::LogEndsBefore { from: until, next_seq: cursor.next_seq }),
+            }
+        }
+    }
+    bytes.truncate(cursor.pos);
+    Ok(bytes)
+}
+
 /// The segments of a log directory, sorted by first seq. Files whose name
 /// isn't a segment name (such as a `.tmp` file left by an interrupted
 /// rotation) are ignored.
@@ -282,6 +338,8 @@ pub struct WalReader {
     current: Option<(Vec<u8>, Cursor)>,
     /// The seq the next segment must start with (after the first one).
     next_seq: Option<u64>,
+    /// The commit time of the record returned last.
+    time: Option<CommitTime>,
     end: Option<LogEnd>,
     done: bool,
 }
@@ -313,8 +371,18 @@ impl WalReader {
     /// `from`, and (from the iterator) with [`Error::LogEndsBefore`] naming
     /// `until` if the log ends before record `until`.
     pub fn open_until(dir: &Path, from: u64, until: u64) -> Result<Self, Error> {
+        Self::from_segments(list_segments(dir)?, from, until)
+    }
+
+    /// A reader of the records `from ..= until` (`u64::MAX`: to the end)
+    /// of a log made of the given segment files, which need not share a
+    /// directory: `(first seq, path)`, sorted by first seq, each named as
+    /// a segment. Restore reads a backup's and an archive's segments as one
+    /// log this way. Otherwise like [`open_until`](Self::open_until): the
+    /// segments must follow each other without a gap, and only the last
+    /// one can have a torn tail.
+    pub fn from_segments(mut segments: Vec<(u64, PathBuf)>, from: u64, until: u64) -> Result<Self, Error> {
         let from = from.max(1);
-        let mut segments = list_segments(dir)?;
         // Start at the last segment that starts at or before `from`
         if let Some(&(first_seq, _)) = segments.first() {
             let start = segments.partition_point(|(seq, _)| *seq <= from);
@@ -331,9 +399,17 @@ impl WalReader {
             next_segment: 0,
             current: None,
             next_seq: None,
+            time: None,
             end: None,
             done: false,
         })
+    }
+
+    /// The commit time of the record the iterator returned last (`None`
+    /// before the first, and for records of WAL format 1, which have no
+    /// time).
+    pub fn time(&self) -> Option<CommitTime> {
+        self.time
     }
 
     /// Where the log ends, once the iterator has returned `None` without
@@ -355,6 +431,7 @@ impl WalReader {
                 while let Some(record) = cursor.next(path, bytes)? {
                     if record.seq >= self.from {
                         self.wanted = record.seq + 1;
+                        self.time = cursor.last_time;
                         return Ok(Step::Record(record));
                     }
                 }
@@ -443,7 +520,10 @@ pub fn read_log(dir: &Path, from: u64) -> Result<(Vec<CommitRecord>, LogEnd), Er
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::{encode_frame, encode_segment_header, KIND_CATALOG, KIND_DATA};
+    use crate::format::{
+        encode_frame, encode_segment_header, encode_segment_header_version, FrameHeader, FORMAT_VERSION, KIND_CATALOG,
+        KIND_DATA,
+    };
     use iwdb_engine::Change;
     use proptest::prelude::*;
 
@@ -452,11 +532,16 @@ mod tests {
     }
 
     /// A segment starting at `first_seq` with the given frames
-    /// (`seq`, `synced_seq`, `kind`, payload).
+    /// (`seq`, `synced_seq`, `kind`, payload), in the current format.
     fn segment(first_seq: u64, frames: &[(u64, u64, u8, &[u8])]) -> Vec<u8> {
-        let mut bytes = encode_segment_header(first_seq).to_vec();
-        for (seq, synced_seq, kind, payload) in frames {
-            encode_frame(&mut bytes, *seq, *synced_seq, *kind, payload);
+        segment_version(FORMAT_VERSION, first_seq, frames)
+    }
+
+    fn segment_version(version: u32, first_seq: u64, frames: &[(u64, u64, u8, &[u8])]) -> Vec<u8> {
+        let mut bytes = encode_segment_header_version(first_seq, version).to_vec();
+        for &(seq, synced_seq, kind, payload) in frames {
+            let time = seq as i64 * 10;
+            encode_frame(&mut bytes, version, FrameHeader { seq, synced_seq, time, kind }, payload);
         }
         bytes
     }
@@ -509,6 +594,50 @@ mod tests {
         let mut bytes = segment(1, &[(1, 0, KIND_DATA, EMPTY)]);
         bytes[0] ^= 1;
         assert!(matches!(read_segment(&path(), &bytes, 1, true), Err(Error::Corrupt { offset: 0, .. })));
+    }
+
+    #[test]
+    fn both_versions_read_and_only_version_2_has_times() {
+        for version in [1, 2] {
+            let bytes = segment_version(version, 5, &[(5, 4, KIND_DATA, EMPTY), (6, 5, KIND_DATA, EMPTY)]);
+            let (records, end) = read_segment(&path(), &bytes, 5, true).expect("read");
+            assert_eq!(records.len(), 2);
+            assert_eq!(end.version, Some(version));
+            assert_eq!(end.last_time, (version == 2).then_some(CommitTime(60)));
+            assert_eq!((end.valid_len, end.next_seq), (bytes.len() as u64, 7));
+        }
+        // A torn last frame in either version is a torn tail
+        for version in [1, 2] {
+            let mut bytes = segment_version(version, 5, &[(5, 4, KIND_DATA, EMPTY), (6, 5, KIND_DATA, EMPTY)]);
+            bytes.pop();
+            let (records, end) = read_segment(&path(), &bytes, 5, true).expect("read");
+            assert_eq!(records.len(), 1);
+            assert_eq!(end.torn.map(|t| t.damage), Some(Damage::Truncated));
+        }
+    }
+
+    #[test]
+    fn a_prefix_ends_after_its_record_and_ignores_what_follows() {
+        let dir = tempfile::tempdir().expect("dir");
+        let file = dir.path().join("00000000000000000005.wal");
+        let full = segment(5, &[(5, 4, KIND_DATA, EMPTY), (6, 5, KIND_DATA, EMPTY), (7, 6, KIND_DATA, EMPTY)]);
+        let one = segment(5, &[(5, 4, KIND_DATA, EMPTY)]);
+        // A frame being written after record 6
+        let mut torn = full.clone();
+        torn.truncate(full.len() - 3);
+        fs::write(&file, &torn).expect("write");
+        let two = segment(5, &[(5, 4, KIND_DATA, EMPTY), (6, 5, KIND_DATA, EMPTY)]);
+        assert_eq!(segment_prefix(&file, 5, 6).expect("prefix"), two);
+        assert_eq!(segment_prefix(&file, 5, 5).expect("prefix"), one);
+        assert_eq!(segment_prefix(&file, 5, 4).expect("prefix"), encode_segment_header(5).to_vec());
+        assert!(matches!(segment_prefix(&file, 5, 7), Err(Error::Corrupt { .. })));
+        fs::write(&file, &two).expect("write");
+        assert!(matches!(segment_prefix(&file, 5, 7), Err(Error::LogEndsBefore { from: 7, next_seq: 7 })));
+        // Damage before the record is corruption, not a tail
+        let mut bad = full;
+        bad[30] ^= 1;
+        fs::write(&file, &bad).expect("write");
+        assert!(matches!(segment_prefix(&file, 5, 6), Err(Error::Corrupt { .. })));
     }
 
     proptest! {

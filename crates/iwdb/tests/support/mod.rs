@@ -98,16 +98,12 @@ pub fn last_segment(dir: &Path) -> PathBuf {
     iwdb_storage::list_segments(&dir.join("wal")).unwrap().pop().unwrap().1
 }
 
-/// A record frame as `documentation/formats/wal.md` describes it.
+/// A data record frame of the current WAL format
+/// (`documentation/formats/wal.md`).
 pub fn frame(seq: u64, synced_seq: u64, payload: &[u8]) -> Vec<u8> {
+    use iwdb_storage::format::{encode_frame, FrameHeader, FORMAT_VERSION, KIND_DATA};
     let mut out = Vec::new();
-    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    out.extend_from_slice(&seq.to_le_bytes());
-    out.extend_from_slice(&synced_seq.to_le_bytes());
-    out.push(1);
-    let crc = crc32c::crc32c_append(crc32c::crc32c(&out), payload);
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(payload);
+    encode_frame(&mut out, FORMAT_VERSION, FrameHeader { seq, synced_seq, time: 0, kind: KIND_DATA }, payload);
     out
 }
 

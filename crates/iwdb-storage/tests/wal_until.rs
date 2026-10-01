@@ -14,6 +14,7 @@ use std::thread;
 
 use common::{namespace, segments, upsert};
 use ironweaver_core::Value;
+use iwdb_storage::format::{FrameHeader, FORMAT_VERSION};
 use iwdb_storage::{Error, FsyncPolicy, LoggedNamespace, Wal, WalOptions, WalReader, MIN_SEGMENT_SIZE};
 
 /// A log with records 1..=n in small segments.
@@ -27,16 +28,10 @@ fn log(n: i64) -> (tempfile::TempDir, LoggedNamespace) {
     (dir, logged)
 }
 
-/// A record frame as `documentation/formats/wal.md` describes it.
+/// A record frame of the current format.
 fn encode_frame(out: &mut Vec<u8>, seq: u64, synced_seq: u64, kind: u8, payload: &[u8]) {
-    let start = out.len();
-    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    out.extend_from_slice(&seq.to_le_bytes());
-    out.extend_from_slice(&synced_seq.to_le_bytes());
-    out.push(kind);
-    let crc = crc32c::crc32c_append(crc32c::crc32c(&out[start..]), payload);
-    out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(payload);
+    let header = FrameHeader { seq, synced_seq, time: 0, kind };
+    iwdb_storage::format::encode_frame(out, FORMAT_VERSION, header, payload);
 }
 
 fn seqs(reader: WalReader) -> Vec<u64> {

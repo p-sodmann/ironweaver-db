@@ -28,13 +28,16 @@ pub mod layout;
 mod logged;
 mod reader;
 mod recovery;
+mod time;
 mod writer;
 
 pub use checkpoint::{CheckpointOutcome, Checkpointer, SkippedCheckpoint};
 pub use error::Error;
 pub use logged::LoggedNamespace;
 pub use reader::{
-    list_segments, read_log, read_segment, LogEnd, SegmentEnd, TornTail, WalReader, MAX_SEGMENT_FILE_LEN,
+    list_segments, read_log, read_segment, segment_prefix, LogEnd, SegmentEnd, TornTail, WalReader,
+    MAX_SEGMENT_FILE_LEN,
 };
 pub use recovery::{recover, CutTail, Recovered, RecoveryReport};
+pub use time::CommitTime;
 pub use writer::{FsyncPolicy, Wal, WalOptions, DEFAULT_SEGMENT_SIZE, MAX_SEGMENT_SIZE, MIN_SEGMENT_SIZE};

@@ -1,24 +1,29 @@
-//! The WAL's on-disk format, version 1: segment headers, record frames and
-//! record payloads. The normative description is
-//! `documentation/formats/wal.md`; this module is its implementation.
+//! The WAL's on-disk format, version 2 (and the reader of version 1):
+//! segment headers, record frames and record payloads. The normative
+//! description is `documentation/formats/wal.md`; this module is its
+//! implementation.
 //!
 //! All integers are little endian. Nothing is aligned or padded.
 //!
 //! ```text
-//! segment header (24 bytes)
+//! segment header (24 bytes, both versions)
 //!   0  magic       [u8; 8]  "IWDBWAL\n"
-//!   8  version     u32      FORMAT_VERSION
+//!   8  version     u32      1 or 2 (FORMAT_VERSION is written)
 //!  12  first_seq   u64      seq of the segment's first record (also the file name)
 //!  20  crc         u32      CRC32C of bytes 0..20
 //!
-//! record frame (25 bytes, then the payload)
+//! record frame, version 2 (33 bytes, then the payload)
 //!   0  len         u32      payload length, at most MAX_RECORD_LEN
 //!   4  seq         u64
 //!  12  synced_seq  u64      highest seq whose fsync had completed when this
 //!                           frame was written (0: none); always < seq
-//!  20  kind        u8       KIND_DATA or KIND_CATALOG
-//!  21  crc         u32      CRC32C of bytes 0..21 followed by the payload
-//!  25  payload     [u8; len] postcard: Vec<Op> (data) or CatalogChange (catalog)
+//!  20  time        i64      commit time: microseconds since 1970-01-01 UTC
+//!  28  kind        u8       KIND_DATA or KIND_CATALOG
+//!  29  crc         u32      CRC32C of bytes 0..29 followed by the payload
+//!  33  payload     [u8; len] postcard: Vec<Op> (data) or CatalogChange (catalog)
+//!
+//! record frame, version 1 (25 bytes): the same without `time`
+//!   0 len, 4 seq, 12 synced_seq, 20 kind, 21 crc (of bytes 0..21 and the payload), 25 payload
 //! ```
 
 use iwdb_engine::{CatalogChange, Change, CommitRecord, DbRecord};
@@ -27,12 +32,18 @@ use crate::Error;
 
 /// The first 8 bytes of every segment.
 pub const SEGMENT_MAGIC: [u8; 8] = *b"IWDBWAL\n";
-/// The segment format this version writes and reads.
-pub const FORMAT_VERSION: u32 = 1;
+/// The segment format this version writes.
+pub const FORMAT_VERSION: u32 = 2;
+/// The segment formats this version reads: version 1 (step 4, frames
+/// without a commit time) and version 2.
+pub const READ_VERSIONS: [u32; 2] = [1, FORMAT_VERSION];
 /// Length of a segment header.
 pub const SEGMENT_HEADER_LEN: usize = 24;
-/// Length of a record frame before its payload.
-pub const FRAME_HEADER_LEN: usize = 25;
+/// Length of a record frame before its payload, in the format this
+/// version writes (version 2).
+pub const FRAME_HEADER_LEN: usize = 33;
+/// Length of a version 1 frame header (no commit time).
+pub const FRAME_HEADER_LEN_V1: usize = 25;
 /// Largest record payload (64 MiB). A commit whose record is larger is
 /// rejected before it is logged or applied ([`Error::RecordTooLarge`]); a
 /// reader treats a larger length field as damage, so a corrupt length never
@@ -45,9 +56,17 @@ pub const KIND_CATALOG: u8 = 2;
 /// Suffix of segment file names: `<first seq, 20 digits>.wal`.
 pub const SEGMENT_SUFFIX: &str = ".wal";
 
-/// Bytes of a segment header or frame header covered by its CRC.
+/// Bytes of a segment header covered by its CRC.
 const HEADER_CRC_AT: usize = 20;
-const FRAME_CRC_AT: usize = 21;
+
+/// Length of a frame header in segment format `version` (1 or 2).
+pub fn frame_header_len(version: u32) -> usize {
+    if version == 1 {
+        FRAME_HEADER_LEN_V1
+    } else {
+        FRAME_HEADER_LEN
+    }
+}
 
 /// The file name of the segment whose first record is `first_seq`:
 /// zero-padded to 20 digits (all of `u64`), so names sort like seqs.
@@ -65,11 +84,17 @@ pub fn parse_segment_name(name: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-/// A segment header.
+/// A segment header in the format this version writes.
 pub fn encode_segment_header(first_seq: u64) -> [u8; SEGMENT_HEADER_LEN] {
+    encode_segment_header_version(first_seq, FORMAT_VERSION)
+}
+
+/// A segment header of format `version` (tests and fixtures write older
+/// versions with it).
+pub fn encode_segment_header_version(first_seq: u64, version: u32) -> [u8; SEGMENT_HEADER_LEN] {
     let mut header = [0u8; SEGMENT_HEADER_LEN];
     header[0..8].copy_from_slice(&SEGMENT_MAGIC);
-    header[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    header[8..12].copy_from_slice(&version.to_le_bytes());
     header[12..20].copy_from_slice(&first_seq.to_le_bytes());
     let crc = crc32c::crc32c(&header[..HEADER_CRC_AT]);
     header[HEADER_CRC_AT..].copy_from_slice(&crc.to_le_bytes());
@@ -79,8 +104,8 @@ pub fn encode_segment_header(first_seq: u64) -> [u8; SEGMENT_HEADER_LEN] {
 /// What a segment header says, or why it can't be read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Header {
-    /// A valid header of a version-1 segment.
-    Valid { first_seq: u64 },
+    /// A valid header of a segment in a format this reader knows.
+    Valid { first_seq: u64, version: u32 },
     /// Too short, wrong magic or wrong checksum: damage.
     Damaged(Damage),
     /// A valid checksum, but a format version this reader doesn't know.
@@ -96,10 +121,10 @@ pub(crate) fn decode_segment_header(bytes: &[u8]) -> Header {
         return Header::Damaged(Damage::BadHeader);
     }
     let version = u32_at(header, 8);
-    if version != FORMAT_VERSION {
+    if !READ_VERSIONS.contains(&version) {
         return Header::UnsupportedVersion(version);
     }
-    Header::Valid { first_seq: u64_at(header, 12) }
+    Header::Valid { first_seq: u64_at(header, 12), version }
 }
 
 /// Encode a record's payload and kind. Fails if the record can't be encoded
@@ -117,15 +142,30 @@ pub(crate) fn encode_payload(record: &CommitRecord) -> Result<(u8, Vec<u8>), Err
     Ok((kind, payload))
 }
 
-/// Append a whole frame (header and payload) to `out`. `payload` must come
-/// from [`encode_payload`].
-pub(crate) fn encode_frame(out: &mut Vec<u8>, seq: u64, synced_seq: u64, kind: u8, payload: &[u8]) {
+/// The fields of a frame header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameHeader {
+    pub seq: u64,
+    pub synced_seq: u64,
+    /// The commit time, microseconds since 1970-01-01 UTC (not written in
+    /// format 1).
+    pub time: i64,
+    pub kind: u8,
+}
+
+/// Append a whole frame (header and payload) of segment format `version`
+/// to `out`. The payload must be at most [`MAX_RECORD_LEN`] bytes (the
+/// writer's payloads come from `encode_payload`, which checks it). Public
+/// for tests and fixtures, which write frames by hand.
+pub fn encode_frame(out: &mut Vec<u8>, version: u32, header: FrameHeader, payload: &[u8]) {
     let start = out.len();
-    // encode_payload bounds the length by MAX_RECORD_LEN
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    out.extend_from_slice(&seq.to_le_bytes());
-    out.extend_from_slice(&synced_seq.to_le_bytes());
-    out.push(kind);
+    out.extend_from_slice(&header.seq.to_le_bytes());
+    out.extend_from_slice(&header.synced_seq.to_le_bytes());
+    if version != 1 {
+        out.extend_from_slice(&header.time.to_le_bytes());
+    }
+    out.push(header.kind);
     let crc = crc32c::crc32c_append(crc32c::crc32c(&out[start..]), payload);
     out.extend_from_slice(&crc.to_le_bytes());
     out.extend_from_slice(payload);
@@ -161,17 +201,20 @@ impl std::fmt::Display for Damage {
 pub(crate) struct Frame<'a> {
     pub seq: u64,
     pub synced_seq: u64,
+    /// The commit time (`None` in format 1).
+    pub time: Option<i64>,
     pub kind: u8,
     pub payload: &'a [u8],
     /// Length of the whole frame, header included.
     pub len: usize,
 }
 
-/// Read the frame at the start of `bytes` (which must not be empty):
-/// `Err` if it is damaged. Checks framing and checksum only, not the
-/// contents. O(frame length); allocates nothing.
-pub(crate) fn read_frame(bytes: &[u8]) -> Result<Frame<'_>, Damage> {
-    let Some(header) = bytes.get(..FRAME_HEADER_LEN) else {
+/// Read the frame of segment format `version` at the start of `bytes`
+/// (which must not be empty): `Err` if it is damaged. Checks framing and
+/// checksum only, not the contents. O(frame length); allocates nothing.
+pub(crate) fn read_frame(bytes: &[u8], version: u32) -> Result<Frame<'_>, Damage> {
+    let header_len = frame_header_len(version);
+    let Some(header) = bytes.get(..header_len) else {
         return Err(Damage::Truncated);
     };
     let len = u32_at(header, 0);
@@ -179,27 +222,31 @@ pub(crate) fn read_frame(bytes: &[u8]) -> Result<Frame<'_>, Damage> {
         return Err(Damage::BadLength);
     }
     let len = len as usize;
-    let Some(payload) = bytes.get(FRAME_HEADER_LEN..FRAME_HEADER_LEN + len) else {
+    let Some(payload) = bytes.get(header_len..header_len + len) else {
         return Err(Damage::Truncated);
     };
-    let crc = crc32c::crc32c_append(crc32c::crc32c(&header[..FRAME_CRC_AT]), payload);
-    if crc != u32_at(header, FRAME_CRC_AT) {
+    let crc_at = header_len - 4;
+    let crc = crc32c::crc32c_append(crc32c::crc32c(&header[..crc_at]), payload);
+    if crc != u32_at(header, crc_at) {
         return Err(Damage::Checksum);
     }
+    let time = (version != 1).then(|| u64_at(header, 20) as i64);
     Ok(Frame {
         seq: u64_at(header, 4),
         synced_seq: u64_at(header, 12),
-        kind: header[20],
+        time,
+        kind: header[crc_at - 1],
         payload,
-        len: FRAME_HEADER_LEN + len,
+        len: header_len + len,
     })
 }
 
 /// The seq a frame header at the start of `bytes` claims, without checking
 /// anything else (used to skip most offsets cheaply when looking for
-/// valid frames after damage).
-pub(crate) fn peek_seq(bytes: &[u8]) -> Option<u64> {
-    bytes.get(..FRAME_HEADER_LEN).map(|h| u64_at(h, 4))
+/// valid frames after damage). The seq is at the same offset in both
+/// formats.
+pub(crate) fn peek_seq(bytes: &[u8], version: u32) -> Option<u64> {
+    bytes.get(..frame_header_len(version)).map(|h| u64_at(h, 4))
 }
 
 /// Why a frame with a valid checksum doesn't hold a valid record. The
@@ -290,50 +337,69 @@ mod tests {
     #[test]
     fn headers_round_trip_and_detect_damage() {
         let header = encode_segment_header(7);
-        assert_eq!(decode_segment_header(&header), Header::Valid { first_seq: 7 });
+        assert_eq!(decode_segment_header(&header), Header::Valid { first_seq: 7, version: 2 });
+        let v1 = encode_segment_header_version(7, 1);
+        assert_eq!(decode_segment_header(&v1), Header::Valid { first_seq: 7, version: 1 });
         assert_eq!(decode_segment_header(&header[..23]), Header::Damaged(Damage::Truncated));
         for bit in 0..SEGMENT_HEADER_LEN * 8 {
             let mut bad = header;
             bad[bit / 8] ^= 1 << (bit % 8);
             assert_eq!(decode_segment_header(&bad), Header::Damaged(Damage::BadHeader), "bit {}", bit);
         }
-        let mut newer = header;
-        newer[8..12].copy_from_slice(&2u32.to_le_bytes());
-        let crc = crc32c::crc32c(&newer[..20]);
-        newer[20..].copy_from_slice(&crc.to_le_bytes());
-        assert_eq!(decode_segment_header(&newer), Header::UnsupportedVersion(2));
+        for version in [0, 3] {
+            let newer = encode_segment_header_version(7, version);
+            assert_eq!(decode_segment_header(&newer), Header::UnsupportedVersion(version));
+        }
+    }
+
+    fn header(seq: u64, synced_seq: u64, time: i64, kind: u8) -> FrameHeader {
+        FrameHeader { seq, synced_seq, time, kind }
     }
 
     #[test]
-    fn frames_round_trip() {
+    fn frames_round_trip_in_both_versions() {
         let index = IndexDef { path: AttrPath::new(["x"]).expect("path") };
         let record = CommitRecord { seq: 3, change: Change::Catalog(CatalogChange::CreateIndex(index)) };
         let (kind, payload) = encode_payload(&record).expect("encode");
-        let mut bytes = Vec::new();
-        encode_frame(&mut bytes, 3, 2, kind, &payload);
-        let frame = read_frame(&bytes).expect("frame");
-        assert_eq!((frame.seq, frame.synced_seq, frame.kind, frame.len), (3, 2, KIND_CATALOG, bytes.len()));
-        assert_eq!(decode_record(&frame), Ok(record));
-        assert_eq!(read_frame(&bytes[..bytes.len() - 1]), Err(Damage::Truncated));
-        assert_eq!(read_frame(&bytes[..FRAME_HEADER_LEN - 1]), Err(Damage::Truncated));
+        for (version, time) in [(2, Some(-5)), (1, None)] {
+            let mut bytes = Vec::new();
+            encode_frame(&mut bytes, version, header(3, 2, -5, kind), &payload);
+            assert_eq!(bytes.len(), frame_header_len(version) + payload.len());
+            let frame = read_frame(&bytes, version).expect("frame");
+            assert_eq!(
+                (frame.seq, frame.synced_seq, frame.time, frame.kind, frame.len),
+                (3, 2, time, KIND_CATALOG, bytes.len())
+            );
+            assert_eq!(decode_record(&frame), Ok(record.clone()));
+            assert_eq!(read_frame(&bytes[..bytes.len() - 1], version), Err(Damage::Truncated));
+            assert_eq!(read_frame(&bytes[..frame_header_len(version) - 1], version), Err(Damage::Truncated));
+            // The CRC covers every header field, the time included
+            for at in 0..frame_header_len(version) - 4 {
+                let mut bad = bytes.clone();
+                bad[at] ^= 0x10;
+                assert!(read_frame(&bad, version).is_err(), "version {} byte {}", version, at);
+            }
+        }
     }
 
     #[test]
     fn a_length_above_the_limit_is_damage_without_allocating() {
-        let mut bytes = Vec::new();
-        encode_frame(&mut bytes, 1, 0, KIND_DATA, &[0]);
-        bytes[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert_eq!(read_frame(&bytes), Err(Damage::BadLength));
-        bytes[0..4].copy_from_slice(&(MAX_RECORD_LEN).to_le_bytes());
-        assert_eq!(read_frame(&bytes), Err(Damage::Truncated));
+        for version in READ_VERSIONS {
+            let mut bytes = Vec::new();
+            encode_frame(&mut bytes, version, header(1, 0, 0, KIND_DATA), &[0]);
+            bytes[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+            assert_eq!(read_frame(&bytes, version), Err(Damage::BadLength));
+            bytes[0..4].copy_from_slice(&(MAX_RECORD_LEN).to_le_bytes());
+            assert_eq!(read_frame(&bytes, version), Err(Damage::Truncated));
+        }
     }
 
     #[test]
     fn checked_frames_with_invalid_contents_are_invalid() {
         let frame = |seq, synced_seq, kind, payload: &[u8]| {
             let mut bytes = Vec::new();
-            encode_frame(&mut bytes, seq, synced_seq, kind, payload);
-            decode_record(&read_frame(&bytes).expect("frame"))
+            encode_frame(&mut bytes, FORMAT_VERSION, header(seq, synced_seq, 0, kind), payload);
+            decode_record(&read_frame(&bytes, FORMAT_VERSION).expect("frame"))
         };
         // An empty op list
         assert_eq!(frame(1, 0, KIND_DATA, &[0]), Ok(CommitRecord { seq: 1, change: Change::Data(vec![]) }));
@@ -347,6 +413,8 @@ mod tests {
 
     #[test]
     fn a_zeroed_frame_is_damage() {
-        assert_eq!(read_frame(&[0u8; 64]), Err(Damage::Checksum));
+        for version in READ_VERSIONS {
+            assert_eq!(read_frame(&[0u8; 64], version), Err(Damage::Checksum));
+        }
     }
 }
