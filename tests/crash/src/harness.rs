@@ -287,8 +287,10 @@ fn choose_plan(rng: &mut Rng, fresh: bool, max_delay: Duration) -> Plan {
     let action = match r {
         40..=87 => Action::Pause,
         88..=95 => Action::Abort,
-        // A panic is only a crash on the commit path (ADR 0008)
-        _ if matches!(call, Call::Write | Call::Sync) => Action::Panic,
+        // A panic is only a crash on the commit path (ADR 0008): the WAL's
+        // writes and fsyncs (though "/wal/" also matches a backup's
+        // segments, see `crash`)
+        _ if matches!(call, Call::Write | Call::Sync) && path == "/wal/" => Action::Panic,
         _ => Action::Abort,
     };
     Plan::At(Rule::new(call, when, action).path(path).skip(rng.below(max_skip + 1)))
@@ -686,9 +688,11 @@ pub fn crash(
     };
     if !outcome.killed {
         // Only an abort or a panic ends a child by itself: a panic in the
-        // commit path aborts (ADR 0008), one during open unwinds (101)
+        // commit path aborts (ADR 0008); one during open, or in a backup
+        // (a file outside the data directory), unwinds (101)
         let expected = matches!(plan, Plan::At(rule) if matches!(rule.action, Action::Abort | Action::Panic));
-        let unwound = outcome.status.code() == Some(101) && outcome.opened().is_none();
+        let outside = panicked_at(&stderr).is_some_and(|path| !path.starts_with(&target.path));
+        let unwound = outcome.status.code() == Some(101) && (outcome.opened().is_none() || outside);
         if !expected || !(outcome.aborted() || unwound) {
             return Err(format!("the child exited by itself with {} ({})", outcome.status, context));
         }
@@ -711,6 +715,16 @@ pub fn crash(
     }
     // (A child killed before its open changed nothing recovery must keep)
     Ok(Crashed { outcome, reached, context })
+}
+
+/// The file an injected panic hit, from the child's stderr
+/// (`injected panic at <rule> (<path>)`).
+fn panicked_at(stderr: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(stderr).ok()?;
+    let rest = text.split("injected panic at ").nth(1)?;
+    let (_, path) = rest.split_once(" (")?;
+    let end = path.find(")\n").unwrap_or(path.len());
+    Some(PathBuf::from(&path[..end]))
 }
 
 /// Open the target's store now (the real recovery) and check it; on
