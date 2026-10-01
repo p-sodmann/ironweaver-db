@@ -141,9 +141,7 @@ fn backup_archive_and_restore_with_several_namespaces() {
     let only = [name("c")];
     restore_namespaces(&dest, &both, RestoreTarget::Latest, Some(&only)).unwrap();
     assert_eq!(check(&dest, &h).keys().collect::<Vec<_>>(), ["c", "default"]);
-    // A namespace dropped before the target, or one that never existed
-    for gone in ["nope"] {
-        let missing = [name(gone)];
-        assert!(restore_namespaces(&work.path().join("x"), &both, RestoreTarget::Latest, Some(&missing)).is_err());
-    }
+    // A namespace that never existed
+    let missing = [name("nope")];
+    assert!(restore_namespaces(&work.path().join("x"), &both, RestoreTarget::Latest, Some(&missing)).is_err());
 }

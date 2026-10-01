@@ -121,3 +121,81 @@ fn commit_latency_during_a_checkpoint() {
         store.close().unwrap();
     }
 }
+
+/// Writers use their own label so a constraint on `L` isn't violated by them.
+fn commit_writer(store: &Store, i: usize) -> Duration {
+    let mut m = node(format!("w{}", i % 1000), i);
+    if let Mutation::UpsertNode { labels, .. } = &mut m {
+        *labels = vec!["W".into()];
+    }
+    let start = Instant::now();
+    store.commit(&[m]).unwrap();
+    start.elapsed()
+}
+
+/// Commit and read latency while an index is built online (ADR 0019), and
+/// while a unique constraint is validated (which holds the writer mutex
+/// for the whole scan).
+#[test]
+#[ignore = "measurement; run with --release --ignored --nocapture"]
+fn latency_during_an_online_index_build() {
+    use iwdb::{AttrPath, CatalogChange, Constraint, ConstraintKind, IndexDef, Label};
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), options(FsyncPolicy::Off)).unwrap();
+    for chunk in (0..NODES).collect::<Vec<_>>().chunks(5000) {
+        store.commit(&chunk.iter().map(|&i| node(format!("n{}", i), i)).collect::<Vec<_>>()).unwrap();
+    }
+    println!("graph: {} nodes", NODES);
+    // For comparison: the same build inside one lock hold, on the engine alone
+    let mut plain = iwdb_engine::Namespace::new(iwdb::NamespaceName::new("plain").unwrap());
+    for chunk in (0..NODES).collect::<Vec<_>>().chunks(5000) {
+        plain.commit(&chunk.iter().map(|&i| node(format!("n{}", i), i)).collect::<Vec<_>>()).unwrap();
+    }
+    let start = Instant::now();
+    plain.commit_catalog(CatalogChange::CreateIndex(IndexDef { path: AttrPath::new(["n"]).unwrap() })).unwrap();
+    println!("the whole build inside one lock hold: {} ms", start.elapsed().as_millis());
+    drop(plain);
+    let path = |p: &str| AttrPath::new([p]).unwrap();
+    let changes = [
+        ("create index", CatalogChange::CreateIndex(IndexDef { path: path("n") })),
+        (
+            "add unique constraint",
+            CatalogChange::AddConstraint(Constraint {
+                kind: ConstraintKind::Unique,
+                label: Label::new("L").unwrap(),
+                path: path("name"),
+            }),
+        ),
+    ];
+    let mut i = 0;
+    let baseline: Vec<Duration> = (0..2000)
+        .map(|_| {
+            i += 1;
+            commit_writer(&store, i)
+        })
+        .collect();
+    println!("outside a build: {}", summary(baseline));
+    for (name, change) in changes {
+        let mut commits = Vec::new();
+        let mut reads = Vec::new();
+        let took = std::thread::scope(|scope| {
+            let build = scope.spawn(|| {
+                let start = Instant::now();
+                store.commit_catalog(change).unwrap();
+                start.elapsed()
+            });
+            while !build.is_finished() {
+                i += 1;
+                commits.push(commit_writer(&store, i));
+                let start = Instant::now();
+                store.read(|n| n.graph().node_count());
+                reads.push(start.elapsed());
+            }
+            build.join().unwrap()
+        });
+        println!("[{}] took {} ms", name, took.as_millis());
+        println!("[{}] commits during: {}", name, summary(commits));
+        println!("[{}] reads during:   {}", name, summary(reads));
+    }
+    store.close().unwrap();
+}

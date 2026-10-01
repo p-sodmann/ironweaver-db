@@ -25,3 +25,15 @@ Adding a **constraint** validates the existing data first, under the writer mute
 ## Consequences
 
 The write-lock hold of an index build shrinks from "read every payload and insert every key" to "insert every key", measured in `crates/iwdb/tests/latency.rs` (see the Results of step 9). It is still O(n log n) until the core can build an index off the graph; the upstream issue asks for that. A build that races with heavy writes to the same nodes re-reads those nodes in the flush (correct, slower).
+
+## Measurement
+
+`cargo test --release -p iwdb --test latency latency_during_an_online_index_build -- --ignored --nocapture`, 500 000 nodes with three attributes each, fsync off, one writer committing one-node transactions in a loop while the build runs (Apple silicon laptop; the numbers are for comparison, not a promise):
+
+| | whole build | longest commit stall | commits outside a build |
+|---|---|---|---|
+| index, in one lock hold (engine alone) | 183 ms | 183 ms (the hold) | p99 5 µs, max 221 µs |
+| index, online (this ADR) | 156 ms | 105 ms | |
+| unique constraint (validation holds the writer mutex) | 406 ms | 345 ms | |
+
+The scan phase is about 50 ms of the 156 and no longer blocks anyone; the install (inserting 500 000 keys under the write lock) is about 100 ms, so the **hold shrinks by roughly 40 %, not to near zero**. That is the honest limit of what the core allows today: only an off-graph build with an O(1) install (the upstream issue) removes the rest. A unique constraint still stalls writers for its whole validation, as the Decision says. Both stalls grow linearly with the number of nodes carrying the label or attribute.
