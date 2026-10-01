@@ -6,8 +6,10 @@
 //! - each node's and edge's `meta` holds the user's meta entries plus
 //!   `iwdb.version` (an `Int`, so versions above `i64::MAX` can't be saved);
 //! - the graph meta holds `iwdb.catalog`, the namespace and its catalog
-//!   (ADR 0003), and `iwdb.seq`, the seq of the last commit the file
-//!   reflects (an `Int`), and nothing else.
+//!   (ADR 0003), `iwdb.seq`, the seq of the last commit the file reflects
+//!   (an `Int`), and `iwdb.keys`, the idempotency key table (a JSON string,
+//!   step 8; data-dir layout 3), and nothing else. Files written before
+//!   layout 3 have no `iwdb.keys`: their table is empty.
 //!
 //! So `ironweaver_core::format::from_binary` can read a database file as a
 //! `Record` graph, with the version as a meta entry.
@@ -31,7 +33,8 @@ use ironweaver_core::{Attrs, Value};
 use serde::{Serialize, Serializer};
 
 use crate::catalog::{CatalogError, IndexChanges, NamespaceCatalog, NamespaceName};
-use crate::reserved::{is_reserved, CATALOG_KEY, SEQ_KEY, VERSION_KEY};
+use crate::idempotency::KeyTable;
+use crate::reserved::{is_reserved, CATALOG_KEY, KEYS_KEY, SEQ_KEY, VERSION_KEY};
 use crate::{DbGraph, DbRecord, Entity, Error};
 
 /// The graph-level data a database file carries.
@@ -45,6 +48,8 @@ pub struct GraphMeta {
     /// holds exactly the state after the commits up to it, catalog included.
     /// Saved as an `Int`, so at most `i64::MAX`.
     pub seq: u64,
+    /// The namespace's recent idempotency keys (step 8).
+    pub keys: KeyTable,
 }
 
 impl GraphMeta {
@@ -55,13 +60,19 @@ impl GraphMeta {
     /// it. The commit pipeline never gets there (`i64::MAX` commits).
     pub fn to_attrs(&self) -> Attrs {
         let seq = i64::try_from(self.seq).map_or(Value::None, Value::Int);
-        [(CATALOG_KEY.to_owned(), self.catalog.to_meta_value(&self.namespace)), (SEQ_KEY.to_owned(), seq)].into()
+        [
+            (CATALOG_KEY.to_owned(), self.catalog.to_meta_value(&self.namespace)),
+            (SEQ_KEY.to_owned(), seq),
+            (KEYS_KEY.to_owned(), self.keys.to_meta_value()),
+        ]
+        .into()
     }
 
     /// Read the graph meta of a loaded file.
     pub fn from_load(meta: &LoadAttrs<'_>) -> Result<Self, Error> {
         let mut found = None;
         let mut seq = None;
+        let mut keys = None;
         for (key, value) in meta.iter() {
             if key == CATALOG_KEY {
                 if found.is_some() {
@@ -77,6 +88,11 @@ impl GraphMeta {
                     LoadKind::Int(v) => u64::try_from(v).map_err(|_| invalid(format!("{:?}", value.to_value())))?,
                     _ => return Err(invalid(format!("{:?}", value.to_value()))),
                 });
+            } else if key == KEYS_KEY {
+                if keys.is_some() {
+                    return Err(Error::InvalidKeyTable { reason: "the key appears twice".into() });
+                }
+                keys = Some(value.to_value());
             } else if is_reserved(key) {
                 return Err(Error::UnknownReservedKey { entity: Entity::Graph, key: key.to_owned() });
             } else {
@@ -85,7 +101,12 @@ impl GraphMeta {
         }
         let (namespace, catalog) = found.ok_or(CatalogError::Missing)?;
         let seq = seq.ok_or(Error::MissingSeq)?;
-        Ok(GraphMeta { namespace, catalog, seq })
+        // Checked against the seq, which may come after it
+        let keys = match keys {
+            Some(value) => KeyTable::from_meta_value(&value, seq)?,
+            None => KeyTable::new(),
+        };
+        Ok(GraphMeta { namespace, catalog, seq, keys })
     }
 }
 

@@ -327,11 +327,11 @@ impl<F: LogFs> Checkpointer<F> {
         // On error the namespace is dropped and loaded again next time
         let mut namespace = namespace;
         if target > namespace.seq() {
-            let reader = WalReader::open_until(&self.wal, namespace.seq() + 1, target)?;
-            for record in reader {
-                let record = record?;
+            let mut reader = WalReader::open_until(&self.wal, namespace.seq() + 1, target)?;
+            while let Some(record) = reader.next_timed() {
+                let (record, time) = record?;
                 let seq = record.seq;
-                if let Err(source) = namespace.replay(record) {
+                if let Err(source) = namespace.replay(record, time) {
                     let error = Error::ReplayFailed { seq, source };
                     self.disabled = Some(error.to_string());
                     return Err(error);

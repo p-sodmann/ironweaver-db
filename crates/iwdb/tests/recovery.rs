@@ -302,7 +302,7 @@ fn a_record_that_fails_to_replay_is_reported_and_not_truncated() {
     let next = reference.seq() + 1;
     let mut wal = Wal::create(&dir.path().join("wal"), WalOptions::default(), next).unwrap();
     let bad = ironweaver_core::Op::RemoveNode { id: "no such node".into() };
-    wal.append(&CommitRecord { seq: next, change: Change::Data(vec![bad]) }).unwrap();
+    wal.append(&CommitRecord::new(next, Change::Data(vec![bad]))).unwrap();
     wal.close().unwrap();
 
     let before = snapshot(dir.path());

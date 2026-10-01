@@ -21,9 +21,9 @@ use crate::checkpoint::{checkpoint_name, list_checkpoints};
 use crate::history::HistoryId;
 use crate::io::{LogFile, LogFs};
 use crate::layout::{encode_marker, BACKUP_NAME, CHECKPOINT_DIR, MARKER_NAME, WAL_DIR};
-use crate::time::CommitTime;
 use crate::verify::Finding;
 use crate::{format, reader, Error};
+use iwdb_engine::CommitTime;
 
 /// The first 8 bytes of a manifest.
 pub const MANIFEST_MAGIC: [u8; 8] = *b"IWDBBAK\n";

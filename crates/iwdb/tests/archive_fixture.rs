@@ -56,7 +56,7 @@ fn generate_fixture() {
     let end = iwdb_storage::read_log(&dir.join("archive"), 1).unwrap().1.next_seq - 1;
     let mut at_end = support::reference();
     for record in iwdb_storage::read_log(&dir.join("archive"), 1).unwrap().0 {
-        at_end.replay(record).unwrap();
+        at_end.replay(record, None).unwrap();
     }
     assert_eq!(at_end.seq(), end);
     fs::remove_file(dir.join("archive").join("LOCK")).unwrap();

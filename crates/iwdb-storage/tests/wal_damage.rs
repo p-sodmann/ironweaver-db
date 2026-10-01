@@ -23,7 +23,7 @@ use proptest::prelude::*;
 /// records as read back.
 fn write_log(dir: &Path, fsync: FsyncPolicy, segment_size: u64, n: i64) -> Vec<CommitRecord> {
     let wal = Wal::create(dir, WalOptions { fsync, segment_size }, 1).unwrap();
-    let mut logged = LoggedNamespace::new(namespace(), wal).unwrap();
+    let logged = LoggedNamespace::new(namespace(), wal).unwrap();
     for i in 0..n {
         if i % 4 == 3 {
             let path = AttrPath::new([format!("k{}", i)]).unwrap();

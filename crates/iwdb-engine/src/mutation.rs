@@ -37,7 +37,7 @@ use ironweaver_core::{Attrs, EdgeId, Op, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{Constraint, IndexDef};
-use crate::DbRecord;
+use crate::{CommitTime, DbRecord, Keyed};
 
 /// Deepest nesting of an attribute or meta value a mutation may carry (a
 /// scalar is depth 1), the core's [`MAX_DEPTH`](ironweaver_core::format::MAX_DEPTH).
@@ -86,6 +86,9 @@ pub enum EdgeKey {
 /// Top-level attribute keys and meta keys must not start with `iwdb.`
 /// ([`reserved`](crate::reserved)); values may be nested at most
 /// [`MAX_VALUE_DEPTH`] levels.
+///
+/// Serde writes `attr` and `meta` sorted by key, so equal mutations encode
+/// to equal bytes (the fingerprint of an idempotent request depends on it).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Mutation {
     /// Create the node, or replace its attributes and meta. The labels are
@@ -94,7 +97,9 @@ pub enum Mutation {
     UpsertNode {
         id: String,
         labels: Vec<String>,
+        #[serde(serialize_with = "ironweaver_core::value::serialize_sorted")]
         attr: Attrs,
+        #[serde(serialize_with = "ironweaver_core::value::serialize_sorted")]
         meta: Attrs,
         expected_version: Option<u64>,
     },
@@ -109,14 +114,18 @@ pub enum Mutation {
         from: String,
         to: String,
         ty: Option<String>,
+        #[serde(serialize_with = "ironweaver_core::value::serialize_sorted")]
         attr: Attrs,
+        #[serde(serialize_with = "ironweaver_core::value::serialize_sorted")]
         meta: Attrs,
     },
     /// Replace an edge's attributes and meta, or add the edge (for
     /// [`EdgeKey::Endpoints`]). Its id is in [`CommitResult::edge_ids`].
     UpsertEdge {
         key: EdgeKey,
+        #[serde(serialize_with = "ironweaver_core::value::serialize_sorted")]
         attr: Attrs,
+        #[serde(serialize_with = "ironweaver_core::value::serialize_sorted")]
         meta: Attrs,
         expected_version: Option<u64>,
     },
@@ -203,6 +212,16 @@ pub struct CommitRecord {
     /// more for each successful commit. Failed commits don't use one.
     pub seq: u64,
     pub change: Change,
+    /// Set for a commit made with an idempotency key (WAL format 3, step
+    /// 8): the key and the result, which replay puts into the key table.
+    pub keyed: Option<Keyed>,
+}
+
+impl CommitRecord {
+    /// A record without an idempotency key.
+    pub fn new(seq: u64, change: Change) -> Self {
+        CommitRecord { seq, change, keyed: None }
+    }
 }
 
 /// The outcome of a successful commit.
@@ -216,4 +235,10 @@ pub struct CommitResult {
     /// after it, sorted (nodes by id, then edges by id). Empty for catalog
     /// changes.
     pub versions: Vec<(Target, u64)>,
+    /// When the WAL appended the commit (step 8; ADR 0010). `None` for a
+    /// commit applied without a log, and for records of WAL format 1.
+    pub time: Option<CommitTime>,
+    /// True if this commit was not applied now: its idempotency key was
+    /// found, and this is the original commit's result (step 8, ADR 0015).
+    pub deduplicated: bool,
 }

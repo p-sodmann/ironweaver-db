@@ -36,7 +36,7 @@ fn assert_read_only(
     fs: &TestFs,
     before: &(Vec<String>, impl std::fmt::Debug + PartialEq, u64),
 ) {
-    assert_eq!(state(logged.namespace()).0, before.0);
+    assert_eq!(state(&logged.namespace()).0, before.0);
     assert_eq!(logged.namespace().seq(), before.2);
     assert!(logged.read_only().is_some());
     let calls = fs.state().calls.len();
@@ -61,7 +61,7 @@ fn a_failed_write_is_not_applied_and_makes_the_namespace_read_only() {
         let fs = TestFs::default();
         let mut logged = logged(&fs, dir.path(), FsyncPolicy::Always, 1 << 20);
         commit_n(&mut logged, 3);
-        let before = state(logged.namespace());
+        let before = state(&logged.namespace());
         let valid_len = std::fs::metadata(logged.wal().segment_path()).unwrap().len();
 
         fs.inject(Call::Write, fault);
@@ -96,7 +96,7 @@ fn a_failed_fsync_is_not_applied_not_retried_and_makes_the_namespace_read_only()
     let fs = TestFs::default();
     let mut logged = logged(&fs, dir.path(), FsyncPolicy::Always, 1 << 20);
     commit_n(&mut logged, 3);
-    let before = state(logged.namespace());
+    let before = state(&logged.namespace());
 
     fs.inject(Call::Sync, Fault::Fail);
     match logged.commit(&[upsert("b", Value::Int(1))]) {
@@ -127,7 +127,7 @@ fn a_failed_group_fsync_fails_the_commit_that_waits_for_it() {
     // Two commits acknowledged without an fsync
     commit_n(&mut logged, 2);
     assert_eq!(logged.wal().synced_seq(), 3);
-    let before = state(logged.namespace());
+    let before = state(&logged.namespace());
 
     fs.inject(Call::Sync, Fault::Fail);
     assert!(matches!(logged.commit(&[upsert("b", Value::Int(1))]), Err(Error::Io { op: "fsync", .. })));
@@ -142,7 +142,7 @@ fn a_failed_sync_due_makes_the_namespace_read_only() {
     let mut logged = logged(&fs, dir.path(), group, 1 << 20);
     commit_n(&mut logged, 1);
     assert_eq!(logged.wal().synced_seq(), 0);
-    let before = state(logged.namespace());
+    let before = state(&logged.namespace());
     std::thread::sleep(Duration::from_millis(30));
     fs.inject(Call::Sync, Fault::Fail);
     assert!(matches!(logged.sync_due(), Err(Error::Io { op: "fsync", .. })));
@@ -165,7 +165,7 @@ fn a_failed_rotation_is_not_applied_and_makes_the_namespace_read_only() {
                 break;
             }
         }
-        let before = state(logged.namespace());
+        let before = state(&logged.namespace());
         let (creates, rotations) = (fs.count(Call::Create), fs.count(Call::Rename));
 
         // A record large enough to need a new segment
@@ -205,16 +205,16 @@ fn a_poisoned_namespace_is_read_only() {
     // A record the graph rejects poisons the namespace (a validated record
     // can't fail to apply through the public API, short of a bug)
     let mut ns = namespace();
-    let bad = CommitRecord { seq: 1, change: Change::Data(vec![ironweaver_core::Op::RemoveNode { id: "x".into() }]) };
-    assert!(matches!(ns.replay(bad), Err(iwdb_engine::Error::ApplyFailed { .. })));
-    let mut logged = LoggedNamespace::new(ns, wal).unwrap();
-    let before = state(logged.namespace());
+    let bad = CommitRecord::new(1, Change::Data(vec![ironweaver_core::Op::RemoveNode { id: "x".into() }]));
+    assert!(matches!(ns.replay(bad, None), Err(iwdb_engine::Error::ApplyFailed { .. })));
+    let logged = LoggedNamespace::new(ns, wal).unwrap();
+    let before = state(&logged.namespace());
     assert!(logged.read_only().is_some());
     let calls = fs.state().calls.len();
     assert!(matches!(logged.commit(&[upsert("a", Value::Int(0))]), Err(Error::ReadOnly { .. })));
     assert!(matches!(logged.commit_catalog(index("x")), Err(Error::ReadOnly { .. })));
     assert_eq!(fs.state().calls.len(), calls);
-    assert_eq!(state(logged.namespace()), before);
+    assert_eq!(state(&logged.namespace()), before);
 }
 
 #[test]

@@ -149,7 +149,7 @@ fn a_newer_layout_or_a_damaged_marker_is_refused() {
     fs::write(&marker, encode_marker_with(LAYOUT_VERSION + 1, b"anything a newer layout holds")).unwrap();
     let before = snapshot(dir.path());
     match Store::open(dir.path(), options(2)) {
-        Err(Error::UnsupportedLayout { version, .. }) => assert_eq!(version, 3),
+        Err(Error::UnsupportedLayout { version, .. }) => assert_eq!(version, LAYOUT_VERSION + 1),
         other => panic!("{:?}", other),
     }
     assert_eq!(snapshot(dir.path()), before);

@@ -18,8 +18,8 @@ use crate::io::{LogFile, LogFs};
 use crate::layout::{
     self, encode_marker, BACKUP_NAME, CHECKPOINT_DIR, LOCK_NAME, MARKER_NAME, RESTORING_NAME, WAL_DIR,
 };
-use crate::time::CommitTime;
 use crate::{reader, Error, WalReader};
+use iwdb_engine::CommitTime;
 
 /// Where a restore reads from: a backup (or any data directory that no
 /// store has open), a WAL archive, or both, of the same history.
@@ -308,17 +308,17 @@ fn replay(
     // Fails with MissingRecords if the log starts after `from`
     let mut reader = WalReader::from_segments(log.to_vec(), from, until)?;
     let (mut replayed, mut time) = (0, None);
-    while let Some(record) = reader.next() {
-        let record = match record {
+    while let Some(record) = reader.next_timed() {
+        let (record, record_time) = match record {
             Ok(record) => record,
             // To the end: the log ends before `from`, nothing after the checkpoint
             Err(Error::LogEndsBefore { from: f, .. }) if to_end && f == from => break,
             Err(e) => return Err(e),
         };
         let seq = record.seq;
-        namespace.replay(record).map_err(|source| Error::ReplayFailed { seq, source })?;
+        namespace.replay(record, record_time).map_err(|source| Error::ReplayFailed { seq, source })?;
         replayed += 1;
-        time = reader.time();
+        time = record_time;
     }
     Ok((replayed, time))
 }

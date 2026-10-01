@@ -27,6 +27,10 @@ pub const SEQ_KEY: &str = "iwdb.seq";
 /// Graph meta: the namespace's catalog (see ADR 0003).
 pub const CATALOG_KEY: &str = "iwdb.catalog";
 
+/// Graph meta: the namespace's idempotency key table (data-dir layout 3,
+/// step 8; see [`KeyTable`](crate::KeyTable)).
+pub const KEYS_KEY: &str = "iwdb.keys";
+
 /// Whether `key` is owned by the database.
 pub fn is_reserved(key: &str) -> bool {
     key.starts_with(RESERVED_PREFIX)
@@ -72,7 +76,7 @@ mod tests {
 
     #[test]
     fn own_keys_are_reserved() {
-        for key in [VERSION_KEY, SEQ_KEY, CATALOG_KEY, "iwdb.", "iwdb.anything"] {
+        for key in [VERSION_KEY, SEQ_KEY, CATALOG_KEY, KEYS_KEY, "iwdb.", "iwdb.anything"] {
             assert!(is_reserved(key), "{}", key);
             assert_eq!(check_user_meta_key(key), Err(Error::ReservedName { key: key.to_owned() }));
             assert_eq!(check_user_key(key), Err(Error::ReservedName { key: key.to_owned() }));

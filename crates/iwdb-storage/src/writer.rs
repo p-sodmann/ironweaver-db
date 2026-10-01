@@ -7,8 +7,8 @@ use iwdb_engine::CommitRecord;
 
 use crate::format::{self, FrameHeader, FORMAT_VERSION, FRAME_HEADER_LEN, SEGMENT_HEADER_LEN};
 use crate::io::{LogFile, LogFs, StdFs};
-use crate::time::CommitTime;
 use crate::{reader, Error};
+use iwdb_engine::CommitTime;
 
 /// Smallest segment size (1 KiB).
 pub const MIN_SEGMENT_SIZE: u64 = 1 << 10;
@@ -221,10 +221,11 @@ impl<F: LogFs> Wal<F> {
     /// - [`Error::ReadOnly`]: the log failed earlier.
     ///
     /// The record's commit time is the system clock's, but never earlier
-    /// than the previous record's ([`CommitTime`]).
-    pub fn append(&mut self, record: &CommitRecord) -> Result<(), Error> {
+    /// than the previous record's ([`CommitTime`]); it is returned.
+    pub fn append(&mut self, record: &CommitRecord) -> Result<CommitTime, Error> {
         let time = CommitTime::now().max(self.last_time);
-        self.append_at(record, time)
+        self.append_at(record, time)?;
+        Ok(time)
     }
 
     /// [`append`](Self::append) with an explicit commit time, written as

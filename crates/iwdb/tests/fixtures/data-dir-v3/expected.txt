@@ -1,0 +1,21 @@
+edge 0 "b" -> "a" type=Some("U") attr={"y": [None, Int(0), [Int(2)]]} meta={} version=2
+edge 1 "b" -> "a" type=None attr={"y": None} meta={} version=1
+node "a" labels=["A", "B"] attr={"x": String("t"), "y": String("s")} meta={} version=5
+node "b" labels=["B"] attr={"y": Int(1)} meta={} version=4
+node "d" labels=["B"] attr={"y": Int(2)} meta={} version=6
+node "p0" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000039")} meta={} version=14
+node "p1" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000")} meta={} version=15
+node "p2" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001001")} meta={} version=14
+catalog NamespaceCatalog { indexes: {IndexDef { path: AttrPath(["y"]) }}, constraints: {} }
+seq 59
+key KeyEntry { key: IdempotencyKey("before-0"), fingerprint: 1720959353, result: CommitResult { seq: 22, edge_ids: [], versions: [(Node("b"), 3)], time: Some(CommitTime(1790849132436134)), deduplicated: false } }
+key KeyEntry { key: IdempotencyKey("before-1"), fingerprint: 1148700529, result: CommitResult { seq: 23, edge_ids: [], versions: [(Node("p0"), 6)], time: Some(CommitTime(1790849132439254)), deduplicated: false } }
+key KeyEntry { key: IdempotencyKey("before-3"), fingerprint: 1214057048, result: CommitResult { seq: 24, edge_ids: [], versions: [(Node("p1"), 6)], time: Some(CommitTime(1790849132442361)), deduplicated: false } }
+key KeyEntry { key: IdempotencyKey("before-5"), fingerprint: 3271358777, result: CommitResult { seq: 25, edge_ids: [], versions: [(Node("p2"), 6)], time: Some(CommitTime(1790849132453310)), deduplicated: false } }
+key KeyEntry { key: IdempotencyKey("before-6"), fingerprint: 859573175, result: CommitResult { seq: 26, edge_ids: [EdgeId(0)], versions: [(Node("d"), 4), (Edge(EdgeId(0)), 1)], time: Some(CommitTime(1790849132457234)), deduplicated: false } }
+key KeyEntry { key: IdempotencyKey("before-7"), fingerprint: 1203359696, result: CommitResult { seq: 27, edge_ids: [], versions: [(Node("p0"), 7)], time: Some(CommitTime(1790849132461239)), deduplicated: false } }
+key KeyEntry { key: IdempotencyKey("before-8"), fingerprint: 3265513103, result: CommitResult { seq: 28, edge_ids: [EdgeId(1)], versions: [(Node("a"), 4), (Node("c"), 2), (Edge(EdgeId(1)), 1)], time: Some(CommitTime(1790849132465217)), deduplicated: false } }
+key KeyEntry { key: IdempotencyKey("before-9"), fingerprint: 83644660, result: CommitResult { seq: 29, edge_ids: [], versions: [(Node("p1"), 7)], time: Some(CommitTime(1790849132476242)), deduplicated: false } }
+key KeyEntry { key: IdempotencyKey("after-0"), fingerprint: 2878946798, result: CommitResult { seq: 58, edge_ids: [], versions: [(Node("p1"), 15)], time: Some(CommitTime(1790849132649676)), deduplicated: false } }
+key KeyEntry { key: IdempotencyKey("after-1"), fingerprint: 557371023, result: CommitResult { seq: 59, edge_ids: [], versions: [(Node("p2"), 14)], time: Some(CommitTime(1790849132654156)), deduplicated: false } }
+history 90aa89a84af7c94e80c8587045dbb3ee

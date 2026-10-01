@@ -63,7 +63,7 @@ fn a_store_verifies_clean_and_reports_what_recovery_reaches() {
     let report = verify(dir.path()).unwrap();
     clean(&report);
     assert_eq!(report.kind, Kind::DataDir);
-    assert_eq!(report.version, Some(2));
+    assert_eq!(report.version, Some(iwdb_storage::layout::LAYOUT_VERSION));
     assert_eq!(report.seq, Some(seq));
     assert_eq!((report.checkpoints, report.checkpoints_checked), (2, 2));
     assert_eq!(report.segments, segment_seqs(dir.path()).len());
@@ -319,4 +319,75 @@ fn a_wal_that_ends_before_the_only_checkpoint_is_a_problem() {
     assert!(Store::open(dir.path(), options(1)).is_err());
     let report = verify(dir.path()).unwrap();
     assert!(report.problems.iter().any(|p| p.message.contains("before the checkpoint")), "{:#?}", report);
+}
+
+/// Rewrite the key table of the checkpoint at `seq` in `dir` (step 8).
+fn rewrite_keys(dir: &Path, seq: u64, keys: iwdb::KeyTable) {
+    let name = NamespaceName::new(iwdb::NAMESPACE).unwrap();
+    let path = checkpoint_path(dir, seq);
+    let loaded = load_checkpoint(&path, seq, &name).unwrap();
+    let meta = GraphMeta { keys, ..loaded.meta };
+    fs::write(&path, codec::to_binary(&loaded.graph, &meta).unwrap()).unwrap();
+}
+
+/// The saved table with its first fingerprint's lowest bit flipped.
+fn flip_first_fingerprint(json: String) -> String {
+    let at = json.find("\"fingerprint\":").unwrap() + "\"fingerprint\":".len();
+    let end = at + json[at..].find(|c: char| !c.is_ascii_digit()).unwrap();
+    let flipped = json[at..end].parse::<u32>().unwrap() ^ 1;
+    format!("{}{}{}", &json[..at], flipped, &json[end..])
+}
+
+/// A table read back from its saved JSON after `edit`, unchecked against a
+/// seq (so that it can be planted where it doesn't belong).
+fn edited(keys: &iwdb::KeyTable, edit: impl FnOnce(String) -> String) -> iwdb::KeyTable {
+    let Value::String(json) = keys.to_meta_value() else { panic!("a string") };
+    iwdb::KeyTable::from_meta_value(&Value::String(edit(json)), u64::MAX).unwrap()
+}
+
+#[test]
+fn an_inconsistent_or_invalid_key_table_is_a_problem() {
+    // A store with keyed commits before each checkpoint
+    let pristine = tempfile::tempdir().unwrap();
+    let store = Store::open(pristine.path(), options(2)).unwrap();
+    let mut reference = reference();
+    let steps = support::workload(50, 11);
+    run(&store, &mut reference, &steps[..10]);
+    support::run_keyed(&store, &mut reference, &steps[10..20], "a");
+    store.checkpoint().unwrap();
+    support::run_keyed(&store, &mut reference, &steps[20..35], "b");
+    store.checkpoint().unwrap();
+    run(&store, &mut reference, &steps[35..]);
+    drop(store);
+    clean(&verify(pristine.path()).unwrap());
+    let [older, newer] = checkpoints(pristine.path())[..] else { panic!() };
+    let name = NamespaceName::new(iwdb::NAMESPACE).unwrap();
+    let keys = load_checkpoint(&checkpoint_path(pristine.path(), newer), newer, &name).unwrap().meta.keys;
+    assert!(keys.len() > 5);
+
+    // A fingerprint the WAL doesn't say: the newer checkpoint differs from the replay
+    let copy = tempfile::tempdir().unwrap();
+    copy_dir(pristine.path(), copy.path());
+    rewrite_keys(copy.path(), newer, edited(&keys, flip_first_fingerprint));
+    let report = verify(copy.path()).unwrap();
+    assert_eq!(report.problems.len(), 1, "{:#?}", report);
+    assert!(report.problems[0].message.contains("idempotency key tables differ"), "{:#?}", report);
+
+    // A table missing its keys altogether
+    let copy = tempfile::tempdir().unwrap();
+    copy_dir(pristine.path(), copy.path());
+    rewrite_keys(copy.path(), newer, iwdb::KeyTable::new());
+    let report = verify(copy.path()).unwrap();
+    assert!(report.problems.iter().any(|p| p.message.contains("idempotency key tables differ")), "{:#?}", report);
+
+    // Entries after the checkpoint's seq: it doesn't load
+    let copy = tempfile::tempdir().unwrap();
+    copy_dir(pristine.path(), copy.path());
+    rewrite_keys(copy.path(), older, keys.clone());
+    let report = verify(copy.path()).unwrap();
+    assert!(
+        report.problems.iter().any(|p| p.message.contains("can't be loaded") && p.message.contains("key table")),
+        "{:#?}",
+        report
+    );
 }

@@ -6,7 +6,9 @@
 //! and keep its fixture (see `documentation/formats/wal.md`).
 //!
 //! - `wal-v1/`: format 1 (step 4), frames without a commit time;
-//! - `wal-v2/`: format 2 (step 7), with a commit time per frame.
+//! - `wal-v2/`: format 2 (step 7), with a commit time per frame;
+//! - `wal-v3/`: format 3 (step 8), whose payloads start with the record's
+//!   idempotency key and result (some records have one).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -16,7 +18,7 @@ use std::path::PathBuf;
 use ironweaver_core::{Attrs, Date, DateTime, EdgeId, Op, Value};
 use iwdb_engine::catalog::{AttrPath, Constraint, ConstraintKind, IndexDef, Label};
 use iwdb_engine::reserved::VERSION_KEY;
-use iwdb_engine::{CatalogChange, Change, CommitRecord, DbRecord};
+use iwdb_engine::{CatalogChange, Change, CommitRecord, DbRecord, IdempotencyKey, Keyed, Target};
 use iwdb_storage::format::FORMAT_VERSION;
 use iwdb_storage::{read_log, CommitTime, FsyncPolicy, Wal, WalOptions, WalReader};
 
@@ -98,7 +100,24 @@ fn fixture_records() -> Vec<CommitRecord> {
         Change::Catalog(CatalogChange::DropIndex(IndexDef { path: AttrPath::new(["address", "city"]).unwrap() })),
         Change::Data(vec![]),
     ];
-    changes.into_iter().zip(1..).map(|(change, seq)| CommitRecord { seq, change }).collect()
+    let mut records: Vec<CommitRecord> =
+        changes.into_iter().zip(1..).map(|(change, seq)| CommitRecord::new(seq, change)).collect();
+    // Format 3: a data and a catalog record with an idempotency key
+    records[0].keyed = Some(Keyed {
+        key: IdempotencyKey::new("req-1 ünïcode").unwrap(),
+        fingerprint: 0xDEAD_BEEF,
+        edge_ids: vec![EdgeId(0)],
+        versions: vec![(Target::Node("a".into()), 1), (Target::Node("b".into()), 1), (Target::Edge(EdgeId(0)), 1)],
+    });
+    records[1].keyed =
+        Some(Keyed { key: IdempotencyKey::new("k").unwrap(), fingerprint: 1, edge_ids: vec![], versions: vec![] });
+    records
+}
+
+/// The records as a log of format `version` holds them: formats 1 and 2
+/// have no idempotency keys.
+fn records_in(version: u32) -> Vec<CommitRecord> {
+    fixture_records().into_iter().map(|r| CommitRecord { keyed: r.keyed.filter(|_| version >= 3), ..r }).collect()
 }
 
 /// The commit times of the fixture records: fixed, and once going
@@ -133,7 +152,7 @@ fn read_timed(dir: &std::path::Path) -> Vec<(CommitRecord, Option<CommitTime>)> 
 #[test]
 fn the_v1_fixture_reads_as_its_records_without_times() {
     let (records, end) = read_log(&fixture_dir(1), 1).unwrap();
-    assert_eq!(records, fixture_records());
+    assert_eq!(records, records_in(1));
     assert_eq!(end.next_seq, fixture_records().len() as u64 + 1);
     assert!(end.torn().is_none());
     assert!(read_timed(&fixture_dir(1)).iter().all(|(_, time)| time.is_none()));
@@ -141,13 +160,20 @@ fn the_v1_fixture_reads_as_its_records_without_times() {
 
 #[test]
 fn the_v2_fixture_reads_as_its_records_and_times() {
-    let expected: Vec<_> = fixture_records().into_iter().map(|r| (r.clone(), Some(fixture_time(r.seq)))).collect();
+    let expected: Vec<_> = records_in(2).into_iter().map(|r| (r.clone(), Some(fixture_time(r.seq)))).collect();
     assert_eq!(read_timed(&fixture_dir(2)), expected);
 }
 
 #[test]
+fn the_v3_fixture_reads_as_its_records_keys_and_times() {
+    let expected: Vec<_> = records_in(3).into_iter().map(|r| (r.clone(), Some(fixture_time(r.seq)))).collect();
+    assert!(expected.iter().filter(|(r, _)| r.keyed.is_some()).count() == 2);
+    assert_eq!(read_timed(&fixture_dir(3)), expected);
+}
+
+#[test]
 fn writing_the_records_gives_the_current_fixture_bytes() {
-    assert_eq!(FORMAT_VERSION, 2, "a new format version needs its own fixture next to wal-v1 and wal-v2");
+    assert_eq!(FORMAT_VERSION, 3, "a new format version needs its own fixture next to wal-v1 to wal-v3");
     let dir = tempfile::tempdir().unwrap();
     write(dir.path());
     let name = "00000000000000000001.wal";
@@ -156,7 +182,7 @@ fn writing_the_records_gives_the_current_fixture_bytes() {
     assert!(written == fixture, "the WAL format changed: bump FORMAT_VERSION and add a fixture");
 }
 
-/// A log written in format 1 continues in format 2: a new writer starts a
+/// A log written in format 1 continues in the current format: a new writer starts a
 /// new segment in the current format, and the reader reads both as one log.
 #[test]
 fn a_v1_log_continues_in_the_current_format() {
@@ -165,7 +191,7 @@ fn a_v1_log_continues_in_the_current_format() {
     fs::copy(fixture_dir(1).join(name), dir.path().join(name)).unwrap();
     let next = fixture_records().len() as u64 + 1;
     let mut wal = Wal::create(dir.path(), WalOptions::default(), next).unwrap();
-    let record = CommitRecord { seq: next, change: Change::Data(vec![]) };
+    let record = CommitRecord::new(next, Change::Data(vec![]));
     wal.append(&record).unwrap();
     wal.close().unwrap();
     let read = read_timed(dir.path());
@@ -187,4 +213,23 @@ fn generate_fixture() {
     }
     fs::create_dir_all(&dir).unwrap();
     write(&dir);
+}
+
+/// A log written in format 2 (step 7) continues in format 3: its records
+/// read without keys, the new segment's with them.
+#[test]
+fn a_v2_log_continues_with_keyed_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let name = "00000000000000000001.wal";
+    fs::copy(fixture_dir(2).join(name), dir.path().join(name)).unwrap();
+    let next = fixture_records().len() as u64 + 1;
+    let mut wal = Wal::create(dir.path(), WalOptions::default(), next).unwrap();
+    let mut record = CommitRecord::new(next, Change::Data(vec![]));
+    record.keyed =
+        Some(Keyed { key: IdempotencyKey::new("again").unwrap(), fingerprint: 9, edge_ids: vec![], versions: vec![] });
+    let time = wal.append(&record).unwrap();
+    wal.close().unwrap();
+    let read = read_timed(dir.path());
+    assert!(read[..read.len() - 1].iter().all(|(r, _)| r.keyed.is_none()));
+    assert_eq!(read.last(), Some(&(record, Some(time))));
 }

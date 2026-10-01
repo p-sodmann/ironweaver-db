@@ -13,7 +13,7 @@ use std::time::Duration;
 use common::{namespace, replay, segments, state, upsert, Call, TestFs};
 use ironweaver_core::Value;
 use iwdb_engine::testutil::workload::{seed, step, Step};
-use iwdb_engine::{CommitRecord, Namespace};
+use iwdb_engine::{CommitRecord, CommitResult, Namespace};
 use iwdb_storage::format::{MAX_RECORD_LEN, SEGMENT_HEADER_LEN};
 use iwdb_storage::{
     read_log, Error, FsyncPolicy, LoggedNamespace, Wal, WalOptions, WalReader, DEFAULT_SEGMENT_SIZE, MIN_SEGMENT_SIZE,
@@ -42,7 +42,9 @@ fn run(
         match (outcome, prepared) {
             (Ok(result), Ok(prepared)) => {
                 acknowledged.push(prepared.record().clone());
-                assert_eq!(reference.apply(prepared).unwrap(), result);
+                // The log gives the commit its time; the reference has none
+                assert!(result.time.is_some());
+                assert_eq!(reference.apply(prepared, None).unwrap(), CommitResult { time: None, ..result });
             }
             (Err(Error::Engine(e)), Err(expected)) => assert_eq!(e, expected),
             (outcome, prepared) => panic!("logged {:?}, reference {:?}", outcome, prepared),
@@ -73,7 +75,7 @@ proptest! {
         let mut acknowledged = Vec::new();
         run(&mut logged, &mut reference, &steps, &mut acknowledged);
         prop_assert_eq!(logged.wal().synced_seq(), logged.namespace().seq());
-        let live = state(logged.namespace());
+        let live = state(&logged.namespace());
         // No close: with `always` every acknowledged commit is synced already
         drop(logged);
 
@@ -99,7 +101,7 @@ proptest! {
         let mut logged = LoggedNamespace::new(replay(records), wal).unwrap();
         run(&mut logged, &mut reference, &more, &mut acknowledged);
         prop_assert!(segments(dir.path()).len() > before);
-        let live = state(logged.namespace());
+        let live = state(&logged.namespace());
         drop(logged);
         let (records, _) = read_log(dir.path(), 1).unwrap();
         prop_assert_eq!(&records, &acknowledged);
@@ -116,7 +118,7 @@ fn logged_with(fs: &TestFs, dir: &std::path::Path, fsync: FsyncPolicy, segment_s
 fn always_syncs_every_commit_and_every_new_segment() {
     let dir = tempfile::tempdir().unwrap();
     let fs = TestFs::default();
-    let mut logged = logged_with(&fs, dir.path(), FsyncPolicy::Always, MIN_SEGMENT_SIZE);
+    let logged = logged_with(&fs, dir.path(), FsyncPolicy::Always, MIN_SEGMENT_SIZE);
     // Segment creation: header write, file sync, rename, directory sync
     assert_eq!((fs.count(Call::Sync), fs.count(Call::SyncDir), fs.count(Call::Rename)), (1, 1, 1));
     for i in 0..100 {
@@ -134,7 +136,7 @@ fn group_commit_syncs_every_batch_and_when_due() {
     let dir = tempfile::tempdir().unwrap();
     let fs = TestFs::default();
     let group = FsyncPolicy::Group { max_delay: Duration::from_secs(3600), max_batch: 3 };
-    let mut logged = logged_with(&fs, dir.path(), group, DEFAULT_SEGMENT_SIZE);
+    let logged = logged_with(&fs, dir.path(), group, DEFAULT_SEGMENT_SIZE);
     let syncs = fs.count(Call::Sync);
     for i in 1..=7 {
         logged.commit(&[upsert("a", Value::Int(i))]).unwrap();
@@ -155,7 +157,7 @@ fn group_commit_syncs_every_batch_and_when_due() {
     // by sync_due
     let dir = tempfile::tempdir().unwrap();
     let group = FsyncPolicy::Group { max_delay: Duration::from_millis(20), max_batch: 1000 };
-    let mut logged = logged_with(&fs, dir.path(), group, DEFAULT_SEGMENT_SIZE);
+    let logged = logged_with(&fs, dir.path(), group, DEFAULT_SEGMENT_SIZE);
     logged.commit(&[upsert("a", Value::Int(1))]).unwrap();
     assert_eq!(logged.wal().synced_seq(), 0);
     std::thread::sleep(Duration::from_millis(30));
@@ -179,7 +181,7 @@ fn group_commit_syncs_every_batch_and_when_due() {
 fn off_never_syncs() {
     let dir = tempfile::tempdir().unwrap();
     let fs = TestFs::default();
-    let mut logged = logged_with(&fs, dir.path(), FsyncPolicy::Off, MIN_SEGMENT_SIZE);
+    let logged = logged_with(&fs, dir.path(), FsyncPolicy::Off, MIN_SEGMENT_SIZE);
     for i in 0..100 {
         logged.commit(&[upsert("a", Value::Int(i))]).unwrap();
     }
@@ -209,7 +211,7 @@ fn off_syncs_every_unsynced_segment_on_an_explicit_sync() {
         }
     })));
     let off = options(FsyncPolicy::Off, MIN_SEGMENT_SIZE);
-    let mut logged = logged_with(&fs, dir.path(), FsyncPolicy::Off, MIN_SEGMENT_SIZE);
+    let logged = logged_with(&fs, dir.path(), FsyncPolicy::Off, MIN_SEGMENT_SIZE);
     for i in 0..60 {
         logged.commit(&[upsert("a", Value::Int(i))]).unwrap();
     }
@@ -221,7 +223,7 @@ fn off_syncs_every_unsynced_segment_on_an_explicit_sync() {
     let wal = Wal::create_with(fs.clone(), dir.path(), off.clone(), 61).unwrap();
     assert_eq!(wal.synced_seq(), 0, "nothing is known to be durable");
     let (records, _) = read_log(dir.path(), 1).unwrap();
-    let mut logged = LoggedNamespace::new(replay(records), wal).unwrap();
+    let logged = LoggedNamespace::new(replay(records), wal).unwrap();
     for i in 60..120 {
         logged.commit(&[upsert("a", Value::Int(i))]).unwrap();
     }
@@ -253,7 +255,7 @@ fn off_syncs_every_unsynced_segment_on_an_explicit_sync() {
 fn off_sync_skips_a_segment_removed_meanwhile() {
     let dir = tempfile::tempdir().unwrap();
     let fs = TestFs::default();
-    let mut logged = logged_with(&fs, dir.path(), FsyncPolicy::Off, MIN_SEGMENT_SIZE);
+    let logged = logged_with(&fs, dir.path(), FsyncPolicy::Off, MIN_SEGMENT_SIZE);
     for i in 0..60 {
         logged.commit(&[upsert("a", Value::Int(i))]).unwrap();
     }
@@ -270,16 +272,16 @@ fn off_sync_skips_a_segment_removed_meanwhile() {
 fn a_record_above_the_limit_is_rejected_before_anything_happens() {
     let dir = tempfile::tempdir().unwrap();
     let wal = Wal::create(dir.path(), WalOptions::default(), 1).unwrap();
-    let mut logged = LoggedNamespace::new(namespace(), wal).unwrap();
+    let logged = LoggedNamespace::new(namespace(), wal).unwrap();
     logged.commit(&[upsert("a", Value::Int(1))]).unwrap();
-    let before = state(logged.namespace());
+    let before = state(&logged.namespace());
 
     let big = Value::String("x".repeat(MAX_RECORD_LEN as usize));
     match logged.commit(&[upsert("b", big)]) {
         Err(Error::RecordTooLarge { seq: 2, len, max }) => assert!(len > max && max == MAX_RECORD_LEN as usize),
         other => panic!("{:?}", other),
     }
-    assert_eq!(state(logged.namespace()), before);
+    assert_eq!(state(&logged.namespace()), before);
     assert!(logged.read_only().is_none());
     logged.commit(&[upsert("b", Value::Int(2))]).unwrap();
     drop(logged);
@@ -293,7 +295,7 @@ fn a_record_above_the_limit_is_rejected_before_anything_happens() {
 fn a_writer_never_overwrites_records() {
     let dir = tempfile::tempdir().unwrap();
     let wal = Wal::create(dir.path(), WalOptions::default(), 1).unwrap();
-    let mut logged = LoggedNamespace::new(namespace(), wal).unwrap();
+    let logged = LoggedNamespace::new(namespace(), wal).unwrap();
     for i in 0..3 {
         logged.commit(&[upsert("a", Value::Int(i))]).unwrap();
     }
@@ -345,7 +347,7 @@ fn a_writer_never_overwrites_records() {
 fn appends_must_come_in_seq_order() {
     let dir = tempfile::tempdir().unwrap();
     let mut wal = Wal::create(dir.path(), WalOptions::default(), 1).unwrap();
-    let record = |seq| CommitRecord { seq, change: iwdb_engine::Change::Data(vec![]) };
+    let record = |seq| CommitRecord::new(seq, iwdb_engine::Change::Data(vec![]));
     wal.append(&record(1)).unwrap();
     assert!(matches!(wal.append(&record(3)), Err(Error::OutOfOrder { expected: 2, found: 3 })));
     assert!(matches!(wal.append(&record(1)), Err(Error::OutOfOrder { expected: 2, found: 1 })));
@@ -370,7 +372,7 @@ fn reading_from_a_seq_needs_the_records_from_there() {
     for _ in 1..10 {
         ns.commit(&[upsert("pad", Value::Int(0))]).unwrap();
     }
-    let mut logged = LoggedNamespace::new(ns, wal).unwrap();
+    let logged = LoggedNamespace::new(ns, wal).unwrap();
     for i in 0..30 {
         logged.commit(&[upsert("a", Value::Int(i))]).unwrap();
     }

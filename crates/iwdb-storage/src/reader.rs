@@ -20,9 +20,9 @@ use std::path::{Path, PathBuf};
 use iwdb_engine::CommitRecord;
 
 use crate::format::{self, Damage, Header, Invalid, FRAME_HEADER_LEN, MAX_RECORD_LEN, SEGMENT_HEADER_LEN};
-use crate::time::CommitTime;
 use crate::writer::MAX_SEGMENT_SIZE;
 use crate::Error;
+use iwdb_engine::CommitTime;
 
 /// The largest segment file the writer can produce: a full segment plus one
 /// record of the largest size (a segment rotates before a record that
@@ -414,6 +414,13 @@ impl WalReader {
         self.time
     }
 
+    /// The next record with its commit time ([`time`](Self::time)): what
+    /// replay needs (the idempotency key table keeps the times).
+    pub fn next_timed(&mut self) -> Option<Result<(CommitRecord, Option<CommitTime>), Error>> {
+        let record = self.next()?;
+        Some(record.map(|record| (record, self.time)))
+    }
+
     /// Where the log ends, once the iterator has returned `None` without
     /// an error.
     pub fn end(&self) -> Option<&LogEnd> {
@@ -542,12 +549,16 @@ mod tests {
     fn segment_version(version: u32, first_seq: u64, frames: &[(u64, u64, u8, &[u8])]) -> Vec<u8> {
         let mut bytes = encode_segment_header_version(first_seq, version).to_vec();
         for &(seq, synced_seq, kind, payload) in frames {
+            // An empty op list; format 3 puts the key's `None` before it
+            let payload = if version >= 3 && payload == EMPTY { &[0, 0][..] } else { payload };
             let time = seq as i64 * 10;
             encode_frame(&mut bytes, version, FrameHeader { seq, synced_seq, time, kind }, payload);
         }
         bytes
     }
 
+    /// An empty op list, in format 1 and 2 (`segment_version` adds the
+    /// key's byte for format 3).
     const EMPTY: &[u8] = &[0];
 
     #[test]

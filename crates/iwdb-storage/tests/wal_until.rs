@@ -21,7 +21,7 @@ use iwdb_storage::{Error, FsyncPolicy, LoggedNamespace, Wal, WalOptions, WalRead
 fn log(n: i64) -> (tempfile::TempDir, LoggedNamespace) {
     let dir = tempfile::tempdir().unwrap();
     let options = WalOptions { fsync: FsyncPolicy::Always, segment_size: MIN_SEGMENT_SIZE };
-    let mut logged = LoggedNamespace::new(namespace(), Wal::create(dir.path(), options, 1).unwrap()).unwrap();
+    let logged = LoggedNamespace::new(namespace(), Wal::create(dir.path(), options, 1).unwrap()).unwrap();
     for i in 0..n {
         logged.commit(&[upsert(&format!("n{}", i % 7), Value::from(format!("{:0>100}", i)))]).unwrap();
     }

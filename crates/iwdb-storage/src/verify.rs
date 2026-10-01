@@ -13,8 +13,8 @@ use crate::backup::{self, Manifest};
 use crate::checkpoint::{list_checkpoints, load_checkpoint};
 use crate::history::HistoryId;
 use crate::layout::{self, BACKUP_NAME, CHECKPOINT_DIR, LOCK_NAME, MARKER_NAME, TEMP_SUFFIX, WAL_DIR};
-use crate::time::CommitTime;
 use crate::{format, reader, Error, WalReader};
+use iwdb_engine::CommitTime;
 
 /// Something verify found, with the file it is about.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -309,8 +309,8 @@ fn replay(
                 return;
             }
         };
-        while let Some(record) = reader.next() {
-            let record = match record {
+        while let Some(record) = reader.next_timed() {
+            let (record, time) = match record {
                 Ok(record) => record,
                 Err(e) => {
                     report.problem(None, format!("the WAL can't be read further: {}", e));
@@ -322,7 +322,7 @@ fn replay(
             report.records += 1;
             report.first_seq.get_or_insert(seq);
             report.last_seq = Some(seq);
-            report.time = reader.time().or(report.time);
+            report.time = time.or(report.time);
             if !replaying || seq <= namespace.seq() {
                 continue;
             }
@@ -338,7 +338,7 @@ fn replay(
                 replaying = false;
                 continue;
             }
-            if let Err(e) = namespace.replay(record) {
+            if let Err(e) = namespace.replay(record, time) {
                 report.problem(None, format!("record {} fails to replay: {}", seq, e));
                 replaying = false;
                 continue;

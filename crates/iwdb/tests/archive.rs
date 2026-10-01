@@ -56,7 +56,7 @@ fn whole_log(dir: &Path) -> Vec<(u64, PathBuf)> {
 fn assert_whole_history(dir: &Path, reference: &Namespace) {
     let mut ns = support::reference();
     for record in WalReader::from_segments(whole_log(dir), 1, u64::MAX).unwrap() {
-        ns.replay(record.unwrap()).unwrap();
+        ns.replay(record.unwrap(), None).unwrap();
     }
     assert_eq!(state(&ns), state(reference));
 }

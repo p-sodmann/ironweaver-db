@@ -179,6 +179,20 @@ pub enum Error {
     /// not affected; the WAL just isn't cut.
     #[error("checkpoints are disabled until the store is reopened, after an earlier failure: {cause}")]
     CheckpointsDisabled { cause: String },
+
+    // Requests (step 8)
+    /// A request didn't finish within its timeout: waiting for a `min_seq`,
+    /// or a job cancelled at its deadline. Nothing changed.
+    #[error("{what} timed out after {after:?}")]
+    Timeout { what: String, after: std::time::Duration },
+    /// The caller cancelled the request (its `cancel::Token`).
+    #[error("the request was cancelled")]
+    Cancelled,
+    /// A read-your-writes seq of another history: a store restored since
+    /// (a restore starts a new history, ADR 0009), or another store. The
+    /// seq says nothing about this store's state.
+    #[error("the seq belongs to history {given}, but the store holds history {store}")]
+    OtherHistory { given: crate::HistoryId, store: crate::HistoryId },
 }
 
 impl Error {

@@ -128,7 +128,7 @@ impl Model {
         }
         m.seq += 1;
         *self = m;
-        Ok(CommitResult { seq: self.seq, edge_ids, versions })
+        Ok(CommitResult { seq: self.seq, edge_ids, versions, ..CommitResult::default() })
     }
 
     /// Whether the whole model satisfies `c`.
@@ -404,7 +404,7 @@ proptest! {
             };
             let actual = prepared.and_then(|p| {
                 log.push(p.record().clone());
-                ns.apply(p)
+                ns.apply(p, None)
             });
             match (&actual, &expected) {
                 (Ok(a), Ok(e)) => {
@@ -432,7 +432,7 @@ proptest! {
             let bytes = postcard::to_allocvec(record).unwrap();
             let decoded: CommitRecord = postcard::from_bytes(&bytes).unwrap();
             prop_assert_eq!(&decoded, record);
-            replica.replay(decoded).unwrap();
+            replica.replay(decoded, None).unwrap();
         }
         prop_assert_eq!(state(&replica), state(&ns));
         prop_assert_eq!(index_paths(replica.graph()), index_paths(ns.graph()));

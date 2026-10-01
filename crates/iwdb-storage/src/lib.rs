@@ -44,7 +44,6 @@ mod logged;
 mod reader;
 mod recovery;
 pub mod restore;
-mod time;
 pub mod verify;
 mod writer;
 
@@ -53,13 +52,13 @@ pub use checkpoint::{CheckpointOutcome, Checkpointer, SkippedCheckpoint};
 pub use error::Error;
 pub use history::HistoryId;
 pub use inspect::{inspect, DirStatus};
-pub use logged::LoggedNamespace;
+pub use iwdb_engine::CommitTime;
+pub use logged::{LockStats, LoggedNamespace, Wait};
 pub use reader::{
     list_segments, read_log, read_segment, segment_prefix, LogEnd, SegmentEnd, TornTail, WalReader,
     MAX_SEGMENT_FILE_LEN,
 };
 pub use recovery::{recover, CutTail, Recovered, RecoveryReport};
 pub use restore::{restore, RestoreReport, RestoreSources, RestoreTarget};
-pub use time::CommitTime;
 pub use verify::{verify, Finding, Kind, VerifyReport};
 pub use writer::{FsyncPolicy, Wal, WalOptions, DEFAULT_SEGMENT_SIZE, MAX_SEGMENT_SIZE, MIN_SEGMENT_SIZE};

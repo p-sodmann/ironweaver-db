@@ -117,6 +117,22 @@ pub enum Error {
     /// The namespace was poisoned by an earlier [`Error::ApplyFailed`].
     #[error("the namespace is poisoned by a failed commit and must be reopened")]
     Poisoned,
+
+    // Idempotency keys (step 8)
+    /// An idempotency key that is empty or too long.
+    #[error("invalid idempotency key: {reason}")]
+    InvalidIdempotencyKey { reason: String },
+    /// A commit reused the idempotency key of an earlier commit (at `seq`)
+    /// with a different request. A key names one request; nothing changed.
+    #[error("idempotency key {key} was used for a different request (commit {seq})")]
+    IdempotencyKeyReused { key: crate::IdempotencyKey, seq: u64 },
+    /// A request that can't be encoded for its fingerprint (values nested
+    /// too deep; such a request fails validation too).
+    #[error("the request can't be encoded: {message}")]
+    Unencodable { message: String },
+    /// A saved idempotency key table (`iwdb.keys`) that is invalid.
+    #[error("invalid idempotency key table: {reason}")]
+    InvalidKeyTable { reason: String },
 }
 
 /// Which part of a saved graph an error is about.

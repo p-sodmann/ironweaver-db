@@ -19,9 +19,11 @@ use crate::history::HistoryId;
 use crate::io::LogFs;
 use crate::Error;
 
-/// The layout version this version writes. It reads layout 1 too, and
-/// upgrades it when it opens a store (see [`DataDir::open`]).
-pub const LAYOUT_VERSION: u32 = 2;
+/// The layout version this version writes. It reads layouts 1 and 2 too,
+/// and upgrades them when it opens a store (see [`DataDir::open`]).
+/// Layout 3 (step 8) adds the idempotency key table (`iwdb.keys`) to the
+/// checkpoints' graph meta; its marker is layout 2's with version 3.
+pub const LAYOUT_VERSION: u32 = 3;
 /// The marker file's name.
 pub const MARKER_NAME: &str = "IWDB";
 /// The lock file's name.
@@ -38,7 +40,7 @@ pub const BACKUP_NAME: &str = "BACKUP";
 pub const RESTORING_NAME: &str = "RESTORING";
 /// The first 8 bytes of the marker.
 pub const MARKER_MAGIC: [u8; 8] = *b"IWDBDIR\n";
-/// Length of the marker file (layout 2).
+/// Length of the marker file (layouts 2 and 3).
 pub const MARKER_LEN: usize = 32;
 /// Length of a layout 1 marker.
 pub const MARKER_LEN_V1: usize = 16;
@@ -58,7 +60,7 @@ pub fn encode_marker_with(version: u32, body: &[u8]) -> Vec<u8> {
     marker
 }
 
-/// The layout 2 marker of a directory of history `history`.
+/// The marker (current layout) of a directory of history `history`.
 pub fn encode_marker(history: HistoryId) -> Vec<u8> {
     encode_marker_with(LAYOUT_VERSION, &history.0)
 }
@@ -66,9 +68,9 @@ pub fn encode_marker(history: HistoryId) -> Vec<u8> {
 /// What a valid marker says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MarkerInfo {
-    /// The layout version (1 or 2).
+    /// The layout version (1, 2 or 3).
     pub version: u32,
-    /// The history id (layout 2; `None` in layout 1).
+    /// The history id (from layout 2; `None` in layout 1).
     pub history: Option<HistoryId>,
 }
 
@@ -98,7 +100,7 @@ fn decode_marker(bytes: &[u8]) -> Marker {
     let version = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
     match (version, bytes.len()) {
         (1, MARKER_LEN_V1) => Marker::Valid(MarkerInfo { version, history: None }),
-        (2, MARKER_LEN) => {
+        (2 | 3, MARKER_LEN) => {
             let mut id = [0u8; 16];
             id.copy_from_slice(&bytes[12..28]);
             Marker::Valid(MarkerInfo { version, history: Some(HistoryId(id)) })
@@ -187,7 +189,9 @@ impl DataDir {
         let marker = read_marker(root)?;
         let created = marker.is_none();
         let (history, upgrade_from) = match marker {
-            Some(MarkerInfo { history: Some(history), .. }) => (history, None),
+            Some(MarkerInfo { version, history: Some(history) }) => {
+                (history, (version < LAYOUT_VERSION).then_some(version))
+            }
             Some(MarkerInfo { version, history: None }) => (HistoryId::random(), Some(version)),
             None => (HistoryId::random(), None),
         };
@@ -237,12 +241,14 @@ impl DataDir {
         fs.sync_dir(&self.root).map_err(|e| Error::io("sync directory", &self.root, e))
     }
 
-    /// Upgrade a layout 1 directory to the current layout: replace its
-    /// marker (atomically, then a directory sync) with one that holds the
-    /// history id [`open`](Self::open) chose. Nothing else changes: the
-    /// checkpoints and segments of layout 1 are valid in layout 2. Does
-    /// nothing for a directory in the current layout. Returns the layout
-    /// version it upgraded from.
+    /// Upgrade a layout 1 or 2 directory to the current layout: replace its
+    /// marker (atomically, then a directory sync) with one of the current
+    /// layout that holds its history id (layout 2), or the one
+    /// [`open`](Self::open) chose (layout 1, which has none). Nothing else
+    /// changes: the checkpoints and segments of layouts 1 and 2 are valid
+    /// in layout 3 (a checkpoint without `iwdb.keys` has an empty key
+    /// table). Does nothing for a directory in the current layout. Returns
+    /// the layout version it upgraded from.
     ///
     /// An older version of Ironweaver DB can't open the directory
     /// afterwards. A crash leaves the old marker or the new one.
@@ -430,7 +436,9 @@ mod tests {
         let history = HistoryId([7; 16]);
         let marker = encode_marker(history);
         assert_eq!(marker.len(), MARKER_LEN);
-        assert_eq!(decode_marker(&marker), Marker::Valid(MarkerInfo { version: 2, history: Some(history) }));
+        assert_eq!(decode_marker(&marker), Marker::Valid(MarkerInfo { version: 3, history: Some(history) }));
+        let v2 = encode_marker_with(2, &history.0);
+        assert_eq!(decode_marker(&v2), Marker::Valid(MarkerInfo { version: 2, history: Some(history) }));
         let v1 = encode_marker_with(1, &[]);
         assert_eq!(v1.len(), MARKER_LEN_V1);
         assert_eq!(decode_marker(&v1), Marker::Valid(MarkerInfo { version: 1, history: None }));

@@ -41,7 +41,7 @@ pub fn state(ns: &Namespace) -> (Vec<String>, iwdb_engine::catalog::NamespaceCat
 pub fn replay(records: impl IntoIterator<Item = CommitRecord>) -> Namespace {
     let mut ns = namespace();
     for record in records {
-        ns.replay(record).unwrap();
+        ns.replay(record, None).unwrap();
     }
     ns
 }

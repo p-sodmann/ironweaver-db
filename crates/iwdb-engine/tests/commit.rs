@@ -527,7 +527,7 @@ fn at_version(version: u64) -> Namespace {
         Op::AddNode { id: "a".into(), labels: vec![], data: rec.clone() },
         Op::AddEdge { id: EdgeId(0), from: "a".into(), to: "a".into(), ty: None, data: rec },
     ];
-    ns.replay(CommitRecord { seq: 1, change: Change::Data(ops) }).unwrap();
+    ns.replay(CommitRecord::new(1, Change::Data(ops)), None).unwrap();
     ns
 }
 
@@ -573,7 +573,7 @@ fn values_nested_too_deep_for_the_log_are_rejected() {
     let prepared = ns.prepare(&[set(node("a"), "ok", nest(99, Value::Int(1)))]).unwrap();
     let bytes = postcard::to_allocvec(prepared.record()).unwrap();
     assert_eq!(&postcard::from_bytes::<CommitRecord>(&bytes).unwrap(), prepared.record());
-    ns.apply(prepared).unwrap();
+    ns.apply(prepared, None).unwrap();
 
     rejects(&mut ns, &[set(node("a"), "deep", nest(100, Value::Int(1)))], too_deep("deep"));
     // An empty list counts as holding a scalar (the log's encoder rejects
@@ -634,10 +634,10 @@ fn records_hold_attribute_ops_and_version_ops() {
         Op::SetNodeAttr { id: "b".into(), key: VERSION_KEY.into(), value: version(2) },
         Op::SetEdgeAttr { id: EdgeId(0), key: VERSION_KEY.into(), value: version(2) },
     ];
-    assert_eq!(prepared.record(), &CommitRecord { seq: 2, change: Change::Data(expected) });
+    assert_eq!(prepared.record(), &CommitRecord::new(2, Change::Data(expected)));
 
     // Whole-record upserts carry the version themselves
-    ns.apply(prepared).unwrap();
+    ns.apply(prepared, None).unwrap();
     let prepared = ns.prepare(&[upsert("a", &["M"], &[])]).unwrap();
     let expected: Vec<Op<DbRecord, DbRecord>> = vec![
         Op::SetNode { id: "a".into(), data: DbRecord { version: 3, ..DbRecord::default() } },
@@ -655,7 +655,7 @@ fn new_edge_ids_come_from_the_graphs_counter() {
         Op::AddEdge { id: EdgeId(100), from: "a".into(), to: "a".into(), ty: None, data: DbRecord::default() },
         Op::RemoveEdge { id: EdgeId(100) },
     ];
-    ns.replay(CommitRecord { seq: 1, change: Change::Data(ops) }).unwrap();
+    ns.replay(CommitRecord::new(1, Change::Data(ops)), None).unwrap();
     assert_eq!(
         ns.commit(&[edge("a", "a", None), edge("a", "a", None)]).unwrap().edge_ids,
         vec![EdgeId(101), EdgeId(102)]
@@ -666,11 +666,11 @@ fn new_edge_ids_come_from_the_graphs_counter() {
 fn replay_rejects_gaps_and_repeats() {
     let mut ns = ns();
     ns.commit(&[upsert("a", &[], &[])]).unwrap();
-    let record = |seq| CommitRecord { seq, change: Change::Data(vec![]) };
-    assert_eq!(ns.replay(record(1)), Err(Error::OutOfOrder { expected: 2, found: 1 }));
-    assert_eq!(ns.replay(record(3)), Err(Error::OutOfOrder { expected: 2, found: 3 }));
+    let record = |seq| CommitRecord::new(seq, Change::Data(vec![]));
+    assert_eq!(ns.replay(record(1), None), Err(Error::OutOfOrder { expected: 2, found: 1 }));
+    assert_eq!(ns.replay(record(3), None), Err(Error::OutOfOrder { expected: 2, found: 3 }));
     assert!(!ns.is_poisoned());
-    ns.replay(record(2)).unwrap();
+    ns.replay(record(2), None).unwrap();
     assert_eq!(ns.seq(), 2);
 }
 
@@ -718,8 +718,13 @@ fn files_with_reserved_attribute_keys_are_rejected() {
     let mut record = Record::with_attr([("iwdb.version", Value::Int(1))]);
     record.meta.insert(VERSION_KEY.into(), Value::Int(1));
     g.add_node("a", record).unwrap();
-    let meta =
-        GraphMeta { namespace: NamespaceName::new("n").unwrap(), catalog: Default::default(), seq: 0 }.to_attrs();
+    let meta = GraphMeta {
+        namespace: NamespaceName::new("n").unwrap(),
+        catalog: Default::default(),
+        seq: 0,
+        keys: Default::default(),
+    }
+    .to_attrs();
     let bytes = format::to_binary(&g, &meta, false).unwrap();
     assert_eq!(
         codec::from_binary(&bytes).unwrap_err(),
@@ -729,7 +734,12 @@ fn files_with_reserved_attribute_keys_are_rejected() {
     // And saving one fails too
     let mut g = DbGraph::new();
     g.add_node("a", DbRecord::with_attr([("iwdb.x", Value::Int(1))])).unwrap();
-    let meta = GraphMeta { namespace: NamespaceName::new("n").unwrap(), catalog: Default::default(), seq: 0 };
+    let meta = GraphMeta {
+        namespace: NamespaceName::new("n").unwrap(),
+        catalog: Default::default(),
+        seq: 0,
+        keys: Default::default(),
+    };
     let err = codec::to_binary(&g, &meta).unwrap_err().to_string();
     assert!(err.contains("'iwdb.x' is reserved"), "{}", err);
 }

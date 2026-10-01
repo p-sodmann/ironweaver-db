@@ -13,6 +13,10 @@ ironweaver-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# Fingerprints of requests made with an idempotency key (step 8): CRC32C
+# of their postcard encoding; both are in the tree already (iwdb-storage)
+crc32c.workspace = true
+postcard.workspace = true
 # Only with `testutil`: the random workload strategies
 proptest = { workspace = true, optional = true }
 
@@ -24,7 +28,6 @@ testutil = ["dep:proptest"]
 [dev-dependencies]
 # Our own tests use the workload strategies
 iwdb-engine = { path = ".", features = ["testutil"] }
-postcard.workspace = true
 proptest.workspace = true
 
 [lints]

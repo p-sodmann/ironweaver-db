@@ -44,12 +44,23 @@ fn one_of_each_kind() -> Vec<Value> {
 ///   flushed, and each one's contents equal a scan: every node with an
 ///   indexable value at the path is found under that value and nowhere
 ///   else, and the index holds no other entry;
-/// - every constraint of the catalog holds.
+/// - every constraint of the catalog holds;
+/// - the idempotency key table (step 8) has at most
+///   [`KEY_TABLE_CAPACITY`](crate::idempotency::KEY_TABLE_CAPACITY)
+///   entries, all at seqs up to the namespace's.
 ///
 /// O((n + m) · number of indexes) time, plus a lookup per indexed node.
 pub fn check(ns: &Namespace) -> Vec<String> {
     let mut found = Violations::default();
     let g = ns.graph();
+
+    let keys = ns.keys();
+    if keys.len() > crate::idempotency::KEY_TABLE_CAPACITY {
+        found.push(|| format!("the idempotency key table has {} entries, more than it may hold", keys.len()));
+    }
+    for entry in keys.entries().filter(|e| e.result.seq > ns.seq()) {
+        found.push(|| format!("idempotency key {} is at seq {}, after the state's", entry.key, entry.result.seq));
+    }
 
     for (_, edge) in g.edges() {
         let id = edge.id().0;
@@ -152,9 +163,9 @@ fn check_index(found: &mut Violations, ns: &Namespace, path: &[String]) -> Resul
     Ok(())
 }
 
-/// Whether two namespaces hold the same state: seq, catalog, and the same
-/// nodes (ids, labels, payloads with versions) and edges (ids, endpoints,
-/// types, payloads). Payloads compare in their canonical form, so `NaN`
+/// Whether two namespaces hold the same state: seq, catalog, idempotency
+/// key table, and the same nodes (ids, labels, payloads with versions) and
+/// edges (ids, endpoints, types, payloads). Payloads compare in their canonical form, so `NaN`
 /// equals `NaN` and `-0.0` differs from `0.0`. Iteration order and the
 /// edge id counter don't count ([`canonical`](crate::testutil::canonical)
 /// leaves them out too). Returns the first difference found.
@@ -167,6 +178,9 @@ pub fn compare(a: &Namespace, b: &Namespace) -> Result<(), String> {
     }
     if a.catalog() != b.catalog() {
         return Err(format!("the catalogs differ: {:?} and {:?}", a.catalog(), b.catalog()));
+    }
+    if let Some(difference) = a.keys().difference(b.keys()) {
+        return Err(format!("the idempotency key tables differ: {}", difference));
     }
     let (ga, gb) = (a.graph(), b.graph());
     if (ga.node_count(), ga.edge_count()) != (gb.node_count(), gb.edge_count()) {

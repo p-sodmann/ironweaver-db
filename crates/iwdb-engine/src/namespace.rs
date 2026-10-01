@@ -4,11 +4,12 @@
 use ironweaver_core::GraphError;
 
 use crate::catalog::{AttrPath, ConstraintKind, NamespaceCatalog, NamespaceName};
+use crate::idempotency::{fingerprint_catalog, fingerprint_data, IdempotencyKey, KeyEntry, KeyTable, Keyed};
 use crate::mutation::{CatalogChange, Change, CommitRecord, CommitResult, Mutation};
-use crate::{codec, resolve, DbGraph, Error};
+use crate::{codec, resolve, CommitTime, DbGraph, Error};
 
-/// One namespace in memory: its graph, its catalog and the `seq` of its
-/// last commit.
+/// One namespace in memory: its graph, its catalog, the `seq` of its last
+/// commit and the table of its recent idempotency keys.
 ///
 /// Every change goes through the commit pipeline, and the graph is only
 /// ever lent out immutably ([`graph`](Self::graph)). A commit is
@@ -22,7 +23,14 @@ use crate::{codec, resolve, DbGraph, Error};
 ///    graph, the indexes are flushed and the record's `seq` becomes the
 ///    namespace's.
 ///
-/// [`commit`](Self::commit) does both. The write-ahead log (step 4) goes
+/// [`commit`](Self::commit) does both. With an idempotency key
+/// ([`prepare_keyed`](Self::prepare_keyed), step 8), preparing first looks
+/// the key up in the [`KeyTable`]: a known key with the same request gives
+/// the original result ([`Prepare::Duplicate`]) and nothing is applied; a
+/// known key with another request is [`Error::IdempotencyKeyReused`].
+/// Applying a keyed record adds it to the table, so replay rebuilds it.
+///
+/// The write-ahead log (step 4) goes
 /// between the two: the record is logged after it is validated and before
 /// it is applied. A commit that fails to prepare changes nothing and uses
 /// no `seq`.
@@ -32,7 +40,8 @@ use crate::{codec, resolve, DbGraph, Error};
 /// commit in order onto an empty namespace ([`replay`](Self::replay))
 /// gives the same graph (as compared by
 /// [`canonical`](crate::testutil::canonical)), catalog and `seq`. Not
-/// thread-safe by itself (`&mut self`); concurrency is step 8.
+/// thread-safe by itself (`&mut self`); `iwdb_storage::LoggedNamespace` adds
+/// the locks (step 8).
 ///
 /// If applying a validated record fails (a bug, or `GraphError::Internal`
 /// from the core, after which the graph may be inconsistent), the
@@ -52,7 +61,18 @@ pub struct Namespace {
     catalog: NamespaceCatalog,
     graph: DbGraph,
     seq: u64,
+    keys: KeyTable,
     poisoned: bool,
+}
+
+/// What preparing a keyed commit gives.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Prepare {
+    /// A new commit, to log and apply.
+    New(Prepared),
+    /// The key's commit is in the table with the same request: its
+    /// original result, with `deduplicated` set. Nothing to log or apply.
+    Duplicate(CommitResult),
 }
 
 /// A validated commit, ready to be logged and applied to the namespace
@@ -70,16 +90,31 @@ impl Prepared {
         &self.record
     }
 
-    /// What [`Namespace::apply`] will return.
+    /// What [`Namespace::apply`] will return (without the commit time).
     pub fn result(&self) -> &CommitResult {
         &self.result
+    }
+
+    /// Carry an idempotency key: the record logs it with the result.
+    fn with_key(mut self, key: IdempotencyKey, fingerprint: u32) -> Self {
+        let result = &self.result;
+        self.record.keyed =
+            Some(Keyed { key, fingerprint, edge_ids: result.edge_ids.clone(), versions: result.versions.clone() });
+        self
     }
 }
 
 impl Namespace {
     /// An empty namespace with an empty catalog, at `seq` 0.
     pub fn new(name: NamespaceName) -> Self {
-        Namespace { name, catalog: NamespaceCatalog::new(), graph: DbGraph::new(), seq: 0, poisoned: false }
+        Namespace {
+            name,
+            catalog: NamespaceCatalog::new(),
+            graph: DbGraph::new(),
+            seq: 0,
+            keys: KeyTable::new(),
+            poisoned: false,
+        }
     }
 
     /// A namespace from a loaded database file (a checkpoint): its graph,
@@ -92,13 +127,25 @@ impl Namespace {
     /// way; [`new`](Self::new) only makes an empty one.
     pub fn from_loaded(loaded: codec::Loaded) -> Self {
         let codec::Loaded { graph, meta, index_changes: _ } = loaded;
-        Namespace { name: meta.namespace, catalog: meta.catalog, graph, seq: meta.seq, poisoned: false }
+        Namespace {
+            name: meta.namespace,
+            catalog: meta.catalog,
+            graph,
+            seq: meta.seq,
+            keys: meta.keys,
+            poisoned: false,
+        }
     }
 
     /// The graph meta a checkpoint of this namespace is saved with: its
-    /// name, catalog and seq.
+    /// name, catalog, seq and idempotency key table.
     pub fn graph_meta(&self) -> codec::GraphMeta {
-        codec::GraphMeta { namespace: self.name.clone(), catalog: self.catalog.clone(), seq: self.seq }
+        codec::GraphMeta {
+            namespace: self.name.clone(),
+            catalog: self.catalog.clone(),
+            seq: self.seq,
+            keys: self.keys.clone(),
+        }
     }
 
     pub fn name(&self) -> &NamespaceName {
@@ -120,6 +167,11 @@ impl Namespace {
         self.seq
     }
 
+    /// The recent keyed commits (step 8).
+    pub fn keys(&self) -> &KeyTable {
+        &self.keys
+    }
+
     /// Whether a failed apply poisoned the namespace (see the type docs).
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
@@ -128,13 +180,51 @@ impl Namespace {
     /// Prepare and apply a data transaction: all mutations or none.
     pub fn commit(&mut self, mutations: &[Mutation]) -> Result<CommitResult, Error> {
         let prepared = self.prepare(mutations)?;
-        self.apply(prepared)
+        self.apply(prepared, None)
     }
 
     /// Prepare and apply a catalog change.
     pub fn commit_catalog(&mut self, change: CatalogChange) -> Result<CommitResult, Error> {
         let prepared = self.prepare_catalog(change)?;
-        self.apply(prepared)
+        self.apply(prepared, None)
+    }
+
+    /// [`prepare`](Self::prepare) with an idempotency key: the original
+    /// result if the key's commit is in the table with the same mutations
+    /// ([`Prepare::Duplicate`]), [`Error::IdempotencyKeyReused`] if it is
+    /// with others; otherwise a new commit whose record carries the key.
+    /// The lookup comes first, so a duplicate is found even if the request
+    /// would fail validation now. O(request) for the fingerprint.
+    pub fn prepare_keyed(&self, mutations: &[Mutation], key: Option<&IdempotencyKey>) -> Result<Prepare, Error> {
+        let Some(key) = key else { return Ok(Prepare::New(self.prepare(mutations)?)) };
+        let fingerprint = fingerprint_data(mutations)?;
+        if let Some(result) = self.duplicate(key, fingerprint)? {
+            return Ok(Prepare::Duplicate(result));
+        }
+        Ok(Prepare::New(self.prepare(mutations)?.with_key(key.clone(), fingerprint)))
+    }
+
+    /// [`prepare_catalog`](Self::prepare_catalog) with an idempotency key,
+    /// like [`prepare_keyed`](Self::prepare_keyed).
+    pub fn prepare_catalog_keyed(&self, change: CatalogChange, key: Option<&IdempotencyKey>) -> Result<Prepare, Error> {
+        let Some(key) = key else { return Ok(Prepare::New(self.prepare_catalog(change)?)) };
+        let fingerprint = fingerprint_catalog(&change)?;
+        if let Some(result) = self.duplicate(key, fingerprint)? {
+            return Ok(Prepare::Duplicate(result));
+        }
+        Ok(Prepare::New(self.prepare_catalog(change)?.with_key(key.clone(), fingerprint)))
+    }
+
+    /// The original result of the commit with `key`, if the table holds it
+    /// with the same fingerprint.
+    fn duplicate(&self, key: &IdempotencyKey, fingerprint: u32) -> Result<Option<CommitResult>, Error> {
+        match self.keys.get(key) {
+            None => Ok(None),
+            Some(entry) if entry.fingerprint == fingerprint => {
+                Ok(Some(CommitResult { deduplicated: true, ..entry.result.clone() }))
+            }
+            Some(entry) => Err(Error::IdempotencyKeyReused { key: key.clone(), seq: entry.result.seq }),
+        }
     }
 
     /// Resolve and validate a data transaction. Doesn't change anything.
@@ -148,8 +238,13 @@ impl Namespace {
         let seq = self.next_seq()?;
         let resolved = resolve::resolve(&self.graph, &self.catalog, mutations)?;
         Ok(Prepared {
-            record: CommitRecord { seq, change: Change::Data(resolved.ops) },
-            result: CommitResult { seq, edge_ids: resolved.edge_ids, versions: resolved.versions },
+            record: CommitRecord::new(seq, Change::Data(resolved.ops)),
+            result: CommitResult {
+                seq,
+                edge_ids: resolved.edge_ids,
+                versions: resolved.versions,
+                ..Default::default()
+            },
         })
     }
 
@@ -186,27 +281,29 @@ impl Namespace {
             }
         }
         Ok(Prepared {
-            record: CommitRecord { seq, change: Change::Catalog(change) },
+            record: CommitRecord::new(seq, Change::Catalog(change)),
             result: CommitResult { seq, ..CommitResult::default() },
         })
     }
 
-    /// Apply a prepared commit. Fails with [`Error::OutOfOrder`] if another
-    /// commit was applied since it was prepared (nothing changes then), and
-    /// with [`Error::ApplyFailed`] (poisoning the namespace) if the graph
-    /// rejects it.
-    pub fn apply(&mut self, prepared: Prepared) -> Result<CommitResult, Error> {
+    /// Apply a prepared commit, appended to the log at `time` (`None`
+    /// without a log). Fails with [`Error::OutOfOrder`] if another commit
+    /// was applied since it was prepared (nothing changes then), and with
+    /// [`Error::ApplyFailed`] (poisoning the namespace) if the graph
+    /// rejects it. Returns the result with its time.
+    pub fn apply(&mut self, prepared: Prepared, time: Option<CommitTime>) -> Result<CommitResult, Error> {
         let Prepared { record, result } = prepared;
-        self.apply_record(record)?;
-        Ok(result)
+        self.apply_record(record, time)?;
+        Ok(CommitResult { time, ..result })
     }
 
     /// Apply a record from the log without validating it again (recovery
-    /// and replicas). Records must come in `seq` order, without gaps:
-    /// otherwise [`Error::OutOfOrder`], and nothing changes. If the graph
-    /// rejects the record, the namespace is poisoned.
-    pub fn replay(&mut self, record: CommitRecord) -> Result<(), Error> {
-        self.apply_record(record)
+    /// and replicas), with its commit time from the log (the key table
+    /// keeps it for keyed records). Records must come in `seq` order,
+    /// without gaps: otherwise [`Error::OutOfOrder`], and nothing changes.
+    /// If the graph rejects the record, the namespace is poisoned.
+    pub fn replay(&mut self, record: CommitRecord, time: Option<CommitTime>) -> Result<(), Error> {
+        self.apply_record(record, time)
     }
 
     fn check_usable(&self) -> Result<(), Error> {
@@ -220,7 +317,7 @@ impl Namespace {
         self.seq.checked_add(1).ok_or(Error::SeqExhausted)
     }
 
-    fn apply_record(&mut self, record: CommitRecord) -> Result<(), Error> {
+    fn apply_record(&mut self, record: CommitRecord, time: Option<CommitTime>) -> Result<(), Error> {
         self.check_usable()?;
         let expected = self.next_seq()?;
         if record.seq != expected {
@@ -244,7 +341,12 @@ impl Namespace {
                 })
             }
         };
-        self.finish_apply(record.seq, outcome)
+        self.finish_apply(record.seq, outcome)?;
+        if let Some(Keyed { key, fingerprint, edge_ids, versions }) = record.keyed {
+            let result = CommitResult { seq: record.seq, edge_ids, versions, time, deduplicated: false };
+            self.keys.insert(KeyEntry { key, fingerprint, result });
+        }
+        Ok(())
     }
 
     /// Advance `seq`, or poison the namespace if applying failed.
@@ -297,19 +399,21 @@ mod tests {
         assert_eq!(ns.finish_apply(2, Err(error.clone())), Err(Error::ApplyFailed { seq: 2, error }));
         assert!(ns.is_poisoned());
         assert_eq!(ns.seq(), 1);
-        assert_eq!(ns.apply(prepared), Err(Error::Poisoned));
+        assert_eq!(ns.apply(prepared, None), Err(Error::Poisoned));
         assert_eq!(ns.commit(&[upsert("c")]), Err(Error::Poisoned));
         assert_eq!(ns.prepare(&[upsert("c")]), Err(Error::Poisoned));
-        let record = CommitRecord { seq: 2, change: Change::Data(vec![]) };
-        assert_eq!(ns.replay(record), Err(Error::Poisoned));
+        let record = CommitRecord::new(2, Change::Data(vec![]));
+        assert_eq!(ns.replay(record, None), Err(Error::Poisoned));
     }
 
     #[test]
     fn a_record_the_graph_rejects_poisons_the_namespace() {
         let mut ns = Namespace::new(NamespaceName::new("n").expect("name"));
-        let bad =
-            CommitRecord { seq: 1, change: Change::Data(vec![ironweaver_core::Op::RemoveNode { id: "x".into() }]) };
-        assert_eq!(ns.replay(bad), Err(Error::ApplyFailed { seq: 1, error: GraphError::NodeNotFound("x".into()) }));
+        let bad = CommitRecord::new(1, Change::Data(vec![ironweaver_core::Op::RemoveNode { id: "x".into() }]));
+        assert_eq!(
+            ns.replay(bad, None),
+            Err(Error::ApplyFailed { seq: 1, error: GraphError::NodeNotFound("x".into()) })
+        );
         assert!(ns.is_poisoned());
         assert_eq!(ns.seq(), 0);
     }
@@ -322,9 +426,9 @@ mod tests {
         assert_eq!(first.record().seq, 1);
         assert_eq!(second.record().seq, 1);
         assert_eq!(first.result().versions, vec![(Target::Node("a".into()), 1)]);
-        ns.apply(first).expect("apply");
+        ns.apply(first, None).expect("apply");
         // `second` was resolved against the state before `first`
-        assert_eq!(ns.apply(second), Err(Error::OutOfOrder { expected: 2, found: 1 }));
+        assert_eq!(ns.apply(second, None), Err(Error::OutOfOrder { expected: 2, found: 1 }));
         assert!(!ns.is_poisoned());
         assert_eq!(ns.seq(), 1);
     }

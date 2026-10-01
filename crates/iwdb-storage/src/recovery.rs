@@ -120,10 +120,10 @@ pub fn recover<F: LogFs>(
         other => other,
     })?;
     let mut replayed = 0;
-    for record in reader.by_ref() {
-        let record = record?;
+    while let Some(record) = reader.next_timed() {
+        let (record, time) = record?;
         let seq = record.seq;
-        namespace.replay(record).map_err(|source| Error::ReplayFailed { seq, source })?;
+        namespace.replay(record, time).map_err(|source| Error::ReplayFailed { seq, source })?;
         replayed += 1;
     }
     let end = reader.end().cloned().ok_or(Error::LogEndsBefore { from, next_seq: namespace.seq() + 1 })?;

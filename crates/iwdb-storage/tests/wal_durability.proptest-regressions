@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b27fa31140fd411cc603a83221244cec46fcff5f6a4320bff874558e22c413cf # shrinks to steps = [Tx([UpsertNode { id: "a", labels: [], attr: {}, meta: {}, expected_version: None }, UpsertNode { id: "b", labels: [], attr: {}, meta: {}, expected_version: None }, UpsertNode { id: "c", labels: [], attr: {}, meta: {}, expected_version: None }, UpsertNode { id: "d", labels: [], attr: {}, meta: {}, expected_version: None }]), Tx([UpsertNode { id: "a", labels: [], attr: {}, meta: {}, expected_version: None }])], segment_size = 1024, from = 0, more = []

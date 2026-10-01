@@ -85,7 +85,7 @@ impl Model {
         if seq < self.ns.seq() {
             let mut ns = empty();
             for record in &self.history[..seq as usize] {
-                ns.replay(record.clone()).map_err(|e| format!("the model failed to replay: {}", e))?;
+                ns.replay(record.clone(), None).map_err(|e| format!("the model failed to replay: {}", e))?;
             }
             self.history.truncate(seq as usize);
             self.ns = ns;
@@ -107,7 +107,7 @@ impl Model {
             // A step that fails validation fails in the child too
             if let Ok(prepared) = prepared {
                 let record = prepared.record().clone();
-                self.ns.apply(prepared).map_err(|e| format!("the model failed to apply: {}", e))?;
+                self.ns.apply(prepared, None).map_err(|e| format!("the model failed to apply: {}", e))?;
                 self.history.push(record);
             }
         }
@@ -123,7 +123,7 @@ impl Model {
         }
         let mut ns = empty();
         for record in &self.history[..seq as usize] {
-            ns.replay(record.clone()).map_err(|e| format!("the model failed to replay: {}", e))?;
+            ns.replay(record.clone(), None).map_err(|e| format!("the model failed to replay: {}", e))?;
         }
         Ok(state(&ns))
     }
@@ -139,7 +139,7 @@ impl Model {
         };
         let Ok(prepared) = prepared else { return Ok(None) };
         let record = prepared.record().clone();
-        let result = self.ns.apply(prepared).map_err(|e| format!("the model failed to apply: {}", e))?;
+        let result = self.ns.apply(prepared, None).map_err(|e| format!("the model failed to apply: {}", e))?;
         self.history.push(record);
         Ok(Some(result.seq))
     }

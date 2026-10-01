@@ -33,16 +33,23 @@
 
 mod ops;
 mod options;
+mod request;
 mod store;
 
+pub use ironweaver_core::cancel::Token as CancelToken;
+pub use ironweaver_core::pathfinding::EdgeCost;
 pub use ironweaver_core::{Attrs, EdgeId, Value};
+pub use ironweaver_core::{Direction, Projection};
 pub use iwdb_engine::catalog::{AttrPath, Constraint, ConstraintKind, IndexDef, Label, NamespaceCatalog};
-pub use iwdb_engine::{CatalogChange, CommitResult, EdgeKey, Mutation, Namespace, Target};
+pub use iwdb_engine::{
+    CatalogChange, CommitResult, CommitTime, EdgeKey, IdempotencyKey, KeyTable, Mutation, Namespace, Target,
+};
 pub use iwdb_storage::io::{LogFs, StdFs};
 pub use iwdb_storage::{
-    BackupReport, CheckpointOutcome, CommitTime, CutTail, DirStatus, Error, Finding, FsyncPolicy, HistoryId, Kind,
+    BackupReport, CheckpointOutcome, CutTail, DirStatus, Error, Finding, FsyncPolicy, HistoryId, Kind, LockStats,
     RecoveryReport, RestoreReport, RestoreSources, RestoreTarget, SkippedCheckpoint, VerifyReport, WalOptions,
 };
 pub use ops::{restore, restore_with, status, verify, Status};
 pub use options::{CheckpointOptions, StoreOptions};
-pub use store::{Edge, Node, Store, StoreStatus, NAMESPACE};
+pub use request::{ReadOptions, DEFAULT_TIMEOUT};
+pub use store::{Analysis, CommitOptions, Edge, Node, ProjectionSpec, Store, StoreStatus, NAMESPACE};

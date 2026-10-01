@@ -30,11 +30,55 @@ pub fn reference() -> Namespace {
     Namespace::new(NamespaceName::new(iwdb::NAMESPACE).unwrap())
 }
 
-/// The observable state: canonical graph, catalog, seq.
-pub type State = (Vec<String>, NamespaceCatalog, u64);
+/// The observable state: canonical graph, catalog, seq, and the
+/// idempotency key table (without commit times, which a reference that
+/// has no log doesn't know).
+pub type State = (Vec<String>, NamespaceCatalog, u64, Vec<String>);
 
 pub fn state(ns: &Namespace) -> State {
-    (canonical(ns.graph()), ns.catalog().clone(), ns.seq())
+    (canonical(ns.graph()), ns.catalog().clone(), ns.seq(), keys(ns))
+}
+
+/// The key table, one line per entry, without times.
+pub fn keys(ns: &Namespace) -> Vec<String> {
+    let entries = ns.keys().entries();
+    entries
+        .map(|e| {
+            let r = &e.result;
+            format!("{} {} {:08x} {:?} {:?}", r.seq, e.key, e.fingerprint, r.edge_ids, r.versions)
+        })
+        .collect()
+}
+
+/// Run `steps` with idempotency keys `<prefix><i>` against the store and
+/// the reference (which takes the store's commit times).
+pub fn run_keyed<F: LogFs + Clone + Send + Sync + 'static>(
+    store: &Store<F>,
+    reference: &mut Namespace,
+    steps: &[Step],
+    prefix: &str,
+) where
+    F::File: Send,
+{
+    for (i, step) in steps.iter().enumerate() {
+        let key = iwdb::IdempotencyKey::new(format!("{}{}", prefix, i)).unwrap();
+        let options = iwdb::CommitOptions { idempotency_key: Some(key.clone()) };
+        let (outcome, prepared) = match step {
+            Step::Tx(mutations) => {
+                (store.commit_with(mutations, &options), reference.prepare_keyed(mutations, Some(&key)))
+            }
+            Step::Catalog(change) => (
+                store.commit_catalog_with(change.clone(), &options),
+                reference.prepare_catalog_keyed(change.clone(), Some(&key)),
+            ),
+        };
+        match (outcome, prepared) {
+            (Ok(a), Ok(iwdb_engine::Prepare::New(p))) => assert_eq!(a, reference.apply(p, a.time).unwrap()),
+            (Ok(a), Ok(iwdb_engine::Prepare::Duplicate(b))) => assert_eq!(a, b),
+            (Err(Error::Engine(a)), Err(b)) => assert_eq!(a, b),
+            (outcome, expected) => panic!("store {:?}, reference {:?}", outcome, expected),
+        }
+    }
 }
 
 pub fn store_state<F: LogFs + Clone + Send + Sync + 'static>(store: &Store<F>) -> State
@@ -56,7 +100,8 @@ where
             Step::Catalog(change) => (store.commit_catalog(change.clone()), reference.commit_catalog(change.clone())),
         };
         match (outcome, expected) {
-            (Ok(a), Ok(b)) => assert_eq!(a, b),
+            // The store's result has its commit time; the reference has none
+            (Ok(a), Ok(b)) => assert_eq!(iwdb::CommitResult { time: None, ..a }, b),
             (Err(Error::Engine(a)), Err(b)) => assert_eq!(a, b),
             (outcome, expected) => panic!("store {:?}, reference {:?}", outcome, expected),
         }
@@ -144,7 +189,7 @@ impl History {
             match (outcome, prepared) {
                 (Ok(a), Ok(prepared)) => {
                     self.records.push(prepared.record().clone());
-                    assert_eq!(a, self.ns.apply(prepared).unwrap());
+                    assert_eq!(a, self.ns.apply(prepared, a.time).unwrap());
                 }
                 (Err(Error::Engine(a)), Err(b)) => assert_eq!(a, b),
                 (outcome, expected) => {
@@ -162,7 +207,7 @@ impl History {
     pub fn state_at(&self, seq: u64) -> State {
         let mut ns = reference();
         for record in &self.records[..seq as usize] {
-            ns.replay(record.clone()).unwrap();
+            ns.replay(record.clone(), None).unwrap();
         }
         state(&ns)
     }

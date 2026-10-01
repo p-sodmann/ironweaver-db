@@ -1,4 +1,4 @@
-//! The WAL's on-disk format, version 2 (and the reader of version 1):
+//! The WAL's on-disk format, version 3 (and the readers of versions 1 and 2):
 //! segment headers, record frames and record payloads. The normative
 //! description is `documentation/formats/wal.md`; this module is its
 //! implementation.
@@ -8,11 +8,11 @@
 //! ```text
 //! segment header (24 bytes, both versions)
 //!   0  magic       [u8; 8]  "IWDBWAL\n"
-//!   8  version     u32      1 or 2 (FORMAT_VERSION is written)
+//!   8  version     u32      1, 2 or 3 (FORMAT_VERSION is written)
 //!  12  first_seq   u64      seq of the segment's first record (also the file name)
 //!  20  crc         u32      CRC32C of bytes 0..20
 //!
-//! record frame, version 2 (33 bytes, then the payload)
+//! record frame, versions 2 and 3 (33 bytes, then the payload)
 //!   0  len         u32      payload length, at most MAX_RECORD_LEN
 //!   4  seq         u64
 //!  12  synced_seq  u64      highest seq whose fsync had completed when this
@@ -20,27 +20,34 @@
 //!  20  time        i64      commit time: microseconds since 1970-01-01 UTC
 //!  28  kind        u8       KIND_DATA or KIND_CATALOG
 //!  29  crc         u32      CRC32C of bytes 0..29 followed by the payload
-//!  33  payload     [u8; len] postcard: Vec<Op> (data) or CatalogChange (catalog)
+//!  33  payload     [u8; len] version 3: postcard (Option<Keyed>, body)
+//!                            versions 1, 2: postcard body
+//!                            body: Vec<Op> (data) or CatalogChange (catalog)
 //!
 //! record frame, version 1 (25 bytes): the same without `time`
 //!   0 len, 4 seq, 12 synced_seq, 20 kind, 21 crc (of bytes 0..21 and the payload), 25 payload
 //! ```
+//!
+//! Version 3 (step 8, ADR 0015) prefixes the payload with the record's
+//! idempotency key and result ([`Keyed`](iwdb_engine::Keyed)), `None` (one
+//! zero byte) for a commit without a key.
 
-use iwdb_engine::{CatalogChange, Change, CommitRecord, DbRecord};
+use iwdb_engine::{CatalogChange, Change, CommitRecord, DbRecord, Keyed};
 
 use crate::Error;
 
 /// The first 8 bytes of every segment.
 pub const SEGMENT_MAGIC: [u8; 8] = *b"IWDBWAL\n";
 /// The segment format this version writes.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 /// The segment formats this version reads: version 1 (step 4, frames
-/// without a commit time) and version 2.
-pub const READ_VERSIONS: [u32; 2] = [1, FORMAT_VERSION];
+/// without a commit time), version 2 (step 7, payloads without an
+/// idempotency key) and version 3.
+pub const READ_VERSIONS: [u32; 3] = [1, 2, FORMAT_VERSION];
 /// Length of a segment header.
 pub const SEGMENT_HEADER_LEN: usize = 24;
 /// Length of a record frame before its payload, in the format this
-/// version writes (version 2).
+/// version writes (versions 2 and 3).
 pub const FRAME_HEADER_LEN: usize = 33;
 /// Length of a version 1 frame header (no commit time).
 pub const FRAME_HEADER_LEN_V1: usize = 25;
@@ -59,7 +66,7 @@ pub const SEGMENT_SUFFIX: &str = ".wal";
 /// Bytes of a segment header covered by its CRC.
 const HEADER_CRC_AT: usize = 20;
 
-/// Length of a frame header in segment format `version` (1 or 2).
+/// Length of a frame header in segment format `version` (1, 2 or 3).
 pub fn frame_header_len(version: u32) -> usize {
     if version == 1 {
         FRAME_HEADER_LEN_V1
@@ -127,13 +134,23 @@ pub(crate) fn decode_segment_header(bytes: &[u8]) -> Header {
     Header::Valid { first_seq: u64_at(header, 12), version }
 }
 
-/// Encode a record's payload and kind. Fails if the record can't be encoded
-/// (never for records the commit pipeline produces) or is larger than
-/// [`MAX_RECORD_LEN`]; nothing is written then.
+/// Encode a record's payload (in the format this version writes) and
+/// kind. Fails if the record can't be encoded (never for records the commit
+/// pipeline produces) or is larger than [`MAX_RECORD_LEN`]; nothing is
+/// written then.
 pub(crate) fn encode_payload(record: &CommitRecord) -> Result<(u8, Vec<u8>), Error> {
-    let encoded = match &record.change {
-        Change::Data(ops) => postcard::to_allocvec(ops).map(|p| (KIND_DATA, p)),
-        Change::Catalog(change) => postcard::to_allocvec(change).map(|p| (KIND_CATALOG, p)),
+    encode_payload_version(record, FORMAT_VERSION)
+}
+
+/// Encode a record's payload in segment format `version` (tests and
+/// fixtures write older versions with it; versions 1 and 2 drop the key).
+pub fn encode_payload_version(record: &CommitRecord, version: u32) -> Result<(u8, Vec<u8>), Error> {
+    let keyed = &record.keyed;
+    let encoded = match (&record.change, version >= 3) {
+        (Change::Data(ops), true) => postcard::to_allocvec(&(keyed, ops)).map(|p| (KIND_DATA, p)),
+        (Change::Catalog(change), true) => postcard::to_allocvec(&(keyed, change)).map(|p| (KIND_CATALOG, p)),
+        (Change::Data(ops), false) => postcard::to_allocvec(ops).map(|p| (KIND_DATA, p)),
+        (Change::Catalog(change), false) => postcard::to_allocvec(change).map(|p| (KIND_CATALOG, p)),
     };
     let (kind, payload) = encoded.map_err(|e| Error::Encode { seq: record.seq, message: e.to_string() })?;
     if payload.len() > MAX_RECORD_LEN as usize {
@@ -207,6 +224,8 @@ pub(crate) struct Frame<'a> {
     pub payload: &'a [u8],
     /// Length of the whole frame, header included.
     pub len: usize,
+    /// The segment format the frame was read in.
+    pub version: u32,
 }
 
 /// Read the frame of segment format `version` at the start of `bytes`
@@ -238,6 +257,7 @@ pub(crate) fn read_frame(bytes: &[u8], version: u32) -> Result<Frame<'_>, Damage
         kind: header[crc_at - 1],
         payload,
         len: header_len + len,
+        version,
     })
 }
 
@@ -286,12 +306,21 @@ pub(crate) fn decode_record(frame: &Frame<'_>) -> Result<CommitRecord, Invalid> 
     if frame.synced_seq >= frame.seq {
         return Err(Invalid::SyncedSeq { seq: frame.seq, synced_seq: frame.synced_seq });
     }
-    let change = match frame.kind {
-        KIND_DATA => Change::Data(decode_exact::<Vec<ironweaver_core::Op<DbRecord, DbRecord>>>(frame.payload)?),
-        KIND_CATALOG => Change::Catalog(decode_exact::<CatalogChange>(frame.payload)?),
-        kind => return Err(Invalid::UnknownKind(kind)),
+    type Ops = Vec<ironweaver_core::Op<DbRecord, DbRecord>>;
+    let (keyed, change) = match (frame.kind, frame.version >= 3) {
+        (KIND_DATA, true) => {
+            let (keyed, ops) = decode_exact::<(Option<Keyed>, Ops)>(frame.payload)?;
+            (keyed, Change::Data(ops))
+        }
+        (KIND_CATALOG, true) => {
+            let (keyed, change) = decode_exact::<(Option<Keyed>, CatalogChange)>(frame.payload)?;
+            (keyed, Change::Catalog(change))
+        }
+        (KIND_DATA, false) => (None, Change::Data(decode_exact::<Ops>(frame.payload)?)),
+        (KIND_CATALOG, false) => (None, Change::Catalog(decode_exact::<CatalogChange>(frame.payload)?)),
+        (kind, _) => return Err(Invalid::UnknownKind(kind)),
     };
-    Ok(CommitRecord { seq: frame.seq, change })
+    Ok(CommitRecord { seq: frame.seq, change, keyed })
 }
 
 fn decode_exact<'a, T: serde::Deserialize<'a>>(payload: &'a [u8]) -> Result<T, Invalid> {
@@ -337,7 +366,7 @@ mod tests {
     #[test]
     fn headers_round_trip_and_detect_damage() {
         let header = encode_segment_header(7);
-        assert_eq!(decode_segment_header(&header), Header::Valid { first_seq: 7, version: 2 });
+        assert_eq!(decode_segment_header(&header), Header::Valid { first_seq: 7, version: 3 });
         let v1 = encode_segment_header_version(7, 1);
         assert_eq!(decode_segment_header(&v1), Header::Valid { first_seq: 7, version: 1 });
         assert_eq!(decode_segment_header(&header[..23]), Header::Damaged(Damage::Truncated));
@@ -346,7 +375,7 @@ mod tests {
             bad[bit / 8] ^= 1 << (bit % 8);
             assert_eq!(decode_segment_header(&bad), Header::Damaged(Damage::BadHeader), "bit {}", bit);
         }
-        for version in [0, 3] {
+        for version in [0, 4] {
             let newer = encode_segment_header_version(7, version);
             assert_eq!(decode_segment_header(&newer), Header::UnsupportedVersion(version));
         }
@@ -359,9 +388,16 @@ mod tests {
     #[test]
     fn frames_round_trip_in_both_versions() {
         let index = IndexDef { path: AttrPath::new(["x"]).expect("path") };
-        let record = CommitRecord { seq: 3, change: Change::Catalog(CatalogChange::CreateIndex(index)) };
-        let (kind, payload) = encode_payload(&record).expect("encode");
-        for (version, time) in [(2, Some(-5)), (1, None)] {
+        let mut record = CommitRecord::new(3, Change::Catalog(CatalogChange::CreateIndex(index)));
+        record.keyed = Some(Keyed {
+            key: iwdb_engine::IdempotencyKey::new("k").expect("key"),
+            fingerprint: 7,
+            edge_ids: vec![],
+            versions: vec![],
+        });
+        for (version, time) in [(3, Some(-5)), (2, Some(-5)), (1, None)] {
+            let (kind, payload) = encode_payload_version(&record, version).expect("encode");
+            let record = CommitRecord { keyed: record.keyed.clone().filter(|_| version >= 3), ..record.clone() };
             let mut bytes = Vec::new();
             encode_frame(&mut bytes, version, header(3, 2, -5, kind), &payload);
             assert_eq!(bytes.len(), frame_header_len(version) + payload.len());
@@ -401,12 +437,14 @@ mod tests {
             encode_frame(&mut bytes, FORMAT_VERSION, header(seq, synced_seq, 0, kind), payload);
             decode_record(&read_frame(&bytes, FORMAT_VERSION).expect("frame"))
         };
-        // An empty op list
-        assert_eq!(frame(1, 0, KIND_DATA, &[0]), Ok(CommitRecord { seq: 1, change: Change::Data(vec![]) }));
+        // No key, an empty op list
+        assert_eq!(frame(1, 0, KIND_DATA, &[0, 0]), Ok(CommitRecord::new(1, Change::Data(vec![]))));
         assert_eq!(frame(1, 0, 0, &[0]), Err(Invalid::UnknownKind(0)));
         assert_eq!(frame(1, 0, 3, &[0]), Err(Invalid::UnknownKind(3)));
         assert_eq!(frame(1, 1, KIND_DATA, &[0]), Err(Invalid::SyncedSeq { seq: 1, synced_seq: 1 }));
-        assert!(matches!(frame(1, 0, KIND_DATA, &[0, 0]), Err(Invalid::Undecodable(_))));
+        assert!(matches!(frame(1, 0, KIND_DATA, &[0, 0, 0]), Err(Invalid::Undecodable(_))));
+        // Format 3 needs the key's option byte
+        assert!(matches!(frame(1, 0, KIND_DATA, &[0]), Err(Invalid::Undecodable(_))));
         assert!(matches!(frame(1, 0, KIND_DATA, &[]), Err(Invalid::Undecodable(_))));
         assert!(matches!(frame(1, 0, KIND_CATALOG, &[9]), Err(Invalid::Undecodable(_))));
     }
