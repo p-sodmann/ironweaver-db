@@ -18,6 +18,7 @@
 //!
 //! The guarantees of each fsync policy are in `documentation/guarantees.md`.
 
+pub mod archive;
 pub mod backup;
 pub mod checkpoint;
 mod error;

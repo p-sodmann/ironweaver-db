@@ -94,7 +94,7 @@ pub struct VerifyReport {
 }
 
 impl VerifyReport {
-    fn new(path: &Path, kind: Kind) -> Self {
+    pub(crate) fn new(path: &Path, kind: Kind) -> Self {
         VerifyReport {
             path: path.to_path_buf(),
             kind,

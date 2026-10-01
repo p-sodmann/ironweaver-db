@@ -127,6 +127,24 @@ pub enum Error {
     #[error("the backup manifest '{}' is invalid: {reason}", path.display())]
     InvalidManifest { path: PathBuf, reason: String },
 
+    /// The WAL archive belongs to another history (a restored store, or
+    /// another store): archive into a new directory. Nothing was written.
+    #[error("the WAL archive '{}' belongs to history {found}, not to this store's {expected}; use a new archive directory", path.display())]
+    ArchiveMismatch { path: PathBuf, expected: crate::HistoryId, found: crate::HistoryId },
+    /// The archive holds a segment of the same name with other contents
+    /// (another history, or damage). It is left as it is, and the WAL
+    /// segment is not removed.
+    #[error("the archive's '{}' differs from the WAL segment of the same name (another history, or damage)", path.display())]
+    ArchiveConflict { path: PathBuf },
+    /// The directory is not a WAL archive: no marker and other files, or a
+    /// damaged or newer marker.
+    #[error("'{}' is not a WAL archive: {reason}", path.display())]
+    NotAnArchive { path: PathBuf, reason: String },
+    /// A restore's backup and archive belong to different histories (or
+    /// the backup's history is unknown, layout 1).
+    #[error("the backup's history {backup} and the archive's {archive} differ; they can't be combined")]
+    HistoryMismatch { backup: String, archive: String },
+
     // Checkpoints and recovery (step 5)
     /// A checkpoint file that can't be loaded: a checksum or format error,
     /// or content that doesn't match its name or namespace. Recovery skips

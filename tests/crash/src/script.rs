@@ -67,6 +67,7 @@ pub fn child_options(policy: Policy, keep: usize) -> StoreOptions {
             background: true,
         },
         create_if_missing: true,
+        archive: None,
     }
 }
 
@@ -76,6 +77,7 @@ pub fn check_options(policy: Policy, keep: usize) -> StoreOptions {
         wal: WalOptions { fsync: policy.fsync(), segment_size: MIN_SEGMENT_SIZE },
         checkpoint: CheckpointOptions { wal_size: None, interval: None, on_close: true, keep, background: false },
         create_if_missing: true,
+        archive: None,
     }
 }
 

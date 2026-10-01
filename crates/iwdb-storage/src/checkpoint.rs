@@ -17,6 +17,7 @@ use iwdb_engine::catalog::{IndexChanges, NamespaceName};
 use iwdb_engine::codec::{self, Loaded};
 use iwdb_engine::Namespace;
 
+use crate::archive::Archive;
 use crate::io::LogFs;
 use crate::layout::DataDir;
 use crate::{reader, Error, WalReader};
@@ -186,7 +187,10 @@ pub struct CheckpointOutcome {
 /// 4. removes the WAL segments whose records all lie at or below the
 ///    oldest kept checkpoint (a segment ends where the next begins; the
 ///    last segment is never removed), then syncs. So recovery can always
-///    fall back to any kept checkpoint and replay the WAL from there.
+///    fall back to any kept checkpoint and replay the WAL from there. With
+///    an [`Archive`] ([`set_archive`](Self::set_archive)), the segments are
+///    first copied into the archive and the archive directory synced, so
+///    a segment leaves `wal/` only once it is durable in the archive.
 ///
 /// Failures: an error while replaying or writing the checkpoint (step 1-2
 /// before the rename) deletes nothing and can be retried at the next run.
@@ -196,7 +200,10 @@ pub struct CheckpointOutcome {
 /// retried, because a retry can succeed without making the entries durable
 /// (fsyncgate), and deleting on that basis could lose data. A replay
 /// failure disables it too: the live namespace would have failed on the
-/// same record.
+/// same record. A failed archive copy (a write, an fsync, a rename, a
+/// conflict) removes no segment and fails the run, and the next run that
+/// writes a checkpoint retries it; a failed sync of the archive directory
+/// disables the checkpointer, like any failed directory sync.
 ///
 /// Memory: its namespace is a second copy of the live one, kept between
 /// runs. Time: O(records replayed) plus O(graph) for the save.
@@ -212,6 +219,7 @@ pub struct Checkpointer<F: LogFs> {
     /// Checkpoints known to be damaged (they failed to load).
     bad: BTreeSet<u64>,
     disabled: Option<String>,
+    archive: Option<Archive<F>>,
 }
 
 impl<F: LogFs> std::fmt::Debug for Checkpointer<F> {
@@ -249,7 +257,19 @@ impl<F: LogFs> Checkpointer<F> {
             newest,
             bad: bad.into_iter().collect(),
             disabled: None,
+            archive: None,
         }
+    }
+
+    /// Archive WAL segments into `archive` before removing them (see the
+    /// type docs).
+    pub fn set_archive(&mut self, archive: Archive<F>) {
+        self.archive = Some(archive);
+    }
+
+    /// The archive, if segments are archived.
+    pub fn archive(&self) -> Option<&Archive<F>> {
+        self.archive.as_ref()
     }
 
     /// The seq of the newest valid checkpoint, if any.
@@ -349,18 +369,29 @@ impl<F: LogFs> Checkpointer<F> {
         Ok((cutoff, removed))
     }
 
-    /// Remove the WAL segments whose records are all at or below `cutoff`.
+    /// Remove the WAL segments whose records are all at or below `cutoff`,
+    /// archiving them first if there is an archive.
     fn remove_segments(&mut self, cutoff: u64) -> Result<Vec<u64>, Error> {
         let segments = self.guard(reader::list_segments(&self.wal))?;
-        let mut removed = Vec::new();
+        let mut removable = Vec::new();
         for pair in segments.windows(2) {
             let ((first_seq, path), (next_first, _)) = (&pair[0], &pair[1]);
             if *next_first > cutoff.saturating_add(1) {
                 break;
             }
-            let result = self.fs.remove_file(path).map_err(|e| Error::io("remove", path, e));
+            removable.push((*first_seq, path.clone()));
+        }
+        if let (Some(archive), false) = (&self.archive, removable.is_empty()) {
+            // A failed copy leaves everything in `wal/`: retried next time
+            archive.copy(&removable)?;
+            let result = archive.sync();
             self.guard(result)?;
-            removed.push(*first_seq);
+        }
+        let mut removed = Vec::new();
+        for (first_seq, path) in removable {
+            let result = self.fs.remove_file(&path).map_err(|e| Error::io("remove", &path, e));
+            self.guard(result)?;
+            removed.push(first_seq);
         }
         if !removed.is_empty() {
             let dir = self.wal.clone();

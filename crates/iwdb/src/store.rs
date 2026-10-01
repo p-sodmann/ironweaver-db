@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use ironweaver_core::{Attrs, EdgeId};
 use iwdb_engine::catalog::{NamespaceCatalog, NamespaceName};
 use iwdb_engine::{CatalogChange, CommitResult, Mutation, Namespace};
+use iwdb_storage::archive::Archive;
 use iwdb_storage::io::{LogFs, StdFs};
 use iwdb_storage::layout::DataDir;
 use iwdb_storage::{
@@ -149,9 +150,11 @@ impl Store<StdFs> {
     /// recover it. See the type docs for what it recovers to.
     ///
     /// Errors: [`Error::Locked`] if another store has `dir` open (in this
-    /// or another process); [`Error::NotADataDir`],
+    /// or another process), or its archive; [`Error::NotADataDir`],
     /// [`Error::UnsupportedLayout`], [`Error::InvalidDataDir`] for a
-    /// directory that isn't one this version can open; and every recovery
+    /// directory that isn't one this version can open; [`Error::IsBackup`]
+    /// and [`Error::InterruptedRestore`]; [`Error::ArchiveMismatch`] and
+    /// [`Error::NotAnArchive`] for an archive of another history; and every recovery
     /// error ([`iwdb_storage::recover`]): corruption, a WAL that doesn't
     /// reach back to any usable checkpoint, a record that fails to replay.
     /// On error nothing valid was changed and the lock is released.
@@ -172,7 +175,7 @@ where
         let Recovered { dir, namespace, report } =
             recover(fs.clone(), dir, options.create_if_missing, &name, options.wal.clone())?;
         log_report(dir.root(), &report);
-        let checkpointer = Checkpointer::new(
+        let mut checkpointer = Checkpointer::new(
             fs.clone(),
             &dir,
             name,
@@ -180,6 +183,9 @@ where
             report.checkpoint,
             report.skipped_checkpoints.iter().map(|s| s.seq),
         );
+        if let Some(path) = &options.archive {
+            checkpointer.set_archive(Archive::open(fs.clone(), path, dir.history())?);
+        }
         let size_trigger = options.checkpoint.wal_size.unwrap_or(u64::MAX);
         let shared = Arc::new(Shared {
             live: Mutex::new(namespace),

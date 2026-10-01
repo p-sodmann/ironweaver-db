@@ -22,6 +22,7 @@ pub fn options(keep: usize) -> StoreOptions {
         wal: WalOptions { fsync: FsyncPolicy::Always, segment_size: MIN_SEGMENT_SIZE },
         checkpoint: CheckpointOptions { wal_size: None, interval: None, on_close: true, keep, background: false },
         create_if_missing: true,
+        archive: None,
     }
 }
 

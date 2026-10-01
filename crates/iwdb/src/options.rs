@@ -1,5 +1,6 @@
 //! Options of a [`Store`](crate::Store).
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use iwdb_storage::WalOptions;
@@ -13,11 +14,23 @@ pub struct StoreOptions {
     /// Create the data directory if it is missing or empty (default true).
     /// If false, opening a directory without a marker fails.
     pub create_if_missing: bool,
+    /// Continuous WAL archiving (default off): a directory that receives
+    /// every WAL segment before the checkpointer removes it, durably
+    /// (`documentation/formats/archive.md`). It is created if missing, and
+    /// must belong to the store's history: a restored store needs a new
+    /// one (`Error::ArchiveMismatch`). With a backup, it allows restoring
+    /// to any later seq it holds.
+    pub archive: Option<PathBuf>,
 }
 
 impl Default for StoreOptions {
     fn default() -> Self {
-        StoreOptions { wal: WalOptions::default(), checkpoint: CheckpointOptions::default(), create_if_missing: true }
+        StoreOptions {
+            wal: WalOptions::default(),
+            checkpoint: CheckpointOptions::default(),
+            create_if_missing: true,
+            archive: None,
+        }
     }
 }
 
