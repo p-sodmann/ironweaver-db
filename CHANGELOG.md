@@ -46,7 +46,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Store::status`, `iwdb::status`, `iwdb_storage::inspect`; `CommitTime` and `HistoryId`.
 - The crash harness runs `verify` before every recovery it checks, archives most data directories, takes backups in the child's script, and restores to random seqs in a child that it kills; new crash points for backups, archiving and restores.
 
+
+- Concurrent readers (step 8, ADR 0014): `LoggedNamespace` holds a writer mutex around the WAL and an `RwLock` around the namespace; commits hold the write lock only to apply and flush indexes, reads never see part of a transaction. `Store::lock_stats`.
+- Idempotency keys (ADR 0015): `Store::commit_with` / `commit_catalog_with` with `CommitOptions::idempotency_key`; a retry returns the original result (`CommitResult::deduplicated`), another request under the key fails with `IdempotencyKeyReused`. The namespace remembers its last 10 000 keyed commits, across restarts, checkpoints, backups and restores; `verify` checks the table.
+- WAL format 3 (keys in record payloads; formats 1 and 2 still read) and data-dir layout 3 (the key table in checkpoints, `iwdb.keys`; layouts 1 and 2 upgraded on open). Fixtures `wal-v3`, `data-dir-v3`.
+- `CommitResult::time`, the commit time; `CommitTime` moved to `iwdb-engine` (re-exported).
+- Read-your-writes and deadlines (ADR 0016): `ReadOptions` (`min_seq`, `history`, `timeout`, `cancel`), `Store::read_with`, `wait_for_seq`; `Store::analyze` runs analytics on a `Projection` without holding a lock, cancelled at its deadline by the store's timer. New errors `Timeout`, `Cancelled`, `OtherHistory`.
+- Python: `transaction(idempotency_key=)`, keys on catalog methods, `time` and `deduplicated` in results, `min_seq=` / `timeout=` on reads, `wait_for_seq`, `iwdb.TimeoutError`.
+- The crash harness retries keyed commits of killed children; its model applies each key once.
 ### Changed
+- Step 8: reads no longer wait for a whole commit (only for its apply); `Store::read` runs under a read lock. `Namespace::apply` and `replay` take the commit time; `Wal::append` returns it; `CommitRecord` has a `keyed` field (`CommitRecord::new` for records without one). Stores written by this version (layout 3, WAL format 3) can't be opened by step 7.
 - WAL format 2 (step 7, ADR 0010): every record carries its commit time, covered by its CRC; format 1 segments are still read, and a format 1 log continues in format 2 (fixture `wal-v2`).
 - Data directory layout 2 (step 7): the marker holds a history id; `BACKUP` and `RESTORING` files. A layout 1 directory is upgraded when a store opens it, after recovery succeeded (fixture `data-dir-v2`).
 - The workspace version is 0.1.0.
