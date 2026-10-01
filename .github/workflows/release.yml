@@ -1,0 +1,103 @@
+name: Release
+
+# Builds the Python package (abi3 wheels for Linux and macOS, x86_64 and
+# arm64, and the sdist), tests every wheel, and publishes them to PyPI when
+# a version tag (v*) is pushed. Publishing uses PyPI's trusted publishing
+# (OpenID Connect, no token in the repository) and the "pypi" environment,
+# which can require a manual approval. workflow_dispatch builds and tests
+# without publishing (or publishes to TestPyPI if asked). See
+# documentation/releasing.md.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      testpypi:
+        description: Publish to TestPyPI
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  wheels:
+    name: wheel (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          args: --release --out dist --manifest-path crates/iwdb-python/Cargo.toml
+          manylinux: auto
+      - uses: astral-sh/setup-uv@v6
+      - name: Test the wheel on the oldest and the newest Python
+        run: |
+          for version in 3.9 3.13; do
+            uv venv --python "$version" "venv-$version"
+            uv pip install --python "venv-$version/bin/python" dist/*.whl pytest hypothesis
+            "venv-$version/bin/python" -m pytest crates/iwdb-python/tests -q
+          done
+        shell: bash
+        env:
+          UV_PYTHON_DOWNLOADS: automatic
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist --manifest-path crates/iwdb-python/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish:
+    name: publish to ${{ inputs.testpypi && 'TestPyPI' || 'PyPI' }}
+    needs: [wheels, sdist]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.testpypi
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.testpypi && 'testpypi' || 'pypi' }}
+      url: ${{ inputs.testpypi && 'https://test.pypi.org/p/ironweaver-db' || 'https://pypi.org/p/ironweaver-db' }}
+    permissions:
+      # Trusted publishing
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: The tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          ls dist
+          version="${GITHUB_REF_NAME#v}"
+          ls dist | grep -q -- "-${version}" || { echo "no file for version ${version} in dist/" >&2; exit 1; }
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ inputs.testpypi && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}

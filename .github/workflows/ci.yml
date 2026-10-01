@@ -34,11 +34,39 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - name: No Python in the dependency graph
+        # Design rule 1: pyo3 only in crates/iwdb-python, which is in the
+        # workspace since step 7; every other crate must stay free of it
         run: |
-          if cargo tree --workspace -e normal | grep -q pyo3; then
-            echo "pyo3 must not be a dependency of the engine crates" >&2
+          if cargo tree -p iwdb-engine -p iwdb-storage -p iwdb -p iwctl -p iwdb-crash -e normal | grep -q pyo3; then
+            echo "pyo3 must not be a dependency of the engine, storage, store or CLI crates" >&2
             exit 1
           fi
+
+  python:
+    # Step 7: the wheel (abi3, CPython 3.9 and later) built by maturin on
+    # every platform we ship, and the Python tests run against it on the
+    # oldest and the newest Python. Windows isn't shipped yet (ADR 0013).
+    name: wheel and pytest (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel]
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Build the wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist --manifest-path crates/iwdb-python/Cargo.toml
+          manylinux: auto
+      - run: python -m pip install dist/*.whl pytest hypothesis
+      - run: python -m pytest crates/iwdb-python/tests -q
 
   crash:
     # Step 6: kill -9 at random points and failpoints, check recovery. The
