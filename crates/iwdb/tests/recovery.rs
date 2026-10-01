@@ -116,7 +116,7 @@ fn a_segment_without_a_valid_header_is_removed() {
     // A new segment with half its header (created outside the writer's
     // temp-and-rename protocol, as damage would leave it)
     let next = reference.seq() + 1;
-    let path = dir.path().join("wal").join(iwdb_storage::format::segment_name(next));
+    let path = dir.path().join("ns/00000000000000000001/wal").join(iwdb_storage::format::segment_name(next));
     fs::write(&path, &iwdb_storage::format::encode_segment_header(next)[..10]).unwrap();
 
     let store = Store::open(dir.path(), options(2)).unwrap();
@@ -141,10 +141,11 @@ fn crash_mid_checkpoint_leaves_a_temp_file() {
     // and a WAL segment whose creation was interrupted
     let ckpt_tmp = dir
         .path()
-        .join("checkpoints")
+        .join("ns/00000000000000000001/checkpoints")
         .join(format!(".{}.123.0.tmp", iwdb_storage::checkpoint::checkpoint_name(at + 5)));
     fs::write(&ckpt_tmp, b"half a checkpoint").unwrap();
-    let wal_tmp = dir.path().join("wal").join(format!("{}.tmp", iwdb_storage::format::segment_name(999)));
+    let wal_tmp =
+        dir.path().join("ns/00000000000000000001/wal").join(format!("{}.tmp", iwdb_storage::format::segment_name(999)));
     fs::write(&wal_tmp, b"half a header").unwrap();
 
     let store = Store::open(dir.path(), options(2)).unwrap();
@@ -276,7 +277,7 @@ fn wal_corruption_is_refused_without_changes() {
     let store = Store::open(dir.path(), options(2)).unwrap();
     run(&store, &mut reference, &workload(40, 11));
     drop(store);
-    let segments = iwdb_storage::list_segments(&dir.path().join("wal")).unwrap();
+    let segments = iwdb_storage::list_segments(&dir.path().join("ns/00000000000000000001/wal")).unwrap();
     assert!(segments.len() > 2);
     let path = &segments[1].1;
     let mut bytes = fs::read(path).unwrap();
@@ -300,7 +301,7 @@ fn a_record_that_fails_to_replay_is_reported_and_not_truncated() {
     store.close().unwrap();
 
     let next = reference.seq() + 1;
-    let mut wal = Wal::create(&dir.path().join("wal"), WalOptions::default(), next).unwrap();
+    let mut wal = Wal::create(&dir.path().join("ns/00000000000000000001/wal"), WalOptions::default(), next).unwrap();
     let bad = ironweaver_core::Op::RemoveNode { id: "no such node".into() };
     wal.append(&CommitRecord::new(next, Change::Data(vec![bad]))).unwrap();
     wal.close().unwrap();
@@ -322,7 +323,7 @@ fn a_wal_that_ends_before_the_checkpoint_is_refused() {
     run(&store, &mut reference, &workload(10, 13));
     store.close().unwrap();
     // Replace the log with an empty one that starts at 1
-    let wal = dir.path().join("wal");
+    let wal = dir.path().join("ns/00000000000000000001/wal");
     fs::remove_dir_all(&wal).unwrap();
     fs::create_dir(&wal).unwrap();
     Wal::create(&wal, WalOptions::default(), 1).unwrap().close().unwrap();

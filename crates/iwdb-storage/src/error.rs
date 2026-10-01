@@ -180,6 +180,32 @@ pub enum Error {
     #[error("checkpoints are disabled until the store is reopened, after an earlier failure: {cause}")]
     CheckpointsDisabled { cause: String },
 
+    // Namespaces (step 9, ADR 0017)
+    /// The store's namespace log can't be read: missing, corrupt (damage
+    /// that isn't a torn tail), of a newer version, or events that don't
+    /// follow from each other.
+    #[error("the namespace log '{}' is invalid: {reason}", path.display())]
+    InvalidNamespaceLog { path: PathBuf, reason: String },
+    /// A namespace with this name exists already.
+    #[error("namespace '{name}' exists already")]
+    NamespaceExists { name: String },
+    /// There is no namespace with this name.
+    #[error("no namespace '{name}'")]
+    NoSuchNamespace { name: String },
+    /// The namespace was dropped while the request ran (or waited): its
+    /// data is gone, and so is its history.
+    #[error("namespace '{name}' was dropped")]
+    NamespaceDropped { name: String },
+    /// A namespace the log lists has a directory that is missing or
+    /// incomplete: files were removed by hand, or the disk lost them.
+    #[error("namespace '{name}' (id {id}) is damaged: {reason}")]
+    NamespaceDamaged { id: u64, name: String, reason: String },
+
+    /// A restore to a seq with several namespaces to restore: seqs belong
+    /// to one namespace each, so the restore must name which one (`only`).
+    #[error("a restore to a seq must select one namespace; the restore would hold {}", namespaces.join(", "))]
+    AmbiguousTarget { namespaces: Vec<String> },
+
     // Requests (step 8)
     /// A request didn't finish within its timeout: waiting for a `min_seq`,
     /// or a job cancelled at its deadline. Nothing changed.

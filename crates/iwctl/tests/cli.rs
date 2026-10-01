@@ -120,7 +120,7 @@ fn checkpoint_backup_restore_and_verify() {
     let backup = work.path().join("backup");
     let out = iwctl(&["backup", p(&data), p(&backup)]);
     assert_eq!(code(&out), 0);
-    assert!(stdout(&out).contains("backed up to seq 30") && stdout(&out).contains(": ok"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("default at seq 30") && stdout(&out).contains(": ok"), "{}", stdout(&out));
     // Not into a directory that has files
     assert_eq!(code(&iwctl(&["backup", p(&data), p(&backup)])), 4);
 
@@ -159,7 +159,8 @@ fn verify_reports_damage_with_exit_code_1() {
     let work = tempfile::tempdir().unwrap();
     let data = work.path().join("data");
     store(&data, 20, None);
-    let checkpoint = fs::read_dir(data.join("checkpoints")).unwrap().next().unwrap().unwrap().path();
+    let checkpoint =
+        fs::read_dir(data.join("ns/00000000000000000001/checkpoints")).unwrap().next().unwrap().unwrap().path();
     let mut bytes = fs::read(&checkpoint).unwrap();
     let at = bytes.len() / 2;
     bytes[at] ^= 0x40;

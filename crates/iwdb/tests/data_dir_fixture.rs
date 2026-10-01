@@ -10,7 +10,11 @@
 //!   to layout 3 with the same history;
 //! - `tests/fixtures/data-dir-v3/`: layout 3, written by step 8 (WAL format
 //!   3), with keyed commits before and after its checkpoint: the key table
-//!   is in the checkpoint's graph meta and in the WAL records.
+//!   is in the checkpoint's graph meta and in the WAL records. Opening a
+//!   copy upgrades it to layout 4 (one namespace, `default`);
+//! - `tests/fixtures/data-dir-v4/`: layout 4, written by step 9: three
+//!   namespaces (one of them with keyed commits before and after its
+//!   checkpoint, an index and constraints), and one that was dropped.
 //!
 //! A new layout version gets a new fixture next to these, written by:
 //!
@@ -135,9 +139,9 @@ fn the_v2_fixture_opens_recovers_its_state_and_history_and_is_upgraded() {
 }
 
 #[test]
-fn the_v3_fixture_opens_and_recovers_its_state_keys_and_history() {
+fn the_v3_fixture_opens_recovers_its_state_keys_and_history_and_is_upgraded() {
     let (_dir, store, rest) = open_fixture(3);
-    assert_eq!(store.recovery().upgraded_from, None);
+    assert_eq!(store.recovery().upgraded_from, Some(3));
     let history: HistoryId = rest.trim().strip_prefix("history ").unwrap().parse().unwrap();
     assert_eq!(store.history(), history);
     // A retry of a keyed commit before the checkpoint, and of one after it,
@@ -162,7 +166,7 @@ fn the_v3_fixture_opens_and_recovers_its_state_keys_and_history() {
 #[test]
 fn a_failed_marker_upgrade_fails_the_open_and_the_next_one_finishes_it() {
     use common::{Action, Call, Rule, TestFs, When};
-    for version in [1, 2] {
+    for version in [1, 2, 3] {
         for when in [When::Before, When::Midway, When::After] {
             let dir = tempfile::tempdir().unwrap();
             copy_dir(&fixture(version).join("store"), dir.path());

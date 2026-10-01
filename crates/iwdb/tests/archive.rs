@@ -46,8 +46,8 @@ fn commit_with_checkpoints<F: iwdb::LogFs + Clone + Send + Sync + 'static>(
 /// where both have one).
 fn whole_log(dir: &Path) -> Vec<(u64, PathBuf)> {
     let mut all: BTreeMap<u64, PathBuf> =
-        iwdb_storage::list_segments(&dir.join("archive")).unwrap().into_iter().collect();
-    all.extend(iwdb_storage::list_segments(&dir.join("data").join("wal")).unwrap());
+        iwdb_storage::list_segments(&dir.join("archive/ns/00000000000000000001")).unwrap().into_iter().collect();
+    all.extend(iwdb_storage::list_segments(&dir.join("data").join("ns/00000000000000000001/wal")).unwrap());
     all.into_iter().collect()
 }
 
@@ -67,7 +67,7 @@ fn the_archive_and_the_wal_hold_the_whole_history() {
     let store = Store::open(&dir.path().join("data"), archived(dir.path())).unwrap();
     let mut reference = reference();
     commit_with_checkpoints(&store, &mut reference, &workload(80, 21));
-    let archived_segments = segment_seqs_in(&dir.path().join("archive"));
+    let archived_segments = segment_seqs_in(&dir.path().join("archive/ns/00000000000000000001"));
     assert!(archived_segments.len() > 5, "{:?}", archived_segments);
     assert_eq!(archived_segments[0], 1, "archived from the first segment");
     assert!(segment_seqs(&dir.path().join("data"))[0] > 1, "the WAL was cut");
@@ -126,7 +126,7 @@ fn archiving_is_idempotent() {
     run(&store, &mut reference, &workload(30, 23));
     fs.add(Rule::new(Call::RemoveFile, When::Before, Action::Fail).path("/wal/"));
     assert!(store.checkpoint().is_err());
-    let in_both: Vec<u64> = segment_seqs_in(&dir.path().join("archive"))
+    let in_both: Vec<u64> = segment_seqs_in(&dir.path().join("archive/ns/00000000000000000001"))
         .into_iter()
         .filter(|s| segment_seqs(&dir.path().join("data")).contains(s))
         .collect();
@@ -147,7 +147,12 @@ fn a_conflicting_segment_in_the_archive_keeps_the_wal() {
     let store = Store::open(&dir.path().join("data"), archived(dir.path())).unwrap();
     let mut reference = reference();
     run(&store, &mut reference, &workload(30, 25));
-    fs::write(dir.path().join("archive").join(iwdb_storage::format::segment_name(1)), b"another history").unwrap();
+    fs::create_dir_all(dir.path().join("archive/ns/00000000000000000001")).unwrap();
+    fs::write(
+        dir.path().join("archive/ns/00000000000000000001").join(iwdb_storage::format::segment_name(1)),
+        b"another history",
+    )
+    .unwrap();
     let before = segment_seqs(&dir.path().join("data"));
     match store.checkpoint() {
         Err(Error::ArchiveConflict { path }) => assert!(path.ends_with(iwdb_storage::format::segment_name(1))),

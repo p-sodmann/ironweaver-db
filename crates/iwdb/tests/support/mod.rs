@@ -128,20 +128,24 @@ pub fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 
 /// The checkpoint seqs in a data directory.
 pub fn checkpoints(dir: &Path) -> Vec<u64> {
-    iwdb_storage::checkpoint::list_checkpoints(&dir.join("checkpoints")).unwrap().into_iter().map(|(s, _)| s).collect()
+    iwdb_storage::checkpoint::list_checkpoints(&dir.join("ns/00000000000000000001/checkpoints"))
+        .unwrap()
+        .into_iter()
+        .map(|(s, _)| s)
+        .collect()
 }
 
 /// The first seqs of the WAL segments in a data directory.
 pub fn segment_seqs(dir: &Path) -> Vec<u64> {
-    iwdb_storage::list_segments(&dir.join("wal")).unwrap().into_iter().map(|(s, _)| s).collect()
+    iwdb_storage::list_segments(&dir.join("ns/00000000000000000001/wal")).unwrap().into_iter().map(|(s, _)| s).collect()
 }
 
 pub fn checkpoint_path(dir: &Path, seq: u64) -> PathBuf {
-    dir.join("checkpoints").join(iwdb_storage::checkpoint::checkpoint_name(seq))
+    dir.join("ns/00000000000000000001/checkpoints").join(iwdb_storage::checkpoint::checkpoint_name(seq))
 }
 
 pub fn last_segment(dir: &Path) -> PathBuf {
-    iwdb_storage::list_segments(&dir.join("wal")).unwrap().pop().unwrap().1
+    iwdb_storage::list_segments(&dir.join("ns/00000000000000000001/wal")).unwrap().pop().unwrap().1
 }
 
 /// A data record frame of the current WAL format

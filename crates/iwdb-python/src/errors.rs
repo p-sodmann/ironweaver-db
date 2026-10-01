@@ -24,7 +24,7 @@ pub mod exc {
         iwdb,
         NotFoundError,
         Error,
-        "A mutation addressed a node or edge that doesn't exist. Nothing changed."
+        "A mutation addressed a node or edge that doesn't exist, or a namespace doesn't exist (any more). Nothing changed."
     );
     create_exception!(
         iwdb,
@@ -83,6 +83,7 @@ pub fn to_py(error: Error) -> PyErr {
         Error::Locked { .. } => LockedError::new_err(message),
         Error::Io { .. } | Error::CheckpointsDisabled { .. } => IoError::new_err(message),
         Error::InvalidOptions(_) => InvalidError::new_err(message),
+        Error::NoSuchNamespace { .. } | Error::NamespaceDropped { .. } => NotFoundError::new_err(message),
         Error::Timeout { .. } => TimeoutError::new_err(message),
         // Python has no way to cancel a request yet
         Error::Cancelled => exc::Error::new_err(message),
@@ -97,6 +98,8 @@ pub fn to_py(error: Error) -> PyErr {
         | Error::ReplayFailed { .. }
         | Error::InvalidDataDir { .. }
         | Error::InvalidManifest { .. }
+        | Error::InvalidNamespaceLog { .. }
+        | Error::NamespaceDamaged { .. }
         | Error::ArchiveConflict { .. }
         | Error::LogEndsBefore { .. }
         | Error::MissingRecords { .. }

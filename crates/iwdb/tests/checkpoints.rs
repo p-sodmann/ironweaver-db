@@ -47,7 +47,7 @@ fn a_failed_checkpoint_write_keeps_the_previous_checkpoint_and_the_wal() {
         run(&store, &mut reference, &steps[..40]);
         let first = store.checkpoint().unwrap().seq;
         run(&store, &mut reference, &steps[40..]);
-        let ckpts = files_in(&dir.path().join("checkpoints"));
+        let ckpts = files_in(&dir.path().join("ns/00000000000000000001/checkpoints"));
         let wal = segment_seqs(dir.path());
 
         fs.inject(Call::WriteAtomic, fault);
@@ -56,7 +56,7 @@ fn a_failed_checkpoint_write_keeps_the_previous_checkpoint_and_the_wal() {
             other => panic!("{:?}: {:?}", fault, other),
         }
         assert_eq!(
-            files_in(&dir.path().join("checkpoints")),
+            files_in(&dir.path().join("ns/00000000000000000001/checkpoints")),
             ckpts,
             "{:?}: previous checkpoint intact, no temp file",
             fault

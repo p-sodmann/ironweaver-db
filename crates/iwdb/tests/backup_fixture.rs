@@ -59,8 +59,8 @@ fn generate_fixture() {
     expected += &format!(
         "history {}\nbackup seq {} time {:?} files {}\n",
         report.history,
-        manifest.seq,
-        manifest.time.map(|t| t.0),
+        manifest.namespaces[0].seq,
+        manifest.namespaces[0].time.map(|t| t.0),
         manifest.files.len()
     );
     fs::write(dir.join("expected.txt"), expected).unwrap();
@@ -76,11 +76,15 @@ fn the_v1_backup_verifies_and_its_manifest_reads() {
     let manifest = read_manifest(&dir.join(BACKUP_NAME)).unwrap();
     let expected = fs::read_to_string(fixture(1).join("expected.txt")).unwrap();
     let line = expected.lines().find(|l| l.starts_with("backup seq")).unwrap();
-    let described =
-        format!("backup seq {} time {:?} files {}", manifest.seq, manifest.time.map(|t| t.0), manifest.files.len());
+    let described = format!(
+        "backup seq {} time {:?} files {}",
+        manifest.namespaces[0].seq,
+        manifest.namespaces[0].time.map(|t| t.0),
+        manifest.files.len()
+    );
     assert_eq!(line, described);
     let history = expected.lines().find_map(|l| l.strip_prefix("history ")).unwrap();
     assert_eq!(manifest.history.to_string(), history);
-    assert_eq!(report.seq, Some(manifest.seq));
+    assert_eq!(report.seq, Some(manifest.namespaces[0].seq));
     assert_eq!(snapshot(&dir), before);
 }

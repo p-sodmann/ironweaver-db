@@ -8,11 +8,7 @@ use iwdb_storage::archive::{verify_archive, ARCHIVE_MARKER_NAME};
 use iwdb_storage::io::{LogFs, StdFs};
 use iwdb_storage::{inspect, DirStatus, Error, Kind, RestoreReport, RestoreSources, RestoreTarget, VerifyReport};
 
-use crate::{Store, StoreOptions, StoreStatus, NAMESPACE};
-
-fn namespace() -> Result<NamespaceName, Error> {
-    Ok(NamespaceName::new(NAMESPACE).map_err(iwdb_engine::Error::from)?)
-}
+use crate::{Store, StoreOptions, StoreStatus};
 
 /// Verify a data directory, a backup or a WAL archive without changing
 /// anything: every checksum, every checkpoint, the WAL from its first
@@ -26,7 +22,7 @@ pub fn verify(dir: &Path) -> Result<VerifyReport, Error> {
     if dir.join(ARCHIVE_MARKER_NAME).exists() {
         return verify_archive(dir);
     }
-    iwdb_storage::verify(dir, &namespace()?)
+    iwdb_storage::verify(dir)
 }
 
 /// Restore a store into `dest`, a new or empty directory, at `target`:
@@ -42,6 +38,18 @@ pub fn restore(dest: &Path, sources: &RestoreSources, target: RestoreTarget) -> 
     restore_with(&StdFs, dest, sources, target)
 }
 
+/// [`restore`] of just the namespaces named in `only` (`None`: all that
+/// existed at the target). A restore to a seq needs exactly one namespace
+/// ([`RestoreTarget::Seq`]).
+pub fn restore_namespaces(
+    dest: &Path,
+    sources: &RestoreSources,
+    target: RestoreTarget,
+    only: Option<&[NamespaceName]>,
+) -> Result<RestoreReport, Error> {
+    restore_with_only(&StdFs, dest, sources, target, only)
+}
+
 /// [`restore`] through the file operations `fs` (tests inject faults with
 /// it).
 pub fn restore_with<F: LogFs>(
@@ -50,20 +58,29 @@ pub fn restore_with<F: LogFs>(
     sources: &RestoreSources,
     target: RestoreTarget,
 ) -> Result<RestoreReport, Error> {
-    let report = iwdb_storage::restore(fs, sources, target, dest, &namespace()?)?;
+    restore_with_only(fs, dest, sources, target, None)
+}
+
+/// [`restore_namespaces`] through the file operations `fs`.
+pub fn restore_with_only<F: LogFs>(
+    fs: &F,
+    dest: &Path,
+    sources: &RestoreSources,
+    target: RestoreTarget,
+    only: Option<&[NamespaceName]>,
+) -> Result<RestoreReport, Error> {
+    let report = iwdb_storage::restore(fs, sources, target, dest, only)?;
     log::info!(
-        "restored '{}' to seq {} (history {}, from checkpoint {:?} and {} WAL records)",
+        "restored '{}' (history {}): {}",
         dest.display(),
-        report.seq,
         report.history,
-        report.checkpoint,
-        report.replayed
+        report.namespaces.iter().map(|n| format!("{} at seq {}", n.name, n.seq)).collect::<Vec<_>>().join(", ")
     );
     Ok(report)
 }
 
 /// What [`status`] found.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Status {
     /// What the files say (after recovery, if the store was opened).
     pub files: DirStatus,

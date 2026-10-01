@@ -10,7 +10,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use iwdb::{verify, Error, IdempotencyKey, RecoveryReport, RestoreSources, RestoreTarget, Store, StoreOptions};
+use iwdb::{verify, Error, IdempotencyKey, RestoreSources, RestoreTarget, Store, StoreOptions, StoreRecovery};
 use iwdb_storage::failpoint::{Action, Call, Rule, When};
 use iwdb_storage::layout::{MARKER_NAME, RESTORING_NAME};
 
@@ -263,9 +263,9 @@ fn restore_points() -> Vec<(Call, When, &'static str, u64)> {
         (Sync, Before, RESTORING_NAME, 0),
         (SyncDir, Before, "/restored", 3),
         (SyncDir, After, "/restored", 3),
-        (WriteAtomic, Midway, "/restored/checkpoints/", 0),
-        (WriteAtomic, WriterDone, "/restored/checkpoints/", 0),
-        (WriteAtomic, After, "/restored/checkpoints/", 0),
+        (WriteAtomic, Midway, "/restored/ns/", 0),
+        (WriteAtomic, WriterDone, "/restored/ns/", 0),
+        (WriteAtomic, After, "/restored/ns/", 0),
         (RemoveFile, Before, RESTORING_NAME, 0),
         (RemoveFile, After, RESTORING_NAME, 0),
         (WriteAtomic, Before, "restored/IWDB", 0),
@@ -576,7 +576,7 @@ fn diff(expected: &model::State, actual: &model::State) -> String {
     out
 }
 
-fn note_report(summary: &mut Summary, report: &RecoveryReport) {
+fn note_report(summary: &mut Summary, report: &StoreRecovery) {
     summary.checked += 1;
     summary.from_checkpoint += u64::from(report.checkpoint.is_some());
     if let Some(tail) = &report.torn_tail {
@@ -854,8 +854,13 @@ fn cycle_once(config: &Config, rng: &mut Rng, target: &mut Target, summary: &mut
     // commit in flight under always)
     let crash_chance = if policy == Policy::Always { 4 } else { 2 };
     if outcome.opened().is_some() && rng.chance(1, crash_chance) {
-        os_crash = os_crash::simulate(&target.path.join("wal"), &config.work.join(SYNC_LOG), policy, rng)
-            .map_err(|e| format!("OS crash simulation: {}", e))?;
+        os_crash = os_crash::simulate(
+            &target.path.join("ns/00000000000000000001/wal"),
+            &config.work.join(SYNC_LOG),
+            policy,
+            rng,
+        )
+        .map_err(|e| format!("OS crash simulation: {}", e))?;
         if os_crash.is_some() {
             summary.os_crashes += 1;
             // Acknowledged commits may be lost only after the synced seq
@@ -993,7 +998,8 @@ pub fn check_archive(target: &Target, summary: &mut Summary) -> Result<(), Strin
     if !report.is_ok() {
         return Err(format!("the archive has problems: {:#?}", report.problems));
     }
-    let wal = iwdb_storage::list_segments(&target.path.join("wal")).map_err(|e| e.to_string())?;
+    let wal =
+        iwdb_storage::list_segments(&target.path.join("ns/00000000000000000001/wal")).map_err(|e| e.to_string())?;
     let wal_first = wal.first().map_or(u64::MAX, |(s, _)| *s);
     match (report.first_seq, report.last_seq) {
         (Some(first), Some(last)) => {
@@ -1130,6 +1136,7 @@ fn restore_cycle(config: &Config, rng: &mut Rng, target: &Target, summary: &mut 
 
 /// The seq of the newest checkpoint in a data directory.
 pub fn newest_checkpoint(dir: &Path) -> Option<u64> {
-    let checkpoints = iwdb_storage::checkpoint::list_checkpoints(&dir.join("checkpoints")).ok()?;
+    let checkpoints =
+        iwdb_storage::checkpoint::list_checkpoints(&dir.join("ns/00000000000000000001/checkpoints")).ok()?;
     checkpoints.last().map(|(seq, _)| *seq)
 }

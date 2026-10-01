@@ -12,7 +12,8 @@ use iwdb_engine::{invariants, Namespace};
 use crate::backup::{self, Manifest};
 use crate::checkpoint::{list_checkpoints, load_checkpoint};
 use crate::history::HistoryId;
-use crate::layout::{self, BACKUP_NAME, CHECKPOINT_DIR, LOCK_NAME, MARKER_NAME, TEMP_SUFFIX, WAL_DIR};
+use crate::layout::{self, NsPaths, BACKUP_NAME, CHECKPOINT_DIR, LOCK_NAME, MARKER_NAME, TEMP_SUFFIX, WAL_DIR};
+use crate::namespaces::{parse_ns_dir_name, read_log, DEFAULT_ID, DEFAULT_NAME, NAMESPACES_NAME, NS_DIR};
 use crate::{format, reader, Error, WalReader};
 use iwdb_engine::CommitTime;
 
@@ -91,6 +92,27 @@ pub struct VerifyReport {
     pub seq: Option<u64>,
     /// The commit time of the last record read (WAL format 2).
     pub time: Option<CommitTime>,
+    /// Each namespace (layout 4 and later, and archives of format 2; one
+    /// entry for older ones), by id. The counts above are the sums over
+    /// them, and `seq`, `first_seq`, `last_seq` and `time` are those of
+    /// the one namespace when there is exactly one, otherwise `None`.
+    pub namespaces: Vec<NamespaceVerify>,
+}
+
+/// What `verify` found in one namespace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamespaceVerify {
+    pub id: u64,
+    pub name: String,
+    pub checkpoints: usize,
+    pub checkpoints_checked: usize,
+    pub segments: usize,
+    pub records: u64,
+    pub first_seq: Option<u64>,
+    pub last_seq: Option<u64>,
+    /// The seq the state reaches (the replay's, or a backup's manifest's).
+    pub seq: Option<u64>,
+    pub time: Option<CommitTime>,
 }
 
 impl VerifyReport {
@@ -110,6 +132,52 @@ impl VerifyReport {
             last_seq: None,
             seq: None,
             time: None,
+            namespaces: Vec::new(),
+        }
+    }
+
+    /// Add a namespace's findings: its problems and notes, prefixed with
+    /// its name if `prefix`, and its counts.
+    pub(crate) fn merge(&mut self, id: u64, name: &str, prefix: bool, sub: VerifyReport) {
+        let tag = |f: Finding| {
+            if prefix {
+                Finding { path: f.path, message: format!("namespace '{}': {}", name, f.message) }
+            } else {
+                f
+            }
+        };
+        self.problems.extend(sub.problems.into_iter().map(tag));
+        self.notes.extend(sub.notes.into_iter().map(tag));
+        self.checkpoints += sub.checkpoints;
+        self.checkpoints_checked += sub.checkpoints_checked;
+        self.segments += sub.segments;
+        self.records += sub.records;
+        self.namespaces.push(NamespaceVerify {
+            id,
+            name: name.to_owned(),
+            checkpoints: sub.checkpoints,
+            checkpoints_checked: sub.checkpoints_checked,
+            segments: sub.segments,
+            records: sub.records,
+            first_seq: sub.first_seq,
+            last_seq: sub.last_seq,
+            seq: sub.seq,
+            time: sub.time,
+        });
+    }
+
+    /// Set the single-namespace fields (see [`namespaces`](Self::namespaces)).
+    pub(crate) fn summarize(&mut self) {
+        if let [only] = self.namespaces.as_slice() {
+            self.first_seq = only.first_seq;
+            self.last_seq = only.last_seq;
+            self.seq = only.seq;
+            self.time = only.time;
+        } else {
+            self.first_seq = None;
+            self.last_seq = None;
+            self.seq = None;
+            self.time = None;
         }
     }
 
@@ -165,17 +233,19 @@ impl VerifyReport {
 ///
 /// Memory: the replayed namespace plus one checkpoint at a time. Time:
 /// every file is read once, and every checkpoint is loaded once.
-pub fn verify(root: &Path, name: &NamespaceName) -> Result<VerifyReport, Error> {
+pub fn verify(root: &Path) -> Result<VerifyReport, Error> {
     if !root.is_dir() {
         return Err(Error::NotADataDir { path: root.to_path_buf(), reason: "it is not a directory".into() });
     }
     let _lock = layout::lock_shared(root)?;
     let is_backup = root.join(BACKUP_NAME).exists();
     let mut report = VerifyReport::new(root, if is_backup { Kind::Backup } else { Kind::DataDir });
+    let layout4;
     match layout::read_marker(root) {
         Ok(Some(info)) => {
             report.version = Some(info.version);
             report.history = info.history;
+            layout4 = info.version >= 4;
         }
         Ok(None) => {
             let reason = if root.join(layout::RESTORING_NAME).exists() {
@@ -185,55 +255,193 @@ pub fn verify(root: &Path, name: &NamespaceName) -> Result<VerifyReport, Error> 
             };
             return Err(Error::NotADataDir { path: root.to_path_buf(), reason });
         }
-        Err(Error::InvalidDataDir { reason, .. }) => report.problem(Some(&root.join(MARKER_NAME)), reason),
+        Err(Error::InvalidDataDir { reason, .. }) => {
+            report.problem(Some(&root.join(MARKER_NAME)), reason);
+            // A damaged marker: the layout is a guess, from what is there
+            layout4 = root.join(NAMESPACES_NAME).exists();
+        }
         Err(e) => return Err(e),
     }
     if root.join(layout::RESTORING_NAME).exists() {
         report.problem(Some(&root.join(layout::RESTORING_NAME)), "an interrupted restore");
     }
 
-    let checkpoint_dir = root.join(CHECKPOINT_DIR);
-    let wal_dir = root.join(WAL_DIR);
-    for dir in [&checkpoint_dir, &wal_dir] {
-        if !dir.is_dir() {
-            report.problem(Some(dir), "the directory is missing");
-        }
-    }
-    list_other_files(&mut report, root)?;
-
     let manifest = if is_backup { read_manifest(&mut report, root) } else { None };
-    let checkpoints = if checkpoint_dir.is_dir() { list_checkpoints(&checkpoint_dir)? } else { Vec::new() };
-    let segments = if wal_dir.is_dir() { reader::list_segments(&wal_dir)? } else { Vec::new() };
-    report.checkpoints = checkpoints.len();
-    report.segments = segments.len();
+    // The namespaces to check: layout 4 lists them in the namespace log,
+    // older layouts have the one in the directory itself
+    let mut namespaces: Vec<(u64, NamespaceName, NsPaths)> = Vec::new();
+    if layout4 {
+        match read_namespace_log(&mut report, root, manifest.as_ref()) {
+            Some(list) => namespaces = list,
+            None => {
+                report.summarize();
+                return Ok(report);
+            }
+        }
+    } else {
+        let name = NamespaceName::new(DEFAULT_NAME).map_err(iwdb_engine::Error::from)?;
+        namespaces.push((DEFAULT_ID, name, NsPaths::legacy(root)));
+    }
+    list_root_files(&mut report, root, layout4)?;
 
-    check_coverage(&mut report, &checkpoints, &segments);
-    replay(&mut report, name, &checkpoints, &segments);
-
+    for (id, name, paths) in &namespaces {
+        let mut sub = VerifyReport::new(root, report.kind);
+        let found = verify_namespace(&mut sub, name, paths)?;
+        if let (Some(manifest), true) = (&manifest, found) {
+            check_namespace_backup(&mut sub, manifest, *id, paths);
+        }
+        report.merge(*id, name.as_str(), layout4, sub);
+    }
     if let Some(manifest) = manifest {
         check_backup(&mut report, root, &manifest);
     }
+    report.summarize();
     Ok(report)
 }
 
-/// Temporary files and anything else that isn't ours.
-fn list_other_files(report: &mut VerifyReport, root: &Path) -> Result<(), Error> {
-    let known_root = [MARKER_NAME, LOCK_NAME, CHECKPOINT_DIR, WAL_DIR, BACKUP_NAME];
-    for (dir, known) in
-        [(root.to_path_buf(), &known_root[..]), (root.join(CHECKPOINT_DIR), &[][..]), (root.join(WAL_DIR), &[][..])]
-    {
+/// Read the namespace log of a layout 4 directory or backup: its torn tail
+/// is a note, damage a problem. Returns the namespaces it lists (for a
+/// backup, those of the manifest), `None` if the log is unusable.
+fn read_namespace_log(
+    report: &mut VerifyReport,
+    root: &Path,
+    manifest: Option<&Manifest>,
+) -> Option<Vec<(u64, NamespaceName, NsPaths)>> {
+    let path = root.join(NAMESPACES_NAME);
+    if !root.join(NS_DIR).is_dir() {
+        report.problem(Some(&root.join(NS_DIR)), "the directory is missing");
+    }
+    let (parsed, table) = match read_log(&path) {
+        Ok(read) => read,
+        Err(Error::InvalidNamespaceLog { reason, .. }) => {
+            report.problem(Some(&path), reason);
+            return None;
+        }
+        Err(Error::Io { source, .. }) => {
+            report.problem(Some(&path), format!("can't be read: {}", source));
+            return None;
+        }
+        Err(_) => return None,
+    };
+    if let Some(reason) = &parsed.torn {
+        report.note(
+            Some(&path),
+            format!(
+                "a torn tail at offset {} of {} bytes ({}): an event that was never acknowledged, which the next open cuts",
+                parsed.valid_len, parsed.file_len, reason
+            ),
+        );
+    }
+    let live: Vec<_> = table.live().cloned().collect();
+    if let Some(manifest) = manifest {
+        // A backup holds the namespaces its manifest lists, which are the
+        // log's live ones at that moment
+        for ns in &live {
+            if manifest.namespace(ns.id).is_none() {
+                report.problem(
+                    Some(&path),
+                    format!("lists namespace {} ('{}'), which the manifest doesn't", ns.id, ns.name),
+                );
+            }
+        }
+        for ns in &manifest.namespaces {
+            if table.get_id(ns.id).is_none_or(|n| n.name != ns.name) {
+                report
+                    .problem(Some(&path), format!("doesn't list namespace {} ('{}') of the manifest", ns.id, ns.name));
+            }
+        }
+    } else if let Ok(entries) = fs::read_dir(root.join(NS_DIR)) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            match parse_ns_dir_name(&name) {
+                Some(id) if table.get_id(id).is_none() => {
+                    let dropped =
+                        table.events().iter().any(|e| e.id == id && e.kind == crate::namespaces::EventKind::Drop);
+                    let data = !dropped && layout::has_data_pub(&NsPaths::new(root, id)).unwrap_or(true);
+                    if data {
+                        report.problem(
+                            Some(&entry.path()),
+                            format!(
+                                "holds data, but the namespace log doesn't list namespace {} (its create event may be lost: damage to the last event of the log looks like a torn tail); a store refuses to open it",
+                                id
+                            ),
+                        );
+                    } else {
+                        report.note(
+                            Some(&entry.path()),
+                            "a namespace directory the log doesn't list (an interrupted create or drop; the next open removes it)",
+                        );
+                    }
+                }
+                Some(_) => {}
+                None if name.ends_with(TEMP_SUFFIX) => report
+                    .note(Some(&entry.path()), "a temporary file (an interrupted write; the next open removes it)"),
+                None => report.note(Some(&entry.path()), "not a file of the database (ignored)"),
+            }
+        }
+    }
+    Some(
+        live.into_iter()
+            .map(|ns| {
+                let paths = NsPaths::new(root, ns.id);
+                (ns.id, ns.name, paths)
+            })
+            .collect(),
+    )
+}
+
+/// Notes about files in the root that aren't ours.
+fn list_root_files(report: &mut VerifyReport, root: &Path, layout4: bool) -> Result<(), Error> {
+    let known: &[&str] = if layout4 {
+        &[MARKER_NAME, LOCK_NAME, NAMESPACES_NAME, NS_DIR, BACKUP_NAME]
+    } else {
+        &[MARKER_NAME, LOCK_NAME, CHECKPOINT_DIR, WAL_DIR, BACKUP_NAME]
+    };
+    for entry in fs::read_dir(root).map_err(|e| Error::io("list", root, e))? {
+        let entry = entry.map_err(|e| Error::io("list", root, e))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(TEMP_SUFFIX) {
+            report.note(Some(&entry.path()), "a temporary file (an interrupted write; the next open removes it)");
+        } else if !known.contains(&name.as_str()) && name != layout::RESTORING_NAME {
+            report.note(Some(&entry.path()), "not a file of the database (ignored)");
+        }
+    }
+    Ok(())
+}
+
+/// Check one namespace's directories, files, coverage and replay into
+/// `report`. Returns whether its directories exist.
+fn verify_namespace(report: &mut VerifyReport, name: &NamespaceName, paths: &NsPaths) -> Result<bool, Error> {
+    let mut present = true;
+    for dir in [&paths.checkpoints, &paths.wal] {
+        if !dir.is_dir() {
+            report.problem(Some(dir), "the directory is missing");
+            present = false;
+        }
+    }
+    list_other_files(report, paths)?;
+    let checkpoints = if paths.checkpoints.is_dir() { list_checkpoints(&paths.checkpoints)? } else { Vec::new() };
+    let segments = if paths.wal.is_dir() { reader::list_segments(&paths.wal)? } else { Vec::new() };
+    report.checkpoints = checkpoints.len();
+    report.segments = segments.len();
+
+    check_coverage(report, &checkpoints, &segments);
+    replay(report, name, &checkpoints, &segments);
+    Ok(present)
+}
+
+fn list_other_files(report: &mut VerifyReport, paths: &NsPaths) -> Result<(), Error> {
+    for dir in [&paths.checkpoints, &paths.wal] {
         if !dir.is_dir() {
             continue;
         }
-        for entry in fs::read_dir(&dir).map_err(|e| Error::io("list", &dir, e))? {
-            let entry = entry.map_err(|e| Error::io("list", &dir, e))?;
+        let is_checkpoints = dir == &paths.checkpoints;
+        for entry in fs::read_dir(dir).map_err(|e| Error::io("list", dir, e))? {
+            let entry = entry.map_err(|e| Error::io("list", dir, e))?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let path = entry.path();
-            let ours = known.contains(&name.as_str())
-                || (dir.ends_with(CHECKPOINT_DIR)
-                    && crate::checkpoint::parse_checkpoint_name(&name).is_some()
-                    && path.is_file())
-                || (dir.ends_with(WAL_DIR) && format::parse_segment_name(&name).is_some() && path.is_file());
+            let ours = (is_checkpoints && crate::checkpoint::parse_checkpoint_name(&name).is_some() && path.is_file())
+                || (!is_checkpoints && format::parse_segment_name(&name).is_some() && path.is_file());
             if name.ends_with(TEMP_SUFFIX) {
                 report.note(Some(&path), "a temporary file (an interrupted write; the next open removes it)");
             } else if !ours {
@@ -244,8 +452,6 @@ fn list_other_files(report: &mut VerifyReport, root: &Path) -> Result<(), Error>
     Ok(())
 }
 
-/// Every checkpoint needs the WAL from its seq + 1 to the newest
-/// checkpoint's seq, so recovery can fall back to it.
 fn check_coverage(report: &mut VerifyReport, checkpoints: &[(u64, PathBuf)], segments: &[(u64, PathBuf)]) {
     let Some(&(newest, _)) = checkpoints.last() else { return };
     let first = segments.first().map(|(seq, _)| *seq);
@@ -470,7 +676,20 @@ fn read_manifest(report: &mut VerifyReport, root: &Path) -> Option<Manifest> {
     }
 }
 
-/// A backup's files and seq against its manifest.
+/// A backup's namespace against its manifest: the WAL must end at the
+/// seq the manifest says.
+fn check_namespace_backup(report: &mut VerifyReport, manifest: &Manifest, id: u64, paths: &NsPaths) {
+    let Some(ns) = manifest.namespace(id) else { return };
+    let path = paths.dir.clone();
+    match report.seq {
+        Some(seq) if seq != ns.seq => report
+            .problem(Some(&path), format!("the backup's WAL ends at seq {}, but its manifest says {}", seq, ns.seq)),
+        _ => {}
+    }
+    report.seq = Some(ns.seq);
+}
+
+/// A backup's files and history against its manifest.
 fn check_backup(report: &mut VerifyReport, root: &Path, manifest: &Manifest) {
     let path = root.join(BACKUP_NAME);
     if report.history.is_some() && Some(manifest.history) != report.history {
@@ -482,12 +701,4 @@ fn check_backup(report: &mut VerifyReport, root: &Path, manifest: &Manifest) {
     for problem in backup::check_files(root, manifest) {
         report.problems.push(problem);
     }
-    match report.seq {
-        Some(seq) if seq != manifest.seq => report.problem(
-            Some(&path),
-            format!("the backup's WAL ends at seq {}, but its manifest says {}", seq, manifest.seq),
-        ),
-        _ => {}
-    }
-    report.seq = Some(manifest.seq);
 }

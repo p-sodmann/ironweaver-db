@@ -48,7 +48,7 @@ def test_a_failed_wal_write_makes_the_store_read_only(path):
     # Small segments: the next rotation needs to create a file in wal/
     store = iwdb.Store.open(path, segment_size=1024, checkpoint_background=False)
     commit(store, id="a", attr={"pad": "x" * 400})
-    shutil.rmtree(path / "wal")
+    shutil.rmtree(path / "ns" / "00000000000000000001" / "wal")
     with pytest.raises(iwdb.IoError):
         for i in range(10):
             commit(store, id="a", attr={"pad": "x" * 400, "i": i})
@@ -68,7 +68,7 @@ def test_damage_is_corrupt(path):
     with iwdb.Store.open(path, segment_size=1024, checkpoint_background=False, checkpoint_on_close=False) as store:
         for i in range(20):
             commit(store, id="a", attr={"pad": "x" * 200, "i": i})
-    first = sorted((path / "wal").iterdir())[0]
+    first = sorted((path / "ns" / "00000000000000000001" / "wal").iterdir())[0]
     data = bytearray(first.read_bytes())
     data[40] ^= 0xFF
     first.write_bytes(bytes(data))

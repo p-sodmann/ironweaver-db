@@ -103,8 +103,8 @@ fn what_a_crash_leaves_is_noted_not_damage() {
     // A torn frame at the end, temporary files
     let bytes = frame(seq + 1, seq, &[7; 40]);
     OpenOptions::new().append(true).open(last_segment(dir.path())).unwrap().write_all(&bytes[..30]).unwrap();
-    fs::write(dir.path().join("checkpoints").join(".x.ckpt.1.0.tmp"), b"half").unwrap();
-    fs::write(dir.path().join("wal").join("00000000000000009999.wal.tmp"), b"half").unwrap();
+    fs::write(dir.path().join("ns/00000000000000000001/checkpoints").join(".x.ckpt.1.0.tmp"), b"half").unwrap();
+    fs::write(dir.path().join("ns/00000000000000000001/wal").join("00000000000000009999.wal.tmp"), b"half").unwrap();
     let report = verify(dir.path()).unwrap();
     clean(&report);
     assert_eq!(report.seq, Some(seq));
@@ -200,21 +200,26 @@ fn missing_and_cut_wal_files_are_problems() {
     let copy = tempfile::tempdir().unwrap();
     copy_dir(pristine.path(), copy.path());
     let middle = segments[segments.len() / 2];
-    fs::remove_file(copy.path().join("wal").join(iwdb_storage::format::segment_name(middle))).unwrap();
+    fs::remove_file(copy.path().join("ns/00000000000000000001/wal").join(iwdb_storage::format::segment_name(middle)))
+        .unwrap();
     assert!(!verify(copy.path()).unwrap().is_ok());
     // The WAL cut before the newest checkpoint
     let copy = tempfile::tempdir().unwrap();
     copy_dir(pristine.path(), copy.path());
     let newest = *checkpoints(copy.path()).last().unwrap();
     for seq in segment_seqs(copy.path()).into_iter().filter(|s| *s > newest - 3) {
-        fs::remove_file(copy.path().join("wal").join(iwdb_storage::format::segment_name(seq))).unwrap();
+        fs::remove_file(copy.path().join("ns/00000000000000000001/wal").join(iwdb_storage::format::segment_name(seq)))
+            .unwrap();
     }
     let report = verify(copy.path()).unwrap();
     assert!(report.problems.iter().any(|p| p.message.contains("before this checkpoint")), "{:#?}", report);
     // The WAL that the oldest checkpoint needs is gone
     let copy = tempfile::tempdir().unwrap();
     copy_dir(pristine.path(), copy.path());
-    fs::remove_file(copy.path().join("wal").join(iwdb_storage::format::segment_name(segments[0]))).unwrap();
+    fs::remove_file(
+        copy.path().join("ns/00000000000000000001/wal").join(iwdb_storage::format::segment_name(segments[0])),
+    )
+    .unwrap();
     let report = verify(copy.path()).unwrap();
     assert!(report.problems.iter().any(|p| p.message.contains("doesn't reach back")), "{:#?}", report);
 }
@@ -308,7 +313,7 @@ fn a_wal_that_ends_before_the_only_checkpoint_is_a_problem() {
     let segments = segment_seqs(dir.path());
     let holding = *segments.iter().rfind(|s| **s <= newest).unwrap();
     for seq in segments {
-        let path = dir.path().join("wal").join(iwdb_storage::format::segment_name(seq));
+        let path = dir.path().join("ns/00000000000000000001/wal").join(iwdb_storage::format::segment_name(seq));
         if seq == holding {
             let bytes = fs::read(&path).unwrap();
             fs::write(&path, &bytes[..iwdb_storage::format::SEGMENT_HEADER_LEN]).unwrap();

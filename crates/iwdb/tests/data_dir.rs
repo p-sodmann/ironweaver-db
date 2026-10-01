@@ -26,7 +26,10 @@ fn a_new_directory_gets_the_layout() {
     let mut names: Vec<String> =
         fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     names.sort();
-    assert_eq!(names, ["IWDB", "LOCK", "checkpoints", "wal"]);
+    assert_eq!(names, ["IWDB", "LOCK", "NAMESPACES", "ns"]);
+    assert!(
+        dir.join("ns/00000000000000000001/wal").is_dir() && dir.join("ns/00000000000000000001/checkpoints").is_dir()
+    );
     assert_eq!(fs::read(dir.join(MARKER_NAME)).unwrap(), encode_marker(history));
     assert_eq!(&fs::read(dir.join(MARKER_NAME)).unwrap()[..8], b"IWDBDIR\n");
     // The history stays the same across opens, and differs between directories
@@ -160,7 +163,7 @@ fn a_newer_layout_or_a_damaged_marker_is_refused() {
     assert!(matches!(Store::open(dir.path(), options(2)), Err(Error::InvalidDataDir { .. })));
 
     fs::write(&marker, good).unwrap();
-    fs::remove_dir_all(dir.path().join("wal")).unwrap();
+    fs::remove_dir_all(dir.path().join("ns")).unwrap();
     assert!(matches!(Store::open(dir.path(), options(2)), Err(Error::InvalidDataDir { .. })));
 }
 

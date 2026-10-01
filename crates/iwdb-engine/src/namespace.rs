@@ -1,7 +1,7 @@
 //! [`Namespace`]: a graph with its catalog and commit position, changed
 //! only through the commit pipeline.
 
-use ironweaver_core::GraphError;
+use ironweaver_core::{GraphError, Key, NodeIx};
 
 use crate::catalog::{AttrPath, ConstraintKind, NamespaceCatalog, NamespaceName};
 use crate::idempotency::{fingerprint_catalog, fingerprint_data, IdempotencyKey, KeyEntry, KeyTable, Keyed};
@@ -63,6 +63,35 @@ pub struct Namespace {
     seq: u64,
     keys: KeyTable,
     poisoned: bool,
+}
+
+/// The keys of an index being built off the write lock (step 9, ADR 0019):
+/// for each node the scan saw, its index key and its version at the time.
+/// [`Namespace::apply_built`] installs it, checking each node's version
+/// again; nodes that changed or appeared meanwhile are re-read then.
+#[derive(Debug)]
+pub struct IndexBuild {
+    path: AttrPath,
+    keys: Vec<(NodeIx, Option<Key>, u64)>,
+}
+
+impl IndexBuild {
+    pub fn new(path: AttrPath) -> Self {
+        IndexBuild { path, keys: Vec::new() }
+    }
+
+    pub fn path(&self) -> &AttrPath {
+        &self.path
+    }
+
+    /// Nodes scanned so far.
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
 }
 
 /// What preparing a keyed commit gives.
@@ -170,6 +199,36 @@ impl Namespace {
     /// The recent keyed commits (step 8).
     pub fn keys(&self) -> &KeyTable {
         &self.keys
+    }
+
+    /// The handles of every node, for [`scan_index_keys`](Self::scan_index_keys)
+    /// in chunks. O(n).
+    pub fn node_handles(&self) -> Vec<NodeIx> {
+        self.graph.node_indices().collect()
+    }
+
+    /// Read the index keys of the nodes `handles` (handles that are stale
+    /// by now are skipped) into `build`. Reads only: run it under the read
+    /// lock, a chunk at a time.
+    pub fn scan_index_keys(&self, handles: &[NodeIx], build: &mut IndexBuild) -> Result<(), Error> {
+        use ironweaver_core::Attributes;
+        for &ix in handles {
+            let Some(node) = self.graph.node(ix) else { continue };
+            let key = node.data.with_value(build.path.keys(), |v| v.and_then(Key::of))?;
+            build.keys.push((ix, key, node.data.version));
+        }
+        Ok(())
+    }
+
+    /// The index path a catalog change needs and the graph lacks, if any:
+    /// what an online build would build.
+    pub fn index_needed(&self, change: &CatalogChange) -> Option<AttrPath> {
+        let path = match change {
+            CatalogChange::CreateIndex(index) => &index.path,
+            CatalogChange::AddConstraint(c) if c.kind == ConstraintKind::Unique => &c.path,
+            _ => return None,
+        };
+        (path.keys() != ["labels"] && !self.graph.has_index(path.keys())).then(|| path.clone())
     }
 
     /// Whether a failed apply poisoned the namespace (see the type docs).
@@ -292,7 +351,36 @@ impl Namespace {
     /// [`Error::ApplyFailed`] (poisoning the namespace) if the graph
     /// rejects it. Returns the result with its time.
     pub fn apply(&mut self, prepared: Prepared, time: Option<CommitTime>) -> Result<CommitResult, Error> {
+        self.apply_built(prepared, time, None)
+    }
+
+    /// [`apply`](Self::apply) a catalog change with the keys of its index
+    /// already read ([`scan_index_keys`](Self::scan_index_keys)): the index
+    /// is created from them, minus every node whose version changed or
+    /// that is gone, and the nodes the scan didn't see are indexed by the
+    /// flush that follows. So the write lock is held for the insertion of
+    /// the keys, not for reading every node's payload.
+    pub fn apply_built(
+        &mut self,
+        prepared: Prepared,
+        time: Option<CommitTime>,
+        build: Option<IndexBuild>,
+    ) -> Result<CommitResult, Error> {
         let Prepared { record, result } = prepared;
+        if let Some(build) = build {
+            if !self.poisoned && record.seq == self.seq.wrapping_add(1) && !self.graph.has_index(build.path.keys()) {
+                let graph = &self.graph;
+                let fresh: Vec<_> = build
+                    .keys
+                    .into_iter()
+                    .filter(|(ix, _, version)| graph.node(*ix).is_some_and(|n| n.data.version == *version))
+                    .map(|(ix, key, _)| (ix, key))
+                    .collect();
+                // An error leaves the graph without the index; the apply
+                // below then builds it the plain way
+                let _ = self.graph.create_index_with_keys(build.path.keys(), fresh);
+            }
+        }
         self.apply_record(record, time)?;
         Ok(CommitResult { time, ..result })
     }

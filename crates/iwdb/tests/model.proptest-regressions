@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc df9cfe3f7880f915470293189e6491333990fdd4f8b3ef4faa97a1d7864e0dfa # shrinks to seed = Tx([UpsertNode { id: "a", labels: [], attr: {}, meta: {}, expected_version: None }, UpsertNode { id: "b", labels: [], attr: {}, meta: {}, expected_version: None }, UpsertNode { id: "c", labels: [], attr: {}, meta: {}, expected_version: None }, UpsertNode { id: "d", labels: [], attr: {}, meta: {}, expected_version: None }]), actions = [TornCrash(1)], keep = 1

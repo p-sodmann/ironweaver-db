@@ -17,9 +17,9 @@ use iwdb_engine::catalog::{IndexChanges, NamespaceName};
 use iwdb_engine::codec::{self, Loaded};
 use iwdb_engine::Namespace;
 
-use crate::archive::Archive;
+use crate::archive::ArchiveHandle;
 use crate::io::LogFs;
-use crate::layout::DataDir;
+use crate::layout::NsPaths;
 use crate::{reader, Error, WalReader};
 
 /// Suffix of checkpoint file names: `<seq, 20 digits>.ckpt`.
@@ -188,7 +188,7 @@ pub struct CheckpointOutcome {
 ///    oldest kept checkpoint (a segment ends where the next begins; the
 ///    last segment is never removed), then syncs. So recovery can always
 ///    fall back to any kept checkpoint and replay the WAL from there. With
-///    an [`Archive`] ([`set_archive`](Self::set_archive)), the segments are
+///    an [`ArchiveHandle`] ([`set_archive`](Self::set_archive)), the segments are
 ///    first copied into the archive and the archive directory synced, so
 ///    a segment leaves `wal/` only once it is durable in the archive.
 ///
@@ -219,7 +219,7 @@ pub struct Checkpointer<F: LogFs> {
     /// Checkpoints known to be damaged (they failed to load).
     bad: BTreeSet<u64>,
     disabled: Option<String>,
-    archive: Option<Archive<F>>,
+    archive: Option<ArchiveHandle<F>>,
 }
 
 impl<F: LogFs> std::fmt::Debug for Checkpointer<F> {
@@ -236,12 +236,12 @@ impl<F: LogFs> std::fmt::Debug for Checkpointer<F> {
 }
 
 impl<F: LogFs> Checkpointer<F> {
-    /// A checkpointer for the data directory `dir` and namespace `name`,
+    /// A checkpointer for the namespace `name` in `paths`,
     /// keeping `keep` checkpoints (at least 1). `newest` and `bad` are what
     /// recovery learned: the checkpoint it loaded and the ones it skipped.
     pub fn new(
         fs: F,
-        dir: &DataDir,
+        paths: &NsPaths,
         name: NamespaceName,
         keep: usize,
         newest: Option<u64>,
@@ -249,8 +249,8 @@ impl<F: LogFs> Checkpointer<F> {
     ) -> Self {
         Checkpointer {
             fs,
-            checkpoints: dir.checkpoint_dir().to_path_buf(),
-            wal: dir.wal_dir().to_path_buf(),
+            checkpoints: paths.checkpoints.clone(),
+            wal: paths.wal.clone(),
             name,
             keep: keep.max(1),
             namespace: None,
@@ -263,12 +263,12 @@ impl<F: LogFs> Checkpointer<F> {
 
     /// Archive WAL segments into `archive` before removing them (see the
     /// type docs).
-    pub fn set_archive(&mut self, archive: Archive<F>) {
+    pub fn set_archive(&mut self, archive: ArchiveHandle<F>) {
         self.archive = Some(archive);
     }
 
     /// The archive, if segments are archived.
-    pub fn archive(&self) -> Option<&Archive<F>> {
+    pub fn archive(&self) -> Option<&ArchiveHandle<F>> {
         self.archive.as_ref()
     }
 
@@ -381,10 +381,16 @@ impl<F: LogFs> Checkpointer<F> {
             }
             removable.push((*first_seq, path.clone()));
         }
-        if let (Some(archive), false) = (&self.archive, removable.is_empty()) {
-            // A failed copy leaves everything in `wal/`: retried next time
-            archive.copy(&removable)?;
-            let result = archive.sync();
+        if self.archive.is_some() && !removable.is_empty() {
+            // A failed copy leaves everything in `wal/`: retried next time.
+            // Making the namespace's archive directory is a directory sync
+            // like the others: a failure disables the checkpointer
+            let made = self.archive.as_ref().map_or(Ok(()), ArchiveHandle::ensure_dir);
+            self.guard(made)?;
+            if let Some(archive) = &self.archive {
+                archive.copy(&removable)?;
+            }
+            let result = self.archive.as_ref().map_or(Ok(()), ArchiveHandle::sync);
             self.guard(result)?;
         }
         let mut removed = Vec::new();

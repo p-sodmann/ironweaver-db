@@ -40,16 +40,23 @@ pub use ironweaver_core::cancel::Token as CancelToken;
 pub use ironweaver_core::pathfinding::EdgeCost;
 pub use ironweaver_core::{Attrs, EdgeId, Value};
 pub use ironweaver_core::{Direction, Projection};
-pub use iwdb_engine::catalog::{AttrPath, Constraint, ConstraintKind, IndexDef, Label, NamespaceCatalog};
+pub use iwdb_engine::catalog::{
+    AttrPath, CatalogError, Constraint, ConstraintKind, IndexDef, Label, NamespaceCatalog, NamespaceName,
+};
 pub use iwdb_engine::{
     CatalogChange, CommitResult, CommitTime, EdgeKey, IdempotencyKey, KeyTable, Mutation, Namespace, Target,
 };
 pub use iwdb_storage::io::{LogFs, StdFs};
+pub use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 pub use iwdb_storage::{
     BackupReport, CheckpointOutcome, CutTail, DirStatus, Error, Finding, FsyncPolicy, HistoryId, Kind, LockStats,
-    RecoveryReport, RestoreReport, RestoreSources, RestoreTarget, SkippedCheckpoint, VerifyReport, WalOptions,
+    NamespaceBackup, NamespaceFiles, NamespaceRestore, NamespaceVerify, RecoveryReport, RestoreReport, RestoreSources,
+    RestoreTarget, SkippedCheckpoint, StoreRecovery, VerifyReport, WalOptions,
 };
-pub use ops::{restore, restore_with, status, verify, Status};
+pub use ops::{restore, restore_namespaces, restore_with, restore_with_only, status, verify, Status};
 pub use options::{CheckpointOptions, StoreOptions};
 pub use request::{ReadOptions, DEFAULT_TIMEOUT};
-pub use store::{Analysis, CommitOptions, Edge, Node, ProjectionSpec, Store, StoreStatus, NAMESPACE};
+pub use store::{
+    Analysis, CommitOptions, Edge, IndexState, IndexStatus, NamespaceStatus, Node, Ns, ProjectionSpec, Store,
+    StoreStatus, NAMESPACE,
+};

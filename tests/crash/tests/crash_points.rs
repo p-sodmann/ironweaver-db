@@ -138,11 +138,15 @@ fn files(dir: &Path) -> Vec<String> {
 }
 
 fn segments(dir: &Path) -> Vec<u64> {
-    iwdb_storage::list_segments(&dir.join("wal")).unwrap().into_iter().map(|(s, _)| s).collect()
+    iwdb_storage::list_segments(&dir.join("ns/00000000000000000001/wal")).unwrap().into_iter().map(|(s, _)| s).collect()
 }
 
 fn checkpoints(dir: &Path) -> Vec<u64> {
-    iwdb_storage::checkpoint::list_checkpoints(&dir.join("checkpoints")).unwrap().into_iter().map(|(s, _)| s).collect()
+    iwdb_storage::checkpoint::list_checkpoints(&dir.join("ns/00000000000000000001/checkpoints"))
+        .unwrap()
+        .into_iter()
+        .map(|(s, _)| s)
+        .collect()
 }
 
 #[test]
@@ -175,10 +179,13 @@ fn inside_a_checkpoint_write() {
             let before = newest_checkpoint(env.dir());
             env.crash_at(pause(Call::WriteAtomic, when).path("/checkpoints/"));
             // The temporary file is there, the checkpoint isn't
-            let temp: Vec<String> =
-                files(&env.dir().join("checkpoints")).into_iter().filter(|n| n.ends_with(".tmp")).collect();
+            let temp: Vec<String> = files(&env.dir().join("ns/00000000000000000001/checkpoints"))
+                .into_iter()
+                .filter(|n| n.ends_with(".tmp"))
+                .collect();
             assert_eq!(temp.len(), 1, "{} {:?}: {:?}", policy, when, temp);
-            let temp_len = fs::metadata(env.dir().join("checkpoints").join(&temp[0])).unwrap().len();
+            let temp_len =
+                fs::metadata(env.dir().join("ns/00000000000000000001/checkpoints").join(&temp[0])).unwrap().len();
             assert!(temp_len > 0, "{} {:?}: flushed into the temporary file", policy, when);
             let store = env.check();
             // (The main thread goes on committing until the kill, which can

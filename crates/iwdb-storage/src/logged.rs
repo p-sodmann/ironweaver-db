@@ -1,11 +1,13 @@
 //! [`LoggedNamespace`]: a namespace whose commits go through its log, shared
 //! by one writer and many readers.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
-use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation, Namespace, Prepare};
+use iwdb_engine::catalog::AttrPath;
+use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, IndexBuild, Mutation, Namespace, Prepare};
 
 use crate::io::{LogFs, StdFs};
 use crate::{Error, Wal};
@@ -60,6 +62,28 @@ pub struct LoggedNamespace<F: LogFs = StdFs> {
     progress: Mutex<()>,
     advanced: Condvar,
     stats: Stats,
+    /// The namespace was dropped (step 9): commits and waits fail.
+    dropped: AtomicBool,
+    /// Index builds in progress (step 9).
+    builds: Mutex<Vec<Arc<BuildProgress>>>,
+}
+
+/// Rows scanned per read-lock hold of an online index build.
+pub const BUILD_CHUNK: usize = 8192;
+
+/// An online index build in progress ([`LoggedNamespace::builds`]).
+#[derive(Debug)]
+pub struct BuildProgress {
+    pub path: AttrPath,
+    pub total: usize,
+    scanned: AtomicU64,
+}
+
+impl BuildProgress {
+    /// Nodes scanned so far.
+    pub fn scanned(&self) -> usize {
+        self.scanned.load(Ordering::Relaxed) as usize
+    }
 }
 
 /// How long commits held the namespace's write lock (apply and index
@@ -86,6 +110,8 @@ pub enum Wait {
     Reached(u64),
     /// The deadline passed first; the namespace's seq then.
     TimedOut(u64),
+    /// The namespace was dropped.
+    Dropped,
     /// `cancelled` said so.
     Cancelled,
     /// The namespace is read-only and below the seq: it will never get there.
@@ -113,6 +139,8 @@ impl<F: LogFs> LoggedNamespace<F> {
             progress: Mutex::new(()),
             advanced: Condvar::new(),
             stats: Stats::default(),
+            dropped: AtomicBool::new(false),
+            builds: Mutex::new(Vec::new()),
         })
     }
 
@@ -147,7 +175,59 @@ impl<F: LogFs> LoggedNamespace<F> {
         change: CatalogChange,
         key: Option<&IdempotencyKey>,
     ) -> Result<CommitResult, Error> {
-        self.log_and_apply(|ns| ns.prepare_catalog_keyed(change, key))
+        // An index the graph lacks is built first, reading the nodes a
+        // chunk at a time under the read lock, so that neither commits nor
+        // reads wait for the whole build (ADR 0019)
+        let build = self.build_index(&change, key)?;
+        self.log_and_apply_built(build, |ns| ns.prepare_catalog_keyed(change, key))
+    }
+
+    /// The index builds in progress.
+    pub fn builds(&self) -> Vec<Arc<BuildProgress>> {
+        lock(&self.builds).clone()
+    }
+
+    fn build_index(&self, change: &CatalogChange, key: Option<&IdempotencyKey>) -> Result<Option<IndexBuild>, Error> {
+        let (path, handles) = {
+            let ns = self.namespace();
+            if key.is_some_and(|k| ns.keys().get(k).is_some()) {
+                return Ok(None);
+            }
+            match ns.index_needed(change) {
+                Some(path) => (path, ns.node_handles()),
+                None => return Ok(None),
+            }
+        };
+        let progress = Arc::new(BuildProgress { path: path.clone(), total: handles.len(), scanned: AtomicU64::new(0) });
+        lock(&self.builds).push(progress.clone());
+        let mut build = IndexBuild::new(path);
+        let mut result = Ok(());
+        for chunk in handles.chunks(BUILD_CHUNK) {
+            if self.is_dropped() {
+                result = Err(Error::NamespaceDropped { name: self.namespace().name().to_string() });
+                break;
+            }
+            result = self.namespace().scan_index_keys(chunk, &mut build).map_err(Error::from);
+            if result.is_err() {
+                break;
+            }
+            progress.scanned.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        }
+        lock(&self.builds).retain(|b| !Arc::ptr_eq(b, &progress));
+        result.map(|()| Some(build))
+    }
+
+    /// Mark the namespace dropped: further commits fail with
+    /// [`Error::NamespaceDropped`], and waiters wake with [`Wait::Dropped`].
+    /// Reads in progress finish on the state they started with.
+    pub fn mark_dropped(&self) {
+        let _guard = lock(&self.progress);
+        self.dropped.store(true, Ordering::Release);
+        self.advanced.notify_all();
+    }
+
+    pub fn is_dropped(&self) -> bool {
+        self.dropped.load(Ordering::Acquire)
     }
 
     /// Fsync every logged commit (see [`Wal::sync`]).
@@ -205,6 +285,9 @@ impl<F: LogFs> LoggedNamespace<F> {
     pub fn wait_for_seq(&self, seq: u64, deadline: Option<Instant>, cancelled: &dyn Fn() -> bool) -> Wait {
         let mut guard = lock(&self.progress);
         loop {
+            if self.is_dropped() {
+                return Wait::Dropped;
+            }
             let now = self.seq();
             if now >= seq {
                 return Wait::Reached(now);
@@ -255,7 +338,18 @@ impl<F: LogFs> LoggedNamespace<F> {
         &self,
         prepare: impl FnOnce(&Namespace) -> Result<Prepare, iwdb_engine::Error>,
     ) -> Result<CommitResult, Error> {
+        self.log_and_apply_built(None, prepare)
+    }
+
+    fn log_and_apply_built(
+        &self,
+        build: Option<IndexBuild>,
+        prepare: impl FnOnce(&Namespace) -> Result<Prepare, iwdb_engine::Error>,
+    ) -> Result<CommitResult, Error> {
         let mut wal = lock(&self.wal);
+        if self.is_dropped() {
+            return Err(Error::NamespaceDropped { name: self.namespace().name().to_string() });
+        }
         // The lookup of a key comes first: a duplicate's commit was applied,
         // so its result stands even when the namespace is read-only now
         let prepared = match (prepare(&self.namespace()), self.read_only()) {
@@ -272,7 +366,7 @@ impl<F: LogFs> LoggedNamespace<F> {
         let mut namespace = self.namespace.write().unwrap_or_else(PoisonError::into_inner);
         // An error here is ApplyFailed (the namespace is now poisoned, so
         // read-only) or a bug; either way the commit is not acknowledged.
-        let applied = namespace.apply(prepared, Some(time));
+        let applied = namespace.apply_built(prepared, Some(time), build);
         let seq = namespace.seq();
         drop(namespace);
         self.stats.record(start.elapsed());

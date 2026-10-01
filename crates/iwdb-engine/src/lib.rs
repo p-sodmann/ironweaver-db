@@ -33,7 +33,7 @@ pub use catalog::Catalog;
 pub use error::{Entity, Error};
 pub use idempotency::{IdempotencyKey, KeyTable, Keyed};
 pub use mutation::{CatalogChange, Change, CommitRecord, CommitResult, EdgeKey, Mutation, Target};
-pub use namespace::{Namespace, Prepare, Prepared};
+pub use namespace::{IndexBuild, Namespace, Prepare, Prepared};
 pub use record::DbRecord;
 pub use time::CommitTime;
 

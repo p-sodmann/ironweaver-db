@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use iwdb::{
-    BackupReport, CheckpointOutcome, CommitTime, Finding, FsyncPolicy, Kind, RecoveryReport, RestoreReport,
-    StoreStatus, VerifyReport,
+    BackupReport, CheckpointOutcome, CommitTime, Finding, FsyncPolicy, IndexState, IndexStatus, Kind, NamespaceStatus,
+    RecoveryReport, RestoreReport, StoreRecovery, StoreStatus, VerifyReport,
 };
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -40,7 +40,7 @@ fn to<'py, T: IntoPyObject<'py>>(py: Python<'py>, value: T) -> PyResult<Bound<'p
     value.into_bound_py_any(py)
 }
 
-pub fn recovery(py: Python<'_>, r: &RecoveryReport) -> PyResult<Py<PyAny>> {
+fn ns_recovery(py: Python<'_>, r: &RecoveryReport) -> PyResult<Py<PyAny>> {
     let torn = match &r.torn_tail {
         Some(t) => dict(
             py,
@@ -58,14 +58,72 @@ pub fn recovery(py: Python<'_>, r: &RecoveryReport) -> PyResult<Py<PyAny>> {
     dict(
         py,
         vec![
-            ("created", to(py, r.created)?),
-            ("upgraded_from", to(py, r.upgraded_from)?),
             ("checkpoint", to(py, r.checkpoint)?),
             ("skipped_checkpoints", to(py, skipped)?),
             ("replayed", to(py, r.replayed)?),
             ("torn_tail", torn),
-            ("removed_temp_files", to(py, r.removed_temp_files.len())?),
             ("seq", to(py, r.seq)?),
+        ],
+    )
+}
+
+/// What recovery did: the fields of the `default` namespace's recovery,
+/// the store's own, and `namespaces`.
+pub fn recovery(py: Python<'_>, r: &StoreRecovery) -> PyResult<Py<PyAny>> {
+    let base = ns_recovery(py, r)?;
+    let out = base.bind(py).cast::<PyDict>()?.clone();
+    out.set_item("created", r.created)?;
+    out.set_item("upgraded_from", r.upgraded_from)?;
+    out.set_item("removed_temp_files", r.removed_temp_files.len())?;
+    out.set_item("removed_orphans", r.removed_orphans.clone())?;
+    let namespaces = PyDict::new(py);
+    for (name, ns) in &r.namespaces {
+        namespaces.set_item(name, ns_recovery(py, ns)?)?;
+    }
+    out.set_item("namespaces", namespaces)?;
+    Ok(out.into_any().unbind())
+}
+
+pub fn indexes(py: Python<'_>, list: &[IndexStatus]) -> PyResult<Py<PyAny>> {
+    let out = PyList::empty(py);
+    for i in list {
+        let (state, scanned, total) = match &i.state {
+            IndexState::Ready => ("ready", None, None),
+            IndexState::Building { scanned, total } => ("building", Some(*scanned), Some(*total)),
+        };
+        out.append(dict(
+            py,
+            vec![
+                ("path", to(py, i.path.keys().to_vec())?),
+                ("state", to(py, state)?),
+                ("declared", to(py, i.declared)?),
+                ("unique", to(py, i.unique)?),
+                ("scanned", to(py, scanned)?),
+                ("total", to(py, total)?),
+            ],
+        )?)?;
+    }
+    Ok(out.into_any().unbind())
+}
+
+pub fn namespace_status(py: Python<'_>, n: &NamespaceStatus) -> PyResult<Py<PyAny>> {
+    dict(
+        py,
+        vec![
+            ("id", to(py, n.id)?),
+            ("name", to(py, n.name.clone())?),
+            ("created", commit_time(py, Some(n.created))?),
+            ("seq", to(py, n.seq)?),
+            ("synced_seq", to(py, n.synced_seq)?),
+            ("checkpoint", to(py, n.checkpoint)?),
+            ("read_only", to(py, n.read_only.clone())?),
+            ("checkpoint_failure", to(py, n.checkpoint_failure.clone())?),
+            ("nodes", to(py, n.nodes)?),
+            ("edges", to(py, n.edges)?),
+            ("memory_bytes", to(py, n.memory_bytes)?),
+            ("constraints", to(py, n.constraints)?),
+            ("indexes", indexes(py, &n.indexes)?.into_bound(py)),
+            ("recovery", ns_recovery(py, &n.recovery)?.into_bound(py)),
         ],
     )
 }
@@ -87,7 +145,15 @@ pub fn store_status(py: Python<'_>, s: &StoreStatus) -> PyResult<Py<PyAny>> {
             ("history", to(py, s.history.to_string())?),
             ("fsync", to(py, fsync)?),
             ("archive", to(py, s.archive.as_deref().map(path))?),
+            ("catalog_failure", to(py, s.catalog_failure.clone())?),
             ("recovery", recovery(py, &s.recovery)?.into_bound(py)),
+            ("namespaces", {
+                let list = PyList::empty(py);
+                for n in &s.namespaces {
+                    list.append(namespace_status(py, n)?)?;
+                }
+                list.into_any()
+            }),
         ],
     )
 }
@@ -105,6 +171,20 @@ pub fn checkpoint(py: Python<'_>, o: &CheckpointOutcome) -> PyResult<Py<PyAny>> 
 }
 
 pub fn backup(py: Python<'_>, r: &BackupReport) -> PyResult<Py<PyAny>> {
+    let namespaces = PyList::empty(py);
+    for n in &r.namespaces {
+        namespaces.append(dict(
+            py,
+            vec![
+                ("id", to(py, n.id)?),
+                ("name", to(py, n.name.clone())?),
+                ("seq", to(py, n.seq)?),
+                ("time", commit_time(py, n.time)?),
+                ("checkpoints", to(py, n.checkpoints.clone())?),
+                ("segments", to(py, n.segments.clone())?),
+            ],
+        )?)?;
+    }
     dict(
         py,
         vec![
@@ -115,6 +195,7 @@ pub fn backup(py: Python<'_>, r: &BackupReport) -> PyResult<Py<PyAny>> {
             ("checkpoints", to(py, r.checkpoints.clone())?),
             ("segments", to(py, r.segments.clone())?),
             ("bytes", to(py, r.bytes)?),
+            ("namespaces", namespaces.into_any()),
         ],
     )
 }
@@ -154,12 +235,51 @@ pub fn verify(py: Python<'_>, r: &VerifyReport) -> PyResult<Py<PyAny>> {
             ("last_seq", to(py, r.last_seq)?),
             ("seq", to(py, r.seq)?),
             ("time", commit_time(py, r.time)?),
+            ("namespaces", {
+                let list = PyList::empty(py);
+                for n in &r.namespaces {
+                    list.append(dict(
+                        py,
+                        vec![
+                            ("id", to(py, n.id)?),
+                            ("name", to(py, n.name.clone())?),
+                            ("checkpoints", to(py, n.checkpoints)?),
+                            ("checkpoints_checked", to(py, n.checkpoints_checked)?),
+                            ("segments", to(py, n.segments)?),
+                            ("records", to(py, n.records)?),
+                            ("first_seq", to(py, n.first_seq)?),
+                            ("last_seq", to(py, n.last_seq)?),
+                            ("seq", to(py, n.seq)?),
+                            ("time", commit_time(py, n.time)?),
+                        ],
+                    )?)?;
+                }
+                list.into_any()
+            }),
         ],
     )
 }
 
 pub fn restore(py: Python<'_>, r: &RestoreReport) -> PyResult<Py<PyAny>> {
     let skipped: Vec<u64> = r.skipped_checkpoints.iter().map(|s| s.seq).collect();
+    let namespaces = PyList::empty(py);
+    for n in &r.namespaces {
+        let skipped: Vec<u64> = n.skipped_checkpoints.iter().map(|s| s.seq).collect();
+        namespaces.append(dict(
+            py,
+            vec![
+                ("id", to(py, n.id)?),
+                ("name", to(py, n.name.clone())?),
+                ("seq", to(py, n.seq)?),
+                ("time", commit_time(py, n.time)?),
+                ("checkpoint", to(py, n.checkpoint)?),
+                ("skipped_checkpoints", to(py, skipped)?),
+                ("replayed", to(py, n.replayed)?),
+                ("backup_segments", to(py, n.backup_segments)?),
+                ("archive_segments", to(py, n.archive_segments)?),
+            ],
+        )?)?;
+    }
     dict(
         py,
         vec![
@@ -173,6 +293,7 @@ pub fn restore(py: Python<'_>, r: &RestoreReport) -> PyResult<Py<PyAny>> {
             ("replayed", to(py, r.replayed)?),
             ("backup_segments", to(py, r.backup_segments)?),
             ("archive_segments", to(py, r.archive_segments)?),
+            ("namespaces", namespaces.into_any()),
         ],
     )
 }

@@ -171,14 +171,16 @@ fn pitr_from_a_backup_and_the_archive() {
 }
 
 fn segment_seqs_in(dir: &Path) -> Vec<u64> {
-    iwdb_storage::list_segments(dir).unwrap().into_iter().map(|(s, _)| s).collect()
+    // An archive keeps a namespace's segments in ns/<id>/
+    let dir = if dir.join("IWDBARCH").exists() { dir.join("ns/00000000000000000001") } else { dir.to_path_buf() };
+    iwdb_storage::list_segments(&dir).unwrap().into_iter().map(|(s, _)| s).collect()
 }
 
 /// The commit time of every record in the archive and the WAL.
 fn commit_times(work: &Path) -> BTreeMap<u64, CommitTime> {
     let mut segments: BTreeMap<u64, PathBuf> =
-        iwdb_storage::list_segments(&work.join("archive")).unwrap().into_iter().collect();
-    segments.extend(iwdb_storage::list_segments(&work.join("data").join("wal")).unwrap());
+        iwdb_storage::list_segments(&work.join("archive/ns/00000000000000000001")).unwrap().into_iter().collect();
+    segments.extend(iwdb_storage::list_segments(&work.join("data").join("ns/00000000000000000001/wal")).unwrap());
     let mut reader = iwdb_storage::WalReader::from_segments(segments.into_iter().collect(), 1, u64::MAX).unwrap();
     let mut times = BTreeMap::new();
     while let Some(record) = reader.next() {
@@ -218,9 +220,12 @@ fn pitr_to_a_time() {
         }
     }
     let first = times[&1];
-    match restore(&work.path().join("too-early"), &from_archive(&archive), RestoreTarget::Time(CommitTime(first.0 - 1)))
-    {
-        Err(Error::NoCommitAtOrBefore { first: Some(f), .. }) => assert_eq!(f, first),
+    // Between the namespace's creation and its first commit it was empty (layout 4 knows when a
+    // namespace was created; layout 1 to 3 stores don't, see `the_fixtures_restore`)
+    restore_and_check(work.path(), &history, &from_archive(&archive), RestoreTarget::Time(CommitTime(first.0 - 1)), 0);
+    // Before the namespace existed there is nothing to restore
+    match restore(&work.path().join("too-early"), &from_archive(&archive), RestoreTarget::Time(CommitTime(0))) {
+        Err(Error::NoCommitAtOrBefore { .. }) => {}
         other => panic!("{:?}", other),
     }
     let future = CommitTime(times[&end].0 + 3_600_000_000);
@@ -276,7 +281,7 @@ fn restores_that_must_be_refused() {
     ));
     // An interrupted backup
     let partial = work.path().join("partial");
-    std::fs::create_dir_all(partial.join("wal")).unwrap();
+    std::fs::create_dir_all(partial.join("ns/00000000000000000001/wal")).unwrap();
     std::fs::write(partial.join("BACKUP"), b"").unwrap();
     assert!(matches!(
         restore(&work.path().join("p"), &from_backup(&partial), RestoreTarget::Latest),
@@ -381,7 +386,7 @@ fn a_checkpoint_waits_for_the_backups_copy() {
         paused_tx.send(()).unwrap();
         resume_rx.lock().unwrap().recv().unwrap();
     })));
-    fs.add(Rule::new(Call::Create, When::Before, Action::Pause).path("/backup/wal/"));
+    fs.add(Rule::new(Call::Create, When::Before, Action::Pause).path("/backup/ns/00000000000000000001/wal/"));
     let backup = work.path().join("backup");
     let copying = {
         let (store, backup) = (store.clone(), backup.clone());
@@ -431,18 +436,22 @@ fn every_write_of_a_restore_can_fail_and_leaves_nothing_wrong() {
         (Call::Write, When::Midway, "RESTORING", 0, false),
         (Call::Sync, When::Before, "RESTORING", 0, false),
         (Call::SyncDir, When::Before, "/dest", 0, false),
-        (Call::WriteAtomic, When::Before, "/dest/checkpoints/", 0, false),
-        (Call::WriteAtomic, When::Midway, "/dest/checkpoints/", 0, false),
-        (Call::WriteAtomic, When::WriterDone, "/dest/checkpoints/", 0, false),
-        (Call::WriteAtomic, When::After, "/dest/checkpoints/", 0, false),
-        (Call::SyncDir, When::Before, "/dest/checkpoints", 0, false),
+        (Call::WriteAtomic, When::Before, "/dest/ns/00000000000000000001/checkpoints/", 0, false),
+        (Call::WriteAtomic, When::Midway, "/dest/ns/00000000000000000001/checkpoints/", 0, false),
+        (Call::WriteAtomic, When::WriterDone, "/dest/ns/00000000000000000001/checkpoints/", 0, false),
+        (Call::WriteAtomic, When::After, "/dest/ns/00000000000000000001/checkpoints/", 0, false),
+        (Call::SyncDir, When::Before, "/dest/ns/00000000000000000001/checkpoints", 0, false),
         (Call::RemoveFile, When::Before, "RESTORING", 0, false),
         (Call::RemoveFile, When::After, "RESTORING", 0, false),
-        (Call::SyncDir, When::Before, "/dest", 2, false),
+        (Call::SyncDir, When::Before, "/dest", 7, false),
+        (Call::CreateDir, When::Before, "/dest/ns", 0, false),
+        (Call::CreateDir, When::Before, "/dest/ns/", 1, false),
+        (Call::WriteAtomic, When::Before, "NAMESPACES", 0, false),
+        (Call::WriteAtomic, When::WriterDone, "NAMESPACES", 0, false),
         (Call::WriteAtomic, When::Before, "dest/IWDB", 0, false),
         (Call::WriteAtomic, When::WriterDone, "dest/IWDB", 0, false),
         (Call::WriteAtomic, When::After, "dest/IWDB", 0, true),
-        (Call::SyncDir, When::Before, "/dest", 3, true),
+        (Call::SyncDir, When::Before, "/dest", 8, true),
     ];
     for (i, (call, when, path, skip, complete)) in rules.into_iter().enumerate() {
         let action = if i % 3 == 0 { Action::NoSpace } else { Action::Fail };

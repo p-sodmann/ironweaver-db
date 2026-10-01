@@ -79,8 +79,10 @@ fn commit_latency_during_a_checkpoint() {
         store.commit(&chunk.iter().map(|&i| edge(i)).collect::<Vec<_>>()).unwrap();
     }
     store.close().unwrap();
-    let size: u64 =
-        std::fs::read_dir(dir.path().join("checkpoints")).unwrap().map(|e| e.unwrap().metadata().unwrap().len()).sum();
+    let size: u64 = std::fs::read_dir(dir.path().join("ns/00000000000000000001/checkpoints"))
+        .unwrap()
+        .map(|e| e.unwrap().metadata().unwrap().len())
+        .sum();
     println!("graph: {} nodes, {} edges, checkpoint {} MiB", NODES, NODES, size >> 20);
 
     for (name, fsync) in [

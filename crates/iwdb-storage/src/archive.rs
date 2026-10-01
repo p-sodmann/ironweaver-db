@@ -6,9 +6,15 @@
 //! <archive>/
 //!   IWDBARCH                      marker: magic, version, history id, CRC32C (32 bytes)
 //!   LOCK                          held exclusively by the store that archives into it
-//!   <first seq, 20 digits>.wal    archived segments, byte for byte
-//!   <name>.wal.tmp                a segment being archived
+//!   NAMESPACES                    a copy of the store's namespace log, kept up to date
+//!   ns/<id, 20 digits>/
+//!     <first seq, 20 digits>.wal  archived segments of namespace <id>, byte for byte
+//!     <name>.wal.tmp              a segment being archived
 //! ```
+//!
+//! A format 1 archive (steps 7 and 8, one namespace) has its segments at
+//! the top and no `NAMESPACES`: they are namespace 1's. A store that
+//! archives into one upgrades it ([`Archive::open`]).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
@@ -17,6 +23,9 @@ use std::path::{Path, PathBuf};
 use crate::history::HistoryId;
 use crate::io::{LogFile, LogFs};
 use crate::layout::{LOCK_NAME, TEMP_SUFFIX};
+use crate::namespaces::{
+    ns_dir_name, parse_ns_dir_name, read_log, write_whole, Event, EventKind, DEFAULT_ID, NAMESPACES_NAME, NS_DIR,
+};
 use crate::verify::{Kind, VerifyReport};
 use crate::{format, reader, Error, WalReader};
 
@@ -24,18 +33,25 @@ use crate::{format, reader, Error, WalReader};
 pub const ARCHIVE_MARKER_NAME: &str = "IWDBARCH";
 /// The first 8 bytes of the archive marker.
 pub const ARCHIVE_MAGIC: [u8; 8] = *b"IWDBARC\n";
-/// The archive format this version writes and reads.
-pub const ARCHIVE_VERSION: u32 = 1;
+/// The archive format this version writes. Format 1 (one namespace, the
+/// segments at the top) is read, and upgraded when a store archives into
+/// it.
+pub const ARCHIVE_VERSION: u32 = 2;
 /// Length of the archive marker.
 pub const ARCHIVE_MARKER_LEN: usize = 32;
 const CHUNK: usize = 1 << 20;
 
-/// The archive marker of history `history`: magic, version (u32 LE), the
-/// history id, CRC32C of the 28 bytes before it.
+/// The archive marker of history `history` in the current format: magic,
+/// version (u32 LE), the history id, CRC32C of the 28 bytes before it.
 pub fn encode_archive_marker(history: HistoryId) -> [u8; ARCHIVE_MARKER_LEN] {
+    encode_archive_marker_with(ARCHIVE_VERSION, history)
+}
+
+/// The archive marker of format `version`.
+pub fn encode_archive_marker_with(version: u32, history: HistoryId) -> [u8; ARCHIVE_MARKER_LEN] {
     let mut marker = [0u8; ARCHIVE_MARKER_LEN];
     marker[..8].copy_from_slice(&ARCHIVE_MAGIC);
-    marker[8..12].copy_from_slice(&ARCHIVE_VERSION.to_le_bytes());
+    marker[8..12].copy_from_slice(&version.to_le_bytes());
     marker[12..28].copy_from_slice(&history.0);
     let crc = crc32c::crc32c(&marker[..28]);
     marker[28..].copy_from_slice(&crc.to_le_bytes());
@@ -44,8 +60,13 @@ pub fn encode_archive_marker(history: HistoryId) -> [u8; ARCHIVE_MARKER_LEN] {
 
 /// Read the archive marker in `dir`: its history id, `None` if there is no
 /// marker. Errors: [`Error::NotAnArchive`] for a damaged or foreign marker
-/// or one of a newer version.
+/// or one of a newer format.
 pub fn read_archive_marker(dir: &Path) -> Result<Option<HistoryId>, Error> {
+    Ok(read_archive_marker_info(dir)?.map(|(_, history)| history))
+}
+
+/// Like [`read_archive_marker`], with the archive's format version.
+pub fn read_archive_marker_info(dir: &Path) -> Result<Option<(u32, HistoryId)>, Error> {
     let path = dir.join(ARCHIVE_MARKER_NAME);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
@@ -60,16 +81,48 @@ pub fn read_archive_marker(dir: &Path) -> Result<Option<HistoryId>, Error> {
         return Err(not(format!("'{}' is damaged", ARCHIVE_MARKER_NAME)));
     }
     let version = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-    if version != ARCHIVE_VERSION || bytes.len() != ARCHIVE_MARKER_LEN {
-        return Err(not(format!("archive format {} (this version reads {})", version, ARCHIVE_VERSION)));
+    if !(1..=ARCHIVE_VERSION).contains(&version) || bytes.len() != ARCHIVE_MARKER_LEN {
+        return Err(not(format!("archive format {} (this version reads 1 to {})", version, ARCHIVE_VERSION)));
     }
     let mut id = [0u8; 16];
     id.copy_from_slice(&bytes[12..28]);
-    Ok(Some(HistoryId(id)))
+    Ok(Some((version, HistoryId(id))))
+}
+
+/// The segments of namespace `id` in the archive `dir`, by first seq: in
+/// `ns/<id>/` (format 2), or at the top for namespace 1 of a format 1
+/// archive.
+pub fn archive_segments(dir: &Path, version: u32, id: u64) -> Result<Vec<(u64, PathBuf)>, Error> {
+    if version < 2 {
+        return if id == DEFAULT_ID { reader::list_segments(dir) } else { Ok(Vec::new()) };
+    }
+    let ns_dir = dir.join(NS_DIR).join(ns_dir_name(id));
+    if ns_dir.is_dir() {
+        reader::list_segments(&ns_dir)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// The ids of the namespaces that have a directory in the format 2 archive
+/// `dir`.
+pub fn archive_namespace_ids(dir: &Path) -> Result<Vec<u64>, Error> {
+    let ns_root = dir.join(NS_DIR);
+    let mut ids = Vec::new();
+    if let Ok(entries) = fs::read_dir(&ns_root) {
+        for entry in entries.flatten() {
+            if let Some(id) = parse_ns_dir_name(&entry.file_name().to_string_lossy()) {
+                ids.push(id);
+            }
+        }
+    }
+    ids.sort_unstable();
+    Ok(ids)
 }
 
 /// An archive directory a store archives into: it holds the archive's
-/// exclusive lock while it exists.
+/// exclusive lock while it exists. The store's namespaces share it, each
+/// through an [`ArchiveHandle`].
 #[derive(Debug)]
 pub struct Archive<F: LogFs> {
     fs: F,
@@ -80,9 +133,14 @@ pub struct Archive<F: LogFs> {
 
 impl<F: LogFs> Archive<F> {
     /// Open the archive directory `dir` for a store of history `history`,
-    /// creating and initializing it if it is missing or empty (marker
-    /// written with `write_atomic`, then the directory synced), and take
-    /// its exclusive lock.
+    /// creating and initializing it if it is missing or empty (`ns/`, then
+    /// the marker written with `write_atomic`, then the directory synced),
+    /// and take its exclusive lock. A format 1 archive (one namespace, the
+    /// segments at the top) is upgraded: its segments are renamed into
+    /// `ns/1/` (each rename is atomic, and a crash leaves the format 1
+    /// marker, so the next open moves the rest) and then the format 2
+    /// marker is written. Format 1 archives belong to the one namespace of
+    /// a layout 1 to 3 store, which has id 1.
     ///
     /// Errors: [`Error::ArchiveMismatch`] if it belongs to another
     /// history (a restored store must archive into a new directory);
@@ -102,11 +160,13 @@ impl<F: LogFs> Archive<F> {
             .open(&lock_path)
             .map_err(|e| Error::io("open", &lock_path, e))?;
         crate::layout::lock_file(&lock, &lock_path, true)?;
-        match read_archive_marker(dir)? {
-            Some(found) if found == history => {}
-            Some(found) => {
+        let archive = Archive { fs, dir: dir.to_path_buf(), history, _lock: lock };
+        match read_archive_marker_info(dir)? {
+            Some((_, found)) if found != history => {
                 return Err(Error::ArchiveMismatch { path: dir.to_path_buf(), expected: history, found });
             }
+            Some((1, _)) => archive.upgrade_v1()?,
+            Some(_) => {}
             None => {
                 for entry in fs::read_dir(dir).map_err(|e| Error::io("list", dir, e))? {
                     let name = entry.map_err(|e| Error::io("list", dir, e))?.file_name();
@@ -118,12 +178,43 @@ impl<F: LogFs> Archive<F> {
                         });
                     }
                 }
+                archive.make_dir(&archive.dir.join(NS_DIR))?;
                 let marker = encode_archive_marker(history);
-                crate::backup::write_atomic(&fs, &dir.join(ARCHIVE_MARKER_NAME), &marker)?;
-                crate::backup::sync_dir(&fs, dir)?;
+                crate::backup::write_atomic(&archive.fs, &dir.join(ARCHIVE_MARKER_NAME), &marker)?;
+                crate::backup::sync_dir(&archive.fs, dir)?;
             }
         }
-        Ok(Archive { fs, dir: dir.to_path_buf(), history, _lock: lock })
+        Ok(archive)
+    }
+
+    /// Create `dir` if it is missing.
+    fn make_dir(&self, dir: &Path) -> Result<(), Error> {
+        match self.fs.create_dir(dir) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(Error::io("create directory", dir, e)),
+        }
+    }
+
+    /// Upgrade a format 1 archive (see [`open`](Self::open)).
+    fn upgrade_v1(&self) -> Result<(), Error> {
+        let ns_root = self.dir.join(NS_DIR);
+        let target = ns_root.join(ns_dir_name(DEFAULT_ID));
+        self.make_dir(&ns_root)?;
+        self.make_dir(&target)?;
+        crate::backup::sync_dir(&self.fs, &ns_root)?;
+        for (first_seq, source) in reader::list_segments(&self.dir)? {
+            let to = target.join(format::segment_name(first_seq));
+            if to.exists() {
+                return Err(Error::ArchiveConflict { path: to });
+            }
+            self.fs.rename(&source, &to).map_err(|e| Error::io("rename", &source, e))?;
+        }
+        crate::backup::sync_dir(&self.fs, &target)?;
+        crate::backup::sync_dir(&self.fs, &self.dir)?;
+        let marker = encode_archive_marker(self.history);
+        crate::backup::write_atomic(&self.fs, &self.dir.join(ARCHIVE_MARKER_NAME), &marker)?;
+        crate::backup::sync_dir(&self.fs, &self.dir)
     }
 
     pub fn dir(&self) -> &Path {
@@ -134,34 +225,92 @@ impl<F: LogFs> Archive<F> {
         self.history
     }
 
-    /// Copy the segment files `segments` (`(first seq, path)`) into the
-    /// archive, each as `<name>.tmp` (created, written in chunks, fsynced)
-    /// renamed over `<name>`. They are durable once [`sync`](Self::sync)
-    /// has synced the directory.
+    /// Copy the segment files `segments` (`(first seq, path)`) of namespace
+    /// `id` into the archive's `ns/<id>/`, each as `<name>.tmp` (created,
+    /// written in chunks, fsynced) renamed over `<name>`. They are durable
+    /// once [`sync`](Self::sync) has synced the directory.
     ///
     /// A segment that is in the archive already must be byte-for-byte the
     /// same (a crash between archiving and removal leaves it in both
     /// places): it is copied again, so that its durability doesn't rest on
     /// an fsync that may never have completed. A different one fails with
     /// [`Error::ArchiveConflict`] before anything is written for it.
-    pub fn copy(&self, segments: &[(u64, PathBuf)]) -> Result<(), Error> {
+    pub fn copy(&self, id: u64, segments: &[(u64, PathBuf)]) -> Result<(), Error> {
+        self.ensure_dir(id)?;
+        let dir = self.dir.join(NS_DIR).join(ns_dir_name(id));
         for (first_seq, source) in segments {
             let name = format::segment_name(*first_seq);
-            let target = self.dir.join(&name);
+            let target = dir.join(&name);
             if target.exists() && !same_content(source, &target)? {
                 return Err(Error::ArchiveConflict { path: target });
             }
-            let tmp = self.dir.join(format!("{}{}", name, TEMP_SUFFIX));
+            let tmp = dir.join(format!("{}{}", name, TEMP_SUFFIX));
             copy_file(&self.fs, source, &tmp)?;
             self.fs.rename(&tmp, &target).map_err(|e| Error::io("rename", &tmp, e))?;
         }
         Ok(())
     }
 
-    /// Sync the archive directory: the segments copied are then durable.
-    /// The caller must never retry a failed sync (ADR 0005).
-    pub fn sync(&self) -> Result<(), Error> {
+    /// Make namespace `id`'s directory in the archive, and sync its
+    /// parents, if it isn't there. A failed directory sync is never
+    /// retried (ADR 0005): the checkpointer calls this on its own, so that
+    /// it can disable itself on such a failure.
+    pub fn ensure_dir(&self, id: u64) -> Result<(), Error> {
+        let ns_root = self.dir.join(NS_DIR);
+        let dir = ns_root.join(ns_dir_name(id));
+        if !dir.is_dir() {
+            self.make_dir(&ns_root)?;
+            self.make_dir(&dir)?;
+            crate::backup::sync_dir(&self.fs, &ns_root)?;
+            crate::backup::sync_dir(&self.fs, &self.dir)?;
+        }
+        Ok(())
+    }
+
+    /// Sync the directory of namespace `id`: the segments copied are then
+    /// durable. The caller must never retry a failed sync (ADR 0005).
+    pub fn sync(&self, id: u64) -> Result<(), Error> {
+        crate::backup::sync_dir(&self.fs, &self.dir.join(NS_DIR).join(ns_dir_name(id)))
+    }
+
+    /// Replace the archive's copy of the store's namespace log with
+    /// `events` (`write_atomic`, then a directory sync). Restore reads it
+    /// to know which namespaces existed when.
+    pub fn write_log(&self, events: &[Event]) -> Result<(), Error> {
+        write_whole(&self.fs, &self.dir.join(NAMESPACES_NAME), events)?;
         crate::backup::sync_dir(&self.fs, &self.dir)
+    }
+}
+
+/// One namespace's use of the archive: what its checkpointer holds.
+#[derive(Debug)]
+pub struct ArchiveHandle<F: LogFs> {
+    archive: std::sync::Arc<Archive<F>>,
+    id: u64,
+}
+
+impl<F: LogFs> ArchiveHandle<F> {
+    pub fn new(archive: std::sync::Arc<Archive<F>>, id: u64) -> Self {
+        ArchiveHandle { archive, id }
+    }
+
+    /// See [`Archive::ensure_dir`].
+    pub fn ensure_dir(&self) -> Result<(), Error> {
+        self.archive.ensure_dir(self.id)
+    }
+
+    /// See [`Archive::copy`].
+    pub fn copy(&self, segments: &[(u64, PathBuf)]) -> Result<(), Error> {
+        self.archive.copy(self.id, segments)
+    }
+
+    /// See [`Archive::sync`].
+    pub fn sync(&self) -> Result<(), Error> {
+        self.archive.sync(self.id)
+    }
+
+    pub fn archive(&self) -> &Archive<F> {
+        &self.archive
     }
 }
 
@@ -212,18 +361,21 @@ fn copy_file<F: LogFs>(fs: &F, source: &Path, target: &Path) -> Result<(), Error
     file.sync().map_err(|e| Error::io("fsync", target, e))
 }
 
-/// Verify an archive directory without changing it: its marker, every
-/// segment from the first to the last (headers, every frame's checksum,
-/// seq and contents), the chain between them, and that every segment is
-/// complete (an archived segment never has a torn tail). Temporary files
-/// (a segment being archived) are notes. Archives aren't replayed: they
-/// hold no checkpoint to compare with. Takes no lock: archived files
-/// appear by rename, complete.
+/// Verify an archive directory without changing it: its marker, the
+/// namespace log copy, and for each namespace every segment from the first
+/// to the last (headers, every frame's checksum, seq and contents), the
+/// chain between them, and that every segment is complete (an archived
+/// segment never has a torn tail). Temporary files (a segment being
+/// archived) are notes. Archives aren't replayed: they hold no checkpoint
+/// to compare with. Takes no lock: archived files appear by rename,
+/// complete.
 pub fn verify_archive(dir: &Path) -> Result<VerifyReport, Error> {
     let mut report = VerifyReport::new(dir, Kind::Archive);
-    match read_archive_marker(dir) {
-        Ok(Some(history)) => {
-            report.version = Some(ARCHIVE_VERSION);
+    let mut version = 1;
+    match read_archive_marker_info(dir) {
+        Ok(Some((found, history))) => {
+            version = found;
+            report.version = Some(found);
             report.history = Some(history);
         }
         Ok(None) => {
@@ -240,18 +392,66 @@ pub fn verify_archive(dir: &Path) -> Result<VerifyReport, Error> {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.ends_with(TEMP_SUFFIX) {
             report.note(Some(&entry.path()), "a segment being archived (a temporary file)");
-        } else if name != ARCHIVE_MARKER_NAME && name != LOCK_NAME && format::parse_segment_name(&name).is_none() {
+        } else if ![ARCHIVE_MARKER_NAME, LOCK_NAME].contains(&name.as_str())
+            && !(version >= 2 && [NAMESPACES_NAME, NS_DIR].contains(&name.as_str()))
+            && !(version < 2 && format::parse_segment_name(&name).is_some())
+        {
             report.note(Some(&entry.path()), "not a file of the archive (ignored)");
         }
     }
-    let segments = reader::list_segments(dir)?;
+    let table = if version >= 2 && dir.join(NAMESPACES_NAME).exists() {
+        match read_log(&dir.join(NAMESPACES_NAME)) {
+            Ok((parsed, table)) => {
+                if let Some(reason) = parsed.torn {
+                    report.note(Some(&dir.join(NAMESPACES_NAME)), format!("a torn tail ({})", reason));
+                }
+                Some(table)
+            }
+            Err(Error::InvalidNamespaceLog { reason, .. }) => {
+                report.problem(Some(&dir.join(NAMESPACES_NAME)), reason);
+                None
+            }
+            Err(e) => return Err(e),
+        }
+    } else {
+        None
+    };
+    let ids: Vec<u64> = if version >= 2 { archive_namespace_ids(dir)? } else { vec![DEFAULT_ID] };
+    for id in ids {
+        let name = table
+            .as_ref()
+            .and_then(|t| t.events().iter().find(|e| e.id == id && e.kind == EventKind::Create))
+            .map_or_else(|| format!("#{}", id), |e| e.name.to_string());
+        let mut sub = VerifyReport::new(dir, Kind::Archive);
+        verify_namespace_segments(&mut sub, dir, version, id)?;
+        report.merge(id, &name, version >= 2, sub);
+    }
+    report.summarize();
+    Ok(report)
+}
+
+/// The segments of one namespace of an archive, into `report`.
+fn verify_namespace_segments(report: &mut VerifyReport, dir: &Path, version: u32, id: u64) -> Result<(), Error> {
+    let segments = archive_segments(dir, version, id)?;
+    if version >= 2 {
+        let ns_dir = dir.join(NS_DIR).join(ns_dir_name(id));
+        for entry in fs::read_dir(&ns_dir).map_err(|e| Error::io("list", &ns_dir, e))? {
+            let entry = entry.map_err(|e| Error::io("list", &ns_dir, e))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(TEMP_SUFFIX) {
+                report.note(Some(&entry.path()), "a segment being archived (a temporary file)");
+            } else if format::parse_segment_name(&name).is_none() {
+                report.note(Some(&entry.path()), "not a file of the archive (ignored)");
+            }
+        }
+    }
     report.segments = segments.len();
-    let Some(&(first_seq, _)) = segments.first() else { return Ok(report) };
+    let Some(&(first_seq, _)) = segments.first() else { return Ok(()) };
     let mut reader = match WalReader::from_segments(segments, first_seq, u64::MAX) {
         Ok(reader) => reader,
         Err(e) => {
             report.problem(None, e.to_string());
-            return Ok(report);
+            return Ok(());
         }
     };
     while let Some(record) = reader.next() {
@@ -264,7 +464,7 @@ pub fn verify_archive(dir: &Path) -> Result<VerifyReport, Error> {
             }
             Err(e) => {
                 report.problem(None, format!("the archive can't be read further: {}", e));
-                return Ok(report);
+                return Ok(());
             }
         }
     }
@@ -279,7 +479,7 @@ pub fn verify_archive(dir: &Path) -> Result<VerifyReport, Error> {
             );
         }
     }
-    Ok(report)
+    Ok(())
 }
 
 #[cfg(test)]

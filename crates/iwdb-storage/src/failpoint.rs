@@ -45,10 +45,14 @@ pub enum Call {
     WriteAtomic,
     RemoveFile,
     Truncate,
+    /// [`LogFs::create_dir`] (a namespace's directory, step 9).
+    CreateDir,
+    /// [`LogFs::remove_dir_all`] (a dropped namespace's directory).
+    RemoveDirAll,
 }
 
 impl Call {
-    pub const ALL: [Call; 9] = [
+    pub const ALL: [Call; 11] = [
         Call::Create,
         Call::OpenAppend,
         Call::Rename,
@@ -58,6 +62,8 @@ impl Call {
         Call::WriteAtomic,
         Call::RemoveFile,
         Call::Truncate,
+        Call::CreateDir,
+        Call::RemoveDirAll,
     ];
 
     pub fn name(self) -> &'static str {
@@ -71,6 +77,8 @@ impl Call {
             Call::WriteAtomic => "write_atomic",
             Call::RemoveFile => "remove_file",
             Call::Truncate => "truncate",
+            Call::CreateDir => "create_dir",
+            Call::RemoveDirAll => "remove_dir_all",
         }
     }
 }
@@ -504,6 +512,18 @@ impl<F: LogFs + Clone> LogFs for FailFs<F> {
         self.enter(Call::Truncate, path)?;
         self.inner.truncate(path, len)?;
         self.point(Call::Truncate, When::After, path)
+    }
+
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.enter(Call::CreateDir, path)?;
+        self.inner.create_dir(path)?;
+        self.point(Call::CreateDir, When::After, path)
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.enter(Call::RemoveDirAll, path)?;
+        self.inner.remove_dir_all(path)?;
+        self.point(Call::RemoveDirAll, When::After, path)
     }
 }
 

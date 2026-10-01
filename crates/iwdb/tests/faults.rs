@@ -218,7 +218,7 @@ fn crashed_with_torn_tail(seed: u64) -> (TempDir, Namespace) {
         c.fs.add(Rule::new(Call::Write, When::Midway, Action::Fail));
         c.failed_commit(&tx(pad(9)));
         drop(c.store);
-        let wal = c.dir.path().join("wal");
+        let wal = c.dir.path().join("ns/00000000000000000001/wal");
         let first = iwdb_storage::list_segments(&wal).unwrap()[0].0;
         let (_, end) = iwdb_storage::read_log(&wal, first).unwrap();
         if end.torn().is_some() {
@@ -262,7 +262,7 @@ fn a_failed_removal_of_a_headerless_segment_is_finished_by_the_next_open() {
     let c = case(8);
     drop(c.store);
     let next = c.reference.seq() + 1;
-    let path = c.dir.path().join("wal").join(iwdb_storage::format::segment_name(next));
+    let path = c.dir.path().join("ns/00000000000000000001/wal").join(iwdb_storage::format::segment_name(next));
     std::fs::write(&path, &iwdb_storage::format::encode_segment_header(next)[..10]).unwrap();
     open_fails(c.dir.path(), Rule::new(Call::RemoveFile, When::Before, Action::Fail).path("/wal/"));
     assert!(path.exists());
@@ -275,7 +275,7 @@ fn a_failed_removal_of_a_headerless_segment_is_finished_by_the_next_open() {
 fn a_failed_removal_of_temporary_files_is_finished_by_the_next_open() {
     let c = case(9);
     drop(c.store);
-    let tmp = c.dir.path().join("checkpoints").join(".00000000000000000099.ckpt.1.0.tmp");
+    let tmp = c.dir.path().join("ns/00000000000000000001/checkpoints").join(".00000000000000000099.ckpt.1.0.tmp");
     std::fs::write(&tmp, b"half").unwrap();
     // (Temporary directories are named .tmp*, so match the file's own name)
     open_fails(c.dir.path(), Rule::new(Call::RemoveFile, When::Before, Action::Fail).path("ckpt.1.0.tmp"));
@@ -312,12 +312,20 @@ fn a_failed_initialization_is_finished_by_the_next_open() {
         Rule::new(Call::WriteAtomic, When::Before, Action::NoSpace).path(MARKER_NAME),
         Rule::new(Call::WriteAtomic, When::Midway, Action::NoSpace).path(MARKER_NAME),
         Rule::new(Call::WriteAtomic, When::WriterDone, Action::Fail).path(MARKER_NAME),
+        // The syncs of the namespace directories, of the namespace log, and the marker's own
         Rule::new(Call::SyncDir, When::Before, Action::Fail).skip(1),
+        Rule::new(Call::SyncDir, When::Before, Action::Fail).skip(3),
+        Rule::new(Call::SyncDir, When::Before, Action::Fail).skip(4),
+        Rule::new(Call::SyncDir, When::Before, Action::Fail).skip(5),
+        Rule::new(Call::CreateDir, When::Before, Action::Fail),
+        Rule::new(Call::CreateDir, When::Before, Action::Fail).skip(2),
+        Rule::new(Call::WriteAtomic, When::Midway, Action::NoSpace).path("NAMESPACES"),
+        Rule::new(Call::WriteAtomic, When::WriterDone, Action::Fail).path("NAMESPACES"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         open_fails(dir.path(), rule.clone());
         let marker = dir.path().join(MARKER_NAME).exists();
-        assert_eq!(marker, rule.skip == 1, "{}: the marker is written last", rule);
+        assert_eq!(marker, rule.call == Call::SyncDir && rule.skip == 5, "{}: the marker is written last", rule);
         let store = open_finishes(dir.path(), &reference());
         assert_eq!(store.recovery().created, !marker, "{}", rule);
         let mut reference = reference();
@@ -336,7 +344,7 @@ type Files = Vec<(std::path::PathBuf, Vec<u8>)>;
 /// checkpoint files and the WAL segments before it.
 fn failed_checkpoint(rule: Rule) -> (Case, Error, Files, Vec<u64>) {
     let c = case_with(options(1), 12);
-    let before = snapshot(&c.dir.path().join("checkpoints"));
+    let before = snapshot(&c.dir.path().join("ns/00000000000000000001/checkpoints"));
     let segments = segment_seqs(c.dir.path());
     c.fs.add(rule.clone());
     let error = c.store.checkpoint().expect_err("the checkpoint fails");
@@ -355,7 +363,12 @@ fn a_checkpoint_that_fails_before_its_rename_deletes_nothing_and_is_retried() {
     ] {
         let (mut c, error, before, segments) = failed_checkpoint(rule.clone());
         assert!(matches!(error, Error::Io { op: "write checkpoint", .. }), "{}: {:?}", rule, error);
-        assert_eq!(snapshot(&c.dir.path().join("checkpoints")), before, "{}: untouched, no temporary file", rule);
+        assert_eq!(
+            snapshot(&c.dir.path().join("ns/00000000000000000001/checkpoints")),
+            before,
+            "{}: untouched, no temporary file",
+            rule
+        );
         assert_eq!(segment_seqs(c.dir.path()), segments, "{}", rule);
         run(&c.store, &mut c.reference, &[pad(1)]);
         let outcome = c.store.checkpoint().unwrap();

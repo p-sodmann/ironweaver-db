@@ -58,8 +58,11 @@ fn a_backup_holds_the_checkpoints_and_the_wal_up_to_its_seq() {
     assert_eq!(verified.last_seq, Some(report.seq));
     assert!(verified.notes.is_empty(), "{:#?}", verified.notes);
     let manifest = read_manifest(&dest.join(BACKUP_NAME)).unwrap();
-    assert_eq!((manifest.seq, manifest.history, manifest.time), (report.seq, report.history, report.time));
-    assert_eq!(manifest.files.len(), report.checkpoints.len() + report.segments.len());
+    assert_eq!(
+        (manifest.namespaces[0].seq, manifest.history, manifest.namespaces[0].time),
+        (report.seq, report.history, report.time)
+    );
+    assert_eq!(manifest.files.len(), report.checkpoints.len() + report.segments.len() + 1, "and the namespace log");
 
     // The store goes on; a store doesn't open the backup
     run(&store, &mut reference_at(&store), &[pad(1)]);
@@ -141,7 +144,7 @@ fn damage_to_a_backup_that_its_files_cant_show_is_found_by_the_manifest() {
 
     // The last segment cut at a frame boundary: every frame left is valid
     let cut = copy("cut");
-    let path = cut.join("wal").join(&last_name);
+    let path = cut.join("ns/00000000000000000001/wal").join(&last_name);
     let bytes = fs::read(&path).unwrap();
     let ends = common::frame_ends(&bytes);
     fs::write(&path, &bytes[..ends[ends.len() - 2]]).unwrap();
@@ -151,14 +154,14 @@ fn damage_to_a_backup_that_its_files_cant_show_is_found_by_the_manifest() {
 
     // The last segment gone
     let gone = copy("gone");
-    fs::remove_file(gone.join("wal").join(&last_name)).unwrap();
+    fs::remove_file(gone.join("ns/00000000000000000001/wal").join(&last_name)).unwrap();
     let verified = verify(&gone).unwrap();
     assert!(verified.problems.iter().any(|p| p.message.contains("missing")), "{:#?}", verified);
     assert!(verified.problems.iter().any(|p| p.message.contains(&format!("manifest says {}", report.seq))));
 
     // A file the backup didn't write
     let extra = copy("extra");
-    fs::write(extra.join("checkpoints").join("00000000000000000001.ckpt"), b"x").unwrap();
+    fs::write(extra.join("ns/00000000000000000001/checkpoints").join("00000000000000000001.ckpt"), b"x").unwrap();
     let verified = verify(&extra).unwrap();
     assert!(verified.problems.iter().any(|p| p.message.contains("not listed")), "{:#?}", verified);
 
@@ -199,22 +202,29 @@ fn every_write_of_a_backup_can_fail_and_leaves_nothing_valid_looking() {
         (Call::Create, When::Before, "dest/BACKUP", 0, false),
         (Call::Sync, When::After, "dest/BACKUP", 0, false),
         // A file: created, written (whole and halfway), fsynced
-        (Call::Create, When::Before, "/dest/checkpoints/", 0, false),
-        (Call::Create, When::Before, "/dest/wal/", 0, false),
-        (Call::Write, When::Before, "/dest/checkpoints/", 0, false),
-        (Call::Write, When::Midway, "/dest/checkpoints/", 0, false),
-        (Call::Write, When::Midway, "/dest/wal/", 1, false),
-        (Call::Write, When::After, "/dest/wal/", 0, false),
-        (Call::Sync, When::Before, "/dest/checkpoints/", 1, false),
-        (Call::Sync, When::Before, "/dest/wal/", 0, false),
-        (Call::Sync, When::After, "/dest/wal/", 2, false),
+        (Call::Create, When::Before, "/dest/ns/00000000000000000001/checkpoints/", 0, false),
+        (Call::Create, When::Before, "/dest/ns/00000000000000000001/wal/", 0, false),
+        (Call::Write, When::Before, "/dest/ns/00000000000000000001/checkpoints/", 0, false),
+        (Call::Write, When::Midway, "/dest/ns/00000000000000000001/checkpoints/", 0, false),
+        (Call::Write, When::Midway, "/dest/ns/00000000000000000001/wal/", 1, false),
+        (Call::Write, When::After, "/dest/ns/00000000000000000001/wal/", 0, false),
+        (Call::Sync, When::Before, "/dest/ns/00000000000000000001/checkpoints/", 1, false),
+        (Call::Sync, When::Before, "/dest/ns/00000000000000000001/wal/", 0, false),
+        (Call::Sync, When::After, "/dest/ns/00000000000000000001/wal/", 2, false),
         // The directories' syncs: the new directory, checkpoints/, wal/,
         // after the manifest, after the marker
         (Call::SyncDir, When::Before, "/dest", 0, false),
         (Call::SyncDir, When::Before, "/dest", 1, false),
         (Call::SyncDir, When::Before, "/dest", 2, false),
-        (Call::SyncDir, When::After, "/dest", 3, false),
-        (Call::SyncDir, When::Before, "/dest", 4, true),
+        (Call::SyncDir, When::Before, "/dest", 3, false),
+        (Call::SyncDir, When::Before, "/dest", 4, false),
+        (Call::SyncDir, When::After, "/dest", 5, false),
+        (Call::SyncDir, When::Before, "/dest", 6, true),
+        // The namespace log
+        (Call::Create, When::Before, "dest/NAMESPACES", 0, false),
+        (Call::Sync, When::After, "dest/NAMESPACES", 0, false),
+        (Call::CreateDir, When::Before, "/dest/ns", 0, false),
+        (Call::CreateDir, When::After, "/dest/ns/", 1, false),
         // The manifest and the marker
         (Call::WriteAtomic, When::Before, "BACKUP", 0, false),
         (Call::WriteAtomic, When::Midway, "BACKUP", 0, false),

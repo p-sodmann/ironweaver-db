@@ -9,7 +9,10 @@ mod output;
 
 use std::process::ExitCode;
 
-use iwdb::{Error, RestoreSources, Store, StoreOptions};
+use iwdb::{
+    AttrPath, CatalogChange, CommitOptions, Constraint, ConstraintKind, Error, IdempotencyKey, IndexDef, Label,
+    RestoreSources, Store, StoreOptions,
+};
 
 use args::{Command, Parsed, USAGE};
 use output::Out;
@@ -60,6 +63,8 @@ fn exit_code(error: &Error) -> u8 {
         | Error::ReplayFailed { .. }
         | Error::InvalidDataDir { .. }
         | Error::InvalidManifest { .. }
+        | Error::InvalidNamespaceLog { .. }
+        | Error::NamespaceDamaged { .. }
         | Error::ArchiveConflict { .. } => exit::DAMAGE,
         _ => exit::FAILED,
     }
@@ -96,10 +101,61 @@ fn run(parsed: &Parsed, out: &Out) -> Result<u8, Error> {
         }
         Command::Checkpoint { dir } => {
             let store = Store::open(dir, store_options(parsed))?;
-            let outcome = store.checkpoint()?;
+            let outcomes: Vec<(String, iwdb::CheckpointOutcome)> = if parsed.namespaces.is_empty() {
+                store.checkpoint_all()?
+            } else {
+                let mut all = Vec::new();
+                for name in &parsed.namespaces {
+                    all.push((name.clone(), store.namespace(name)?.checkpoint()?));
+                }
+                all
+            };
             store.close()?;
-            out.checkpoint(dir, &outcome);
+            for (name, outcome) in &outcomes {
+                out.checkpoint(dir, name, outcome);
+            }
             Ok(exit::OK)
+        }
+        Command::Namespaces { dir } => {
+            let store = Store::open(dir, store_options(parsed))?;
+            out.namespaces(&store.status());
+            Ok(exit::OK)
+        }
+        Command::CreateNamespace { dir, name } => {
+            let store = Store::open(dir, store_options(parsed))?;
+            let result = store.create_namespace(name, key(parsed)?.as_ref())?;
+            store.close()?;
+            out.namespace_result("created", &result);
+            Ok(exit::OK)
+        }
+        Command::DropNamespace { dir, name } => {
+            let store = Store::open(dir, store_options(parsed))?;
+            let result = store.drop_namespace(name, key(parsed)?.as_ref())?;
+            store.close()?;
+            out.namespace_result("dropped", &result);
+            Ok(exit::OK)
+        }
+        Command::Indexes { dir } => {
+            let store = Store::open(dir, store_options(parsed))?;
+            let ns = store.namespace(one_namespace(parsed))?;
+            out.indexes(&ns.status(), &ns.catalog());
+            Ok(exit::OK)
+        }
+        Command::CreateIndex { dir, path } => catalog_change(parsed, out, dir, "created index", |_| {
+            Ok(CatalogChange::CreateIndex(IndexDef { path: attr_path(path)? }))
+        }),
+        Command::DropIndex { dir, path } => catalog_change(parsed, out, dir, "dropped index", |_| {
+            Ok(CatalogChange::DropIndex(IndexDef { path: attr_path(path)? }))
+        }),
+        Command::AddConstraint { dir, kind, label, path } => {
+            catalog_change(parsed, out, dir, "added constraint", |_| {
+                Ok(CatalogChange::AddConstraint(constraint(*kind, label, path)?))
+            })
+        }
+        Command::DropConstraint { dir, kind, label, path } => {
+            catalog_change(parsed, out, dir, "dropped constraint", |_| {
+                Ok(CatalogChange::DropConstraint(constraint(*kind, label, path)?))
+            })
         }
         Command::Backup { dir, dest } => {
             let store = Store::open(dir, store_options(parsed))?;
@@ -110,7 +166,13 @@ fn run(parsed: &Parsed, out: &Out) -> Result<u8, Error> {
         }
         Command::Restore { dest, backup, archive, target } => {
             let sources = RestoreSources { backup: backup.clone(), archive: archive.clone() };
-            let report = iwdb::restore(dest, &sources, *target)?;
+            let only: Vec<iwdb::NamespaceName> = parsed
+                .namespaces
+                .iter()
+                .map(|n| iwdb::NamespaceName::new(n.as_str()).map_err(iwdb_engine_error))
+                .collect::<Result<_, _>>()?;
+            let only = (!only.is_empty()).then_some(only.as_slice());
+            let report = iwdb::restore_namespaces(dest, &sources, *target, only)?;
             out.restore(&report);
             verify_after(parsed, out, dest)
         }
@@ -130,4 +192,41 @@ fn verify_after(parsed: &Parsed, out: &Out, dir: &std::path::Path) -> Result<u8,
     let report = iwdb::verify(dir)?;
     out.verify(&report);
     Ok(if report.is_ok() { exit::OK } else { exit::DAMAGE })
+}
+
+fn iwdb_engine_error(e: iwdb::CatalogError) -> Error {
+    Error::Engine(e.into())
+}
+
+fn one_namespace(parsed: &Parsed) -> &str {
+    parsed.namespaces.first().map_or(iwdb::NAMESPACE, String::as_str)
+}
+
+fn key(parsed: &Parsed) -> Result<Option<IdempotencyKey>, Error> {
+    Ok(parsed.key.as_deref().map(IdempotencyKey::new).transpose()?)
+}
+
+fn attr_path(path: &[String]) -> Result<AttrPath, Error> {
+    AttrPath::new(path.iter().cloned()).map_err(iwdb_engine_error)
+}
+
+fn constraint(kind: ConstraintKind, label: &str, path: &[String]) -> Result<Constraint, Error> {
+    Ok(Constraint { kind, label: Label::new(label).map_err(iwdb_engine_error)?, path: attr_path(path)? })
+}
+
+/// Open the store, commit one catalog change in a namespace, close.
+fn catalog_change(
+    parsed: &Parsed,
+    out: &Out,
+    dir: &std::path::Path,
+    what: &str,
+    make: impl FnOnce(&Store) -> Result<CatalogChange, Error>,
+) -> Result<u8, Error> {
+    let store = Store::open(dir, store_options(parsed))?;
+    let change = make(&store)?;
+    let options = CommitOptions { idempotency_key: key(parsed)? };
+    let result = store.namespace(one_namespace(parsed))?.commit_catalog_with(change, &options)?;
+    store.close()?;
+    out.commit(what, result.seq, result.deduplicated);
+    Ok(exit::OK)
 }

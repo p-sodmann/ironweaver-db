@@ -31,7 +31,7 @@ fn verify(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyAny>> {
 /// Restore into `dest` from a backup and/or an archive, to `seq`, to the
 /// last commit at or before `time` (an aware datetime), or to the latest.
 #[pyfunction]
-#[pyo3(signature = (dest, *, backup = None, archive = None, seq = None, time = None))]
+#[pyo3(signature = (dest, *, backup = None, archive = None, seq = None, time = None, namespaces = None))]
 fn restore(
     py: Python<'_>,
     dest: PathBuf,
@@ -39,6 +39,7 @@ fn restore(
     archive: Option<PathBuf>,
     seq: Option<u64>,
     time: Option<&Bound<'_, PyAny>>,
+    namespaces: Option<Vec<String>>,
 ) -> PyResult<Py<PyAny>> {
     guard(|| {
         let target = match (seq, time) {
@@ -57,13 +58,20 @@ fn restore(
             (None, None) => RestoreTarget::Latest,
         };
         let sources = RestoreSources { backup, archive };
-        let report = py.detach(|| iwdb::restore(&dest, &sources, target)).map_err(|e| match e {
-            // The sources don't reach the target: a request, not damage
-            Error::LogEndsBefore { .. } | Error::MissingRecords { .. } | Error::NoCommitAtOrBefore { .. } => {
-                invalid(e.to_string())
-            }
-            other => to_py(other),
-        })?;
+        let only: Option<Vec<iwdb::NamespaceName>> = namespaces
+            .map(|list| {
+                list.into_iter().map(|n| iwdb::NamespaceName::new(n).map_err(|e| invalid(e.to_string()))).collect()
+            })
+            .transpose()?;
+        let report =
+            py.detach(|| iwdb::restore_namespaces(&dest, &sources, target, only.as_deref())).map_err(|e| match e {
+                // The sources don't reach the target: a request, not damage
+                Error::LogEndsBefore { .. }
+                | Error::MissingRecords { .. }
+                | Error::NoCommitAtOrBefore { .. }
+                | Error::AmbiguousTarget { .. } => invalid(e.to_string()),
+                other => to_py(other),
+            })?;
         reports::restore(py, &report)
     })
 }
@@ -78,6 +86,7 @@ fn _panic_for_tests() -> PyResult<()> {
 #[pymodule]
 fn _iwdb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<store::PyStore>()?;
+    m.add_class::<store::PyNamespace>()?;
     m.add_class::<store::PyTransaction>()?;
     m.add_function(wrap_pyfunction!(verify, m)?)?;
     m.add_function(wrap_pyfunction!(restore, m)?)?;

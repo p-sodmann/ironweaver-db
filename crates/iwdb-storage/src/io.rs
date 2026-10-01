@@ -38,6 +38,13 @@ pub trait LogFs {
     fn remove_file(&self, path: &Path) -> io::Result<()>;
     /// Cut the file at `path` to `len` bytes and fsync it.
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()>;
+    /// Create the directory `path` (not its parents); `AlreadyExists` if
+    /// there is one. Not durable until its parent is synced (step 9:
+    /// namespace directories).
+    fn create_dir(&self, path: &Path) -> io::Result<()>;
+    /// Remove the directory `path` and everything in it (step 9: a dropped
+    /// namespace's directory). Not durable until its parent is synced.
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()>;
 }
 
 /// An open log file.
@@ -85,6 +92,14 @@ impl LogFs for StdFs {
         let file = OpenOptions::new().write(true).open(path)?;
         file.set_len(len)?;
         file.sync_all()
+    }
+
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        fs::create_dir(path)
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        fs::remove_dir_all(path)
     }
 }
 
