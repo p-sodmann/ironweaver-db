@@ -8,12 +8,15 @@
 //!   core's file format, with the catalog in the graph meta.
 //! - [`mutation`]: the write vocabulary, commit records and results.
 //! - [`Namespace`]: a graph changed only through the commit pipeline.
+//! - [`invariants`]: the invariants every namespace keeps, checked from
+//!   scratch (for `verify`).
 //! - [`testutil`]: canonical graph comparison for tests, and random
 //!   workloads with the `testutil` feature.
 
 pub mod catalog;
 pub mod codec;
 mod error;
+pub mod invariants;
 pub mod mutation;
 mod namespace;
 mod record;

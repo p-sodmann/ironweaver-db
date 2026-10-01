@@ -81,14 +81,14 @@ fn violation(constraint: &Constraint, node: String, other: Option<String>) -> Er
 }
 
 /// The value at `path` (none and missing values are `None`, as for filters).
-fn value_at(data: &DbRecord, path: &[String]) -> Result<Option<Value>, GraphError> {
+pub(crate) fn value_at(data: &DbRecord, path: &[String]) -> Result<Option<Value>, GraphError> {
     data.with_value(path, |v| v.cloned())
 }
 
 /// Whether `value` (an attribute's own value, at depth 1) is nested deeper
 /// than [`MAX_VALUE_DEPTH`]. Empty containers count as if they held a
 /// scalar (see there). Recurses at most `MAX_VALUE_DEPTH + 1` levels.
-fn too_deep(value: &Value, level: usize) -> bool {
+pub(crate) fn too_deep(value: &Value, level: usize) -> bool {
     if level > MAX_VALUE_DEPTH {
         return true;
     }
