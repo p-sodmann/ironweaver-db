@@ -21,7 +21,7 @@ use crate::rng::Rng;
 use crate::script::{check_options, Policy};
 
 /// How long a child may take to reach a point before the run fails.
-const CHILD_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const CHILD_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A running child and its protocol lines.
 pub struct ChildProcess {
@@ -322,11 +322,23 @@ pub struct Config {
     pub max_delay: Duration,
     /// Print a line every this many cycles (0: never).
     pub progress: u64,
+    /// Cycles of the catalog scenario (step 9) run after the others.
+    pub catalog_cycles: u64,
 }
 
 impl Config {
     pub fn new(exe: PathBuf, policy: Policy, seed: u64, cycles: u64, work: PathBuf) -> Self {
-        Config { exe, policy, seed, cycles, work, acts: 120, max_delay: Duration::from_millis(60), progress: 0 }
+        Config {
+            exe,
+            policy,
+            seed,
+            cycles,
+            work,
+            acts: 120,
+            max_delay: Duration::from_millis(60),
+            progress: 0,
+            catalog_cycles: cycles / 3,
+        }
     }
 }
 
@@ -380,6 +392,8 @@ pub struct Summary {
     pub restores_complete: u64,
     pub restores_interrupted: u64,
     pub restore_kills: u64,
+    /// The catalog scenario: namespaces, indexes and constraints (step 9).
+    pub catalog: Option<crate::catalog::CatalogSummary>,
 }
 
 impl fmt::Display for Summary {
@@ -427,6 +441,9 @@ impl fmt::Display for Summary {
         write!(f, "  failpoints reached:")?;
         for (rule, n) in &self.reached {
             write!(f, " {}={}", rule, n)?;
+        }
+        if let Some(catalog) = &self.catalog {
+            write!(f, "\n{}", catalog)?;
         }
         Ok(())
     }
@@ -804,6 +821,20 @@ pub fn run(config: &Config) -> Result<Summary, Failure> {
         drop(store);
         check_backups(&config.work, &target, &Outcome::none(), &mut summary).map_err(|e| failure(config.cycles, e))?;
         check_archive(&target, &mut summary).map_err(|e| failure(config.cycles, e))?;
+    }
+    if config.catalog_cycles > 0 {
+        let work = config.work.join("catalog");
+        let catalog = crate::catalog::run(
+            &config.exe,
+            config.policy,
+            config.seed,
+            config.catalog_cycles,
+            config.acts,
+            config.max_delay,
+            &work,
+        )
+        .map_err(|e| failure(config.cycles, e))?;
+        summary.catalog = Some(catalog);
     }
     summary.elapsed = start.elapsed();
     Ok(summary)

@@ -140,20 +140,20 @@ impl ChildArgs {
 }
 
 /// Write a protocol line and flush it.
-fn say(line: &str) {
+pub(crate) fn say(line: &str) {
     let mut out = std::io::stdout().lock();
     // If the parent is gone there is no one to tell
     let _ = writeln!(out, "{}", line).and_then(|()| out.flush());
 }
 
-fn fail(what: &str, error: impl std::fmt::Display) -> ! {
+pub(crate) fn fail(what: &str, error: impl std::fmt::Display) -> ! {
     say(&format!("error {}: {}", what, error));
     eprintln!("iwdb-crash child: {}: {}", what, error);
     std::process::exit(2)
 }
 
 /// Block this thread until the process is killed.
-fn wait_for_kill() -> ! {
+pub(crate) fn wait_for_kill() -> ! {
     loop {
         std::thread::park();
     }
@@ -176,7 +176,7 @@ fn sync_log_hook(work: &Path) -> Result<iwdb_storage::failpoint::Hook, std::io::
 
 /// A [`FailFs`] with `rules`, whose pauses say `paused` and wait to be
 /// killed.
-fn fail_fs(rules: &[Rule]) -> FailFs {
+pub(crate) fn fail_fs(rules: &[Rule]) -> FailFs {
     let fs = FailFs::new();
     for rule in rules {
         fs.add(rule.clone());

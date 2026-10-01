@@ -56,6 +56,7 @@
 //! workload. Kill timing is real time, so a rerun with the same seed makes
 //! the same plans but kills at slightly different moments.
 
+pub mod catalog;
 pub mod child;
 pub mod harness;
 pub mod model;

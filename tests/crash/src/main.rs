@@ -88,6 +88,15 @@ fn main() -> ExitCode {
             }
         }
     }
+    if args.first().map(String::as_str) == Some("catalog") {
+        match iwdb_crash::catalog::CatalogArgs::parse(&args[1..]) {
+            Ok(catalog) => iwdb_crash::catalog::main(&catalog),
+            Err(e) => {
+                eprintln!("iwdb-crash catalog: {}", e);
+                return ExitCode::from(2);
+            }
+        }
+    }
     let options = match parse(&args) {
         Ok(options) => options,
         Err(e) => {

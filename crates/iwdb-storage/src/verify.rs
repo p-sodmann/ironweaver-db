@@ -280,7 +280,7 @@ pub fn verify(root: &Path) -> Result<VerifyReport, Error> {
         }
     } else {
         let name = NamespaceName::new(DEFAULT_NAME).map_err(iwdb_engine::Error::from)?;
-        namespaces.push((DEFAULT_ID, name, NsPaths::legacy(root)));
+        namespaces.push((DEFAULT_ID, name, layout::legacy_paths_at(root)));
     }
     list_root_files(&mut report, root, layout4)?;
 

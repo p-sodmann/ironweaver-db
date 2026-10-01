@@ -298,21 +298,7 @@ impl DataDir {
     /// interrupted upgrade moved it already, in `ns/<id>/`. Meant for the
     /// recovery that runs before [`upgrade`](Self::upgrade).
     pub fn legacy_paths(&self) -> NsPaths {
-        let moved = NsPaths::new(&self.root, DEFAULT_ID);
-        let pick = |sub: &str, moved: &Path| {
-            let at_root = self.root.join(sub);
-            if at_root.exists() {
-                at_root
-            } else {
-                moved.to_path_buf()
-            }
-        };
-        NsPaths {
-            id: DEFAULT_ID,
-            dir: moved.dir.clone(),
-            checkpoints: pick(CHECKPOINT_DIR, &moved.checkpoints),
-            wal: pick(WAL_DIR, &moved.wal),
-        }
+        legacy_paths_at(&self.root)
     }
 
     /// Whether the directory is in an older layout and
@@ -523,6 +509,26 @@ fn has_data(paths: &NsPaths) -> Result<bool, Error> {
         }
     }
     Ok(false)
+}
+
+/// [`DataDir::legacy_paths`] for the directory `root` (verify uses it on
+/// a layout 1-3 directory whose upgrade was interrupted).
+pub fn legacy_paths_at(root: &Path) -> NsPaths {
+    let moved = NsPaths::new(root, DEFAULT_ID);
+    let pick = |sub: &str, moved: &Path| {
+        let at_root = root.join(sub);
+        if at_root.exists() {
+            at_root
+        } else {
+            moved.to_path_buf()
+        }
+    };
+    NsPaths {
+        id: DEFAULT_ID,
+        dir: moved.dir.clone(),
+        checkpoints: pick(CHECKPOINT_DIR, &moved.checkpoints),
+        wal: pick(WAL_DIR, &moved.wal),
+    }
 }
 
 /// Create the directory of namespace `id` in `root`: `ns/<id>/`,
