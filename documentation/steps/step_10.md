@@ -18,6 +18,17 @@ One protocol-independent service interface that every access method uses, with b
 - [ ] Error model: typed errors with stable codes (not found, conflict, constraint violation, budget exceeded, timeout, invalid argument, unavailable), documented in `documentation/api/errors.md`.
 - [ ] The embedded facade (`iwdb`) implements the trait; Python embedded bindings are moved onto it.
 
+## Notes from step 9
+
+- **Every operation names a namespace.** `Store::namespace(name) -> Ns` is the handle the `Database` trait should wrap: `Ns` has commit (with and without keys), catalog changes, `read`, `analyze`, `wait_for_seq`, `status`, `index_entries` and `checkpoint`; `Store` has `create_namespace`, `drop_namespace`, `namespaces`, `status` and `backup`. The shorthands on `Store` (`store.commit`, `store.node`, ...) act on `default` and exist for the embedded API; the trait shouldn't have them (design rule 8: one way to say it).
+- **Seqs and `min_seq` are per namespace**, `ReadOptions.history` is the store's. A read token is `(namespace, seq)`. A cursor must carry the namespace and the seq it was made at.
+- **Errors to map**: `NoSuchNamespace` and `NamespaceDropped` (not found), `NamespaceExists` and `IdempotencyKeyReused` (conflict), `AmbiguousTarget` (invalid argument), `NamespaceDamaged` and `InvalidNamespaceLog` (corrupt). A read in progress on a dropped namespace finishes; a wait or commit fails with `NamespaceDropped`.
+- **Index state in `explain`.** `Ns::status().indexes` has `ready` or `building (scanned/total)`. A building index isn't in the catalog and `find_nodes` can't use it, so `explain` must say "no index" until it is installed. Per-index entry counts come from `Ns::index_entries` (range scans, O(entries); upstream #35).
+- **Index builds are not free**: the final insertion holds the namespace write lock (about 100 ms at 500 000 nodes) and a unique constraint's validation holds the writer for its whole scan (ADR 0019). Server limits and timeouts for catalog operations should expect that; the core can't do better until #34.
+- **Namespace operations are keyed** (`create_namespace` / `drop_namespace` take an `Option<&IdempotencyKey>`); the trait should expose that.
+- **Drop and the archive.** `drop_namespace` archives the namespace's remaining WAL if the store has an archive; `iwctl` forces the caller to say so (`--archive` or `--no-archive`). A server should do the same through its configuration.
+- **Limits for step 15** (auth and limits): the number of namespaces, names, and memory per namespace are not limited yet; `NamespaceStatus.memory_bytes` is whole-graph memory (indexes included) and is cheap (O(1)), so a per-namespace memory limit can be checked on every commit.
+
 ## Acceptance criteria
 
 - No read operation can run unbounded (test per operation).

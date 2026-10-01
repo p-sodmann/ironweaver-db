@@ -1,6 +1,6 @@
 # Step 9: Catalog operations and namespaces
 
-Status: todo
+Status: done
 Milestone: M2 Service
 Depends on: step 8
 
@@ -10,10 +10,12 @@ Multiple named graphs per store, and index and constraint definitions managed li
 
 ## Tasks
 
-- [ ] Namespaces: create, list, drop, each with its own graph, WAL stream position and checkpoint (ADR: one WAL per namespace vs. a shared WAL).
-- [ ] Index management: create (online build), drop, list; definitions persisted in the catalog, indexes rebuilt on recovery.
-- [ ] Constraints: unique (label + path), required (label + path); adding one validates existing data first.
-- [ ] Catalog views for `status`: counts, index sizes, memory per namespace.
+- [x] Namespaces: create, list, drop, each with its own graph, seq space, WAL and checkpoints ([ADR 0017](../adr/0017-namespaces.md): one WAL per namespace plus a namespace log; names, ids, layout 4, the upgrade from layouts 1-3, crash-safe create and drop, what happens to readers and waiters of a dropped namespace; keys: [ADR 0018](../adr/0018-namespace-keys-and-restore.md)).
+- [x] Index management: create (online build, [ADR 0019](../adr/0019-online-index-build.md): the scan holds neither the writer mutex nor the namespace lock for long; the insertion still holds the write lock, measured), drop, list with state; definitions persisted in the catalog, indexes rebuilt on recovery.
+- [x] Constraints: unique (label + path), required (label + path); adding one validates existing data first (a unique constraint's validation holds the writer mutex, ADR 0019); scoped to one namespace.
+- [x] Catalog views for `status`: counts, index state and entries, memory per namespace, in `Store::status`, `iwctl status` / `namespaces` / `indexes` and Python.
+- [x] Formats: layout 4, backup manifest 2, archive format 2 (the WAL format stays 3), readers for the older versions, fixtures `data-dir-v4`, `backup-v2`, `archive-v2`; `data-dir.md`, `wal.md`, `backup.md`, `archive.md` updated.
+- [x] Python and `iwctl`: the API is in `documentation/python-api.md` (written first); namespace and catalog commands in `documentation/iwctl.md`.
 
 ## Notes from step 8
 
@@ -26,5 +28,11 @@ Multiple named graphs per store, and index and constraint definitions managed li
 
 ## Acceptance criteria
 
-- Catalog changes survive crash and recovery (added to the crash suite).
-- Unique constraints hold under concurrent writers.
+- [x] Catalog changes survive crash and recovery (the harness's catalog scenario and `namespace_points.rs`).
+- [x] Unique constraints hold under concurrent writers (`namespaces.rs`, per namespace).
+
+## Corrections to this step
+
+- The task said "WAL stream position and checkpoint" per namespace; with one WAL per namespace (ADR 0017) each namespace has its own seq space, WAL and checkpoints, so there is no stream position. The ADR also settles the note "with a shared WAL, the WAL format changes (format 4)": it doesn't, because the WAL isn't shared.
+- "Unique constraints hold under concurrent writers while every commit runs under the writer mutex" (step 8 note) holds per namespace, which is the scope of a unique constraint.
+- The online build is only partly online (ADR 0019): the scan is, the insertion into the index isn't, because the core can only build an index inside `&mut Graph` (upstream #34). It was measured instead of promised.

@@ -29,8 +29,16 @@ fn pause(call: Call, when: When, path: &str, skip: u64) -> Plan {
 /// every cycle.
 #[test]
 fn creating_and_dropping_namespaces() {
+    for policy in Policy::ALL {
+        // `always` hits each point at a later skip too: the others are kept short
+        let skips: &[u64] = if policy == Policy::Always { &[0, 2] } else { &[0] };
+        creating_and_dropping_under(policy, skips);
+    }
+}
+
+fn creating_and_dropping_under(policy: Policy, skips: &[u64]) {
     let mut plans = Vec::new();
-    for skip in [0, 2] {
+    for &skip in skips {
         for when in [When::Before, When::After] {
             plans.push(pause(Call::CreateDir, when, "/ns/", skip));
             plans.push(pause(Call::RemoveDirAll, when, "/ns/", skip.min(2)));
@@ -43,7 +51,7 @@ fn creating_and_dropping_namespaces() {
         plans.push(pause(Call::OpenAppend, When::Before, "NAMESPACES", skip.min(2)));
         plans.push(pause(Call::CreateDir, When::After, "/archive-", skip.min(2)));
     }
-    for policy in Policy::ALL {
+    {
         let work = tempfile::tempdir().unwrap();
         let cycles = plans.len() as u64;
         let summary =

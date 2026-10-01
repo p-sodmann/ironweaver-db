@@ -12,7 +12,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [6](step_6.md) | Crash and fault-injection suite | M1 | done |
 | [7](step_7.md) | Backup, PITR, `verify` and Python embedded bindings | M1 | done (PyPI publish of 0.1.0 pending: [releasing.md](../releasing.md)) |
 | [8](step_8.md) | Concurrency, idempotency and read-your-writes | M2 | done |
-| [9](step_9.md) | Catalog operations and namespaces | M2 | todo |
+| [9](step_9.md) | Catalog operations and namespaces | M2 | done |
 | [10](step_10.md) | Query layer and the `Database` service trait | M2 | todo |
 | [11](step_11.md) | gRPC server | M3 | todo |
 | [12](step_12.md) | REST/JSON API | M3 | todo |
