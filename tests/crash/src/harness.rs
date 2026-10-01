@@ -261,8 +261,8 @@ fn restore_points() -> Vec<(Call, When, &'static str, u64)> {
     vec![
         (Create, After, RESTORING_NAME, 0),
         (Sync, Before, RESTORING_NAME, 0),
-        (SyncDir, Before, "/restored", 3),
-        (SyncDir, After, "/restored", 3),
+        (SyncDir, Before, "/restored", 8),
+        (SyncDir, After, "/restored", 8),
         (WriteAtomic, Midway, "/restored/ns/", 0),
         (WriteAtomic, WriterDone, "/restored/ns/", 0),
         (WriteAtomic, After, "/restored/ns/", 0),

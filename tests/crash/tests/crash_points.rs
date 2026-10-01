@@ -444,15 +444,15 @@ fn during_a_restore() {
         (pause(Call::Create, When::After).path(RESTORING_NAME), false),
         (pause(Call::Sync, When::Before).path(RESTORING_NAME), false),
         (pause(Call::SyncDir, When::Before).path("/restored"), false),
-        (pause(Call::WriteAtomic, When::Midway).path("/restored/checkpoints/"), false),
-        (pause(Call::WriteAtomic, When::WriterDone).path("/restored/checkpoints/"), false),
-        (pause(Call::WriteAtomic, When::After).path("/restored/checkpoints/"), false),
+        (pause(Call::WriteAtomic, When::Midway).path("/restored/ns/"), false),
+        (pause(Call::WriteAtomic, When::WriterDone).path("/restored/ns/"), false),
+        (pause(Call::WriteAtomic, When::After).path("/restored/ns/"), false),
         (pause(Call::RemoveFile, When::Before).path(RESTORING_NAME), false),
         (pause(Call::RemoveFile, When::After).path(RESTORING_NAME), false),
         (pause(Call::WriteAtomic, When::Before).path("restored/IWDB"), false),
         (pause(Call::WriteAtomic, When::After).path("restored/IWDB"), true),
-        (pause(Call::SyncDir, When::Before).path("/restored").skip(3), true),
-        (Rule::new(Call::WriteAtomic, When::WriterDone, Action::Abort).path("/restored/checkpoints/"), false),
+        (pause(Call::SyncDir, When::Before).path("/restored").skip(8), true),
+        (Rule::new(Call::WriteAtomic, When::WriterDone, Action::Abort).path("/restored/ns/"), false),
     ] {
         for from_data in [true, false] {
             let plan = RestorePlan::At(rule.clone());
