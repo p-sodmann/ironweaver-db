@@ -18,6 +18,7 @@
 //!
 //! The guarantees of each fsync policy are in `documentation/guarantees.md`.
 
+pub mod backup;
 pub mod checkpoint;
 mod error;
 #[cfg(feature = "failpoints")]
@@ -30,8 +31,10 @@ mod logged;
 mod reader;
 mod recovery;
 mod time;
+pub mod verify;
 mod writer;
 
+pub use backup::BackupReport;
 pub use checkpoint::{CheckpointOutcome, Checkpointer, SkippedCheckpoint};
 pub use error::Error;
 pub use history::HistoryId;
@@ -42,4 +45,5 @@ pub use reader::{
 };
 pub use recovery::{recover, CutTail, Recovered, RecoveryReport};
 pub use time::CommitTime;
+pub use verify::{verify, Finding, Kind, VerifyReport};
 pub use writer::{FsyncPolicy, Wal, WalOptions, DEFAULT_SEGMENT_SIZE, MAX_SEGMENT_SIZE, MIN_SEGMENT_SIZE};

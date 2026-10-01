@@ -13,7 +13,8 @@ use iwdb_engine::{CatalogChange, CommitResult, Mutation, Namespace};
 use iwdb_storage::io::{LogFs, StdFs};
 use iwdb_storage::layout::DataDir;
 use iwdb_storage::{
-    recover, CheckpointOutcome, Checkpointer, Error, FsyncPolicy, HistoryId, LoggedNamespace, Recovered, RecoveryReport,
+    backup, recover, BackupReport, CheckpointOutcome, Checkpointer, Error, FsyncPolicy, HistoryId, LoggedNamespace,
+    Recovered, RecoveryReport,
 };
 
 use crate::StoreOptions;
@@ -124,6 +125,8 @@ where
     shared: Arc<Shared<F>>,
     threads: Vec<JoinHandle<()>>,
     report: RecoveryReport,
+    /// The file operations, for backups.
+    fs: F,
     /// Holds the lock; released when the store is dropped, after the
     /// threads have stopped.
     dir: DataDir,
@@ -170,7 +173,7 @@ where
             recover(fs.clone(), dir, options.create_if_missing, &name, options.wal.clone())?;
         log_report(dir.root(), &report);
         let checkpointer = Checkpointer::new(
-            fs,
+            fs.clone(),
             &dir,
             name,
             options.checkpoint.keep,
@@ -199,7 +202,7 @@ where
                 threads.push(spawn("iwdb-sync", move || sync_loop(&shared, max_delay))?);
             }
         }
-        Ok(Store { shared, threads, report, dir })
+        Ok(Store { shared, threads, report, fs, dir })
     }
 
     /// Commit a data transaction: all mutations or none, validated against
@@ -341,6 +344,47 @@ where
             (target(&live, &self.shared.options), live.wal().appended_bytes())
         };
         run_checkpoint(&self.shared, target, appended)
+    }
+
+    /// Back the store up into `dest`, a missing or empty directory, while
+    /// it runs: a consistent copy of its data directory up to the last
+    /// commit, which `verify` checks and [`restore`](crate::restore) turns
+    /// into a store again (`documentation/formats/backup.md`, ADR 0009).
+    ///
+    /// - **What it reaches**: the WAL is fsynced first, and the backup holds
+    ///   every commit up to the synced seq then, which is the last commit
+    ///   (if the store is read-only, nothing more is synced: the commits up
+    ///   to its synced seq). Commits after that are not in it.
+    /// - **What it holds**: every checkpoint at or below that seq, and the
+    ///   WAL from the oldest of them up to the seq, so it restores to any
+    ///   seq in between.
+    /// - **Waiting**: commits wait only for the fsync, as in
+    ///   [`checkpoint`](Self::checkpoint). Checkpoints (background,
+    ///   explicit and on close) wait until the copy is done: the backup
+    ///   holds the checkpointer's lock, so that no file it copies is
+    ///   removed meanwhile, and the WAL grows until then.
+    /// - **Writing**: every file is fsynced, then the manifest, then the
+    ///   marker, last. A backup that fails or is interrupted leaves a
+    ///   directory without a marker, which a store, `verify` and `restore`
+    ///   refuse; remove it and try again.
+    ///
+    /// Errors: [`Error::DestinationNotEmpty`]; [`Error::InvalidOptions`] if
+    /// `dest` is inside the data directory; [`Error::Io`]; a WAL read error
+    /// if a segment it copies is damaged; a failed fsync of the WAL (then
+    /// the store is read-only, as after any failed fsync).
+    pub fn backup(&self, dest: &Path) -> Result<BackupReport, Error> {
+        let checkpointer = lock(&self.shared.checkpointer);
+        let seq = {
+            let mut live = self.live()?;
+            if live.read_only().is_none() {
+                or_abort("an fsync of the WAL", || live.sync())?;
+            }
+            live.wal().synced_seq().min(live.namespace().seq())
+        };
+        let damaged = checkpointer.damaged();
+        let report = backup::write_backup(&self.fs, self.dir.root(), self.history(), seq, damaged, dest)?;
+        log::info!("{}: backed up to seq {} into '{}'", self.dir.root().display(), report.seq, dest.display());
+        Ok(report)
     }
 
     /// Stop the background threads, fsync the WAL, write a checkpoint (if

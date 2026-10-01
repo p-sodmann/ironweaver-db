@@ -246,6 +246,31 @@ fn write_atomic_ignores_a_failed_directory_sync() {
     assert_eq!(std::fs::read(sub.join("file")).expect("read"), b"data");
 }
 
+/// Known core behaviour (upstream #33): the binary header's `flags` (u16,
+/// bytes 10..12) and `reserved` (u32, bytes 12..16) are documented as 0,
+/// but the loaders don't check them, and the CRC32 covers only the
+/// payload. So damage there goes unnoticed (both loaders), and a flag a
+/// newer writer sets would be ignored rather than refused. Pinned: a file
+/// with both fields changed loads like the original. When this fails,
+/// upstream checks them: drop the header check in `iwdb_storage::verify`
+/// (see `documentation/steps/upstream-check.md`).
+#[test]
+fn binary_header_flags_and_reserved_bytes_are_not_checked() {
+    let mut g = G::new();
+    g.apply_all(sample_batch(&g)).expect("setup");
+    let meta = Attrs::new();
+    let bytes = format::to_binary(&g, &meta, false).expect("save");
+    assert_eq!(&bytes[..8], b"IRONWEAV");
+    assert_eq!(&bytes[10..16], &[0; 6], "flags and reserved are written as 0");
+    let mut changed = bytes.clone();
+    changed[10] = 0x01; // a flag
+    changed[12..16].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]); // reserved
+    let (loaded, _) = format::from_binary(&changed).expect("the slice loader accepts it");
+    assert_eq!(canonical(&loaded), canonical(&g));
+    let (streamed, _) = format::from_binary_reader(&changed[..]).expect("the streaming loader accepts it");
+    assert_eq!(canonical(&streamed), canonical(&g));
+}
+
 #[test]
 fn property_index_lookups() {
     let mut g = G::new();

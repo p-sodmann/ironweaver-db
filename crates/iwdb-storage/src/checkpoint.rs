@@ -257,6 +257,12 @@ impl<F: LogFs> Checkpointer<F> {
         self.newest
     }
 
+    /// The checkpoints known to be damaged (they failed to load), which a
+    /// backup doesn't copy.
+    pub fn damaged(&self) -> &BTreeSet<u64> {
+        &self.bad
+    }
+
     /// Why checkpoints are disabled, if they are.
     pub fn disabled(&self) -> Option<&str> {
         self.disabled.as_deref()

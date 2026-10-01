@@ -1,2 +1,6 @@
-# WAL segments (format fixtures) are binary
+# Fixtures of the on-disk formats are binary
 *.wal binary
+*.ckpt binary
+IWDB binary
+BACKUP binary
+IWDBARCH binary

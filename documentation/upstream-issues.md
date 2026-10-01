@@ -1,8 +1,8 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5; all are filed (links in the table).
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7; all are filed (links in the table).
 
-Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–14 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
+Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–15 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
 
 | # | Title | Status |
 |---|---|---|
@@ -20,6 +20,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–14 
 | 12 | [Small API and dependency cleanups: public attribute lookup, optional bincode, doc comments](#12-small-api-and-dependency-cleanups-public-attribute-lookup-optional-bincode-doc-comments) | filed: [#30](https://github.com/p-sodmann/Ironweaver/issues/30) |
 | 13 | [`Value` serde rejects empty containers at the depth limit that the file format accepts](#13-value-serde-rejects-empty-containers-at-the-depth-limit-that-the-file-format-accepts) | filed: [#31](https://github.com/p-sodmann/Ironweaver/issues/31) |
 | 14 | [`write_atomic` ignores a failed directory fsync after the rename](#14-write_atomic-ignores-a-failed-directory-fsync-after-the-rename) | filed: [#32](https://github.com/p-sodmann/Ironweaver/issues/32) |
+| 15 | [Binary format: the header's flags and reserved bytes are never checked](#15-binary-format-the-headers-flags-and-reserved-bytes-are-never-checked) | filed: [#33](https://github.com/p-sodmann/Ironweaver/issues/33) |
 
 ---
 
@@ -324,3 +325,35 @@ Return the error of the directory sync on Unix, as for every other step. Where i
 **Why the database needs it**
 
 Ironweaver DB writes checkpoints with `write_atomic` and then deletes the WAL segments and older checkpoints the new checkpoint covers. That is only safe if the new checkpoint's directory entry is durable before anything is deleted. If the rename were lost in a crash after the deletions, the data would be gone. Until this is fixed, we call our own directory fsync after `write_atomic` and check its result, which means a second directory sync per checkpoint and a failure mode that `write_atomic` could report itself.
+
+## 15. Binary format: the header's flags and reserved bytes are never checked
+
+Found in step 7 while building `verify` (filed as [#33](https://github.com/p-sodmann/Ironweaver/issues/33)), checked against `a14149e`.
+
+**Problem**
+
+`docs/format.md` describes the binary header as `b"IRONWEAV", u16 format version (2), u16 flags (0), u32 reserved (0)`, and says the framing detects "a truncated or corrupted file before anything is parsed". But the loaders check only the magic and the version: `check_version` reads bytes 8..10, and nothing reads bytes 10..16. The CRC32 in the trailer covers the payload only. So:
+
+- damage in the `flags` or `reserved` bytes goes unnoticed: the file loads as if it were intact, and an integrity check built on the loader can't see it;
+- a flag that a newer writer sets (the reason to have a flags field) would be silently ignored by this reader instead of refused, so a file whose meaning the flag changes would be misread.
+
+Reproduction (`a14149e`):
+
+```rust
+use ironweaver_core::{format, Attrs, Graph, Op, Record};
+let mut g: Graph<Record, Record> = Graph::new();
+g.apply(Op::AddNode { id: "a".into(), labels: vec![], data: Record::default() }).unwrap();
+let mut bytes = format::to_binary(&g, &Attrs::new(), false).unwrap();
+bytes[10] = 0x01;                                            // a flag
+bytes[12..16].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);   // reserved
+assert!(format::from_binary(&bytes).is_ok());               // loads
+assert!(format::from_binary_reader(&bytes[..]).is_ok());    // streaming too
+```
+
+**Proposal**
+
+In `check_version` (used by both `binary_payload` and `build_from_reader`), reject a file whose `flags` has a bit this reader doesn't know, or whose `reserved` field isn't 0, with a `GraphError::Format` that says so (for flags, like a newer version: "written by a newer ironweaver?"). Alternatively, or as well, let the trailer's CRC cover the header too, which would need a format version bump; checking the fields is enough for format 2 and needs no bump, since the writer always writes zeros.
+
+**Why the database needs it**
+
+Ironweaver DB's checkpoints are binary files, and `verify` (like SQLite's `PRAGMA integrity_check`) promises to find any damaged byte in them. Until the loader checks the header, we read the 16 header bytes ourselves in `verify` and report non-zero `flags` or `reserved` as damage. Recovery keeps loading such a checkpoint: its data is intact.

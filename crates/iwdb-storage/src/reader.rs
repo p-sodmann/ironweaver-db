@@ -280,9 +280,11 @@ pub(crate) fn read_segment_file(path: &Path, first_seq: u64, last: bool) -> Resu
 /// appending to the file meanwhile. A backup copies the segment that holds
 /// its last record this way.
 ///
-/// Fails with [`Error::LogEndsBefore`] if the segment ends before record
-/// `until`. Holds the file in memory (at most [`MAX_SEGMENT_FILE_LEN`]).
-pub fn segment_prefix(path: &Path, first_seq: u64, until: u64) -> Result<Vec<u8>, Error> {
+/// Returns the bytes and the commit time of record `until` (`None` if the
+/// prefix has no record, or in WAL format 1). Fails with
+/// [`Error::LogEndsBefore`] if the segment ends before record `until`.
+/// Holds the file in memory (at most [`MAX_SEGMENT_FILE_LEN`]).
+pub fn segment_prefix(path: &Path, first_seq: u64, until: u64) -> Result<(Vec<u8>, Option<CommitTime>), Error> {
     let mut bytes = read_file(path)?;
     let mut cursor = Cursor::new(path, &bytes, first_seq, false)?;
     if until >= first_seq {
@@ -295,7 +297,7 @@ pub fn segment_prefix(path: &Path, first_seq: u64, until: u64) -> Result<Vec<u8>
         }
     }
     bytes.truncate(cursor.pos);
-    Ok(bytes)
+    Ok((bytes, cursor.last_time))
 }
 
 /// The segments of a log directory, sorted by first seq. Files whose name
@@ -627,9 +629,9 @@ mod tests {
         torn.truncate(full.len() - 3);
         fs::write(&file, &torn).expect("write");
         let two = segment(5, &[(5, 4, KIND_DATA, EMPTY), (6, 5, KIND_DATA, EMPTY)]);
-        assert_eq!(segment_prefix(&file, 5, 6).expect("prefix"), two);
-        assert_eq!(segment_prefix(&file, 5, 5).expect("prefix"), one);
-        assert_eq!(segment_prefix(&file, 5, 4).expect("prefix"), encode_segment_header(5).to_vec());
+        assert_eq!(segment_prefix(&file, 5, 6).expect("prefix"), (two.clone(), Some(CommitTime(60))));
+        assert_eq!(segment_prefix(&file, 5, 5).expect("prefix"), (one, Some(CommitTime(50))));
+        assert_eq!(segment_prefix(&file, 5, 4).expect("prefix"), (encode_segment_header(5).to_vec(), None));
         assert!(matches!(segment_prefix(&file, 5, 7), Err(Error::Corrupt { .. })));
         fs::write(&file, &two).expect("write");
         assert!(matches!(segment_prefix(&file, 5, 7), Err(Error::LogEndsBefore { from: 7, next_seq: 7 })));

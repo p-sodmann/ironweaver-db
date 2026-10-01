@@ -26,6 +26,7 @@
 //! `documentation/guarantees.md`, the directory layout in
 //! `documentation/formats/data-dir.md`.
 
+mod ops;
 mod options;
 mod store;
 
@@ -34,8 +35,9 @@ pub use iwdb_engine::catalog::{AttrPath, Constraint, ConstraintKind, IndexDef, L
 pub use iwdb_engine::{CatalogChange, CommitResult, EdgeKey, Mutation, Namespace, Target};
 pub use iwdb_storage::io::{LogFs, StdFs};
 pub use iwdb_storage::{
-    CheckpointOutcome, CommitTime, CutTail, Error, FsyncPolicy, HistoryId, RecoveryReport, SkippedCheckpoint,
-    WalOptions,
+    BackupReport, CheckpointOutcome, CommitTime, CutTail, Error, Finding, FsyncPolicy, HistoryId, Kind, RecoveryReport,
+    SkippedCheckpoint, VerifyReport, WalOptions,
 };
+pub use ops::verify;
 pub use options::{CheckpointOptions, StoreOptions};
 pub use store::{Edge, Node, Store, NAMESPACE};

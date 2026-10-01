@@ -117,6 +117,16 @@ pub enum Error {
     #[error("the data directory '{}' has layout version {version}, this version knows {}", path.display(), crate::layout::LAYOUT_VERSION)]
     UnsupportedLayout { path: PathBuf, version: u32 },
 
+    // Backup, archiving and restore (step 7, ADR 0009)
+    /// A backup or restore needs a missing or empty destination directory;
+    /// this one holds files. Nothing was written.
+    #[error("'{}' exists and isn't empty; a backup or restore needs a new or empty directory", path.display())]
+    DestinationNotEmpty { path: PathBuf },
+    /// A backup's manifest (`BACKUP`) can't be read: damaged, truncated,
+    /// or of a newer version.
+    #[error("the backup manifest '{}' is invalid: {reason}", path.display())]
+    InvalidManifest { path: PathBuf, reason: String },
+
     // Checkpoints and recovery (step 5)
     /// A checkpoint file that can't be loaded: a checksum or format error,
     /// or content that doesn't match its name or namespace. Recovery skips
