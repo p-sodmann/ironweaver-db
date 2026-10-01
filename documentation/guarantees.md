@@ -23,11 +23,35 @@ Conditions:
 ## Failed commits (steps 4 and 5)
 
 - A commit that fails validation (a conflict, constraint violation, reserved name, a record above 64 MiB, ...) changes nothing, isn't logged, and the namespace stays writable.
-- A commit that fails because the log can't be written or fsynced is not applied and not acknowledged. **Its outcome is unknown**: the record may still reach the log and be recovered after a restart. Treat it like a timeout, and retry only if the retry is idempotent (idempotency keys come in step 8).
+- A commit that fails because the log can't be written or fsynced is not applied and not acknowledged. **Its outcome is unknown**: the record may still reach the log and be recovered after a restart. Treat it like a timeout, and retry with an idempotency key (step 8, below): then the retry applies it exactly once.
 - After such a failure, the namespace is **read-only until reopened**. Reads keep working and see every applied commit, including group-committed ones whose durability the failure may have cost. Writes fail with a read-only error. A failed fsync is never retried.
 - The same holds if applying a logged commit fails. That is a bug, and it poisons the namespace.
 - The store exposes this state (`Store::read_only`, step 5). Reopening the store runs recovery and makes it writable again.
 - **A panic while the store changes its namespace or WAL** (a commit, an fsync, the group commit timer) aborts the process (step 6, [ADR 0008](adr/0008-panics-in-the-commit-path-abort.md)). It is a crash: no reader sees a partially applied transaction, and the next open recovers every logged commit (the one in flight like a failed fsync: its outcome is unknown). A panic in a `Store::read` closure changes nothing and leaves the store writable.
+
+## Concurrency, idempotency and read-your-writes (step 8)
+
+[ADR 0014](adr/0014-concurrent-readers.md), [ADR 0015](adr/0015-idempotency-keys.md), [ADR 0016](adr/0016-read-your-writes-and-deadlines.md).
+
+**Readers and the writer.**
+
+- Commits are serialized (one writer per namespace). Reads run concurrently with each other and with a commit's validation, WAL append and fsync; they wait only while a commit applies its record and flushes the indexes (the namespace's write lock). Measured (`crates/iwdb/tests/concurrency.rs`, debug build, this machine): the write lock is held at most a few milliseconds for small commits; during a 1.5 s analytics job with commits going on, the slowest of ~900 000 reads took 0.27 ms.
+- **A read never sees part of a transaction**: it sees the state after some commit, all of whose ops are applied, and the seq it reports is that commit's. Checked by readers against a committing writer, every read compared with the reference state at its seq.
+- A long `Store::read` closure delays commits (they wait to apply) and the reads queued behind them; long work belongs in `Store::analyze`, which copies the graph into a `Projection` under the read lock (O(n + m)) and runs the job without any lock, on the state at the seq it reports.
+
+**Idempotency keys.**
+
+- A commit with an idempotency key (1 to 255 bytes) applies **at most once**: a retry with the same key and the same request returns the original result (seq, edge ids, versions, commit time) with `deduplicated` set and commits nothing; a retry with the same key and a different request fails with `IdempotencyKeyReused` and changes nothing. So a commit whose outcome is unknown (an `Io` error, a timeout, a crash before the answer) is applied **exactly once** by retrying it with its key until it succeeds.
+- This holds across restarts, checkpoints, WAL cuts, backups and restores, and process crashes: the key table is part of the namespace's state, rebuilt from the records and saved in checkpoints. Tested in `crates/iwdb/tests/idempotency.rs` (restarts, checkpoints, backup and restore, failed WAL writes and fsyncs) and by the kill -9 harness, whose children retry the keyed commits the killed child tried last; the model applies each key once.
+- **Limits**: the store remembers the last 10 000 keyed commits; a retry after more keyed commits than that applies again. A key's entry is exactly as durable as its commit: under `group`, an OS crash that loses an acknowledged commit loses its key too, and its retry applies it (once).
+- **Restore**: a restore to seq `N` keeps the keys of the commits `1 ..= N` and none after. A retry of a commit after `N`, which the restored history doesn't contain, applies it.
+- A duplicate is answered even while the store is read-only (its commit was applied).
+
+**Read-your-writes and deadlines.**
+
+- A read with `min_seq` sees the commit `min_seq` and all before it: it waits until that commit is applied, returning as soon as it is, and fails with `Timeout` after its timeout (30 s by default), at once with `ReadOnly` if the store is read-only below `min_seq`, and with `OtherHistory` if the caller says the seq belongs to another history (a store restored since, or another store). Every commit is applied before it is acknowledged, so a client's own commits are always visible to its later reads.
+- Commit results carry the commit time (the WAL's, ADR 0010).
+- An analytics job runs under a cancel token that the store cancels at its deadline: it fails with `Timeout` (or `Cancelled`, when the caller cancels it), returns no partial result, and leaves the store usable.
 
 ## Crashes and simulated failures (step 6)
 
@@ -86,12 +110,12 @@ What happens at each failure the storage layer can meet. Each row has a failpoin
 `iwdb::verify` (`iwctl verify`, `iwdb.verify()`; [ADR 0011](adr/0011-verify.md)):
 
 - **Never writes** anything, and never creates `LOCK`. It takes a shared lock, so it fails with `Locked` while a store has the directory open, and a store can't open it while verify runs.
-- Finds damage in any file the database writes: every checksum (marker, WAL headers and frames, checkpoints, manifest, archive marker), a checkpoint whose state differs from what the WAL replays to, a WAL that doesn't reach a checkpoint, and broken invariants (edge endpoints, versions, reserved keys, value depth, indexes against a scan, constraints). The tests flip bytes in every kind of file and plant states that violate each invariant.
+- Finds damage in any file the database writes: every checksum (marker, WAL headers and frames, checkpoints, manifest, archive marker), a checkpoint whose state (the idempotency key table included, step 8) differs from what the WAL replays to, an invalid key table, a WAL that doesn't reach a checkpoint, and broken invariants (edge endpoints, versions, reserved keys, value depth, indexes against a scan, constraints). The tests flip bytes in every kind of file and plant states that violate each invariant.
 - Reports what a crash leaves (a torn tail, temporary files, an interrupted cleanup) as notes, not damage, and changes nothing about it. The harness runs verify before every recovery it checks: it finds no problem exactly when recovery succeeds, and reaches the same seq.
 
 ## Python (step 7)
 
-The Python bindings ([python-api.md](python-api.md), [ADR 0013](adr/0013-python-bindings.md)) give the same guarantees as the store: a transaction is one commit, all or nothing; nothing is committed when its `with` block raises. A panic in the commit path aborts the interpreter (a crash, recovered by the next open); any other panic raises `iwdb.InternalError`. A child forked without exec inherits the store's lock and must not use the store.
+The Python bindings ([python-api.md](python-api.md), [ADR 0013](adr/0013-python-bindings.md)) give the same guarantees as the store (since step 8 also idempotency keys and `min_seq`, with the GIL released while waiting): a transaction is one commit, all or nothing; nothing is committed when its `with` block raises. A panic in the commit path aborts the interpreter (a crash, recovered by the next open); any other panic raises `iwdb.InternalError`. A child forked without exec inherits the store's lock and must not use the store.
 
 ## Platforms (step 7)
 
@@ -116,7 +140,7 @@ Linux and macOS. **Windows is not supported yet**: there the directory fsync is 
 
 ## Integrity of the log (step 4)
 
-- Every record and segment header is checksummed (CRC32C over all of its fields and payload, the commit time included since WAL format 2, step 7).
+- Every record and segment header is checksummed (CRC32C over all of its fields and payload, the commit time included since WAL format 2, step 7, and the idempotency key and result since format 3, step 8).
 - A torn or damaged record at the end of the log (from a crash during a write) marks the end of the log. The records before it are intact, and its position is reported for recovery to truncate.
 - Damage anywhere else is never skipped silently: in an earlier segment, before a record that proves the damaged one was synced, a gap or a repeat in `seq`, or an unreadable record with a valid checksum. The reader reports it as an error.
 - Reading never panics on corrupt input and never allocates more than the file's size for a corrupt length.

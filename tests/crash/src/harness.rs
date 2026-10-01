@@ -10,7 +10,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use iwdb::{verify, Error, RecoveryReport, RestoreSources, RestoreTarget, Store, StoreOptions};
+use iwdb::{verify, Error, IdempotencyKey, RecoveryReport, RestoreSources, RestoreTarget, Store, StoreOptions};
 use iwdb_storage::failpoint::{Action, Call, Rule, When};
 use iwdb_storage::layout::{MARKER_NAME, RESTORING_NAME};
 
@@ -147,6 +147,16 @@ impl Outcome {
             .filter_map(|rest| rest.split_once(' '))
             .filter_map(|(seq, path)| Some((path.into(), seq.parse().ok()?)))
             .collect()
+    }
+
+    /// The idempotency keys the child tried, in order.
+    pub fn tried(&self) -> Vec<IdempotencyKey> {
+        self.words("try").filter_map(|w| IdempotencyKey::new(*w.first()?).ok()).collect()
+    }
+
+    /// Keyed commits answered from the key table.
+    pub fn deduplicated(&self) -> usize {
+        self.words("dedup").count()
     }
 
     /// The seq the restore child reported.
@@ -356,6 +366,10 @@ pub struct Summary {
     /// `verify` runs before a checked recovery (step 7), and of archives.
     pub verified: u64,
     pub archives_verified: u64,
+    /// Keyed commits the children tried (step 8), and those answered from
+    /// the key table (retries of commits the store had).
+    pub keyed: u64,
+    pub deduplicated: u64,
     /// The script's backups found complete (verified and restored), and
     /// found interrupted (refused).
     pub backups_complete: u64,
@@ -388,6 +402,11 @@ impl fmt::Display for Summary {
             f,
             "  {} acknowledged commits; {} OS crashes simulated, losing {} acknowledged but unsynced commits; {} in-flight commits recovered",
             self.acknowledged, self.os_crashes, self.lost_unsynced, self.in_flight_found
+        )?;
+        writeln!(
+            f,
+            "  idempotency keys: {} keyed commits tried, {} answered from the key table (each key applied once)",
+            self.keyed, self.deduplicated
         )?;
         writeln!(
             f,
@@ -584,6 +603,9 @@ pub struct Target {
     pub archive: Option<PathBuf>,
     /// Where the children's online backups go, if they take any.
     pub backups: Option<PathBuf>,
+    /// The keyed commits the last child that tried any tried last: the
+    /// next child retries them first (step 8).
+    pub retries: Vec<IdempotencyKey>,
 }
 
 impl Target {
@@ -597,6 +619,7 @@ impl Target {
             background: true,
             archive: None,
             backups: None,
+            retries: Vec::new(),
         }
     }
 
@@ -647,6 +670,7 @@ pub fn crash(
         background: target.background,
         archive: target.archive.clone(),
         backups: target.backups.clone(),
+        retries: target.retries.clone(),
         rules,
     };
     let stderr = work.join("child.stderr");
@@ -705,8 +729,14 @@ pub fn crash(
             return Err(format!("the child opened a state at seq {} that differs from the model ({})", seq, context));
         }
         target.model.settle(seq)?;
-        target.model.begin(seed, acts);
+        target.model.begin(seed, acts, &target.retries)?;
         target.fresh = false;
+        // The next child retries the last two keyed commits this one tried:
+        // the one in flight at the kill, if any, and one before it
+        let tried = outcome.tried();
+        if !tried.is_empty() {
+            target.retries = tried[tried.len().saturating_sub(2)..].to_vec();
+        }
         let acked = outcome.acked().unwrap_or(seq);
         // The commit in flight may be complete in the log, or acknowledged
         // but not yet reported; with the script finished there is none
@@ -812,6 +842,8 @@ fn cycle_once(config: &Config, rng: &mut Rng, target: &mut Target, summary: &mut
         }
         Plan::At(_) => summary.missed += 1,
     }
+    summary.keyed += outcome.tried().len() as u64;
+    summary.deduplicated += outcome.deduplicated() as u64;
     if let Some((seq, _, _)) = outcome.opened() {
         summary.child_opens += 1;
         summary.acknowledged += outcome.acked().unwrap_or(seq) - seq;

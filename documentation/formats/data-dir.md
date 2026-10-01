@@ -1,6 +1,6 @@
-# Data directory, layout version 2
+# Data directory, layout version 3
 
-Status: stable contract (design rule 4). Implemented in `crates/iwdb-storage` (`layout.rs`, `history.rs`, `checkpoint.rs`, `recovery.rs`) and used by `iwdb::Store`. Fixtures: `crates/iwdb/tests/fixtures/data-dir-v2/` and, for layout 1, `data-dir-v1/`. Decisions and alternatives: [ADR 0006](../adr/0006-checkpoints-and-recovery.md) (layout 1) and [ADR 0009](../adr/0009-backup-archive-restore.md) (layout 2: histories, backups, restore).
+Status: stable contract (design rule 4). Implemented in `crates/iwdb-storage` (`layout.rs`, `history.rs`, `checkpoint.rs`, `recovery.rs`) and `iwdb_engine::codec` / `idempotency`, used by `iwdb::Store`. Fixtures: `crates/iwdb/tests/fixtures/data-dir-v3/` and, for older layouts, `data-dir-v2/` and `data-dir-v1/`. Decisions and alternatives: [ADR 0006](../adr/0006-checkpoints-and-recovery.md) (layout 1), [ADR 0009](../adr/0009-backup-archive-restore.md) (layout 2: histories, backups, restore) and [ADR 0015](../adr/0015-idempotency-keys.md) (layout 3: the idempotency key table in checkpoints).
 
 A store keeps one namespace (step 9 adds more) in one directory:
 
@@ -16,7 +16,7 @@ A store keeps one namespace (step 9 adds more) in one directory:
   RESTORING                     only while a restore writes the directory (Restore, below)
 ```
 
-Layout 2 (step 7) differs from layout 1 (step 5) in the marker, which now holds a history id, and in the `BACKUP` and `RESTORING` files. Checkpoints and segments are the same; the WAL segments carry their own format version (formats/wal.md).
+Layout 3 (step 8) differs from layout 2 in the checkpoints' graph meta, which holds the idempotency key table (`iwdb.keys`), and in the marker's version. Layout 2 (step 7) differed from layout 1 (step 5) in the marker, which holds a history id since, and in the `BACKUP` and `RESTORING` files. The WAL segments carry their own format version (formats/wal.md).
 
 Temporary files end in `.tmp`: `.<name>.<pid>.<n>.tmp` (the core's `write_atomic`, for checkpoints and the marker) and `<segment>.tmp` (a WAL segment being created). They are never read, and are removed when a store opens.
 
@@ -27,7 +27,7 @@ All integers little endian.
 | Offset | Size | Field | Value |
 |---|---|---|---|
 | 0 | 8 | magic | `IWDBDIR\n` (`49 57 44 42 44 49 52 0a`) |
-| 8 | 4 | version | `2`, the layout version |
+| 8 | 4 | version | `3`, the layout version (`2` in a layout 2 marker, otherwise the same) |
 | 12 | 16 | history | the history id: 16 random bytes (printed as 32 hex digits) |
 | 28 | 4 | crc | CRC32C of bytes 0..28 |
 
@@ -41,13 +41,13 @@ Opening a directory:
 
 - **It has a `RESTORING` file**: refused with `InterruptedRestore`, before anything is changed (Restore, below).
 - **It has a marker and a `BACKUP` file**: a backup, refused with `IsBackup`. A backup is restored, not opened: so it stays as it was, and two stores never continue one history.
-- **It has a marker** with a valid CRC and version 2: open it. `wal/` and `checkpoints/` must exist (otherwise `InvalidDataDir`).
-- **Version 1**: open it. Once recovery has read it successfully (and before the WAL writer starts), its marker is replaced by a layout 2 marker with a new random history id (`write_atomic`, then a directory sync). Nothing else changes; the recovery report says `upgraded_from: 1`. A crash leaves either marker. A failed open leaves the old one. Versions before step 7 can't open the directory afterwards.
-- **Version above 2**: refused with `UnsupportedLayout`, before anything is changed.
+- **It has a marker** with a valid CRC and version 3: open it. `wal/` and `checkpoints/` must exist (otherwise `InvalidDataDir`).
+- **Version 1 or 2**: open it. Once recovery has read it successfully (and before the WAL writer starts), its marker is replaced by a layout 3 marker (`write_atomic`, then a directory sync): with the same history id (layout 2), or a new random one (layout 1, which has none). Nothing else changes: its checkpoints have no `iwdb.keys` and load with an empty key table. The recovery report says `upgraded_from: 1` or `2`. A crash leaves either marker. A failed open leaves the old one. Older versions can't open the directory afterwards (step 7 refuses layout 3 with `UnsupportedLayout`).
+- **Version above 3**: refused with `UnsupportedLayout`, before anything is changed.
 - **Our magic, a wrong length or CRC**: refused with `InvalidDataDir`.
 - **Another file named `IWDB`**: refused with `NotADataDir`.
 - **No marker**: the directory may only hold what an interrupted initialization leaves (`LOCK`, empty `checkpoints/` and `wal/`, `*.tmp` files). With `create_if_missing` (the default), it is initialized; otherwise it is refused with `NotADataDir`. Anything else is refused with `NotADataDir`, and nothing is created in it, not even `LOCK`: an interrupted backup or restore leaves such a directory. A missing directory is created (with its parents) if `create_if_missing` is set.
-- **Initialization**: take the lock, check again that there is no marker, create `checkpoints/` and `wal/`, sync the directory, write the marker (layout 2, a new random history id) with `write_atomic`, sync the directory. The marker comes last, so a directory with a marker is complete.
+- **Initialization**: take the lock, check again that there is no marker, create `checkpoints/` and `wal/`, sync the directory, write the marker (layout 3, a new random history id) with `write_atomic`, sync the directory. The marker comes last, so a directory with a marker is complete.
 
 ## Lock (`LOCK`)
 
@@ -66,9 +66,11 @@ Name: the seq, as 20 decimal digits zero-padded, then `.ckpt`. Names sort like s
 Content: a graph file in the core's **binary format, version 2** (magic `IRONWEAV`, a CRC32 over the payload, a length trailer), written by `iwdb_engine::codec::write_binary`:
 
 - nodes and edges carry their user attributes and meta, and the version as `iwdb.version` in their meta (see `codec.rs`);
-- the graph meta holds exactly two keys: `iwdb.catalog`, the namespace's catalog as a JSON string ([ADR 0003](../adr/0003-catalog-storage.md)), and `iwdb.seq`, an `Int`.
+- the graph meta holds exactly three keys: `iwdb.catalog`, the namespace's catalog as a JSON string ([ADR 0003](../adr/0003-catalog-storage.md)); `iwdb.seq`, an `Int`; and `iwdb.keys`, the idempotency key table (below). A checkpoint written before layout 3 has no `iwdb.keys`: its key table is empty.
 
-**Contract.** A checkpoint at seq `S` holds exactly the state after the commits `1 ..= S`: data, versions and catalog. `S` equals the number in its name. It includes only commits that were synced to the WAL when it was taken, so the WAL always reaches at least to `S`, even after an OS crash (with the `always` and `group` policies; see below for `off`).
+**The key table** (`iwdb.keys`, step 8): a JSON string `{"format": 1, "entries": [...]}`, entries by seq, one per keyed commit the namespace remembers: `{"seq", "key", "fingerprint", "time", "edge_ids", "versions"}`, where `time` is microseconds since 1970 UTC or `null`, `edge_ids` a list of numbers, and `versions` a list of `[{"n": "<node id>"} | {"e": <edge id>}, version]`. It holds at most 10 000 entries (`KEY_TABLE_CAPACITY`): the keyed commits with the highest seqs at or below `S`. Loading refuses (as a damaged checkpoint) a table of another format, with more entries, with seqs not strictly increasing or outside `1 ..= S`, with a key twice or an invalid key, or with unknown fields. The table is a function of the records `1 ..= S` (ADR 0015): `verify` compares it with the WAL replay.
+
+**Contract.** A checkpoint at seq `S` holds exactly the state after the commits `1 ..= S`: data, versions, catalog and key table. `S` equals the number in its name. It includes only commits that were synced to the WAL when it was taken, so the WAL always reaches at least to `S`, even after an OS crash (with the `always` and `group` policies; see below for `off`).
 
 **Writing** (the checkpointer, [ADR 0006](../adr/0006-checkpoints-and-recovery.md)):
 
@@ -125,8 +127,8 @@ A panic during recovery (a core bug, upstream #28) is a crash: nothing was chang
 4. **Replay.** The newest backup checkpoint at or below `N` that loads (older ones on failure, then an empty namespace at seq 0) is loaded and the log replayed onto it up to `N`. `MissingRecords` if the log doesn't reach back to the checkpoint's seq + 1; `LogEndsBefore` if it ends before `N`.
 5. **Write.** The destination must be missing or empty, and not inside a source. In this order, through `LogFs`: a `RESTORING` file, fsynced; `LOCK` (locked), `checkpoints/` and `wal/`; the directory synced; the checkpoint at `N` (`write_atomic`; none if `N` is 0) and `checkpoints/` synced; `RESTORING` removed and the directory synced; the marker with a **new** history id (`write_atomic`) and the directory synced.
 
-The result opens as a store at `N` with an empty WAL: its first commit is `N + 1`, in a new history, which needs a new archive directory. An interrupted restore leaves either `RESTORING` (open refuses with `InterruptedRestore`), or a checkpoint without a marker (`NotADataDir`), or, for a restore to seq 0 or a failure before anything was written, an empty directory. It is never finished by the next open: remove the directory and restore again. A restore never writes to its sources.
+The result opens as a store at `N` with an empty WAL: its first commit is `N + 1`, in a new history, which needs a new archive directory. Its checkpoint holds the key table at `N`: the keys of the restored commits, and none of the commits after `N`, which the new history doesn't contain (ADR 0015). An interrupted restore leaves either `RESTORING` (open refuses with `InterruptedRestore`), or a checkpoint without a marker (`NotADataDir`), or, for a restore to seq 0 or a failure before anything was written, an empty directory. It is never finished by the next open: remove the directory and restore again. A restore never writes to its sources.
 
 ## Versioning
 
-Layout version 2 is this document; layout 1 is the same without the history id in the marker and without `BACKUP` and `RESTORING`, and is upgraded when a store opens it. Checkpoints have no version of their own: the core's binary format version is checked by the core, and the meta keys and their encoding belong to the layout version (the catalog JSON also has its own `format`). A newer writer that adds a meta key, changes a file name or adds a directory must bump the layout version, so that an older reader refuses the directory instead of skipping its checkpoints as damaged.
+Layout version 3 is this document. Layout 2 is the same without `iwdb.keys` in checkpoints; layout 1 is layout 2 without the history id in the marker and without `BACKUP` and `RESTORING`. Both are upgraded when a store opens them, and read as they are by `verify` and restore. Checkpoints have no version of their own: the core's binary format version is checked by the core, and the meta keys and their encoding belong to the layout version (the catalog JSON also has its own `format`). A newer writer that adds a meta key, changes a file name or adds a directory must bump the layout version, so that an older reader refuses the directory instead of skipping its checkpoints as damaged.

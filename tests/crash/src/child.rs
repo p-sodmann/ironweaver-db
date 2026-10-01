@@ -5,11 +5,17 @@
 //! | Line | When |
 //! |---|---|
 //! | `open <seq> <synced_seq> <digest>` | `Store::open` returned (recovery is done) |
+//! | `try <key>` | a commit with this idempotency key starts (step 8) |
 //! | `ack <seq> <synced_seq>` | a commit returned `Ok` (acknowledged), with `Store::synced_seq` after it |
+//! | `dedup <seq> <key>` | a keyed commit returned the original result of commit `seq`: it committed nothing |
 //! | `backup <seq> <path>` | an online backup into `path` returned `Ok`, at `seq` |
 //! | `paused <rule> <path>` | a pause rule fired at a call on `path`; the thread then blocks until the parent kills the child |
 //! | `done` | the script ended; the child then waits to be killed |
 //! | `error <message>` | something failed that shouldn't have; the child exits with status 2 |
+//!
+//! Before its script, a child retries the keyed commits `--retry <key>`
+//! that the previous child tried last (it may have been killed during
+//! them): each applies once, from the log or now.
 //!
 //! The restore child (`iwdb-crash restore ...`, [`RestoreArgs`]) runs one
 //! restore through a [`FailFs`] and says `restored <seq>`, then `done`.
@@ -26,7 +32,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use iwdb::{Error, RestoreSources, RestoreTarget, Store};
+use iwdb::{CommitOptions, Error, IdempotencyKey, LogFs, RestoreSources, RestoreTarget, Store};
 use iwdb_engine::testutil::workload::Step;
 use iwdb_storage::failpoint::{Call, FailFs, Rule};
 
@@ -55,6 +61,8 @@ pub struct ChildArgs {
     /// Where the script's backups go (each into a new directory); without
     /// it the script's backups are skipped.
     pub backups: Option<PathBuf>,
+    /// Keyed commits to retry first (step 8).
+    pub retries: Vec<IdempotencyKey>,
     pub rules: Vec<Rule>,
 }
 
@@ -83,6 +91,10 @@ impl ChildArgs {
                 args.push(path.display().to_string());
             }
         }
+        for key in &self.retries {
+            args.push("--retry".into());
+            args.push(key.as_str().to_owned());
+        }
         for rule in &self.rules {
             args.push("--rule".into());
             args.push(rule.to_string());
@@ -101,6 +113,7 @@ impl ChildArgs {
             background: true,
             archive: None,
             backups: None,
+            retries: Vec::new(),
             rules: Vec::new(),
         };
         let mut args = args.iter();
@@ -117,6 +130,7 @@ impl ChildArgs {
                 "--background" => parsed.background = value == "true",
                 "--archive" => parsed.archive = Some(value.into()),
                 "--backups" => parsed.backups = Some(value.into()),
+                "--retry" => parsed.retries.push(IdempotencyKey::new(value.as_str()).map_err(|e| e.to_string())?),
                 "--rule" => parsed.rules.push(value.parse()?),
                 other => return Err(format!("unknown child option '{}'", other)),
             }
@@ -190,21 +204,16 @@ pub fn main(args: &ChildArgs) -> ! {
     };
     say(&format!("open {} {} {:016x}", store.seq(), store.synced_seq(), store.read(digest)));
 
+    for key in &args.retries {
+        match Script::keyed(key) {
+            Ok(step) => commit(&store, step, Some(key.clone())),
+            Err(e) => fail("retry", e),
+        }
+    }
     let mut backups = 0;
     for act in Script::new(args.seed).take(args.acts) {
         match act {
-            Act::Commit(step) => {
-                let result = match step {
-                    Step::Tx(mutations) => store.commit(&mutations),
-                    Step::Catalog(change) => store.commit_catalog(change),
-                };
-                match result {
-                    Ok(result) => say(&format!("ack {} {}", result.seq, store.synced_seq())),
-                    // Invalid or conflicting: the model rejects it too
-                    Err(Error::Engine(_)) => {}
-                    Err(e) => fail("commit", e),
-                }
-            }
+            Act::Commit(step, key) => commit(&store, step, key),
             Act::Checkpoint => {
                 if let Err(e) = store.checkpoint() {
                     fail("checkpoint", e);
@@ -229,6 +238,28 @@ pub fn main(args: &ChildArgs) -> ! {
     }
     say("done");
     wait_for_kill()
+}
+
+/// Commit `step` (with its idempotency key) and say how it went.
+fn commit<F: LogFs + Clone + Send + Sync + 'static>(store: &Store<F>, step: Step, key: Option<IdempotencyKey>)
+where
+    F::File: Send,
+{
+    if let Some(key) = &key {
+        say(&format!("try {}", key.as_str()));
+    }
+    let options = CommitOptions { idempotency_key: key.clone() };
+    let result = match step {
+        Step::Tx(mutations) => store.commit_with(&mutations, &options),
+        Step::Catalog(change) => store.commit_catalog_with(change, &options),
+    };
+    match (result, key) {
+        (Ok(result), Some(key)) if result.deduplicated => say(&format!("dedup {} {}", result.seq, key.as_str())),
+        (Ok(result), _) => say(&format!("ack {} {}", result.seq, store.synced_seq())),
+        // Invalid or conflicting: the model rejects it too
+        (Err(Error::Engine(_)), _) => {}
+        (Err(e), _) => fail("commit", e),
+    }
 }
 
 /// What the restore child runs: a restore into `dest` from a backup or
@@ -313,6 +344,7 @@ mod tests {
             background: false,
             archive: Some("/tmp/archive".into()),
             backups: None,
+            retries: vec![IdempotencyKey::new("00000000000000aa-17").expect("key")],
             rules: vec![Rule::new(Call::RemoveFile, When::After, Action::Pause).skip(2).path("/wal/")],
         };
         assert_eq!(ChildArgs::parse(&args.to_args()), Ok(args));

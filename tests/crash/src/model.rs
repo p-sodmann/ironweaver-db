@@ -6,35 +6,52 @@
 //! in order (a step that fails validation uses no seq, in the child and
 //! here) until the model is at that seq. It keeps every commit record, so
 //! it can also go back to an earlier seq.
+//!
+//! Commits with an idempotency key (step 8) go through the engine's keyed
+//! path, so the model applies each key once, as the store must: a retry
+//! whose original is in the model's key table commits nothing.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use iwdb::{Namespace, NamespaceCatalog};
+use iwdb::{IdempotencyKey, Namespace, NamespaceCatalog};
 use iwdb_engine::catalog::NamespaceName;
 use iwdb_engine::testutil::canonical;
 use iwdb_engine::testutil::workload::Step;
-use iwdb_engine::CommitRecord;
+use iwdb_engine::{CommitRecord, Prepare};
 
 use crate::script::Script;
 
-/// What is compared after recovery: the canonical graph, the catalog and
-/// the seq.
-pub type State = (Vec<String>, NamespaceCatalog, u64);
+/// What is compared after recovery: the canonical graph, the catalog, the
+/// seq, and the idempotency key table without commit times (the model has
+/// no log, so no times).
+pub type State = (Vec<String>, NamespaceCatalog, u64, Vec<String>);
 
 pub fn state(ns: &Namespace) -> State {
-    (canonical(ns.graph()), ns.catalog().clone(), ns.seq())
+    let keys = ns
+        .keys()
+        .entries()
+        .map(|e| {
+            let r = &e.result;
+            format!("{} {} {:08x} {:?} {:?}", r.seq, e.key, e.fingerprint, r.edge_ids, r.versions)
+        })
+        .collect();
+    (canonical(ns.graph()), ns.catalog().clone(), ns.seq(), keys)
 }
+
+/// A commit the child may make: its step and idempotency key.
+pub type Commit = (Step, Option<IdempotencyKey>);
 
 /// A digest of [`state`], for the child to report the state it opened
 /// with. Parent and child are the same binary, so `DefaultHasher` (fixed
 /// keys) gives the same digest in both.
 pub fn digest(ns: &Namespace) -> u64 {
-    let (graph, catalog, seq) = state(ns);
+    let (graph, catalog, seq, keys) = state(ns);
     let mut hasher = DefaultHasher::new();
     graph.hash(&mut hasher);
     format!("{:?}", catalog).hash(&mut hasher);
     seq.hash(&mut hasher);
+    keys.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -49,7 +66,7 @@ pub fn empty() -> Namespace {
 pub struct Model {
     ns: Namespace,
     history: Vec<CommitRecord>,
-    pending: Option<Box<dyn Iterator<Item = Step>>>,
+    pending: Option<Box<dyn Iterator<Item = Commit>>>,
 }
 
 impl std::fmt::Debug for Model {
@@ -74,9 +91,15 @@ impl Model {
     }
 
     /// A child started at the model's seq with the script `seed`, running
-    /// at most `acts` acts: its commits are what the model can advance by.
-    pub fn begin(&mut self, seed: u64, acts: usize) {
-        self.pending = Some(Box::new(Script::commits(seed, acts)));
+    /// at most `acts` acts, after retrying the keyed commits `retries`: its
+    /// commits are what the model can advance by.
+    pub fn begin(&mut self, seed: u64, acts: usize, retries: &[IdempotencyKey]) -> Result<(), String> {
+        let mut first = Vec::new();
+        for key in retries {
+            first.push((Script::keyed(key)?, Some(key.clone())));
+        }
+        self.pending = Some(Box::new(first.into_iter().chain(Script::commits(seed, acts))));
+        Ok(())
     }
 
     /// Go to `seq`: forward through the pending commits, or back through
@@ -93,7 +116,7 @@ impl Model {
             self.pending = None;
         }
         while self.ns.seq() < seq {
-            let Some(step) = self.pending.as_mut().and_then(Iterator::next) else {
+            let Some((step, key)) = self.pending.as_mut().and_then(Iterator::next) else {
                 return Err(format!(
                     "seq {} is beyond every commit the child could have made (the model ends at {})",
                     seq,
@@ -101,11 +124,12 @@ impl Model {
                 ));
             };
             let prepared = match step {
-                Step::Tx(mutations) => self.ns.prepare(&mutations),
-                Step::Catalog(change) => self.ns.prepare_catalog(change),
+                Step::Tx(mutations) => self.ns.prepare_keyed(&mutations, key.as_ref()),
+                Step::Catalog(change) => self.ns.prepare_catalog_keyed(change, key.as_ref()),
             };
-            // A step that fails validation fails in the child too
-            if let Ok(prepared) = prepared {
+            // A step that fails validation fails in the child too, and a
+            // retry of a commit the model has commits nothing in either
+            if let Ok(Prepare::New(prepared)) = prepared {
                 let record = prepared.record().clone();
                 self.ns.apply(prepared, None).map_err(|e| format!("the model failed to apply: {}", e))?;
                 self.history.push(record);
