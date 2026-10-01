@@ -35,6 +35,23 @@
 //! - in every case the canonical graph, catalog and seq equal the model's
 //!   at the recovered seq: no partial transaction, nothing out of order.
 //!
+//! **Step 7 adds:**
+//!
+//! - `verify` before every recovery the parent checks, on the directory as
+//!   the crash left it: no problem when recovery succeeds, and the same
+//!   seq; a problem when it refuses;
+//! - a WAL archive for most data directories, checked after every checked
+//!   recovery: it verifies, starts at seq 1, and reaches the WAL's first
+//!   segment, so no segment the checkpointer removed was lost;
+//! - online backups in the child's script, checked after the next checked
+//!   recovery: complete ones verify and restore to the model's state at
+//!   their seq; interrupted ones are refused by verify and restore;
+//! - a restore child (`iwdb-crash restore`) in a quarter of the cycles: a
+//!   restore to a random seq from the archive (and the data directory as a
+//!   cold copy), killed at a random moment or at a restore failpoint; the
+//!   result is refused or equals the model at that seq;
+//! - failpoints in archiving and backups among the plans.
+//!
 //! The parent's choices come from its seed, and so does each child's
 //! workload. Kill timing is real time, so a rerun with the same seed makes
 //! the same plans but kills at slightly different moments.
@@ -48,8 +65,8 @@ pub mod script;
 
 pub use child::ChildArgs;
 pub use harness::{
-    check, check_recovery, crash, run, Bounds, CheckError, ChildProcess, Config, Crashed, Failure, Outcome, Plan,
-    Summary, Target,
+    check, check_archive, check_backups, check_recovery, crash, restore_in_child, run, Bounds, CheckError,
+    ChildProcess, Config, Crashed, Failure, Outcome, Plan, RestorePlan, Restored, Summary, Target,
 };
 pub use model::Model;
 pub use script::Policy;

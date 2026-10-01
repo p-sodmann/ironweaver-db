@@ -74,3 +74,13 @@ It then simulates, sometimes, an **OS crash**: in the last segment it truncates 
 - Not simulated: an OS crash's loss in files other than the last segment, lost directory entries, and, with `off`, loss in earlier segments or in a segment header while later frames survive. For `always` and `group` the directory fsyncs cover these. For `off` the guarantees don't promise anything about them.
 - Building the harness found two bugs from steps 4 and 5, fixed in their own commits (see step_6.md): `Wal::sync` under `off` didn't sync rotated segments, and a panic in a read made the store read-only. It also led to ADR 0008 (a panic in the commit path aborts).
 - `iwdb-crash` depends on the `failpoints` and `testutil` features. In a workspace build, cargo unifies features, so those modules are compiled into the workspace's `iwdb-storage` and `iwdb-engine` as well. They are unused there, and `StdFs` stays free of failpoints. A downstream user of `iwdb` doesn't get them.
+
+## Addendum (step 7)
+
+Step 7 extends the harness to the new write paths ([ADR 0009](0009-backup-archive-restore.md)) and to `verify` ([ADR 0011](0011-verify.md)), without changing the decisions above:
+
+- **verify before every checked recovery**, on the directory as the crash left it. It must find no problem when recovery succeeds (and replay to the same seq), and must find one when recovery refuses (`off` after an OS crash). So it runs thousands of times per long run, on torn tails, temporary files and interrupted cleanups.
+- **An archive** for three quarters of the data directories. After each checked recovery it must verify, start at seq 1 and reach the WAL's first segment: no segment the checkpointer removed is lost. The plans include failpoints in archiving (each copy's create, write, fsync, rename, and the archive's directory sync).
+- **Backups** in the child's script (2% of the acts). After the next checked recovery, a complete one must verify, be at most at the recovered seq, and restore to the model's state at its seq; an interrupted one must be refused by verify and restore. The plans include failpoints in backups (files, syncs, manifest, marker).
+- **A restore child** (`iwdb-crash restore`) in a quarter of the cycles with an archive: a restore to a random seq, from the archive alone or with the data directory as a cold copy, which runs to the end, is killed after a random delay, or pauses (or aborts) at one of its writes and is killed. The result must be refused (`InterruptedRestore`, `NotADataDir`, or an empty directory) or equal the model at that seq (`Model::state_at`).
+- **Crash points**: `crash_points.rs` adds kills at a backup's manifest and marker, in archiving before and after a segment is durable in the archive, and at each write of a restore.

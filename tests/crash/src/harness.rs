@@ -1,7 +1,7 @@
 //! The parent: runs cycles of spawn, kill, (simulated OS crash), recover,
 //! check. See the crate docs for the protocol and what is checked.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
@@ -10,10 +10,11 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use iwdb::{Error, RecoveryReport, Store};
+use iwdb::{verify, Error, RecoveryReport, RestoreSources, RestoreTarget, Store, StoreOptions};
 use iwdb_storage::failpoint::{Action, Call, Rule, When};
+use iwdb_storage::layout::{MARKER_NAME, RESTORING_NAME};
 
-use crate::child::{ChildArgs, SYNC_LOG};
+use crate::child::{ChildArgs, RestoreArgs, SYNC_LOG};
 use crate::model::{self, Model};
 use crate::os_crash::{self, OsCrash};
 use crate::rng::Rng;
@@ -42,9 +43,14 @@ pub struct Outcome {
 impl ChildProcess {
     /// Run `exe child <args>`, with stderr into `stderr`.
     pub fn spawn(exe: &Path, args: &ChildArgs, stderr: &Path) -> std::io::Result<Self> {
+        Self::spawn_command(exe, "child", args.to_args(), stderr)
+    }
+
+    /// Run `exe <command> <args>`, with stderr into `stderr`.
+    pub fn spawn_command(exe: &Path, command: &str, args: Vec<String>, stderr: &Path) -> std::io::Result<Self> {
         let mut child = Command::new(exe)
-            .arg("child")
-            .args(args.to_args())
+            .arg(command)
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(File::create(stderr)?)
@@ -103,6 +109,15 @@ impl ChildProcess {
 }
 
 impl Outcome {
+    /// No child ran.
+    pub fn none() -> Self {
+        #[cfg(unix)]
+        let status = std::os::unix::process::ExitStatusExt::from_raw(0);
+        #[cfg(not(unix))]
+        let status = std::os::windows::process::ExitStatusExt::from_raw(0);
+        Outcome { lines: Vec::new(), status, killed: false }
+    }
+
     fn words(&self, prefix: &str) -> impl Iterator<Item = Vec<&str>> {
         let prefix = format!("{} ", prefix);
         self.lines.iter().filter_map(move |l| l.strip_prefix(prefix.as_str())).map(|rest| rest.split(' ').collect())
@@ -123,6 +138,20 @@ impl Outcome {
     pub fn synced(&self) -> u64 {
         let acks = self.words("ack").filter_map(|w| w.get(1)?.parse::<u64>().ok());
         acks.chain(self.opened().map(|o| o.1)).max().unwrap_or(0)
+    }
+
+    /// The backups the child reported: path and seq.
+    pub fn backups(&self) -> HashMap<PathBuf, u64> {
+        let backups = self.lines.iter().filter_map(|l| l.strip_prefix("backup "));
+        backups
+            .filter_map(|rest| rest.split_once(' '))
+            .filter_map(|(seq, path)| Some((path.into(), seq.parse().ok()?)))
+            .collect()
+    }
+
+    /// The seq the restore child reported.
+    pub fn restored(&self) -> Option<u64> {
+        self.words("restored").find_map(|w| w.first()?.parse().ok())
     }
 
     pub fn paused(&self) -> Option<&str> {
@@ -195,6 +224,42 @@ fn points() -> Vec<(Call, When, &'static str, u64)> {
         // Recovery: the torn tail, temporary files
         (Truncate, Before, "", 0),
         (Truncate, After, "", 0),
+        // Archiving, before the checkpointer removes segments (step 7)
+        (Create, After, "/archive-", 4),
+        (Write, Midway, "/archive-", 4),
+        (Sync, Before, "/archive-", 4),
+        (Rename, Before, "/archive-", 4),
+        (Rename, After, "/archive-", 4),
+        (SyncDir, Before, "/archive-", 2),
+        (SyncDir, After, "/archive-", 2),
+        // The script's online backups: files, syncs, manifest, marker
+        (Create, After, "/backups-", 4),
+        (Write, Midway, "/backups-", 6),
+        (Sync, Before, "/backups-", 6),
+        (SyncDir, Before, "/backups-", 6),
+        (WriteAtomic, Before, "/backups-", 1),
+        (WriteAtomic, WriterDone, "/backups-", 1),
+        (WriteAtomic, After, "/backups-", 1),
+    ]
+}
+
+/// The failpoints of a restore (in the restore child), with the largest
+/// skip.
+fn restore_points() -> Vec<(Call, When, &'static str, u64)> {
+    use Call::*;
+    use When::*;
+    vec![
+        (Create, After, RESTORING_NAME, 0),
+        (Sync, Before, RESTORING_NAME, 0),
+        (SyncDir, Before, "/restored", 3),
+        (SyncDir, After, "/restored", 3),
+        (WriteAtomic, Midway, "/restored/checkpoints/", 0),
+        (WriteAtomic, WriterDone, "/restored/checkpoints/", 0),
+        (WriteAtomic, After, "/restored/checkpoints/", 0),
+        (RemoveFile, Before, RESTORING_NAME, 0),
+        (RemoveFile, After, RESTORING_NAME, 0),
+        (WriteAtomic, Before, "restored/IWDB", 0),
+        (WriteAtomic, After, "restored/IWDB", 0),
     ]
 }
 
@@ -286,6 +351,19 @@ pub struct Summary {
     pub refused: u64,
     /// New data directories.
     pub directories: u64,
+    /// `verify` runs before a checked recovery (step 7), and of archives.
+    pub verified: u64,
+    pub archives_verified: u64,
+    /// The script's backups found complete (verified and restored), and
+    /// found interrupted (refused).
+    pub backups_complete: u64,
+    pub backups_interrupted: u64,
+    /// Restores run in a child: complete (compared with the model at their
+    /// seq), and interrupted by a kill (refused); and kills at a restore
+    /// failpoint.
+    pub restores_complete: u64,
+    pub restores_interrupted: u64,
+    pub restore_kills: u64,
 }
 
 impl fmt::Display for Summary {
@@ -313,6 +391,17 @@ impl fmt::Display for Summary {
             f,
             "  recovery: {} from a checkpoint, {} torn tails cut ({} frames discarded), {} temporary files removed, {} refused (off), {} data directories",
             self.from_checkpoint, self.torn_tails, self.discarded_frames, self.temp_files_removed, self.refused, self.directories
+        )?;
+        writeln!(
+            f,
+            "  verify: {} runs before recovery, {} of archives; backups: {} complete and restored, {} interrupted and refused; restores in a child: {} complete, {} interrupted and refused ({} killed at a failpoint)",
+            self.verified,
+            self.archives_verified,
+            self.backups_complete,
+            self.backups_interrupted,
+            self.restores_complete,
+            self.restores_interrupted,
+            self.restore_kills
         )?;
         write!(f, "  failpoints reached:")?;
         for (rule, n) in &self.reached {
@@ -376,17 +465,42 @@ impl Bounds {
     }
 }
 
-/// Open the store (the real recovery), check its seq against `bounds` and
-/// its state against the model at that seq. Returns the store.
+/// Verify the directory as the crash left it, open the store (the real
+/// recovery), check its seq against `bounds` and its state against the
+/// model at that seq. Verify must find no problem when recovery succeeds
+/// (and must reach the same seq), and must find one when it refuses.
+/// Returns the store.
 pub fn check_recovery(
     dir: &Path,
     policy: Policy,
     keep: usize,
+    archive: Option<&Path>,
     model: &mut Model,
     bounds: Bounds,
 ) -> Result<Store, CheckError> {
-    let store = Store::open(dir, check_options(policy, keep)).map_err(CheckError::Open)?;
+    let verified = verify(dir);
+    let store = match Store::open(dir, check_options(policy, keep, archive)) {
+        Ok(store) => store,
+        Err(e) => {
+            if matches!(&verified, Ok(report) if report.is_ok()) {
+                return Err(CheckError::Violation(format!("recovery refused ({}), but verify found no problem", e)));
+            }
+            return Err(CheckError::Open(e));
+        }
+    };
     let seq = store.seq();
+    match verified {
+        Ok(report) if report.is_ok() && report.seq == Some(seq) => {}
+        Ok(report) => {
+            return Err(CheckError::Violation(format!(
+                "verify before recovery found problems or another seq ({:?}, recovered {}): {:#?}",
+                report.seq, seq, report.problems
+            )))
+        }
+        // An interrupted initialization has no marker yet; the open finished it
+        Err(Error::NotADataDir { .. }) if store.recovery().created => {}
+        Err(e) => return Err(CheckError::Violation(format!("verify before recovery failed: {}", e))),
+    }
     bounds.check(seq).map_err(CheckError::Violation)?;
     let expected = model::state(model.at(seq).map_err(CheckError::Violation)?);
     let actual = store.read(model::state);
@@ -464,11 +578,31 @@ pub struct Target {
     pub fresh: bool,
     /// Children run background checkpoints (the harness always does).
     pub background: bool,
+    /// The store's WAL archive, if it archives.
+    pub archive: Option<PathBuf>,
+    /// Where the children's online backups go, if they take any.
+    pub backups: Option<PathBuf>,
 }
 
 impl Target {
     pub fn new(path: PathBuf, keep: usize) -> Self {
-        Target { path, keep, model: Model::default(), bounds: Bounds::exact(0), fresh: true, background: true }
+        Target {
+            path,
+            keep,
+            model: Model::default(),
+            bounds: Bounds::exact(0),
+            fresh: true,
+            background: true,
+            archive: None,
+            backups: None,
+        }
+    }
+
+    /// Remove the data directory, its archive and its backups.
+    pub fn remove(&self) {
+        for dir in [Some(&self.path), self.archive.as_ref(), self.backups.as_ref()].into_iter().flatten() {
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -509,6 +643,8 @@ pub fn crash(
         policy,
         keep: target.keep,
         background: target.background,
+        archive: target.archive.clone(),
+        backups: target.backups.clone(),
         rules,
     };
     let stderr = work.join("child.stderr");
@@ -581,7 +717,9 @@ pub fn crash(
 /// success the model settles at the recovered seq, which the next open
 /// must reach exactly.
 pub fn check(target: &mut Target, policy: Policy) -> Result<Store, CheckError> {
-    let store = check_recovery(&target.path, policy, target.keep, &mut target.model, target.bounds)?;
+    let archive = target.archive.clone();
+    let store =
+        check_recovery(&target.path, policy, target.keep, archive.as_deref(), &mut target.model, target.bounds)?;
     let seq = store.seq();
     target.model.settle(seq).map_err(CheckError::Violation)?;
     target.bounds = Bounds::exact(seq);
@@ -617,22 +755,34 @@ pub fn run(config: &Config) -> Result<Summary, Failure> {
     // Leave the directory checked
     if !target.fresh || target.bounds != Bounds::exact(0) {
         let store = check(&mut target, config.policy).map_err(|e| failure(config.cycles, e.to_string()))?;
+        summary.verified += 1;
         note_report(&mut summary, store.recovery());
+        drop(store);
+        check_backups(&config.work, &target, &Outcome::none(), &mut summary).map_err(|e| failure(config.cycles, e))?;
+        check_archive(&target, &mut summary).map_err(|e| failure(config.cycles, e))?;
     }
     summary.elapsed = start.elapsed();
     Ok(summary)
 }
 
+/// A new data directory, with an archive (most of the time) and a place
+/// for backups.
 fn new_target(config: &Config, rng: &mut Rng, summary: &mut Summary) -> Target {
     summary.directories += 1;
-    Target::new(config.work.join(format!("dir-{}", summary.directories)), rng.range(1, 3) as usize)
+    let n = summary.directories;
+    let mut target = Target::new(config.work.join(format!("dir-{}", n)), rng.range(1, 3) as usize);
+    if rng.chance(3, 4) {
+        target.archive = Some(config.work.join(format!("archive-{}", n)));
+    }
+    target.backups = Some(config.work.join(format!("backups-{}", n)));
+    target
 }
 
 fn cycle_once(config: &Config, rng: &mut Rng, target: &mut Target, summary: &mut Summary) -> Result<(), String> {
     let policy = config.policy;
     // Now and then a new directory, for the initialization points
     if !target.fresh && target.bounds.lo == target.bounds.hi && rng.chance(1, 60) {
-        let _ = fs::remove_dir_all(&target.path);
+        target.remove();
         *target = new_target(config, rng, summary);
     }
     let seed = rng.next_u64();
@@ -676,6 +826,7 @@ fn cycle_once(config: &Config, rng: &mut Rng, target: &mut Target, summary: &mut
         return Ok(());
     }
     let hi = target.bounds.hi;
+    summary.verified += 1;
     match check(target, policy) {
         Ok(store) => {
             let seq = store.seq();
@@ -688,6 +839,14 @@ fn cycle_once(config: &Config, rng: &mut Rng, target: &mut Target, summary: &mut
             }
             if rng.chance(1, 8) {
                 store.close().map_err(|e| format!("close after recovery: {}", e))?;
+            } else {
+                drop(store);
+            }
+            let context = |e: String| format!("{} ({})", e, crashed.context);
+            check_backups(&config.work, target, outcome, summary).map_err(context)?;
+            check_archive(target, summary).map_err(context)?;
+            if target.archive.is_some() && rng.chance(1, 4) {
+                restore_cycle(config, rng, target, summary).map_err(context)?;
             }
             Ok(())
         }
@@ -700,12 +859,227 @@ fn cycle_once(config: &Config, rng: &mut Rng, target: &mut Target, summary: &mut
                 return Err(format!("LogEndsBefore, but the log reaches the checkpoint ({})", crashed.context));
             }
             summary.refused += 1;
-            let _ = fs::remove_dir_all(&target.path);
+            target.remove();
             *target = new_target(config, rng, summary);
             Ok(())
         }
         Err(e) => Err(format!("{} ({}; OS crash {:?})", e, crashed.context, os_crash)),
     }
+}
+
+/// Options for opening a directory the harness checks: never create one.
+fn open_existing(policy: Policy) -> StoreOptions {
+    StoreOptions { create_if_missing: false, ..check_options(policy, 2, None) }
+}
+
+/// Check every backup the children left in the target's backup directory,
+/// then remove them. A complete one (with a marker) must verify, be at
+/// most at the recovered seq (a backup holds only synced commits, which a
+/// crash can't lose), match the seq the child reported, and restore to the
+/// model's state at its seq. One without a marker (interrupted) must be
+/// refused by verify and restore.
+pub fn check_backups(work: &Path, target: &Target, outcome: &Outcome, summary: &mut Summary) -> Result<(), String> {
+    let Some(dir) = target.backups.as_ref().filter(|d| d.exists()) else { return Ok(()) };
+    let reported = outcome.backups();
+    let mut entries: Vec<PathBuf> = fs::read_dir(dir)
+        .map_err(|e| format!("list {}: {}", dir.display(), e))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    entries.sort();
+    let restored = work.join("restored-backup");
+    for backup in entries {
+        match verify(&backup) {
+            Ok(report) => {
+                let seq = report.seq.unwrap_or(0);
+                if !report.is_ok() {
+                    return Err(format!("backup {}: verify found problems: {:#?}", backup.display(), report.problems));
+                }
+                if reported.get(&backup).is_some_and(|r| *r != seq) {
+                    return Err(format!(
+                        "backup {} is at seq {}, the child said {:?}",
+                        backup.display(),
+                        seq,
+                        reported.get(&backup)
+                    ));
+                }
+                let expected = target.model.state_at(seq).map_err(|e| format!("backup {}: {}", backup.display(), e))?;
+                let _ = fs::remove_dir_all(&restored);
+                let sources = RestoreSources { backup: Some(backup.clone()), archive: None };
+                iwdb::restore(&restored, &sources, RestoreTarget::Latest)
+                    .map_err(|e| format!("restoring backup {}: {}", backup.display(), e))?;
+                let store = Store::open(&restored, open_existing(Policy::Always)).map_err(|e| e.to_string())?;
+                if store.read(model::state) != expected {
+                    return Err(format!(
+                        "backup {} restores to another state than the model's at {}",
+                        backup.display(),
+                        seq
+                    ));
+                }
+                summary.backups_complete += 1;
+            }
+            Err(Error::NotADataDir { .. }) => {
+                if reported.contains_key(&backup) {
+                    return Err(format!("the child reported backup {}, but it has no marker", backup.display()));
+                }
+                let _ = fs::remove_dir_all(&restored);
+                let sources = RestoreSources { backup: Some(backup.clone()), archive: None };
+                if iwdb::restore(&restored, &sources, RestoreTarget::Latest).is_ok() {
+                    return Err(format!("an interrupted backup {} restored", backup.display()));
+                }
+                summary.backups_interrupted += 1;
+            }
+            Err(e) => return Err(format!("verify backup {}: {}", backup.display(), e)),
+        }
+        let _ = fs::remove_dir_all(&backup);
+    }
+    let _ = fs::remove_dir_all(&restored);
+    Ok(())
+}
+
+/// The target's archive: it verifies, it holds the store's history from
+/// seq 1 (the store archived from its creation), and together with the
+/// WAL it reaches the recovered seq without a gap: no segment the
+/// checkpointer removed is lost.
+pub fn check_archive(target: &Target, summary: &mut Summary) -> Result<(), String> {
+    let Some(archive) = target.archive.as_ref().filter(|a| a.exists()) else { return Ok(()) };
+    let report = verify(archive).map_err(|e| format!("verify archive: {}", e))?;
+    summary.archives_verified += 1;
+    if !report.is_ok() {
+        return Err(format!("the archive has problems: {:#?}", report.problems));
+    }
+    let wal = iwdb_storage::list_segments(&target.path.join("wal")).map_err(|e| e.to_string())?;
+    let wal_first = wal.first().map_or(u64::MAX, |(s, _)| *s);
+    match (report.first_seq, report.last_seq) {
+        (Some(first), Some(last)) => {
+            if first != 1 {
+                return Err(format!("the archive starts at seq {}, not 1", first));
+            }
+            if last + 1 < wal_first {
+                return Err(format!(
+                    "the archive ends at seq {} and the WAL starts at {}: removed segments were lost",
+                    last, wal_first
+                ));
+            }
+        }
+        _ if wal_first > 1 && wal_first != u64::MAX => {
+            return Err(format!("the WAL starts at {} but the archive holds nothing", wal_first))
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// How a restore in a child ended, as checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Restored {
+    /// Complete, and equal to the model at its seq.
+    Complete,
+    /// Interrupted, and refused by a store (or nothing but an empty or
+    /// missing directory).
+    Interrupted,
+}
+
+/// When the restore child is killed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RestorePlan {
+    /// Not at all: it finishes.
+    Finish,
+    /// After this long, counted from the spawn.
+    Delay(Duration),
+    /// At a failpoint: pause (then kill) or abort.
+    At(Rule),
+}
+
+/// Restore the target to seq `n` in a child process into `dest`, from its
+/// archive and, with `from_data`, its data directory (a cold copy; no
+/// store may have it open), killed per `plan`. Then check what is left:
+/// complete and equal to the model at `n`, or refused.
+pub fn restore_in_child(
+    exe: &Path,
+    work: &Path,
+    target: &Target,
+    n: u64,
+    from_data: bool,
+    plan: &RestorePlan,
+    dest: &Path,
+) -> Result<(Restored, Outcome), String> {
+    let _ = fs::remove_dir_all(dest);
+    let rules = match plan {
+        RestorePlan::At(rule) => vec![rule.clone()],
+        _ => Vec::new(),
+    };
+    let args = RestoreArgs {
+        backup: from_data.then(|| target.path.clone()),
+        archive: target.archive.clone(),
+        dest: dest.to_path_buf(),
+        seq: Some(n),
+        rules,
+    };
+    let stderr = work.join("restore.stderr");
+    let mut child = ChildProcess::spawn_command(exe, "restore", args.to_args(), &stderr)
+        .map_err(|e| format!("spawn restore: {}", e))?;
+    match plan {
+        RestorePlan::Delay(delay) => std::thread::sleep(*delay),
+        _ => {
+            child.wait_for(&["done", "error", "paused"], CHILD_TIMEOUT);
+        }
+    }
+    let outcome = child.kill().map_err(|e| format!("kill restore: {}", e))?;
+    let context = format!("restore to {} ({:?}, from data: {}): {:?}", n, plan, from_data, outcome.lines);
+    if let Some(error) = outcome.error() {
+        return Err(format!("the restore failed: {} ({})", error, context));
+    }
+    let complete = dest.join(MARKER_NAME).exists() && !dest.join(RESTORING_NAME).exists();
+    if outcome.restored().is_some() && !complete {
+        return Err(format!("the restore reported success but left no marker ({})", context));
+    }
+    let restored = match Store::open(dest, open_existing(Policy::Always)) {
+        Ok(store) => {
+            if !complete {
+                return Err(format!("an incomplete restore opened ({})", context));
+            }
+            if store.read(model::state) != target.model.state_at(n)? {
+                return Err(format!("the restore differs from the model at seq {} ({})", n, context));
+            }
+            Restored::Complete
+        }
+        Err(Error::InterruptedRestore { .. }) | Err(Error::NotADataDir { .. }) if !complete => Restored::Interrupted,
+        Err(e) => return Err(format!("opening the restore: {} ({})", e, context)),
+    };
+    Ok((restored, outcome))
+}
+
+/// Restore the target (its data directory as a cold copy, and its
+/// archive; or the archive alone when it reaches the seq) to a random seq
+/// in a child, sometimes killed: at a random moment or at a restore
+/// failpoint ([`restore_in_child`]).
+fn restore_cycle(config: &Config, rng: &mut Rng, target: &Target, summary: &mut Summary) -> Result<(), String> {
+    let Some(archive) = target.archive.as_ref() else { return Ok(()) };
+    let n = rng.range(0, target.model.seq());
+    let archive_end = verify(archive).map_err(|e| e.to_string())?.last_seq.unwrap_or(0);
+    let from_data = n > archive_end || rng.chance(1, 2);
+    let r = rng.below(100);
+    let plan = match r {
+        0..=39 => RestorePlan::Finish,
+        40..=59 => RestorePlan::Delay(Duration::from_micros(rng.below(30_000))),
+        _ => {
+            let points = restore_points();
+            let &(call, when, path, max_skip) = rng.pick(&points);
+            let action = if r >= 95 { Action::Abort } else { Action::Pause };
+            RestorePlan::At(Rule::new(call, when, action).path(path).skip(rng.below(max_skip + 1)))
+        }
+    };
+    let dest = config.work.join("restored");
+    let (restored, outcome) = restore_in_child(&config.exe, &config.work, target, n, from_data, &plan, &dest)?;
+    if matches!(plan, RestorePlan::At(_)) && (outcome.paused().is_some() || !outcome.killed) {
+        summary.restore_kills += 1;
+    }
+    match restored {
+        Restored::Complete => summary.restores_complete += 1,
+        Restored::Interrupted => summary.restores_interrupted += 1,
+    }
+    let _ = fs::remove_dir_all(&dest);
+    Ok(())
 }
 
 /// The seq of the newest checkpoint in a data directory.

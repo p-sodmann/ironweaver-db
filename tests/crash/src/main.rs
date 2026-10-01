@@ -8,13 +8,14 @@
 //! Runs `--cycles` kill/recover cycles for each policy and each of `--seeds`
 //! consecutive seeds starting at `--seed` (random if not given; it is
 //! printed). Exits with 1 at the first violated guarantee, printing its
-//! policy, seed and cycle, and keeps the files. `iwdb-crash child ...` is
-//! the child side, run by the parent.
+//! policy, seed and cycle, and keeps the files. `iwdb-crash child ...` and
+//! `iwdb-crash restore ...` are the child sides, run by the parent.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use iwdb_crash::child::RestoreArgs;
 use iwdb_crash::{run, ChildArgs, Config, Policy};
 
 struct Options {
@@ -74,6 +75,15 @@ fn main() -> ExitCode {
             Ok(child) => iwdb_crash::child::main(&child),
             Err(e) => {
                 eprintln!("iwdb-crash child: {}", e);
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if args.first().map(String::as_str) == Some("restore") {
+        match RestoreArgs::parse(&args[1..]) {
+            Ok(restore) => iwdb_crash::child::restore_main(&restore),
+            Err(e) => {
+                eprintln!("iwdb-crash restore: {}", e);
                 return ExitCode::from(2);
             }
         }

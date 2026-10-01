@@ -114,6 +114,20 @@ impl Model {
         Ok(&self.ns)
     }
 
+    /// The state after the commits `1 ..= seq`, without moving the model:
+    /// for checking backups and restores. `seq` must be at most the
+    /// model's seq.
+    pub fn state_at(&self, seq: u64) -> Result<State, String> {
+        if seq > self.ns.seq() {
+            return Err(format!("seq {} is beyond the model's seq {}", seq, self.ns.seq()));
+        }
+        let mut ns = empty();
+        for record in &self.history[..seq as usize] {
+            ns.replay(record.clone()).map_err(|e| format!("the model failed to replay: {}", e))?;
+        }
+        Ok(state(&ns))
+    }
+
     /// Apply `step` now, as the parent commits it to a store it opened.
     /// Returns the seq, or `None` if the step fails validation (then the
     /// store's commit fails too).

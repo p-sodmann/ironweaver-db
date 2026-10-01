@@ -14,7 +14,10 @@
 //! - between a segment's rename and its directory sync (a rotation);
 //! - during recovery's truncation of a torn tail, before and after it;
 //! - during initialization, before the marker is written and after it;
-//! - an abort and a panic in the commit path.
+//! - an abort and a panic in the commit path;
+//! - (step 7) during an online backup, at its manifest and its marker;
+//!   during archiving, before and after a segment is durable in the
+//!   archive; and during a restore, at each of its writes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -23,10 +26,13 @@ use std::path::{Path, PathBuf};
 
 use iwdb::Store;
 use iwdb_crash::harness::newest_checkpoint;
-use iwdb_crash::{check, crash, Bounds, Outcome, Plan, Policy, Target};
+use iwdb_crash::{
+    check, check_archive, check_backups, crash, restore_in_child, Bounds, Crashed, Outcome, Plan, Policy, RestorePlan,
+    Restored, Summary, Target,
+};
 use iwdb_engine::testutil::workload::{pad, Step};
 use iwdb_storage::failpoint::{Action, Call, Rule, When};
-use iwdb_storage::layout::MARKER_NAME;
+use iwdb_storage::layout::{MARKER_NAME, RESTORING_NAME};
 use tempfile::TempDir;
 
 const ACTS: usize = 120;
@@ -43,6 +49,34 @@ impl Env {
         let work = tempfile::tempdir().unwrap();
         let target = Target::new(work.path().join("data"), keep);
         Env { work, target, policy, seed: 100 }
+    }
+
+    /// With a WAL archive, and a directory for the script's backups.
+    fn with_archive(policy: Policy, keep: usize) -> Env {
+        let mut env = Env::new(policy, keep);
+        env.target.archive = Some(env.work.path().join("archive-1"));
+        env.target.backups = Some(env.work.path().join("backups-1"));
+        env
+    }
+
+    fn exe() -> PathBuf {
+        PathBuf::from(env!("CARGO_BIN_EXE_iwdb-crash"))
+    }
+
+    /// Kill a child where `rule` pauses it, trying new children (new
+    /// scripts) until one reaches it: backups are rare in a script.
+    fn crash_when_reached(&mut self, rule: Rule) -> Crashed {
+        for _ in 0..30 {
+            self.seed += 1;
+            let plan = Plan::At(rule.clone());
+            let crashed = crash(&Self::exe(), self.work.path(), self.policy, ACTS, &mut self.target, self.seed, &plan)
+                .unwrap_or_else(|e| panic!("{}: {}", self.policy, e));
+            if crashed.reached {
+                return crashed;
+            }
+            self.check();
+        }
+        panic!("{} {}: no child reached the point", self.policy, rule)
     }
 
     fn dir(&self) -> &Path {
@@ -317,4 +351,113 @@ fn an_abort_or_a_panic_in_the_commit_path() {
             env.check();
         }
     }
+}
+
+/// Kills during an online backup: at its first file, halfway through a
+/// copy, at its manifest (written but not renamed, renamed) and at its
+/// marker (renamed: complete). Whatever is left is refused by verify and
+/// restore, or complete and equal to the model at its seq.
+#[test]
+fn during_a_backup() {
+    // One policy: a backup does the same under each (it syncs first),
+    // and the random runs cover all three
+    for policy in [Policy::Group] {
+        for (rule, complete) in [
+            (pause(Call::Create, When::After).path("/backups-"), false),
+            (pause(Call::Write, When::Midway).path("/backups-").skip(1), false),
+            (pause(Call::WriteAtomic, When::WriterDone).path("/backups-"), false),
+            (pause(Call::WriteAtomic, When::After).path("/backups-"), false),
+            (pause(Call::WriteAtomic, When::After).path("/backups-").skip(1), true),
+        ] {
+            let mut env = Env::with_archive(policy, 2);
+            env.setup();
+            let crashed = env.crash_when_reached(rule.clone());
+            let paused = PathBuf::from(crashed.outcome.paused().unwrap().split_once(' ').unwrap().1);
+            let backup =
+                paused.ancestors().find(|p| p.parent() == env.target.backups.as_deref()).unwrap().to_path_buf();
+            assert_eq!(backup.join(MARKER_NAME).exists(), complete, "{} {}", policy, rule);
+            env.check();
+            let mut summary = Summary::default();
+            check_backups(env.work.path(), &env.target, &crashed.outcome, &mut summary)
+                .unwrap_or_else(|e| panic!("{} {}: {}", policy, rule, e));
+            if complete {
+                assert_eq!(summary.backups_interrupted, 0, "{} {}", policy, rule);
+            } else {
+                assert!(summary.backups_interrupted >= 1, "{} {}: {:?}", policy, rule, summary);
+            }
+        }
+    }
+}
+
+/// Kills during archiving: halfway through a segment's copy, after its
+/// rename (before the archive directory is synced), and after that sync
+/// (before the segment leaves the WAL). Recovery then finds the archive
+/// valid and no removed segment missing, and the next checkpoint archives
+/// again what both hold and removes it.
+#[test]
+fn during_archiving() {
+    // One policy: archiving does the same under each, and the random runs
+    // cover all three
+    for policy in [Policy::Always] {
+        for rule in [
+            pause(Call::Write, When::Midway).path("/archive-"),
+            pause(Call::Rename, When::After).path("/archive-"),
+            pause(Call::SyncDir, When::After).path("/archive-"),
+        ] {
+            let mut env = Env::with_archive(policy, 1);
+            env.setup();
+            env.crash_when_reached(rule.clone());
+            let store = env.check();
+            let mut summary = Summary::default();
+            check_archive(&env.target, &mut summary).unwrap_or_else(|e| panic!("{} {}: {}", policy, rule, e));
+            finish_cleanup(&store, &mut env.target);
+            drop(store);
+            check_archive(&env.target, &mut summary).unwrap_or_else(|e| panic!("{} {}: {}", policy, rule, e));
+            // Everything removed from the WAL is in the archive, from seq 1
+            let n = env.target.model.seq();
+            let dest = env.work.path().join("restored");
+            let (restored, _) =
+                restore_in_child(&Env::exe(), env.work.path(), &env.target, n, true, &RestorePlan::Finish, &dest)
+                    .unwrap();
+            assert_eq!(restored, Restored::Complete);
+        }
+    }
+}
+
+/// Kills during a restore, at each of its writes: what is left is refused
+/// (an interrupted restore), or complete once its marker is in place. A
+/// restore that finishes equals the model at its seq.
+#[test]
+fn during_a_restore() {
+    let mut env = Env::with_archive(Policy::Always, 1);
+    env.setup();
+    let n = env.target.model.seq() - 3;
+    let dest = env.work.path().join("restored");
+    for (rule, complete) in [
+        (pause(Call::Create, When::After).path(RESTORING_NAME), false),
+        (pause(Call::Sync, When::Before).path(RESTORING_NAME), false),
+        (pause(Call::SyncDir, When::Before).path("/restored"), false),
+        (pause(Call::WriteAtomic, When::Midway).path("/restored/checkpoints/"), false),
+        (pause(Call::WriteAtomic, When::WriterDone).path("/restored/checkpoints/"), false),
+        (pause(Call::WriteAtomic, When::After).path("/restored/checkpoints/"), false),
+        (pause(Call::RemoveFile, When::Before).path(RESTORING_NAME), false),
+        (pause(Call::RemoveFile, When::After).path(RESTORING_NAME), false),
+        (pause(Call::WriteAtomic, When::Before).path("restored/IWDB"), false),
+        (pause(Call::WriteAtomic, When::After).path("restored/IWDB"), true),
+        (pause(Call::SyncDir, When::Before).path("/restored").skip(3), true),
+        (Rule::new(Call::WriteAtomic, When::WriterDone, Action::Abort).path("/restored/checkpoints/"), false),
+    ] {
+        for from_data in [true, false] {
+            let plan = RestorePlan::At(rule.clone());
+            let (restored, outcome) =
+                restore_in_child(&Env::exe(), env.work.path(), &env.target, n, from_data, &plan, &dest)
+                    .unwrap_or_else(|e| panic!("{}: {}", rule, e));
+            assert!(outcome.paused().is_some() || outcome.aborted(), "{}: {:?}", rule, outcome.lines);
+            let expected = if complete { Restored::Complete } else { Restored::Interrupted };
+            assert_eq!(restored, expected, "{} (from data: {})", rule, from_data);
+        }
+    }
+    let (restored, _) =
+        restore_in_child(&Env::exe(), env.work.path(), &env.target, n, true, &RestorePlan::Finish, &dest).unwrap();
+    assert_eq!(restored, Restored::Complete);
 }

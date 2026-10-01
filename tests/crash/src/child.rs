@@ -6,9 +6,13 @@
 //! |---|---|
 //! | `open <seq> <synced_seq> <digest>` | `Store::open` returned (recovery is done) |
 //! | `ack <seq> <synced_seq>` | a commit returned `Ok` (acknowledged), with `Store::synced_seq` after it |
+//! | `backup <seq> <path>` | an online backup into `path` returned `Ok`, at `seq` |
 //! | `paused <rule> <path>` | a pause rule fired at a call on `path`; the thread then blocks until the parent kills the child |
 //! | `done` | the script ended; the child then waits to be killed |
 //! | `error <message>` | something failed that shouldn't have; the child exits with status 2 |
+//!
+//! The restore child (`iwdb-crash restore ...`, [`RestoreArgs`]) runs one
+//! restore through a [`FailFs`] and says `restored <seq>`, then `done`.
 //!
 //! Before every fsync of a file, the child appends `<path> <length>` to the
 //! sync log (`<work>/synclog`). The length is where the file will be
@@ -22,7 +26,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use iwdb::{Error, Store};
+use iwdb::{Error, RestoreSources, RestoreTarget, Store};
 use iwdb_engine::testutil::workload::Step;
 use iwdb_storage::failpoint::{Call, FailFs, Rule};
 
@@ -46,6 +50,11 @@ pub struct ChildArgs {
     /// Background checkpoints (by WAL size and time); without them only
     /// the script's checkpoints run.
     pub background: bool,
+    /// The WAL archive, if the store archives.
+    pub archive: Option<PathBuf>,
+    /// Where the script's backups go (each into a new directory); without
+    /// it the script's backups are skipped.
+    pub backups: Option<PathBuf>,
     pub rules: Vec<Rule>,
 }
 
@@ -68,6 +77,12 @@ impl ChildArgs {
             "--background".into(),
             self.background.to_string(),
         ];
+        for (flag, path) in [("--archive", &self.archive), ("--backups", &self.backups)] {
+            if let Some(path) = path {
+                args.push(flag.into());
+                args.push(path.display().to_string());
+            }
+        }
         for rule in &self.rules {
             args.push("--rule".into());
             args.push(rule.to_string());
@@ -84,6 +99,8 @@ impl ChildArgs {
             policy: Policy::Always,
             keep: 2,
             background: true,
+            archive: None,
+            backups: None,
             rules: Vec::new(),
         };
         let mut args = args.iter();
@@ -98,6 +115,8 @@ impl ChildArgs {
                 "--policy" => parsed.policy = value.parse()?,
                 "--keep" => parsed.keep = number(value)? as usize,
                 "--background" => parsed.background = value == "true",
+                "--archive" => parsed.archive = Some(value.into()),
+                "--backups" => parsed.backups = Some(value.into()),
                 "--rule" => parsed.rules.push(value.parse()?),
                 other => return Err(format!("unknown child option '{}'", other)),
             }
@@ -141,22 +160,29 @@ fn sync_log_hook(work: &Path) -> Result<iwdb_storage::failpoint::Hook, std::io::
     }))
 }
 
-/// The child's main: never returns.
-pub fn main(args: &ChildArgs) -> ! {
+/// A [`FailFs`] with `rules`, whose pauses say `paused` and wait to be
+/// killed.
+fn fail_fs(rules: &[Rule]) -> FailFs {
     let fs = FailFs::new();
-    for rule in &args.rules {
+    for rule in rules {
         fs.add(rule.clone());
     }
     fs.set_pause(Some(Arc::new(|rule: &Rule, path: &Path| {
         say(&format!("paused {} {}", rule, path.display()));
         wait_for_kill()
     })));
+    fs
+}
+
+/// The child's main: never returns.
+pub fn main(args: &ChildArgs) -> ! {
+    let fs = fail_fs(&args.rules);
     match sync_log_hook(&args.work) {
         Ok(hook) => fs.set_hook(Some(hook)),
         Err(e) => fail("open the sync log", e),
     }
 
-    let mut options = child_options(args.policy, args.keep);
+    let mut options = child_options(args.policy, args.keep, args.archive.as_deref());
     options.checkpoint.background = args.background;
     let store = match Store::open_with(fs, &args.dir, options) {
         Ok(store) => store,
@@ -164,6 +190,7 @@ pub fn main(args: &ChildArgs) -> ! {
     };
     say(&format!("open {} {} {:016x}", store.seq(), store.synced_seq(), store.read(digest)));
 
+    let mut backups = 0;
     for act in Script::new(args.seed).take(args.acts) {
         match act {
             Act::Commit(step) => {
@@ -188,8 +215,82 @@ pub fn main(args: &ChildArgs) -> ! {
                     fail("sync", e);
                 }
             }
+            Act::Backup => {
+                let Some(dir) = &args.backups else { continue };
+                let dest = dir.join(format!("{:016x}-{}", args.seed, backups));
+                backups += 1;
+                match store.backup(&dest) {
+                    Ok(report) => say(&format!("backup {} {}", report.seq, dest.display())),
+                    Err(e) => fail("backup", e),
+                }
+            }
             Act::Sleep(duration) => std::thread::sleep(duration),
         }
+    }
+    say("done");
+    wait_for_kill()
+}
+
+/// What the restore child runs: a restore into `dest` from a backup or
+/// data directory and/or an archive, to `seq` (or the latest), with
+/// failpoints.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreArgs {
+    pub backup: Option<PathBuf>,
+    pub archive: Option<PathBuf>,
+    pub dest: PathBuf,
+    pub seq: Option<u64>,
+    pub rules: Vec<Rule>,
+}
+
+impl RestoreArgs {
+    /// The command line after `restore`.
+    pub fn to_args(&self) -> Vec<String> {
+        let mut args = vec!["--dest".into(), self.dest.display().to_string()];
+        for (flag, path) in [("--backup", &self.backup), ("--archive", &self.archive)] {
+            if let Some(path) = path {
+                args.push(flag.into());
+                args.push(path.display().to_string());
+            }
+        }
+        if let Some(seq) = self.seq {
+            args.push("--seq".into());
+            args.push(seq.to_string());
+        }
+        for rule in &self.rules {
+            args.push("--rule".into());
+            args.push(rule.to_string());
+        }
+        args
+    }
+
+    pub fn parse(args: &[String]) -> Result<Self, String> {
+        let mut parsed =
+            RestoreArgs { backup: None, archive: None, dest: PathBuf::new(), seq: None, rules: Vec::new() };
+        let mut args = args.iter();
+        while let Some(flag) = args.next() {
+            let value = args.next().ok_or_else(|| format!("{} needs a value", flag))?;
+            match flag.as_str() {
+                "--dest" => parsed.dest = value.into(),
+                "--backup" => parsed.backup = Some(value.into()),
+                "--archive" => parsed.archive = Some(value.into()),
+                "--seq" => parsed.seq = Some(value.parse().map_err(|e| format!("--seq {}: {}", value, e))?),
+                "--rule" => parsed.rules.push(value.parse()?),
+                other => return Err(format!("unknown restore option '{}'", other)),
+            }
+        }
+        Ok(parsed)
+    }
+}
+
+/// The restore child's main: never returns.
+pub fn restore_main(args: &RestoreArgs) -> ! {
+    let fs = fail_fs(&args.rules);
+    let sources = RestoreSources { backup: args.backup.clone(), archive: args.archive.clone() };
+    let target = args.seq.map_or(RestoreTarget::Latest, RestoreTarget::Seq);
+    match iwdb::restore_with(&fs, &args.dest, &sources, target) {
+        Ok(report) => say(&format!("restored {}", report.seq)),
+        Err(e) => fail("restore", e),
     }
     say("done");
     wait_for_kill()
@@ -210,9 +311,19 @@ mod tests {
             policy: Policy::Group,
             keep: 3,
             background: false,
+            archive: Some("/tmp/archive".into()),
+            backups: None,
             rules: vec![Rule::new(Call::RemoveFile, When::After, Action::Pause).skip(2).path("/wal/")],
         };
         assert_eq!(ChildArgs::parse(&args.to_args()), Ok(args));
         assert!(ChildArgs::parse(&["--seed".into()]).is_err());
+        let restore = RestoreArgs {
+            backup: None,
+            archive: Some("/a".into()),
+            dest: "/d e".into(),
+            seq: Some(17),
+            rules: vec![Rule::new(Call::Create, When::Before, Action::Abort).path("RESTORING")],
+        };
+        assert_eq!(RestoreArgs::parse(&restore.to_args()), Ok(restore));
     }
 }

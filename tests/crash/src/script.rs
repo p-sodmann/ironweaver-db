@@ -4,6 +4,7 @@
 //! child attempted, in which order.
 
 use std::fmt;
+use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -55,8 +56,8 @@ impl FromStr for Policy {
 /// The child's store: 1 KiB segments (a rotation every few commits), a
 /// background checkpoint every 8 KiB of WAL or 20 ms, keeping `keep`
 /// checkpoints, so that kills land in rotations, checkpoints and WAL
-/// segment removal.
-pub fn child_options(policy: Policy, keep: usize) -> StoreOptions {
+/// segment removal (and archiving, with an `archive`).
+pub fn child_options(policy: Policy, keep: usize, archive: Option<&Path>) -> StoreOptions {
     StoreOptions {
         wal: WalOptions { fsync: policy.fsync(), segment_size: MIN_SEGMENT_SIZE },
         checkpoint: CheckpointOptions {
@@ -67,17 +68,18 @@ pub fn child_options(policy: Policy, keep: usize) -> StoreOptions {
             background: true,
         },
         create_if_missing: true,
-        archive: None,
+        archive: archive.map(Path::to_path_buf),
     }
 }
 
-/// The parent's store for checking recovery: no background threads.
-pub fn check_options(policy: Policy, keep: usize) -> StoreOptions {
+/// The parent's store for checking recovery: no background threads, the
+/// same archive (its checkpoint on close removes segments too).
+pub fn check_options(policy: Policy, keep: usize, archive: Option<&Path>) -> StoreOptions {
     StoreOptions {
         wal: WalOptions { fsync: policy.fsync(), segment_size: MIN_SEGMENT_SIZE },
         checkpoint: CheckpointOptions { wal_size: None, interval: None, on_close: true, keep, background: false },
         create_if_missing: true,
-        archive: None,
+        archive: archive.map(Path::to_path_buf),
     }
 }
 
@@ -87,6 +89,9 @@ pub enum Act {
     Commit(Step),
     Checkpoint,
     Sync,
+    /// An online backup into a new directory (if the child has one for
+    /// backups).
+    Backup,
     Sleep(Duration),
 }
 
@@ -121,6 +126,7 @@ impl Iterator for Script {
             0..=73 => Act::Commit(self.steps.next()?),
             74..=80 => Act::Checkpoint,
             81..=85 => Act::Sync,
+            86..=87 => Act::Backup,
             _ => Act::Sleep(Duration::from_micros(self.rng.below(3000))),
         })
     }
@@ -135,6 +141,7 @@ mod tests {
         let a: Vec<Act> = Script::new(5).take(200).collect();
         assert_eq!(a, Script::new(5).take(200).collect::<Vec<_>>());
         assert!(a.iter().any(|x| matches!(x, Act::Checkpoint)));
+        assert!(a.iter().any(|x| matches!(x, Act::Backup)));
         assert_eq!(Script::commits(5, 200).count(), a.iter().filter(|x| matches!(x, Act::Commit(_))).count());
         for policy in Policy::ALL {
             assert_eq!(policy.to_string().parse::<Policy>(), Ok(policy));
