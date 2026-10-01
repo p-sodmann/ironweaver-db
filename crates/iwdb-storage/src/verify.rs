@@ -299,6 +299,7 @@ fn replay(
         }
     }
     let mut namespace = namespace.unwrap_or_else(|| Namespace::new(name.clone()));
+    let base = namespace.seq();
     let mut replaying = true;
     if let Some(&(first_seq, _)) = segments.first() {
         let mut reader = match WalReader::from_segments(segments.to_vec(), first_seq, u64::MAX) {
@@ -359,6 +360,18 @@ fn replay(
                 }
                 pending.next();
             }
+        }
+        // Recovery reads the WAL from the base's seq + 1: it must reach it
+        if let Some(end) = reader.end().filter(|end| end.next_seq < base + 1) {
+            report.problem(
+                None,
+                format!(
+                    "the WAL ends at seq {}, before the checkpoint at {} (recovery refuses: LogEndsBefore)",
+                    end.next_seq.saturating_sub(1),
+                    base
+                ),
+            );
+            replaying = false;
         }
         if let Some(torn) = reader.end().and_then(|end| end.last_segment.clone()) {
             if let Some(tail) = torn.torn {

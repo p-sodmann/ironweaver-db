@@ -291,3 +291,32 @@ fn directories_that_are_not_data_directories_are_errors() {
     assert_eq!((report.version, report.history, report.seq), (Some(1), None, Some(58)));
     assert_eq!(snapshot(&fixture), before);
 }
+
+/// The WAL cut back before the only checkpoint (as an OS crash under
+/// `off` can do): recovery refuses, and so must verify.
+#[test]
+fn a_wal_that_ends_before_the_only_checkpoint_is_a_problem() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), options(1)).unwrap();
+    let mut reference = reference();
+    run(&store, &mut reference, &support::workload(20, 8));
+    store.checkpoint().unwrap();
+    drop(store);
+    // Cut the segment holding the checkpoint's seq back to its header, and
+    // remove the later ones: the WAL now ends before the checkpoint
+    let newest = *checkpoints(dir.path()).last().unwrap();
+    let segments = segment_seqs(dir.path());
+    let holding = *segments.iter().rfind(|s| **s <= newest).unwrap();
+    for seq in segments {
+        let path = dir.path().join("wal").join(iwdb_storage::format::segment_name(seq));
+        if seq == holding {
+            let bytes = fs::read(&path).unwrap();
+            fs::write(&path, &bytes[..iwdb_storage::format::SEGMENT_HEADER_LEN]).unwrap();
+        } else if seq > holding {
+            fs::remove_file(&path).unwrap();
+        }
+    }
+    assert!(Store::open(dir.path(), options(1)).is_err());
+    let report = verify(dir.path()).unwrap();
+    assert!(report.problems.iter().any(|p| p.message.contains("before the checkpoint")), "{:#?}", report);
+}
