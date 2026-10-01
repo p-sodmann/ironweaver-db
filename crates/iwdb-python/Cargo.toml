@@ -1,0 +1,30 @@
+[package]
+name = "iwdb-python"
+description = "Ironweaver DB embedded, for Python: PyO3 bindings of the iwdb crate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "iwdb_python"
+crate-type = ["cdylib"]
+# Tested with pytest (tests/), against the built module: a Rust test binary
+# would have to link libpython
+test = false
+doctest = false
+
+[dependencies]
+ironweaver-core.workspace = true
+iwdb = { path = "../iwdb" }
+iwdb-engine = { path = "../iwdb-engine" }
+iwdb-storage = { path = "../iwdb-storage" }
+# The bindings (design rule 1: only in this crate). abi3: one wheel per
+# platform for CPython 3.9 and later (ADR 0013); maturin adds the
+# extension-module feature when it builds the wheel
+pyo3 = { version = "0.29", features = ["abi3-py39"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+# ADR 0013: Python embedded bindings
+
+Status: accepted
+Date: 2026-10-01
+
+## Context
+
+Step 7 makes the embedded store usable from Python (`crates/iwdb-python`, PyO3, maturin) and ships wheels. The API is a contract: step 14's remote client must have the same shape, and the same Python test suite must run against both. Design rule 1 keeps Python out of every other crate; design rule 8 makes the bindings a translation layer. Facts that shaped the decisions:
+
+- PyO3 0.29.3 (MSRV 1.83) builds on our MSRV 1.85; maturin 1.15 builds the crate with Rust 1.85 (checked: `RUSTUP_TOOLCHAIN=1.85 maturin build`).
+- The abi3 (limited) C API has no `datetime` API; `PyString::to_str` needs Python 3.10 under abi3.
+- A cdylib with `abi3-py310` doesn't build with `cargo build --workspace` where `python3` is older (this machine's system Python is 3.9): PyO3's build script refuses a minimum above the interpreter it finds.
+- `Store` is `Send + Sync`; every write is serialized inside it.
+- A panic in the store's commit path aborts the process (ADR 0008). PyO3 turns other panics in `#[pymethods]` into `pyo3_runtime.PanicException`, a `BaseException` that `except Exception` doesn't catch.
+- A `flock` belongs to the open file, which a forked child shares.
+- On Windows, our directory fsync is a no-op (ADR 0005), the lock is `LockFileEx`, the crash harness and the step 6 crash points use `SIGKILL` and `SIGABRT`, and CI doesn't build or test the workspace on Windows.
+
+## Decision
+
+- **The API** is written down first, in [python-api.md](../python-api.md): `Store.open(path, **options)`, `close`, `closed`, a context manager; `store.transaction()` as a context manager that collects mutations and commits them as one `Store::commit` when the block ends, and nothing on an exception (or explicitly, once, with `commit()`); catalog changes as their own commits; reads (`node`, `edge`, `seq`, `synced_seq`, `read_only`, `history`, `status`, `catalog`); `sync`, `checkpoint`, `backup`; module functions `verify` and `restore`. Everything returned is a plain Python value (dicts, lists, scalars, `bytes`, `date`, `datetime`). Edge ids from a transaction come back in `result["edge_ids"]`; `add_edge` and `upsert_edge` return the position. `synced_seq()` is `None` under `fsync="off"` until an explicit sync, as in `iwctl status`.
+- **Values both ways, exactly**: `None`, `bool` (before `int`), `int` (i64; `OverflowError` outside), `float` (bit for bit: `-0.0`, NaN, infinities), `str`, `bytes` (and `bytearray`, read back as `bytes`), `list`, `dict` with `str` keys (read back sorted), `date`, `datetime` (aware ones keep their UTC offset as a fixed `timezone`; fractional-second offsets are refused). A `tuple` is refused rather than turned into a list, so that nothing comes back as another type. The 100-level depth limit is counted as the commit pipeline counts it (an empty container holds a scalar), so the binding refuses exactly what the engine would, with `ValueError`, also for a list that contains itself. Dates go through the `datetime` module's classes (cached), since abi3 has no datetime C API. Hypothesis checks the round trip on random nested values.
+- **Errors**: `iwdb.Error` and one subclass per kind (`ConflictError`, `ConstraintError`, `NotFoundError`, `InvalidError`, `ReadOnlyError`, `LockedError`, `IoError`, `CorruptError`, `ClosedError`, `InternalError`), each with the Rust message. Argument errors are Python's own (`TypeError`, `ValueError`, `OverflowError`).
+- **Threads**: a `Store` may be shared between threads. Every call that does I/O or may wait releases the GIL (`Python::detach`): open, close, commits, reads, `sync`, `checkpoint`, `backup`, `verify`, `restore`. Inside, a `RwLock<Option<Store>>`: calls hold the read side (so they run concurrently, and `Store` serializes writes), `close` takes the write side (waiting for calls in progress) and leaves `None`, after which calls raise `ClosedError`. No lock is ever waited for while holding the GIL. A transaction belongs to one thread (PyO3 raises if two use it at once).
+- **ABI: abi3, CPython 3.9 and later**: one wheel per platform for every CPython from 3.9 on. 3.9 rather than 3.10, because PyO3's build script must accept the `python3` it finds when `cargo build --workspace` builds the cdylib, and 3.9 is still the system Python on macOS's command line tools. Free-threaded CPython builds aren't covered by abi3 and aren't shipped yet.
+- **Panics**: ADR 0008's abort applies inside Python: a panic in the commit path (a bug) kills the interpreter, as `kill -9` would, and the next open recovers every logged commit. The Python docs (python-api.md, the package README) say so. Every other entry point runs inside `catch_unwind` and turns a panic into `iwdb.InternalError` (an `Exception`), and the interpreter goes on (tested with a test-only `_panic_for_tests`).
+- **Forking**: documented: a child forked without exec inherits the store's lock and must not use the store; use the `spawn` start method.
+- **Windows wheels come later.** Shipping them now would mean a wheel whose guarantees differ (no directory fsync, so a crash of the OS after a rotation, a checkpoint or a backup can lose a directory entry) and are untested: the workspace isn't built or tested on Windows in CI, the crash harness needs Unix signals, and no Windows machine checked the lock, the renames or file removal while files are open. Design rule 3 asks for a test of every durability claim. step_7.md says so, and a later step (16, operability) adds Windows: a directory sync through `FILE_FLAG_BACKUP_SEMANTICS` and `FlushFileBuffers`, a Windows CI job for the workspace and the Python tests, and a harness that kills with `TerminateProcess`.
+- **Platforms shipped**: Linux (manylinux, x86_64 and aarch64) and macOS (x86_64 and arm64). CI builds the wheel with maturin on each and runs the Python tests against it on Python 3.9 and 3.13, on every push; the release workflow does the same before publishing.
+- **Design rule 1**: `pyo3` appears only in `crates/iwdb-python`. The crate is in the workspace (clippy, fmt, the MSRV check and `cargo deny` cover it); its Rust test target is off (the tests are pytest, against the built module), so `cargo test --workspace` doesn't need libpython. The CI check "No Python in the dependency graph" now lists the crates that must stay free of it instead of the whole workspace.
+- **Packaging**: the distribution is `ironweaver-db` on PyPI, the import name `iwdb`; a mixed project (`python/iwdb/__init__.py` over the native `iwdb._iwdb`) with type stubs (`_iwdb.pyi`, `py.typed`). The version comes from the workspace (`0.1.0`).
+
+## Consequences
+
+- Code written against the embedded store runs against the remote client of step 14, which implements the same contract (minus local paths: `Store.open`, `backup`, `verify`, `restore`).
+- Dates and datetimes cost a few Python calls each; everything else converts directly.
+- Windows users can't install the package from PyPI until the Windows work lands; `pip` finds no wheel and would try to build the sdist.

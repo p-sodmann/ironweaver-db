@@ -1,0 +1,35 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "ironweaver-db"
+description = "Ironweaver DB, embedded: a durable graph store in a directory (WAL, checkpoints, backups, point-in-time restore)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Philipp Sodmann" }]
+keywords = ["graph", "database", "embedded", "wal"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+    "Topic :: Database :: Database Engines/Servers",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "hypothesis>=6"]
+
+[project.urls]
+Repository = "https://github.com/p-sodmann/ironweaver-db"
+Documentation = "https://github.com/p-sodmann/ironweaver-db/blob/main/documentation/python-api.md"
+
+[tool.maturin]
+module-name = "iwdb._iwdb"
+python-source = "python"
+features = ["pyo3/extension-module"]
