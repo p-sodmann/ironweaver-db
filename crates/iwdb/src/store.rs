@@ -13,7 +13,7 @@ use iwdb_engine::{CatalogChange, CommitResult, Mutation, Namespace};
 use iwdb_storage::io::{LogFs, StdFs};
 use iwdb_storage::layout::DataDir;
 use iwdb_storage::{
-    recover, CheckpointOutcome, Checkpointer, Error, FsyncPolicy, LoggedNamespace, Recovered, RecoveryReport,
+    recover, CheckpointOutcome, Checkpointer, Error, FsyncPolicy, HistoryId, LoggedNamespace, Recovered, RecoveryReport,
 };
 
 use crate::StoreOptions;
@@ -126,7 +126,7 @@ where
     report: RecoveryReport,
     /// Holds the lock; released when the store is dropped, after the
     /// threads have stopped.
-    _dir: DataDir,
+    dir: DataDir,
 }
 
 impl<F: LogFs + Send + Sync + 'static> std::fmt::Debug for Store<F>
@@ -135,7 +135,7 @@ where
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Store")
-            .field("dir", &self._dir.root())
+            .field("dir", &self.dir.root())
             .field("seq", &lock(&self.shared.live).namespace().seq())
             .finish_non_exhaustive()
     }
@@ -199,7 +199,7 @@ where
                 threads.push(spawn("iwdb-sync", move || sync_loop(&shared, max_delay))?);
             }
         }
-        Ok(Store { shared, threads, report, _dir: dir })
+        Ok(Store { shared, threads, report, dir })
     }
 
     /// Commit a data transaction: all mutations or none, validated against
@@ -297,6 +297,13 @@ where
     /// commit failed to apply. Reopen it to recover.
     pub fn read_only(&self) -> Option<String> {
         lock(&self.shared.live).read_only()
+    }
+
+    /// The history of commits this store continues (data-dir layout 2,
+    /// ADR 0009): a new id for a new or restored directory. A WAL archive
+    /// belongs to one history.
+    pub fn history(&self) -> HistoryId {
+        self.dir.history()
     }
 
     /// What recovery found and did when the store was opened.

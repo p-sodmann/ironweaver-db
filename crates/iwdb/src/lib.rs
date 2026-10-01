@@ -33,6 +33,9 @@ pub use ironweaver_core::{Attrs, EdgeId, Value};
 pub use iwdb_engine::catalog::{AttrPath, Constraint, ConstraintKind, IndexDef, Label, NamespaceCatalog};
 pub use iwdb_engine::{CatalogChange, CommitResult, EdgeKey, Mutation, Namespace, Target};
 pub use iwdb_storage::io::{LogFs, StdFs};
-pub use iwdb_storage::{CheckpointOutcome, CutTail, Error, FsyncPolicy, RecoveryReport, SkippedCheckpoint, WalOptions};
+pub use iwdb_storage::{
+    CheckpointOutcome, CommitTime, CutTail, Error, FsyncPolicy, HistoryId, RecoveryReport, SkippedCheckpoint,
+    WalOptions,
+};
 pub use options::{CheckpointOptions, StoreOptions};
 pub use store::{Edge, Node, Store, NAMESPACE};

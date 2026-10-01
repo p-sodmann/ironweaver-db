@@ -23,6 +23,7 @@ mod error;
 #[cfg(feature = "failpoints")]
 pub mod failpoint;
 pub mod format;
+mod history;
 pub mod io;
 pub mod layout;
 mod logged;
@@ -33,6 +34,7 @@ mod writer;
 
 pub use checkpoint::{CheckpointOutcome, Checkpointer, SkippedCheckpoint};
 pub use error::Error;
+pub use history::HistoryId;
 pub use logged::LoggedNamespace;
 pub use reader::{
     list_segments, read_log, read_segment, segment_prefix, LogEnd, SegmentEnd, TornTail, WalReader,

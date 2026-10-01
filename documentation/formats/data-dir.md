@@ -1,41 +1,53 @@
-# Data directory, layout version 1
+# Data directory, layout version 2
 
-Status: stable contract (design rule 4). Implemented in `crates/iwdb-storage` (`layout.rs`, `checkpoint.rs`, `recovery.rs`) and used by `iwdb::Store`. Fixture: `crates/iwdb/tests/fixtures/data-dir-v1/`. Decisions and alternatives: [ADR 0006](../adr/0006-checkpoints-and-recovery.md).
+Status: stable contract (design rule 4). Implemented in `crates/iwdb-storage` (`layout.rs`, `history.rs`, `checkpoint.rs`, `recovery.rs`) and used by `iwdb::Store`. Fixtures: `crates/iwdb/tests/fixtures/data-dir-v2/` and, for layout 1, `data-dir-v1/`. Decisions and alternatives: [ADR 0006](../adr/0006-checkpoints-and-recovery.md) (layout 1) and [ADR 0009](../adr/0009-backup-archive-restore.md) (layout 2: histories, backups, restore).
 
 A store keeps one namespace (step 9 adds more) in one directory:
 
 ```
 <dir>/
-  IWDB                          marker: magic, layout version, CRC32C (16 bytes)
+  IWDB                          marker: magic, layout version, history id, CRC32C (32 bytes)
   LOCK                          empty; held with an exclusive lock while a store has the directory open
   checkpoints/
     <seq, 20 digits>.ckpt       checkpoints (below)
   wal/
     <first seq, 20 digits>.wal  WAL segments (formats/wal.md)
+  BACKUP                        only in a backup: its manifest (formats/backup.md)
+  RESTORING                     only while a restore writes the directory (Restore, below)
 ```
+
+Layout 2 (step 7) differs from layout 1 (step 5) in the marker, which now holds a history id, and in the `BACKUP` and `RESTORING` files. Checkpoints and segments are the same; the WAL segments carry their own format version (formats/wal.md).
 
 Temporary files end in `.tmp`: `.<name>.<pid>.<n>.tmp` (the core's `write_atomic`, for checkpoints and the marker) and `<segment>.tmp` (a WAL segment being created). They are never read, and are removed when a store opens.
 
-## Marker (`IWDB`, 16 bytes)
+## Marker (`IWDB`, 32 bytes)
 
 All integers little endian.
 
 | Offset | Size | Field | Value |
 |---|---|---|---|
 | 0 | 8 | magic | `IWDBDIR\n` (`49 57 44 42 44 49 52 0a`) |
-| 8 | 4 | version | `1`, the layout version |
-| 12 | 4 | crc | CRC32C of bytes 0..12 |
+| 8 | 4 | version | `2`, the layout version |
+| 12 | 16 | history | the history id: 16 random bytes (printed as 32 hex digits) |
+| 28 | 4 | crc | CRC32C of bytes 0..28 |
+
+Every layout keeps this frame: the magic, the version at offset 8, then the layout's own fields, and a CRC32C of everything before it as the last 4 bytes. So a reader can check the CRC of a marker of any length and tell a newer layout from damage. (Layout 1's marker is the frame without fields: 16 bytes, CRC at 12. Versions before step 7 checked the length first, and report a layout 2 directory as damaged, `InvalidDataDir`, rather than newer.)
+
+**The history id** names the history of commits the directory holds. A new directory gets a random one, and so does every restore ([ADR 0009](../adr/0009-backup-archive-restore.md)): after a restore to seq `N`, the restored store's commits `N + 1, ...` differ from the original's. A backup keeps the id of the store it copies; a WAL archive holds one history's segments ([archive.md](archive.md)). A store archives only into an archive of its own history, and a restore combines a backup and an archive only if their histories match.
 
 The layout version covers everything in this document: the directory structure, file names, the marker, and the checkpoint content (the graph meta keys and their encoding). The WAL segments carry their own format version. Any change to this document bumps the layout version, keeps a reader for version N-1, and adds a fixture.
 
 Opening a directory:
 
-- **It has a marker** with a valid CRC and version 1: open it. `wal/` and `checkpoints/` must exist (otherwise `InvalidDataDir`).
-- **Version above 1**: refused with `UnsupportedLayout`, before anything is changed.
+- **It has a `RESTORING` file**: refused with `InterruptedRestore`, before anything is changed (Restore, below).
+- **It has a marker and a `BACKUP` file**: a backup, refused with `IsBackup`. A backup is restored, not opened: so it stays as it was, and two stores never continue one history.
+- **It has a marker** with a valid CRC and version 2: open it. `wal/` and `checkpoints/` must exist (otherwise `InvalidDataDir`).
+- **Version 1**: open it. Once recovery has read it successfully (and before the WAL writer starts), its marker is replaced by a layout 2 marker with a new random history id (`write_atomic`, then a directory sync). Nothing else changes; the recovery report says `upgraded_from: 1`. A crash leaves either marker. A failed open leaves the old one. Versions before step 7 can't open the directory afterwards.
+- **Version above 2**: refused with `UnsupportedLayout`, before anything is changed.
 - **Our magic, a wrong length or CRC**: refused with `InvalidDataDir`.
 - **Another file named `IWDB`**: refused with `NotADataDir`.
-- **No marker**: the directory may only hold what an interrupted initialization leaves (`LOCK`, empty `checkpoints/` and `wal/`, `*.tmp` files). With `create_if_missing` (the default), it is initialized; otherwise it is refused with `NotADataDir`. Anything else is refused with `NotADataDir`, and nothing is created in it, not even `LOCK`. A missing directory is created (with its parents) if `create_if_missing` is set.
-- **Initialization**: take the lock, check again that there is no marker, create `checkpoints/` and `wal/`, sync the directory, write the marker with `write_atomic`, sync the directory. The marker comes last, so a directory with a marker is complete.
+- **No marker**: the directory may only hold what an interrupted initialization leaves (`LOCK`, empty `checkpoints/` and `wal/`, `*.tmp` files). With `create_if_missing` (the default), it is initialized; otherwise it is refused with `NotADataDir`. Anything else is refused with `NotADataDir`, and nothing is created in it, not even `LOCK`: an interrupted backup or restore leaves such a directory. A missing directory is created (with its parents) if `create_if_missing` is set.
+- **Initialization**: take the lock, check again that there is no marker, create `checkpoints/` and `wal/`, sync the directory, write the marker (layout 2, a new random history id) with `write_atomic`, sync the directory. The marker comes last, so a directory with a marker is complete.
 
 ## Lock (`LOCK`)
 
@@ -45,6 +57,7 @@ The store opens `LOCK` (creating it if needed) and takes an exclusive, non-block
 - The lock is released when the store is closed or dropped, and by the OS when the process exits, however it exits (tested with `kill -9`).
 - It is advisory: it keeps out other stores and tools that take it (`iwctl`, step 7), not arbitrary programs. On network file systems `flock` may not work; they are not supported.
 - The lock is taken after the marker is checked and before anything is changed, apart from creating `LOCK` itself.
+- **Readers** that must not run while a store has the directory open (`verify`, and restore reading a data directory or backup) take a **shared** lock (`flock(LOCK_SH | LOCK_NB)`) on `LOCK` if the file exists, and never create it. They fail with `Locked` while a store has the directory open, and keep stores out while they read. Shared locks don't exclude each other.
 
 ## Checkpoints (`checkpoints/<seq>.ckpt`)
 
@@ -80,7 +93,8 @@ A checkpoint is durable before anything is removed, and the WAL always holds eve
 3. Load the newest checkpoint that loads, streaming (`codec::from_binary_reader`: peak memory is the graph plus a buffer). A checkpoint that fails to load is **skipped**, and recovery tries the next older one, or an empty namespace at seq 0 if none is left. Failing to load means a checksum, length or format error, a catalog or version error, a seq that differs from the name, or another namespace's name. Skipped checkpoints are reported and left in place. The indexes are rebuilt from the loaded catalog (`NamespaceCatalog::apply_indexes`); differences from the indexes saved in the file are reported as `IndexChanges`, which are always empty for files the database wrote.
 4. Replay the WAL from the checkpoint's seq + 1 to its end with `Namespace::replay`.
 5. If the last segment has a torn tail, cut it: `set_len(valid_len)` and fsync. If `valid_len` is 0 (not even the header is valid), remove the segment and fsync `wal/`. The report includes the damage and `discarded_frames`: complete frames after the damage that were written before it was synced. That is possible only with `group` or `off` after an OS crash, and those commits were never durable.
-6. Start the WAL writer at the log's next seq, in a new segment.
+6. If the directory is in layout 1, upgrade its marker (Marker, above).
+7. Start the WAL writer at the log's next seq, in a new segment.
 
 The result is the state after the last complete commit in the log. With `always`, that is every acknowledged commit. With `group`, it is every acknowledged commit except those an OS crash lost within the policy's window ([guarantees.md](../guarantees.md)).
 
@@ -89,6 +103,7 @@ The result is the state after the last complete commit in the log. With `always`
 | Case | Error |
 |---|---|
 | The directory is not ours, is newer, or is damaged | `NotADataDir`, `UnsupportedLayout`, `InvalidDataDir` |
+| A backup, or an interrupted restore | `IsBackup`, `InterruptedRestore` |
 | Another store has it open | `Locked` |
 | The WAL doesn't reach back to the newest checkpoint that loads: newer ones are damaged and the records they covered were removed from the WAL. Fallback past the retention window is impossible | `NoUsableCheckpoint { from, first_seq, skipped }` |
 | The WAL ends before the checkpoint's seq (WAL files removed by hand, or an OS crash with `off`) | `LogEndsBefore` |
@@ -102,4 +117,4 @@ A panic during recovery (a core bug, upstream #28) is a crash: nothing was chang
 
 ## Versioning
 
-Layout version 1 is this document. Checkpoints have no version of their own: the core's binary format version is checked by the core, and the meta keys and their encoding belong to the layout version (the catalog JSON also has its own `format`). A newer writer that adds a meta key, changes a file name or adds a directory must bump the layout version, so that an older reader refuses the directory instead of skipping its checkpoints as damaged.
+Layout version 2 is this document; layout 1 is the same without the history id in the marker and without `BACKUP` and `RESTORING`, and is upgraded when a store opens it. Checkpoints have no version of their own: the core's binary format version is checked by the core, and the meta keys and their encoding belong to the layout version (the catalog JSON also has its own `format`). A newer writer that adds a meta key, changes a file name or adds a directory must bump the layout version, so that an older reader refuses the directory instead of skipping its checkpoints as damaged.

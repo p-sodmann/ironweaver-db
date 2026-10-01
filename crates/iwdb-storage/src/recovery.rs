@@ -18,6 +18,9 @@ use crate::{Error, LoggedNamespace, Wal, WalOptions, WalReader};
 pub struct RecoveryReport {
     /// The data directory was created (or initialized) by this open.
     pub created: bool,
+    /// The layout version the directory was upgraded from by this open
+    /// (`Some(1)` for a step 5 directory), if it was.
+    pub upgraded_from: Option<u32>,
     /// Stale temporary files that were removed.
     pub removed_temp_files: Vec<PathBuf>,
     /// The seq of the checkpoint recovery started from, `None` if it
@@ -73,7 +76,9 @@ pub struct Recovered<F: LogFs> {
 /// 4. replay the WAL from the checkpoint's seq + 1 to its end;
 /// 5. cut a torn tail off the last segment at its valid length and fsync
 ///    it (remove the segment if not even its header is valid);
-/// 6. start a WAL writer at the log's next seq, in a new segment.
+/// 6. upgrade a layout 1 directory to the current layout (a new marker
+///    with a history id, [`DataDir::upgrade`]);
+/// 7. start a WAL writer at the log's next seq, in a new segment.
 ///
 /// The result is the state after every commit in the log, which includes
 /// every acknowledged commit that the fsync policy made durable.
@@ -81,7 +86,8 @@ pub struct Recovered<F: LogFs> {
 /// Errors. Nothing is truncated or deleted in any of these cases, apart
 /// from temporary files, and the lock is released:
 /// - the directory: [`Error::NotADataDir`], [`Error::InvalidDataDir`],
-///   [`Error::UnsupportedLayout`], [`Error::Locked`];
+///   [`Error::UnsupportedLayout`], [`Error::IsBackup`],
+///   [`Error::InterruptedRestore`], [`Error::Locked`];
 /// - [`Error::NoUsableCheckpoint`]: the WAL doesn't reach back to the
 ///   newest checkpoint that loads (the newer ones are damaged and their
 ///   records were cut from the WAL);
@@ -101,7 +107,7 @@ pub fn recover<F: LogFs>(
     name: &NamespaceName,
     wal_options: WalOptions,
 ) -> Result<Recovered<F>, Error> {
-    let (dir, created) = DataDir::open(&fs, root, create)?;
+    let (mut dir, created) = DataDir::open(&fs, root, create)?;
     let removed_temp_files = dir.remove_temp_files(&fs)?;
 
     let base = load_newest(dir.checkpoint_dir(), name)?;
@@ -143,11 +149,13 @@ pub fn recover<F: LogFs>(
         }
     }
 
+    let upgraded_from = dir.upgrade(&fs)?;
     let seq = namespace.seq();
     let wal = Wal::create_with(fs, dir.wal_dir(), wal_options, end.next_seq)?;
     let namespace = LoggedNamespace::new(namespace, wal)?;
     let report = RecoveryReport {
         created,
+        upgraded_from,
         removed_temp_files,
         checkpoint: base.checkpoint,
         skipped_checkpoints: base.skipped,

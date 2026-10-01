@@ -103,6 +103,15 @@ pub enum Error {
     /// `wal/` or `checkpoints/` directory.
     #[error("the data directory '{}' is damaged: {reason}", path.display())]
     InvalidDataDir { path: PathBuf, reason: String },
+    /// The directory is a backup (it has a `BACKUP` manifest). A store
+    /// doesn't open a backup, so that the backup stays as it was and two
+    /// stores never continue one history: restore it instead.
+    #[error("'{}' is a backup; restore it into a new directory instead of opening it", path.display())]
+    IsBackup { path: PathBuf },
+    /// The directory holds an interrupted restore (a `RESTORING` file).
+    /// Remove it and restore again.
+    #[error("'{}' holds an interrupted restore; remove it and restore again", path.display())]
+    InterruptedRestore { path: PathBuf },
     /// The data directory has a layout version this version doesn't know
     /// (written by a newer Ironweaver DB).
     #[error("the data directory '{}' has layout version {version}, this version knows {}", path.display(), crate::layout::LAYOUT_VERSION)]

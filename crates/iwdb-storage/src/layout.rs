@@ -3,21 +3,25 @@
 //!
 //! ```text
 //! <dir>/
-//!   IWDB           marker: magic, layout version, CRC32C (16 bytes)
+//!   IWDB           marker: magic, layout version, history id, CRC32C (32 bytes; 16 in layout 1)
 //!   LOCK           held with an exclusive lock while a store has the directory open
 //!   checkpoints/   <seq, 20 digits>.ckpt   (see `checkpoint`)
 //!   wal/           <first seq, 20 digits>.wal   (see `documentation/formats/wal.md`)
+//!   BACKUP         only in a backup: its manifest (`documentation/formats/backup.md`)
+//!   RESTORING      only while a restore writes the directory
 //! ```
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::history::HistoryId;
 use crate::io::LogFs;
 use crate::Error;
 
-/// The layout version this version writes and reads.
-pub const LAYOUT_VERSION: u32 = 1;
+/// The layout version this version writes. It reads layout 1 too, and
+/// upgrades it when it opens a store (see [`DataDir::open`]).
+pub const LAYOUT_VERSION: u32 = 2;
 /// The marker file's name.
 pub const MARKER_NAME: &str = "IWDB";
 /// The lock file's name.
@@ -26,28 +30,54 @@ pub const LOCK_NAME: &str = "LOCK";
 pub const CHECKPOINT_DIR: &str = "checkpoints";
 /// The WAL directory's name.
 pub const WAL_DIR: &str = "wal";
+/// A backup's manifest. A directory with it is a backup, which a store
+/// refuses to open: it is restored instead.
+pub const BACKUP_NAME: &str = "BACKUP";
+/// Present while a restore writes a directory. A directory with it is an
+/// interrupted restore, which a store refuses to open.
+pub const RESTORING_NAME: &str = "RESTORING";
 /// The first 8 bytes of the marker.
 pub const MARKER_MAGIC: [u8; 8] = *b"IWDBDIR\n";
-/// Length of the marker file.
-pub const MARKER_LEN: usize = 16;
+/// Length of the marker file (layout 2).
+pub const MARKER_LEN: usize = 32;
+/// Length of a layout 1 marker.
+pub const MARKER_LEN_V1: usize = 16;
 /// Suffix of temporary files (a checkpoint, marker or segment being
 /// written). Any file with it is stale when a store opens.
 pub const TEMP_SUFFIX: &str = ".tmp";
 
-/// The marker's bytes: magic, version (u32 LE), CRC32C of bytes 0..12.
-pub fn encode_marker(version: u32) -> [u8; MARKER_LEN] {
-    let mut marker = [0u8; MARKER_LEN];
-    marker[..8].copy_from_slice(&MARKER_MAGIC);
-    marker[8..12].copy_from_slice(&version.to_le_bytes());
-    let crc = crc32c::crc32c(&marker[..12]);
-    marker[12..].copy_from_slice(&crc.to_le_bytes());
+/// A marker of layout `version`: magic, version (u32 LE), `body`, and the
+/// CRC32C of everything before it. Every layout keeps this frame, so that a
+/// reader can tell a newer marker from a damaged one.
+pub fn encode_marker_with(version: u32, body: &[u8]) -> Vec<u8> {
+    let mut marker = MARKER_MAGIC.to_vec();
+    marker.extend_from_slice(&version.to_le_bytes());
+    marker.extend_from_slice(body);
+    let crc = crc32c::crc32c(&marker);
+    marker.extend_from_slice(&crc.to_le_bytes());
     marker
+}
+
+/// The layout 2 marker of a directory of history `history`.
+pub fn encode_marker(history: HistoryId) -> Vec<u8> {
+    encode_marker_with(LAYOUT_VERSION, &history.0)
+}
+
+/// What a valid marker says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarkerInfo {
+    /// The layout version (1 or 2).
+    pub version: u32,
+    /// The history id (layout 2; `None` in layout 1).
+    pub history: Option<HistoryId>,
 }
 
 /// What a marker file says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Marker {
-    Version(u32),
+    Valid(MarkerInfo),
+    /// A valid marker of a layout this version doesn't know.
+    Newer(u32),
     /// Not our magic: some other file.
     Foreign,
     /// Our magic, but the wrong length or checksum.
@@ -58,14 +88,28 @@ fn decode_marker(bytes: &[u8]) -> Marker {
     if !bytes.starts_with(&MARKER_MAGIC) {
         return Marker::Foreign;
     }
-    if bytes.len() != MARKER_LEN || crc32c::crc32c(&bytes[..12]).to_le_bytes() != bytes[12..16] {
+    if bytes.len() < MARKER_LEN_V1 {
         return Marker::Damaged;
     }
-    Marker::Version(u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]))
+    let (data, crc) = bytes.split_at(bytes.len() - 4);
+    if crc32c::crc32c(data).to_le_bytes() != crc {
+        return Marker::Damaged;
+    }
+    let version = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    match (version, bytes.len()) {
+        (1, MARKER_LEN_V1) => Marker::Valid(MarkerInfo { version, history: None }),
+        (2, MARKER_LEN) => {
+            let mut id = [0u8; 16];
+            id.copy_from_slice(&bytes[12..28]);
+            Marker::Valid(MarkerInfo { version, history: Some(HistoryId(id)) })
+        }
+        (version, _) if version > LAYOUT_VERSION => Marker::Newer(version),
+        _ => Marker::Damaged,
+    }
 }
 
-/// An open data directory: its paths and the exclusive lock, held until
-/// this value is dropped (or the process exits).
+/// An open data directory: its paths, its history and the exclusive lock,
+/// held until this value is dropped (or the process exits).
 ///
 /// The lock is `flock` on `LOCK` (`LockFileEx` on Windows), taken without
 /// waiting. It is per open file, so a second open in the same process fails
@@ -76,22 +120,33 @@ pub struct DataDir {
     root: PathBuf,
     checkpoints: PathBuf,
     wal: PathBuf,
+    history: HistoryId,
+    /// The layout version found, if the marker still has to be upgraded to
+    /// the current layout ([`upgrade`](Self::upgrade)).
+    upgrade_from: Option<u32>,
     /// Holds the lock; closing it releases the lock.
     _lock: File,
 }
 
 impl DataDir {
     /// Open the data directory `root` and take its lock. With `create`, a
-    /// missing or empty directory is initialized (so is one left by an
-    /// interrupted initialization); otherwise it must exist with a marker.
-    /// Returns the directory and whether it was created.
+    /// missing or empty directory is initialized in the current layout
+    /// (so is one left by an interrupted initialization), with a new
+    /// history id; otherwise it must exist with a marker. Returns the
+    /// directory and whether it was created.
+    ///
+    /// A layout 1 directory (step 5) opens too. It gets a history id, which
+    /// [`upgrade`](Self::upgrade) writes into a layout 2 marker; recovery
+    /// does that once the directory has been read successfully, so a
+    /// failed open changes nothing.
     ///
     /// Errors, all before anything is changed except as noted:
     /// [`Error::NotADataDir`] (no marker, and files that aren't ours, or
     /// `create` is false), [`Error::UnsupportedLayout`] (a newer layout),
     /// [`Error::InvalidDataDir`] (a damaged marker, or a missing `wal/` or
-    /// `checkpoints/`), [`Error::Locked`] (another store has it open; the
-    /// `LOCK` file exists afterwards), [`Error::Io`].
+    /// `checkpoints/`), [`Error::IsBackup`] (a backup: restore it instead),
+    /// [`Error::InterruptedRestore`], [`Error::Locked`] (another store has
+    /// it open; the `LOCK` file exists afterwards), [`Error::Io`].
     pub fn open<F: LogFs>(fs: &F, root: &Path, create: bool) -> Result<(DataDir, bool), Error> {
         let not_ours = |reason: &str| Error::NotADataDir { path: root.to_path_buf(), reason: reason.to_owned() };
         match fs::metadata(root) {
@@ -107,7 +162,8 @@ impl DataDir {
             Err(e) => return Err(Error::io("stat", root, e)),
         }
 
-        let initialized = read_marker(root)?;
+        check_openable(root)?;
+        let initialized = read_marker(root)?.is_some();
         if !initialized {
             check_empty(root)?;
             if !create {
@@ -129,14 +185,24 @@ impl DataDir {
             Err(fs4::TryLockError::Error(e)) => return Err(Error::io("lock", &lock_path, e)),
         }
 
+        // Checked again under the lock: another store may have initialized
+        // it, or a restore may have finished it
+        check_openable(root)?;
+        let marker = read_marker(root)?;
+        let created = marker.is_none();
+        let (history, upgrade_from) = match marker {
+            Some(MarkerInfo { history: Some(history), .. }) => (history, None),
+            Some(MarkerInfo { version, history: None }) => (HistoryId::random(), Some(version)),
+            None => (HistoryId::random(), None),
+        };
         let dir = DataDir {
             root: root.to_path_buf(),
             checkpoints: root.join(CHECKPOINT_DIR),
             wal: root.join(WAL_DIR),
+            history,
+            upgrade_from,
             _lock: lock,
         };
-        // Checked again under the lock: another store may have initialized it
-        let created = !read_marker(root)?;
         if created {
             check_empty(root)?;
             dir.initialize(fs)?;
@@ -163,10 +229,38 @@ impl DataDir {
             }
         }
         fs.sync_dir(&self.root).map_err(|e| Error::io("sync directory", &self.root, e))?;
+        self.write_marker(fs)
+    }
+
+    /// Write the current layout's marker with `write_atomic`, and sync the
+    /// directory.
+    fn write_marker<F: LogFs>(&self, fs: &F) -> Result<(), Error> {
         let marker = self.root.join(MARKER_NAME);
-        let bytes = encode_marker(LAYOUT_VERSION);
+        let bytes = encode_marker(self.history);
         fs.write_atomic(&marker, &mut |out| out.write_all(&bytes)).map_err(|e| Error::io("write", &marker, e))?;
         fs.sync_dir(&self.root).map_err(|e| Error::io("sync directory", &self.root, e))
+    }
+
+    /// Upgrade a layout 1 directory to the current layout: replace its
+    /// marker (atomically, then a directory sync) with one that holds the
+    /// history id [`open`](Self::open) chose. Nothing else changes: the
+    /// checkpoints and segments of layout 1 are valid in layout 2. Does
+    /// nothing for a directory in the current layout. Returns the layout
+    /// version it upgraded from.
+    ///
+    /// An older version of Ironweaver DB can't open the directory
+    /// afterwards. A crash leaves the old marker or the new one.
+    pub fn upgrade<F: LogFs>(&mut self, fs: &F) -> Result<Option<u32>, Error> {
+        let Some(from) = self.upgrade_from else { return Ok(None) };
+        self.write_marker(fs)?;
+        self.upgrade_from = None;
+        Ok(Some(from))
+    }
+
+    /// The directory's history id (for a layout 1 directory, the one that
+    /// [`upgrade`](Self::upgrade) writes).
+    pub fn history(&self) -> HistoryId {
+        self.history
     }
 
     pub fn root(&self) -> &Path {
@@ -210,18 +304,21 @@ impl DataDir {
     }
 }
 
-/// Whether `root` has a valid marker of a known version (false if it has
-/// none).
-fn read_marker(root: &Path) -> Result<bool, Error> {
+/// Read the marker of the data directory `root`, without taking the lock
+/// or changing anything: `None` if it has none. Errors:
+/// [`Error::UnsupportedLayout`] (a newer layout), [`Error::NotADataDir`]
+/// (a file named `IWDB` that isn't ours), [`Error::InvalidDataDir`] (a
+/// damaged marker), [`Error::Io`].
+pub fn read_marker(root: &Path) -> Result<Option<MarkerInfo>, Error> {
     let path = root.join(MARKER_NAME);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(Error::io("read", &path, e)),
     };
     match decode_marker(&bytes) {
-        Marker::Version(LAYOUT_VERSION) => Ok(true),
-        Marker::Version(version) => Err(Error::UnsupportedLayout { path: root.to_path_buf(), version }),
+        Marker::Valid(info) => Ok(Some(info)),
+        Marker::Newer(version) => Err(Error::UnsupportedLayout { path: root.to_path_buf(), version }),
         Marker::Foreign => Err(Error::NotADataDir {
             path: root.to_path_buf(),
             reason: format!("'{}' is not an Ironweaver DB marker", MARKER_NAME),
@@ -230,6 +327,17 @@ fn read_marker(root: &Path) -> Result<bool, Error> {
             Err(Error::InvalidDataDir { path: root.to_path_buf(), reason: format!("'{}' is damaged", MARKER_NAME) })
         }
     }
+}
+
+/// A store opens neither an interrupted restore nor a backup.
+fn check_openable(root: &Path) -> Result<(), Error> {
+    if root.join(RESTORING_NAME).exists() {
+        return Err(Error::InterruptedRestore { path: root.to_path_buf() });
+    }
+    if root.join(BACKUP_NAME).exists() && root.join(MARKER_NAME).exists() {
+        return Err(Error::IsBackup { path: root.to_path_buf() });
+    }
+    Ok(())
 }
 
 /// A directory without a marker may only hold what an interrupted
@@ -249,13 +357,38 @@ fn check_empty(root: &Path) -> Result<(), Error> {
             other => other.ends_with(TEMP_SUFFIX) && path.is_file(),
         };
         if !ok {
+            let what = if matches!(&*name, CHECKPOINT_DIR | WAL_DIR) { "a non-empty " } else { "" };
             return Err(Error::NotADataDir {
                 path: root.to_path_buf(),
-                reason: format!("it has no marker file and holds '{}'", name),
+                reason: format!(
+                    "it has no marker file and holds {}'{}' (an interrupted backup or restore leaves such a directory)",
+                    what, name
+                ),
             });
         }
     }
     Ok(())
+}
+
+/// Take a shared lock on `<root>/LOCK`, if that file exists, without
+/// creating it: readers that must not run while a store has the directory
+/// open (verify, restore reading a data directory) hold it while they
+/// read. Shared locks don't exclude each other. Returns the locked file,
+/// or `None` if there is no `LOCK` file (then no store has it open: a
+/// store creates `LOCK` before anything else). Fails with
+/// [`Error::Locked`] if a store has it open.
+pub fn lock_shared(root: &Path) -> Result<Option<File>, Error> {
+    let path = root.join(LOCK_NAME);
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Error::io("open", &path, e)),
+    };
+    match fs4::FileExt::try_lock_shared(&file) {
+        Ok(()) => Ok(Some(file)),
+        Err(fs4::TryLockError::WouldBlock) => Err(Error::Locked { path }),
+        Err(fs4::TryLockError::Error(e)) => Err(Error::io("lock", &path, e)),
+    }
 }
 
 #[cfg(test)]
@@ -264,13 +397,22 @@ mod tests {
 
     #[test]
     fn markers_are_checked() {
-        let marker = encode_marker(LAYOUT_VERSION);
-        assert_eq!(decode_marker(&marker), Marker::Version(1));
-        assert_eq!(decode_marker(&encode_marker(7)), Marker::Version(7));
+        let history = HistoryId([7; 16]);
+        let marker = encode_marker(history);
+        assert_eq!(marker.len(), MARKER_LEN);
+        assert_eq!(decode_marker(&marker), Marker::Valid(MarkerInfo { version: 2, history: Some(history) }));
+        let v1 = encode_marker_with(1, &[]);
+        assert_eq!(v1.len(), MARKER_LEN_V1);
+        assert_eq!(decode_marker(&v1), Marker::Valid(MarkerInfo { version: 1, history: None }));
+        // A newer layout may have any body
+        assert_eq!(decode_marker(&encode_marker_with(7, b"whatever")), Marker::Newer(7));
+        assert_eq!(decode_marker(&encode_marker_with(1, &[0; 16])), Marker::Damaged);
+        assert_eq!(decode_marker(&encode_marker_with(0, &[])), Marker::Damaged);
         assert_eq!(decode_marker(b"hello"), Marker::Foreign);
         assert_eq!(decode_marker(&marker[..15]), Marker::Damaged);
-        for bit in 64..128 {
-            let mut bad = marker;
+        assert_eq!(decode_marker(&marker[..31]), Marker::Damaged);
+        for bit in 64..MARKER_LEN * 8 {
+            let mut bad = marker.clone();
             bad[bit / 8] ^= 1 << (bit % 8);
             assert_eq!(decode_marker(&bad), Marker::Damaged, "bit {}", bit);
         }
