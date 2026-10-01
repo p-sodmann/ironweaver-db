@@ -98,11 +98,19 @@ fn sample_batch(g: &G) -> Vec<O> {
 
 #[test]
 fn builds_without_python() {
-    // Nothing in the dependency graph links Python: pyo3 is not in the lockfile.
+    // Design rule 1: only the bindings crate (step 7) depends on pyo3; no
+    // other package in the lockfile does (pyo3's own crates aside).
     let lock = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock");
     let lock = std::fs::read_to_string(lock).expect("workspace Cargo.lock");
     assert!(lock.contains("name = \"ironweaver-core\""));
-    assert!(!lock.contains("name = \"pyo3"), "pyo3 must not be a dependency");
+    for package in lock.split("[[package]]") {
+        let Some(name) = package.lines().find_map(|l| l.strip_prefix("name = \"")) else { continue };
+        let name = name.trim_end_matches('"');
+        let uses_pyo3 = package.lines().any(|l| l.trim() == "\"pyo3\"," || l.trim().starts_with("\"pyo3 "));
+        if uses_pyo3 && !name.starts_with("pyo3") {
+            assert_eq!(name, "iwdb-python", "pyo3 must not be a dependency of {}", name);
+        }
+    }
 }
 
 #[test]
