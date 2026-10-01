@@ -145,6 +145,12 @@ pub enum Error {
     #[error("the backup's history {backup} and the archive's {archive} differ; they can't be combined")]
     HistoryMismatch { backup: String, archive: String },
 
+    /// A restore to a time found no record with a commit time at or
+    /// before it in the sources' WAL (`first`: the earliest commit time
+    /// there, if any).
+    #[error("no commit at or before {time} in the WAL to restore from (the earliest is {})", first.map_or("none".to_owned(), |t| t.to_string()))]
+    NoCommitAtOrBefore { time: crate::CommitTime, first: Option<crate::CommitTime> },
+
     // Checkpoints and recovery (step 5)
     /// A checkpoint file that can't be loaded: a checksum or format error,
     /// or content that doesn't match its name or namespace. Recovery skips

@@ -36,8 +36,8 @@ pub use iwdb_engine::{CatalogChange, CommitResult, EdgeKey, Mutation, Namespace,
 pub use iwdb_storage::io::{LogFs, StdFs};
 pub use iwdb_storage::{
     BackupReport, CheckpointOutcome, CommitTime, CutTail, Error, Finding, FsyncPolicy, HistoryId, Kind, RecoveryReport,
-    SkippedCheckpoint, VerifyReport, WalOptions,
+    RestoreReport, RestoreSources, RestoreTarget, SkippedCheckpoint, VerifyReport, WalOptions,
 };
-pub use ops::verify;
+pub use ops::{restore, restore_with, verify};
 pub use options::{CheckpointOptions, StoreOptions};
 pub use store::{Edge, Node, Store, NAMESPACE};

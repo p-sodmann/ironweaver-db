@@ -113,3 +113,57 @@ pub fn frame(seq: u64, synced_seq: u64, payload: &[u8]) -> Vec<u8> {
 pub fn workload(n: usize, seed: u64) -> Vec<Step> {
     workload::seeded(n, seed)
 }
+
+/// A reference that keeps every commit record, so that it can give the
+/// state at any seq (point-in-time restore tests).
+pub struct History {
+    pub ns: Namespace,
+    pub records: Vec<iwdb_engine::CommitRecord>,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        History { ns: reference(), records: Vec::new() }
+    }
+}
+
+impl History {
+    /// Run `steps` against the store and the reference: the same outcome
+    /// for each, as [`run`] checks.
+    pub fn run<F: LogFs + Clone + Send + Sync + 'static>(&mut self, store: &Store<F>, steps: &[Step])
+    where
+        F::File: Send,
+    {
+        for step in steps {
+            let (outcome, prepared) = match step {
+                Step::Tx(mutations) => (store.commit(mutations), self.ns.prepare(mutations)),
+                Step::Catalog(change) => {
+                    (store.commit_catalog(change.clone()), self.ns.prepare_catalog(change.clone()))
+                }
+            };
+            match (outcome, prepared) {
+                (Ok(a), Ok(prepared)) => {
+                    self.records.push(prepared.record().clone());
+                    assert_eq!(a, self.ns.apply(prepared).unwrap());
+                }
+                (Err(Error::Engine(a)), Err(b)) => assert_eq!(a, b),
+                (outcome, expected) => {
+                    panic!("store {:?}, reference {:?}", outcome, expected.map(|p| p.result().clone()))
+                }
+            }
+        }
+    }
+
+    pub fn seq(&self) -> u64 {
+        self.ns.seq()
+    }
+
+    /// The state after the commits `1 ..= seq`.
+    pub fn state_at(&self, seq: u64) -> State {
+        let mut ns = reference();
+        for record in &self.records[..seq as usize] {
+            ns.replay(record.clone()).unwrap();
+        }
+        state(&ns)
+    }
+}

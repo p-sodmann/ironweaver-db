@@ -115,6 +115,18 @@ A panic during recovery (a core bug, upstream #28) is a crash: nothing was chang
 
 **The `off` policy** (tests only) never fsyncs, so the checkpointer checkpoints up to the last applied seq. After an OS crash the WAL may then end before a checkpoint, and recovery refuses to open (`LogEndsBefore`). That is within what `off` allows.
 
+## Restore
+
+`iwdb::restore` (`iwdb_storage::restore`) writes a new data directory at a target seq `N` from a backup (or a data directory no store has open), a WAL archive ([archive.md](archive.md)), or both ([ADR 0009](../adr/0009-backup-archive-restore.md)):
+
+1. **Sources.** A backup is read under a shared lock on its `LOCK` (`Locked` if a store has it open) and must have a marker (an interrupted backup has none: `NotADataDir`) and, if it has one, a valid manifest ([backup.md](backup.md)). An archive must have its marker. Their history ids must be equal (`HistoryMismatch`; a layout 1 directory has none, so it can't be combined with an archive).
+2. **One log.** The backup's and the archive's segments are read as one log. Where both have a segment of the same name, one must be a prefix of the other (the backup's copy of the segment it cut), and the longer is used; otherwise `ArchiveConflict`.
+3. **Target.** A seq; a time: the last record in seq order whose commit time is at or before it ([wal.md](wal.md), "Commit time"; `NoCommitAtOrBefore` if there is none); or the latest seq the sources reach (a backup alone: its manifest's seq).
+4. **Replay.** The newest backup checkpoint at or below `N` that loads (older ones on failure, then an empty namespace at seq 0) is loaded and the log replayed onto it up to `N`. `MissingRecords` if the log doesn't reach back to the checkpoint's seq + 1; `LogEndsBefore` if it ends before `N`.
+5. **Write.** The destination must be missing or empty, and not inside a source. In this order, through `LogFs`: a `RESTORING` file, fsynced; `LOCK` (locked), `checkpoints/` and `wal/`; the directory synced; the checkpoint at `N` (`write_atomic`; none if `N` is 0) and `checkpoints/` synced; `RESTORING` removed and the directory synced; the marker with a **new** history id (`write_atomic`) and the directory synced.
+
+The result opens as a store at `N` with an empty WAL: its first commit is `N + 1`, in a new history, which needs a new archive directory. An interrupted restore leaves either `RESTORING` (open refuses with `InterruptedRestore`), or a checkpoint without a marker (`NotADataDir`), or, for a restore to seq 0 or a failure before anything was written, an empty directory. It is never finished by the next open: remove the directory and restore again. A restore never writes to its sources.
+
 ## Versioning
 
 Layout version 2 is this document; layout 1 is the same without the history id in the marker and without `BACKUP` and `RESTORING`, and is upgraded when a store opens it. Checkpoints have no version of their own: the core's binary format version is checked by the core, and the meta keys and their encoding belong to the layout version (the catalog JSON also has its own `format`). A newer writer that adds a meta key, changes a file name or adds a directory must bump the layout version, so that an older reader refuses the directory instead of skipping its checkpoints as damaged.
