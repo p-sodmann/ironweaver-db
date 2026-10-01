@@ -18,6 +18,11 @@
 //! # }
 //! ```
 //!
+//! Operations: [`Store::backup`] (an online backup), continuous WAL
+//! archiving ([`StoreOptions::archive`]), [`restore`] (point-in-time
+//! recovery from a backup and/or an archive), [`verify`] (every file and
+//! invariant, without writing) and [`status`].
+//!
 //! [`Store`] translates only: commits go through the engine's commit
 //! pipeline ([`iwdb_engine::Namespace`]) and the WAL
 //! ([`iwdb_storage::LoggedNamespace`]); opening runs recovery

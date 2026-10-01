@@ -468,4 +468,25 @@ mod tests {
         escaping.files[0].path = "../outside".into();
         assert!(Manifest::decode(&escaping.encode()).unwrap_err().contains("invalid path"));
     }
+
+    /// A manifest frame with a valid CRC around arbitrary bytes.
+    fn framed(doc: &[u8]) -> Vec<u8> {
+        let mut out = MANIFEST_MAGIC.to_vec();
+        out.extend_from_slice(&MANIFEST_VERSION.to_le_bytes());
+        out.extend_from_slice(&(doc.len() as u32).to_le_bytes());
+        out.extend_from_slice(doc);
+        let crc = crc32c::crc32c(&out);
+        out.extend_from_slice(&crc.to_le_bytes());
+        out
+    }
+
+    proptest::proptest! {
+        /// Arbitrary bytes, as a whole file or as the document inside a
+        /// valid frame: an error, never a panic.
+        #[test]
+        fn arbitrary_manifests_never_panic(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512)) {
+            let _ = Manifest::decode(&bytes);
+            let _ = Manifest::decode(&framed(&bytes));
+        }
+    }
 }

@@ -17,7 +17,7 @@ fn namespace() -> Result<NamespaceName, Error> {
 /// Verify a data directory, a backup or a WAL archive without changing
 /// anything: every checksum, every checkpoint, the WAL from its first
 /// segment, replay against the newer checkpoints, and the invariants
-/// ([`iwdb_storage::verify`] and [`verify_archive`] list them, ADR 0011).
+/// ([`iwdb_storage::verify`](fn@iwdb_storage::verify) and [`verify_archive`] list them, ADR 0011).
 ///
 /// On a data directory or backup it takes a shared lock:
 /// [`Error::Locked`] while a store has it open. Damage is reported in
@@ -34,7 +34,7 @@ pub fn verify(dir: &Path) -> Result<VerifyReport, Error> {
 /// result is a data directory with a new history id and one checkpoint at
 /// the target seq, which [`Store::open`](crate::Store::open) opens
 /// directly; its next commit is the target seq + 1. The sources are only
-/// read. See [`iwdb_storage::restore`] for the steps, the errors and what
+/// read. See [`iwdb_storage::restore`](fn@iwdb_storage::restore) for the steps, the errors and what
 /// an interrupted restore leaves (ADR 0009).
 ///
 /// A restored store has a new history: give it a new archive directory.

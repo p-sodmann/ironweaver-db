@@ -1,5 +1,6 @@
 //! Ironweaver DB storage: the write-ahead log (step 4), the data
-//! directory, checkpoints and recovery (step 5). Backup follows in step 7.
+//! directory, checkpoints and recovery (step 5), backups, WAL archiving,
+//! restore and verify (step 7).
 //!
 //! - [`Wal`]: appends [`CommitRecord`](iwdb_engine::CommitRecord)s to
 //!   segment files, fsynced per [`FsyncPolicy`], and fails into a read-only
@@ -15,6 +16,16 @@
 //!   (`documentation/formats/data-dir.md`).
 //! - [`checkpoint`]: checkpoint files and the [`Checkpointer`].
 //! - [`recover`]: open a data directory and rebuild its namespace.
+//! - [`backup`]: a consistent copy of a data directory up to a synced seq,
+//!   with a manifest (`documentation/formats/backup.md`).
+//! - [`archive`]: continuous WAL archiving before the checkpointer removes
+//!   segments (`documentation/formats/archive.md`).
+//! - [`restore`](mod@restore): a new data directory at a seq or time from a backup
+//!   and/or an archive.
+//! - [`verify`](mod@verify): every file and invariant, checked without writing.
+//! - [`inspect`]: a quick, read-only look at a directory.
+//! - [`HistoryId`] and [`CommitTime`]: which history a directory holds, and
+//!   when a commit was appended (ADR 0009, ADR 0010).
 //!
 //! The guarantees of each fsync policy are in `documentation/guarantees.md`.
 
