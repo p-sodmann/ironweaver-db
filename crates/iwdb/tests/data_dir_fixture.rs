@@ -4,7 +4,7 @@
 //! it and recover the state in `expected.txt`:
 //!
 //! - `tests/fixtures/data-dir-v1/`: layout 1, written by step 5 (WAL format
-//!   1). Opening a copy upgrades it to layout 2;
+//!   1). Opening a copy upgrades it to the current layout;
 //! - `tests/fixtures/data-dir-v2/`: layout 2, written by step 7 (WAL format
 //!   2), with its history id in `expected.txt`. Opening a copy upgrades it
 //!   to layout 3 with the same history;
@@ -20,6 +20,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[path = "../../iwdb-storage/tests/common/mod.rs"]
+mod common;
 mod support;
 
 use std::fs;
@@ -151,4 +153,36 @@ fn the_v3_fixture_opens_and_recovers_its_state_keys_and_history() {
     let result = store.commit_with(&mutations, &options).unwrap();
     assert!(result.deduplicated && result.time.is_some());
     assert_eq!(store.seq(), seq);
+}
+
+/// A failure while the marker is upgraded (layouts 1 and 2): before the
+/// rename, the old marker stays; after it, the new one is in place. Either
+/// way the open fails with `Io`, nothing else changed, and the next open
+/// recovers the fixture's state (layout 2: with its history id).
+#[test]
+fn a_failed_marker_upgrade_fails_the_open_and_the_next_one_finishes_it() {
+    use common::{Action, Call, Rule, TestFs, When};
+    for version in [1, 2] {
+        for when in [When::Before, When::Midway, When::After] {
+            let dir = tempfile::tempdir().unwrap();
+            copy_dir(&fixture(version).join("store"), dir.path());
+            let fs = TestFs::default();
+            fs.add(Rule::new(Call::WriteAtomic, when, Action::Fail).path("IWDB"));
+            let error = Store::open_with(fs, dir.path(), options(2)).unwrap_err();
+            assert!(matches!(error, iwdb::Error::Io { .. }), "{} {:?}: {}", version, when, error);
+            let marker = read_marker(dir.path()).unwrap().unwrap();
+            let expected = if when == When::After { LAYOUT_VERSION } else { version };
+            assert_eq!(marker.version, expected, "{} {:?}", version, when);
+
+            let store = Store::open(dir.path(), options(2)).unwrap();
+            let text = fs::read_to_string(fixture(version).join("expected.txt")).unwrap();
+            let (state, rest) = text.split_at(text.find("history ").unwrap_or(text.len()));
+            assert_eq!(store.read(describe), state);
+            if let Some(history) = rest.trim().strip_prefix("history ") {
+                assert_eq!(store.history(), history.parse::<HistoryId>().unwrap());
+            }
+            drop(store);
+            assert_eq!(read_marker(dir.path()).unwrap().unwrap().version, LAYOUT_VERSION);
+        }
+    }
 }

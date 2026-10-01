@@ -137,10 +137,11 @@ impl DataDir {
     /// history id; otherwise it must exist with a marker. Returns the
     /// directory and whether it was created.
     ///
-    /// A layout 1 directory (step 5) opens too. It gets a history id, which
-    /// [`upgrade`](Self::upgrade) writes into a layout 2 marker; recovery
-    /// does that once the directory has been read successfully, so a
-    /// failed open changes nothing.
+    /// A layout 1 (step 5) or layout 2 (step 7) directory opens too: a
+    /// layout 1 directory gets a new history id, a layout 2 one keeps its
+    /// own, and [`upgrade`](Self::upgrade) writes it into a marker of the
+    /// current layout. Recovery does that once the directory has been read
+    /// successfully, so a failed open changes nothing.
     ///
     /// Errors, all before anything is changed except as noted:
     /// [`Error::NotADataDir`] (no marker, and files that aren't ours, or

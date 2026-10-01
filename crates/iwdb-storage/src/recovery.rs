@@ -76,7 +76,7 @@ pub struct Recovered<F: LogFs> {
 /// 4. replay the WAL from the checkpoint's seq + 1 to its end;
 /// 5. cut a torn tail off the last segment at its valid length and fsync
 ///    it (remove the segment if not even its header is valid);
-/// 6. upgrade a layout 1 directory to the current layout (a new marker
+/// 6. upgrade a layout 1 or 2 directory to the current layout (a new marker
 ///    with a history id, [`DataDir::upgrade`]);
 /// 7. start a WAL writer at the log's next seq, in a new segment.
 ///
