@@ -101,11 +101,7 @@ impl<F: LogFs> Archive<F> {
             .truncate(false)
             .open(&lock_path)
             .map_err(|e| Error::io("open", &lock_path, e))?;
-        match fs4::FileExt::try_lock(&lock) {
-            Ok(()) => {}
-            Err(fs4::TryLockError::WouldBlock) => return Err(Error::Locked { path: lock_path }),
-            Err(fs4::TryLockError::Error(e)) => return Err(Error::io("lock", &lock_path, e)),
-        }
+        crate::layout::lock_file(&lock, &lock_path, true)?;
         match read_archive_marker(dir)? {
             Some(found) if found == history => {}
             Some(found) => {

@@ -205,3 +205,45 @@ fn backups_and_interrupted_restores_are_refused() {
         other => panic!("{:?}", other),
     }
 }
+
+/// A process that another thread spawns holds a copy of this process's
+/// open files until it execs, the lock file included, so the lock of a
+/// store that was just closed can look held for that moment. Opening must
+/// not fail then (a step 5 bug, found in step 7: about 3.5% of reopens
+/// failed with `Locked` while another thread spawned processes).
+#[cfg(unix)]
+#[test]
+fn reopening_while_another_thread_spawns_processes() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(2);
+    opts.wal.fsync = iwdb::FsyncPolicy::Off;
+    Store::open(dir.path(), opts.clone()).unwrap().close().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let spawner = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut spawned = 0;
+            while !stop.load(Ordering::Relaxed) {
+                Command::new("true").status().unwrap();
+                spawned += 1;
+            }
+            spawned
+        })
+    };
+    let mut locked = 0;
+    for _ in 0..400 {
+        match Store::open(dir.path(), opts.clone()) {
+            Err(Error::Locked { .. }) => locked += 1,
+            other => drop(other.unwrap()),
+        }
+        // A reader's shared lock, too
+        if matches!(iwdb::verify(dir.path()), Err(Error::Locked { .. })) {
+            locked += 1;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    assert!(spawner.join().unwrap() > 100);
+    assert_eq!(locked, 0);
+}

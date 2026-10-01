@@ -51,9 +51,9 @@ Opening a directory:
 
 ## Lock (`LOCK`)
 
-The store opens `LOCK` (creating it if needed) and takes an exclusive, non-blocking lock on it: `flock(LOCK_EX | LOCK_NB)` on Unix, `LockFileEx` on Windows, through the `fs4` crate (std's `File::try_lock` needs Rust 1.89; our MSRV is 1.85). If the lock is held, opening fails with `Locked`.
+The store opens `LOCK` (creating it if needed) and takes an exclusive, non-blocking lock on it: `flock(LOCK_EX | LOCK_NB)` on Unix, `LockFileEx` on Windows, through the `fs4` crate (std's `File::try_lock` needs Rust 1.89; our MSRV is 1.85). If the lock is held, it tries again a few times over about 80 ms, then opening fails with `Locked`. (A process that another thread spawns holds a copy of every open file until it execs, and so, for that moment, the lock of a store that was just closed; without the retries a reopen failed now and then. Step 7 found and fixed this.)
 
-- `flock` locks belong to the open file, not the process, so a second open in the same process fails too.
+- `flock` locks belong to the open file, not the process, so a second open in the same process fails too. For the same reason a child process **forked** without exec (Python's `multiprocessing` with the `fork` start method, `os.fork()`) inherits the lock: the store stays locked until that child exits, even after the parent closes it. Don't fork while a store is open, or use the `spawn` start method.
 - The lock is released when the store is closed or dropped, and by the OS when the process exits, however it exits (tested with `kill -9`).
 - It is advisory: it keeps out other stores and tools that take it (`iwctl`, step 7), not arbitrary programs. On network file systems `flock` may not work; they are not supported.
 - The lock is taken after the marker is checked and before anything is changed, apart from creating `LOCK` itself.

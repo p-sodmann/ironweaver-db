@@ -367,11 +367,7 @@ fn write_restored<F: LogFs>(fs: &F, dest: &Path, namespace: &Namespace, history:
         .truncate(false)
         .open(&lock_path)
         .map_err(|e| Error::io("open", &lock_path, e))?;
-    match fs4::FileExt::try_lock(&lock) {
-        Ok(()) => {}
-        Err(fs4::TryLockError::WouldBlock) => return Err(Error::Locked { path: lock_path }),
-        Err(fs4::TryLockError::Error(e)) => return Err(Error::io("lock", &lock_path, e)),
-    }
+    crate::layout::lock_file(&lock, &lock_path, true)?;
     for sub in [CHECKPOINT_DIR, WAL_DIR] {
         let path = dest.join(sub);
         fs::create_dir(&path).map_err(|e| Error::io("create directory", &path, e))?;

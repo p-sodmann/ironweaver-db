@@ -179,11 +179,7 @@ impl DataDir {
             .truncate(false)
             .open(&lock_path)
             .map_err(|e| Error::io("open", &lock_path, e))?;
-        match fs4::FileExt::try_lock(&lock) {
-            Ok(()) => {}
-            Err(fs4::TryLockError::WouldBlock) => return Err(Error::Locked { path: lock_path }),
-            Err(fs4::TryLockError::Error(e)) => return Err(Error::io("lock", &lock_path, e)),
-        }
+        lock_file(&lock, &lock_path, true)?;
 
         // Checked again under the lock: another store may have initialized
         // it, or a restore may have finished it
@@ -384,11 +380,45 @@ pub fn lock_shared(root: &Path) -> Result<Option<File>, Error> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(Error::io("open", &path, e)),
     };
-    match fs4::FileExt::try_lock_shared(&file) {
-        Ok(()) => Ok(Some(file)),
-        Err(fs4::TryLockError::WouldBlock) => Err(Error::Locked { path }),
-        Err(fs4::TryLockError::Error(e)) => Err(Error::io("lock", &path, e)),
+    lock_file(&file, &path, false)?;
+    Ok(Some(file))
+}
+
+/// How long [`lock_file`] waits between attempts, in milliseconds: about
+/// 80 ms in all.
+const LOCK_RETRIES_MS: [u64; 6] = [1, 2, 5, 10, 20, 40];
+
+/// Lock `file` (the lock file at `path`), exclusively or shared, without
+/// blocking; [`Error::Locked`] if it is held.
+///
+/// A held lock is tried again a few times over about 80 ms before giving
+/// up. A process that another thread of this process is spawning holds a
+/// copy of every open file between its fork and its exec (close-on-exec
+/// takes effect only at the exec), and a `flock` belongs to the open file,
+/// so the lock of a store that was just closed can look held for that
+/// moment. Without the retries, reopening a store while another thread
+/// starts processes failed now and then (step 7 found it: 3.5% of reopens
+/// under heavy spawning). A real holder makes the open fail after the
+/// retries.
+pub fn lock_file(file: &File, path: &Path, exclusive: bool) -> Result<(), Error> {
+    let attempt = || {
+        if exclusive {
+            fs4::FileExt::try_lock(file)
+        } else {
+            fs4::FileExt::try_lock_shared(file)
+        }
+    };
+    for wait in LOCK_RETRIES_MS.iter().map(|ms| Some(std::time::Duration::from_millis(*ms))).chain([None]) {
+        match attempt() {
+            Ok(()) => return Ok(()),
+            Err(fs4::TryLockError::WouldBlock) => match wait {
+                Some(wait) => std::thread::sleep(wait),
+                None => return Err(Error::Locked { path: path.to_path_buf() }),
+            },
+            Err(fs4::TryLockError::Error(e)) => return Err(Error::io("lock", path, e)),
+        }
     }
+    Err(Error::Locked { path: path.to_path_buf() })
 }
 
 #[cfg(test)]
