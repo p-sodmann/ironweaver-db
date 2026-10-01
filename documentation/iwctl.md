@@ -11,7 +11,12 @@ iwctl [--json] <command> [options]
 | Command | What it does |
 |---|---|
 | `status <dir>` | What a data directory, a backup or a WAL archive holds. A data directory that no store has open is **opened** (recovery runs: it may cut a torn tail, remove temporary files, and upgrade a layout 1 directory) and closed again without a checkpoint; the output says what recovery did, the seq, and the synced seq. One that a store has open is only read: `in use`, exit code 3. A backup shows its manifest; an archive its segments. |
-| `checkpoint <dir> (--archive <archive> \| --no-archive) [--keep <n>]` | Open the store, write a checkpoint of every commit, keep `n` checkpoints (default 2), remove the WAL segments the oldest kept one covers, and close. If the store archives its WAL, name the archive: the segments the checkpoint removes go there first. `--no-archive` says it doesn't; one of the two is required, so that a checkpoint never removes segments an archive should have received. With nothing new to write, it removes nothing ([data-dir.md](formats/data-dir.md), "Interrupted cleanup"). |
+| `checkpoint <dir> (--archive <archive> \| --no-archive) [--keep <n>]` | Open the store, write a checkpoint of every commit of every namespace (`-n` to name some), keep `n` checkpoints (default 2), remove the WAL segments the oldest kept one covers, and close. If the store archives its WAL, name the archive: the segments the checkpoint removes go there first. `--no-archive` says it doesn't; one of the two is required, so that a checkpoint never removes segments an archive should have received. With nothing new to write, it removes nothing ([data-dir.md](formats/data-dir.md), "Interrupted cleanup"). |
+| `namespaces <dir>` | List the namespaces of a store with their seqs, counts, memory and indexes (opens the store, like `status`). |
+| `create-namespace <dir> <name> [--key <key>]`, `drop-namespace <dir> <name> (--archive <archive> \| --no-archive) [--key <key>]` | Create or drop a namespace ([ADR 0017](adr/0017-namespaces.md)). A drop needs `--archive` (the store's archive: the namespace's last segments go there first) or `--no-archive`, as `checkpoint` does. With `--key`, a retry returns the original result (`deduplicated`). |
+| `indexes <dir> [-n <namespace>]` | The namespace's indexes with their state (`ready`, or `building`), paths, whether declared or needed by a unique constraint, and entries. |
+| `create-index <dir> <path> [-n <ns>] [--key <key>]`, `drop-index <dir> <path> ...` | Create (online build) or drop a property index; `path` is attribute names joined by `.`. |
+| `add-constraint <dir> unique\|required <label> <path> [-n <ns>] [--key <key>]`, `drop-constraint <dir> ...` | Add a constraint (the existing data is validated first: exit code 4 with the violating node if it fails) or drop one. |
 | `backup <dir> <dest> [--no-verify]` | Open the store, back it up into `<dest>` (missing or empty) up to its last commit, close it, and verify the backup ([backup.md](formats/backup.md)). |
 | `restore <dest> [--backup <dir>] [--archive <archive>] [--seq <n> \| --time <time>] [--no-verify]` | Restore into `<dest>` (missing or empty) from a backup (or a data directory no store has open), an archive, or both, to seq `n`, to the last commit at or before `time`, or to the latest seq they reach; then verify the result. `time` is RFC 3339 with a UTC offset: `2026-10-01T12:30:00Z`, `2026-10-01T14:30:00+02:00`. The restored store has a new history: give it a new archive. |
 | `verify <dir>` | Check every file and invariant of a data directory, a backup or an archive, and change nothing ([ADR 0011](adr/0011-verify.md)). Problems are damage; notes are what a crash leaves (a torn tail, temporary files, an interrupted cleanup). |
@@ -25,6 +30,8 @@ Options:
 | `--fsync always\|group\|off` | The fsync policy to open a store with (`status`, `checkpoint`, `backup`; default `always`). Under `off` the synced seq shows as `none`: the store knows of no fsync, so it claims no durable seq. |
 | `--keep <n>` | Checkpoints to keep (`checkpoint`). |
 | `--archive <archive>` | The store's WAL archive (`status`, `checkpoint`, `backup`), or the archive to restore from (`restore`). |
+| `-n`, `--namespace <name>` | The namespace a command acts on (default `default`); for `checkpoint` and `restore`, repeatable: only those namespaces (a `--seq` restore needs exactly one). |
+| `--key <key>` | An idempotency key for the operation (`create-namespace`, `drop-namespace`, index and constraint commands). |
 | `--no-verify` | Don't verify after `backup` or `restore`. |
 
 ## Exit codes
@@ -42,7 +49,7 @@ Options:
 ```
 $ iwctl status data
 data directory  data
-  layout 2, history 0e456595a462b8189be548cc0810328b
+  layout 4, history 0e456595a462b8189be548cc0810328b
   store: seq 58, synced seq 58, fsync always
   recovery: replayed 29 records onto checkpoint 29
   checkpoints: 29

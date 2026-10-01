@@ -292,8 +292,7 @@ fn binary_header_flags_and_reserved_bytes_are_not_checked() {
 fn an_index_is_built_inside_a_mutable_borrow_and_leaves_unseen_nodes_dirty() {
     let mut g = G::new();
     for i in 0..4 {
-        g.apply(Op::AddNode { id: format!("n{}", i), labels: vec![], data: rec([("v", Value::Int(i))]) })
-            .expect("add");
+        g.apply(Op::AddNode { id: format!("n{}", i), labels: vec![], data: rec([("v", Value::Int(i))]) }).expect("add");
     }
     let age = path("v");
     let handles: Vec<_> = g.node_indices().collect();
@@ -319,8 +318,7 @@ fn an_index_is_built_inside_a_mutable_borrow_and_leaves_unseen_nodes_dirty() {
 fn index_memory_is_only_reported_for_the_whole_graph() {
     let mut g = G::new();
     for i in 0..200 {
-        g.apply(Op::AddNode { id: format!("n{}", i), labels: vec![], data: rec([("v", Value::Int(i))]) })
-            .expect("add");
+        g.apply(Op::AddNode { id: format!("n{}", i), labels: vec![], data: rec([("v", Value::Int(i))]) }).expect("add");
     }
     let before = g.memory_usage();
     assert!(g.create_index::<GraphError>(&path("v")).expect("create"));

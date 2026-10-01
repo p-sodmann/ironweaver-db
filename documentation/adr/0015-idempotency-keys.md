@@ -49,3 +49,7 @@ Questions:
 - A client that retries with the same key after any unknown outcome applies its commit exactly once, as long as the retry comes within 10 000 keyed commits. Tested in the engine (dedup, reuse, eviction, replay and checkpoint round trip), in the store (restart, checkpoint, backup + restore, failpoints) and by the kill -9 harness, whose children retry keyed commits of the killed child.
 - `verify` compares the key table of every checkpoint with the WAL replayed to its seq, and checks each table's bounds; a damaged table fails to load.
 - Step 7 versions can't open a layout 3 directory (`UnsupportedLayout`) or read format 3 segments; opening a step 7 directory with this version upgrades it.
+
+## Update (step 9)
+
+With namespaces the key table stays per namespace, and creating and dropping a namespace take keys that live in the namespace log: see [ADR 0018](0018-namespace-keys-and-restore.md).
