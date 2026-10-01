@@ -6,8 +6,9 @@ use std::sync::{PoisonError, RwLock};
 use std::time::Duration;
 
 use iwdb::{
-    AttrPath, CatalogChange, CheckpointOptions, CommitResult, Constraint, ConstraintKind, EdgeId, EdgeKey, Error,
-    FsyncPolicy, IndexDef, Label, Mutation, Store, StoreOptions, Target, WalOptions,
+    AttrPath, CatalogChange, CheckpointOptions, CommitOptions, CommitResult, Constraint, ConstraintKind, EdgeId,
+    EdgeKey, Error, FsyncPolicy, IdempotencyKey, IndexDef, Label, Mutation, ReadOptions, Store, StoreOptions, Target,
+    WalOptions,
 };
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
@@ -47,6 +48,23 @@ fn fsync_policy(fsync: &str, max_delay: f64, max_batch: u32) -> PyResult<FsyncPo
         "off" => FsyncPolicy::Off,
         other => return Err(value_error(format!("fsync must be 'always', 'group' or 'off', not '{}'", other))),
     })
+}
+
+/// Commit options with an optional idempotency key.
+fn commit_options(idempotency_key: Option<String>) -> PyResult<CommitOptions> {
+    let idempotency_key = idempotency_key.map(IdempotencyKey::new).transpose().map_err(|e| invalid(e.to_string()))?;
+    Ok(CommitOptions { idempotency_key })
+}
+
+/// Read options: `min_seq`, and `timeout` in seconds (`None`: the default;
+/// `inf`: none).
+fn read_options(min_seq: Option<u64>, timeout: Option<f64>) -> PyResult<ReadOptions> {
+    let timeout = match timeout {
+        Some(t) if t == f64::INFINITY => Some(Duration::MAX),
+        Some(t) => Some(seconds(t, "timeout")?),
+        None => None,
+    };
+    Ok(ReadOptions { min_seq, timeout, ..ReadOptions::default() })
 }
 
 fn seconds(s: f64, what: &str) -> PyResult<Duration> {
@@ -89,6 +107,8 @@ pub fn commit_result(py: Python<'_>, result: &CommitResult) -> PyResult<Py<PyAny
     dict.set_item("seq", result.seq)?;
     dict.set_item("edge_ids", PyList::new(py, result.edge_ids.iter().map(|e| e.0))?)?;
     dict.set_item("versions", versions)?;
+    dict.set_item("time", reports::commit_time(py, result.time)?)?;
+    dict.set_item("deduplicated", result.deduplicated)?;
     Ok(dict.into_any().unbind())
 }
 
@@ -177,15 +197,32 @@ impl PyStore {
 
     /// A transaction: mutations committed as one, when its `with` block
     /// ends or by `commit()`.
-    fn transaction(slf: Py<Self>) -> PyTransaction {
-        PyTransaction { store: slf, mutations: Vec::new(), edges: 0, result: None, done: false }
+    /// With `idempotency_key`, the commit applies at most once (a retry
+    /// returns the original result).
+    #[pyo3(signature = (*, idempotency_key = None))]
+    fn transaction(slf: Py<Self>, idempotency_key: Option<String>) -> PyResult<PyTransaction> {
+        let options = commit_options(idempotency_key)?;
+        Ok(PyTransaction { store: slf, mutations: Vec::new(), edges: 0, result: None, done: false, options })
     }
 
-    /// The node `id` as a dict, or `None`.
-    fn node(&self, py: Python<'_>, id: &str) -> PyResult<Option<Py<PyAny>>> {
+    /// The node `id` as a dict, or `None`; with `min_seq`, after waiting
+    /// (at most `timeout` seconds) until that commit is applied.
+    #[pyo3(signature = (id, *, min_seq = None, timeout = None))]
+    fn node(
+        &self,
+        py: Python<'_>,
+        id: &str,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Option<Py<PyAny>>> {
         guard(|| {
             let id = id.to_owned();
-            let Some(node) = self.with(py, move |s| Ok(s.node(&id)))? else { return Ok(None) };
+            let options = read_options(min_seq, timeout)?;
+            let node = self.with(py, move |s| {
+                s.read_with(&options, |_| ())?;
+                Ok(s.node(&id))
+            })?;
+            let Some(node) = node else { return Ok(None) };
             let dict = PyDict::new(py);
             dict.set_item("id", &node.id)?;
             dict.set_item("labels", PyList::new(py, &node.labels)?)?;
@@ -196,10 +233,17 @@ impl PyStore {
         })
     }
 
-    /// The edge `id` as a dict, or `None`.
-    fn edge(&self, py: Python<'_>, id: u64) -> PyResult<Option<Py<PyAny>>> {
+    /// The edge `id` as a dict, or `None`; `min_seq` and `timeout` as for
+    /// `node`.
+    #[pyo3(signature = (id, *, min_seq = None, timeout = None))]
+    fn edge(&self, py: Python<'_>, id: u64, min_seq: Option<u64>, timeout: Option<f64>) -> PyResult<Option<Py<PyAny>>> {
         guard(|| {
-            let Some(edge) = self.with(py, move |s| Ok(s.edge(EdgeId(id))))? else { return Ok(None) };
+            let options = read_options(min_seq, timeout)?;
+            let edge = self.with(py, move |s| {
+                s.read_with(&options, |_| ())?;
+                Ok(s.edge(EdgeId(id)))
+            })?;
+            let Some(edge) = edge else { return Ok(None) };
             let dict = PyDict::new(py);
             dict.set_item("id", edge.id.0)?;
             dict.set_item("from", &edge.from)?;
@@ -209,6 +253,16 @@ impl PyStore {
             dict.set_item("meta", from_attrs(py, &edge.meta)?)?;
             dict.set_item("version", edge.version)?;
             Ok(Some(dict.into_any().unbind()))
+        })
+    }
+
+    /// Wait until commit `seq` is applied (at most `timeout` seconds);
+    /// returns the store's seq.
+    #[pyo3(signature = (seq, *, timeout = None))]
+    fn wait_for_seq(&self, py: Python<'_>, seq: u64, timeout: Option<f64>) -> PyResult<u64> {
+        guard(|| {
+            let options = read_options(None, timeout)?;
+            self.with(py, move |s| s.wait_for_seq(seq, &options))
         })
     }
 
@@ -241,10 +295,13 @@ impl PyStore {
         })
     }
 
-    /// The catalog: indexes and constraints.
-    fn catalog(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    /// The catalog: indexes and constraints; `min_seq` and `timeout` as
+    /// for `node`.
+    #[pyo3(signature = (*, min_seq = None, timeout = None))]
+    fn catalog(&self, py: Python<'_>, min_seq: Option<u64>, timeout: Option<f64>) -> PyResult<Py<PyAny>> {
         guard(|| {
-            let catalog = self.with(py, |s| Ok(s.catalog()))?;
+            let options = read_options(min_seq, timeout)?;
+            let catalog = self.with(py, move |s| s.read_with(&options, |ns| ns.catalog().clone()))?;
             let indexes = PyList::empty(py);
             for index in catalog.indexes() {
                 indexes.append(PyList::new(py, index.path.keys())?)?;
@@ -269,28 +326,56 @@ impl PyStore {
     }
 
     /// Declare an index on `path` (a commit of its own).
-    fn create_index(&self, py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (path, *, idempotency_key = None))]
+    fn create_index(
+        &self,
+        py: Python<'_>,
+        path: &Bound<'_, PyAny>,
+        idempotency_key: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
         let change = CatalogChange::CreateIndex(IndexDef { path: attr_path(path)? });
-        self.commit_catalog(py, change)
+        self.commit_catalog(py, change, idempotency_key)
     }
 
     /// Drop the index on `path` (a commit of its own).
-    fn drop_index(&self, py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (path, *, idempotency_key = None))]
+    fn drop_index(
+        &self,
+        py: Python<'_>,
+        path: &Bound<'_, PyAny>,
+        idempotency_key: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
         let change = CatalogChange::DropIndex(IndexDef { path: attr_path(path)? });
-        self.commit_catalog(py, change)
+        self.commit_catalog(py, change, idempotency_key)
     }
 
     /// Add a `"unique"` or `"required"` constraint on the nodes with
     /// `label` at `path` (a commit of its own).
-    fn add_constraint(&self, py: Python<'_>, kind: &str, label: &str, path: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (kind, label, path, *, idempotency_key = None))]
+    fn add_constraint(
+        &self,
+        py: Python<'_>,
+        kind: &str,
+        label: &str,
+        path: &Bound<'_, PyAny>,
+        idempotency_key: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
         let change = CatalogChange::AddConstraint(constraint(kind, label, path)?);
-        self.commit_catalog(py, change)
+        self.commit_catalog(py, change, idempotency_key)
     }
 
     /// Drop a constraint (a commit of its own).
-    fn drop_constraint(&self, py: Python<'_>, kind: &str, label: &str, path: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (kind, label, path, *, idempotency_key = None))]
+    fn drop_constraint(
+        &self,
+        py: Python<'_>,
+        kind: &str,
+        label: &str,
+        path: &Bound<'_, PyAny>,
+        idempotency_key: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
         let change = CatalogChange::DropConstraint(constraint(kind, label, path)?);
-        self.commit_catalog(py, change)
+        self.commit_catalog(py, change, idempotency_key)
     }
 
     /// Fsync every commit so far.
@@ -316,9 +401,10 @@ impl PyStore {
 }
 
 impl PyStore {
-    fn commit_catalog(&self, py: Python<'_>, change: CatalogChange) -> PyResult<Py<PyAny>> {
+    fn commit_catalog(&self, py: Python<'_>, change: CatalogChange, key: Option<String>) -> PyResult<Py<PyAny>> {
         guard(|| {
-            let result = self.with(py, move |s| s.commit_catalog(change))?;
+            let options = commit_options(key)?;
+            let result = self.with(py, move |s| s.commit_catalog_with(change, &options))?;
             commit_result(py, &result)
         })
     }
@@ -334,6 +420,8 @@ pub struct PyTransaction {
     edges: usize,
     result: Option<Py<PyAny>>,
     done: bool,
+    /// The idempotency key, if any.
+    options: CommitOptions,
 }
 
 /// A node (`str`) or edge (`int`) id.
@@ -481,7 +569,8 @@ impl PyTransaction {
         self.done = true;
         let mutations = std::mem::take(&mut self.mutations);
         let store = self.store.get();
-        let result = guard(|| store.with(py, move |s| s.commit(&mutations)))?;
+        let options = self.options.clone();
+        let result = guard(|| store.with(py, move |s| s.commit_with(&mutations, &options)))?;
         let result = commit_result(py, &result)?;
         self.result = Some(result.clone_ref(py));
         Ok(result)

@@ -41,13 +41,19 @@ pub mod exc {
     create_exception!(iwdb, LockedError, Error, "Another store has the directory (or archive) open.");
     create_exception!(iwdb, IoError, Error, "A file operation failed. A commit's outcome is then unknown.");
     create_exception!(iwdb, CorruptError, Error, "Damaged data: the WAL, a checkpoint, a marker or a manifest.");
+    create_exception!(
+        iwdb,
+        TimeoutError,
+        Error,
+        "A read's min_seq wasn't applied within its timeout. Nothing changed."
+    );
     create_exception!(iwdb, ClosedError, Error, "The store is closed.");
     create_exception!(iwdb, InternalError, Error, "A bug: a Rust panic outside the commit path.");
 }
 
 use exc::{
     ClosedError, ConflictError, ConstraintError, CorruptError, InternalError, InvalidError, IoError, LockedError,
-    NotFoundError, ReadOnlyError,
+    NotFoundError, ReadOnlyError, TimeoutError,
 };
 
 /// Register the exceptions in the module.
@@ -62,6 +68,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("LockedError", py.get_type::<LockedError>())?;
     m.add("IoError", py.get_type::<IoError>())?;
     m.add("CorruptError", py.get_type::<CorruptError>())?;
+    m.add("TimeoutError", py.get_type::<TimeoutError>())?;
     m.add("ClosedError", py.get_type::<ClosedError>())?;
     m.add("InternalError", py.get_type::<InternalError>())?;
     Ok(())
@@ -76,6 +83,9 @@ pub fn to_py(error: Error) -> PyErr {
         Error::Locked { .. } => LockedError::new_err(message),
         Error::Io { .. } | Error::CheckpointsDisabled { .. } => IoError::new_err(message),
         Error::InvalidOptions(_) => InvalidError::new_err(message),
+        Error::Timeout { .. } => TimeoutError::new_err(message),
+        // Python has no way to cancel a request yet
+        Error::Cancelled => exc::Error::new_err(message),
         Error::Corrupt { .. }
         | Error::InvalidRecord { .. }
         | Error::SeqMismatch { .. }
