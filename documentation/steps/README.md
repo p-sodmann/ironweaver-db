@@ -33,7 +33,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 |---|---|---|
 | M0 Foundation | 1–3 | done |
 | M1 Embedded durable | 4–7 | done, except the PyPI publish of 0.1.0 (prepared; the owner publishes) |
-| M2 Service | 8–10 | in progress (step 8 done) |
+| M2 Service | 8–10 | in progress (steps 8 and 9 done) |
 | M3 Network access | 11–14 | todo |
 | M4 Production 1.0 | 15–17 | todo |
 | M5 HA | 18 | todo |
