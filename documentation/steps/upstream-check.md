@@ -16,15 +16,15 @@ Find out which of our upstream issues have been fixed, adopt the fixes, and remo
 
 ## Open issues
 
-Last checked: 2026-10-02 at core `3b15149`: #26–#35 fixed and adopted (see Closed issues); #46 found and filed in that bump.
+Last checked: 2026-10-02 at core `cd09ea0`: no open issues. #26–#35 were fixed in `3b15149`, #46 in `cd09ea0` (see Closed issues).
 
 | Issue | Finding | Needed before | Until fixed | When fixed |
 |---|---|---|---|---|
-| [#46](https://github.com/p-sodmann/Ironweaver/issues/46) | `Value`'s serde writes NaN and infinities to JSON as `null` (gap in the #26 fix) | Step 12 (`Expr` constants in JSON filters), step 13 (JSON export) | Binary checkpoints are unaffected. JSON export (step 13) must refuse non-finite floats with a clear error, or write attribute maps with `format::tagged` itself; REST filters can't carry them | Drop the restriction; update `value_serde_writes_non_finite_floats_to_json_as_null` in `core_smoke.rs` and `json_export_of_non_finite_floats_does_not_load` in `db_graph.rs`; allow non-finite floats in JSON tests |
+| – | none open | | | |
 
 ## Closed issues
 
-All fixed in core `3b15149` (bumped 2026-10-02, commit `core: bump ironweaver-core a14149e -> 3b15149`), adopted in the upstream check that followed.
+#26–#35 were fixed in core `3b15149` (bumped 2026-10-02, commit `core: bump ironweaver-core a14149e -> 3b15149`) and adopted in the upstream check that followed; #46 was fixed in `cd09ea0` (bumped the same day).
 
 | Issue | Finding | What we did |
 |---|---|---|
@@ -38,3 +38,4 @@ All fixed in core `3b15149` (bumped 2026-10-02, commit `core: bump ironweaver-co
 | [#33](https://github.com/p-sodmann/Ironweaver/issues/33) | Binary header `flags`/`reserved` not checked | `check_checkpoint_header` removed from `verify`; the loaders refuse such a file, and `verify` reports it as "can't be loaded". Recovery treats it as a damaged checkpoint (it loaded before). `binary_header_flags_and_reserved_bytes_are_checked` |
 | [#34](https://github.com/p-sodmann/Ironweaver/issues/34) | No off-graph index build | `Namespace::begin_index_build` / `scan_index_keys` / `apply_built` use the core's `IndexBuild` and `install_index`; our version check is gone. Measuring it found writer starvation during the scan, now fixed (`applies_waiting`, `BUILD_CHUNK` 2048): longest commit stall about 5 ms instead of 105 ms (ADR 0019 update). `an_index_is_built_off_the_graph_and_installed`, and `an_online_index_build_sees_commits_made_during_the_scan` in `tests/commit.rs` |
 | [#35](https://github.com/p-sodmann/Ironweaver/issues/35) | No per-index statistics | `Ns::index_entries` uses `index_stats` (O(1)); `IndexStatus::size` (entries, distinct keys, memory) in Rust, Python and `iwctl`. `index_stats_are_reported_per_index` |
+| [#46](https://github.com/p-sodmann/Ironweaver/issues/46) | `Value`'s serde wrote NaN and infinities to JSON as `null` (gap in the #26 fix; found in the `3b15149` bump, fixed in `cd09ea0`) | Nothing to remove (no JSON export or REST yet; no restriction was implemented). The pin tests now check the fix (`value_serde_keeps_non_finite_floats_in_json`, `json_keeps_negative_zero_nan_and_infinities`), and the proptest generators include infinities |

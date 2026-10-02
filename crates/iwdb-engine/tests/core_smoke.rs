@@ -570,24 +570,28 @@ fn expr_and_pattern_round_trip() {
     assert_eq!(Pattern::parse(&pattern.to_string()).expect("reparse"), pattern);
 }
 
-/// Known core gap (in the review, upstream #46): `Value`'s serde
-/// writes NaN and the infinities to JSON as `null` and can't read the
-/// `"NaN"` / `"Infinity"` / `"-Infinity"` strings that the core's own JSON
-/// files use for them (#26). Codecs that write attribute maps with
-/// `value::serialize_sorted` (our `DbCodec`) write files that don't load.
+/// Fixed upstream (#46): `Value`'s serde writes NaN and the infinities to
+/// JSON as `"NaN"`, `"Infinity"` and `"-Infinity"`, like the core's own
+/// JSON files (#26), and reads them back; the binary encoding is
+/// unchanged. Codecs that write attribute maps with
+/// `value::serialize_sorted` (our `DbCodec`) keep them.
 #[test]
-fn value_serde_writes_non_finite_floats_to_json_as_null() {
+fn value_serde_keeps_non_finite_floats_in_json() {
+    let same = |v: &Value, f: f64| matches!(v, Value::Float(x) if x.to_bits() == f.to_bits());
     for (f, text) in [(f64::NAN, "NaN"), (f64::INFINITY, "Infinity"), (f64::NEG_INFINITY, "-Infinity")] {
-        assert_eq!(serde_json::to_string(&Value::Float(f)).expect("json"), r#"{"Float":null}"#);
-        assert!(serde_json::from_str::<Value>(&format!(r#"{{"Float":"{}"}}"#, text)).is_err(), "{}", text);
-        // The core's own codec keeps them
+        let json = serde_json::to_string(&Value::Float(f)).expect("json");
+        assert_eq!(json, format!(r#"{{"Float":"{}"}}"#, text));
+        assert!(same(&serde_json::from_str::<Value>(&json).expect("decode"), f), "{}", text);
+        let bytes = postcard::to_stdvec(&Value::Float(f)).expect("postcard");
+        assert!(same(&postcard::from_bytes::<Value>(&bytes).expect("decode"), f), "{}", text);
+        // The core's own codec agrees
         let mut g = G::new();
         g.add_node("a", rec([("k", Value::Float(f))])).expect("add");
         let json = format::to_json(&g, &Attrs::new(), false).expect("save");
         assert!(String::from_utf8_lossy(&json).contains(&format!(r#""{}""#, text)));
         let (loaded, _) = format::from_json(&json).expect("load");
         let ix = loaded.node_ix("a").expect("node");
-        assert!(matches!(loaded.node(ix).expect("node").data.attr["k"], Value::Float(x) if x.to_bits() == f.to_bits()));
+        assert!(same(&loaded.node(ix).expect("node").data.attr["k"], f));
     }
 }
 

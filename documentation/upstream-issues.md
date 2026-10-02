@@ -1,6 +1,6 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump.
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`.
 
 Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`. Titles are ready to paste; the text below each title is the issue body.
 
@@ -23,7 +23,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 15 | [Binary format: the header's flags and reserved bytes are never checked](#15-binary-format-the-headers-flags-and-reserved-bytes-are-never-checked) | fixed upstream (`3b15149`): [#33](https://github.com/p-sodmann/Ironweaver/issues/33) |
 | 16 | [No way to build an index off the graph and install it in O(1)](#16-no-way-to-build-an-index-off-the-graph-and-install-it-in-o1) | fixed upstream (`3b15149`): [#34](https://github.com/p-sodmann/Ironweaver/issues/34) |
 | 17 | [No per-index entry count or memory accessor](#17-no-per-index-entry-count-or-memory-accessor) | fixed upstream (`3b15149`): [#35](https://github.com/p-sodmann/Ironweaver/issues/35) |
-| 18 | [`Value` serde writes NaN and infinities to JSON as `null`](#18-value-serde-writes-nan-and-infinities-to-json-as-null) | filed: [#46](https://github.com/p-sodmann/Ironweaver/issues/46) |
+| 18 | [`Value` serde writes NaN and infinities to JSON as `null`](#18-value-serde-writes-nan-and-infinities-to-json-as-null) | fixed upstream (`cd09ea0`): [#46](https://github.com/p-sodmann/Ironweaver/issues/46) |
 
 ---
 

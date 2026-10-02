@@ -15,7 +15,7 @@ repository = "https://github.com/p-sodmann/ironweaver-db"
 # Pinned git revision until 0.2.0 is on crates.io; see documentation/adr/0002-ironweaver-core-dependency.md.
 # No default features: `format-v1` reads ironweaver 0.1 files and is the only
 # user of bincode 1 (unmaintained, RUSTSEC-2025-0141). Our files are format 2.
-ironweaver-core = { git = "https://github.com/p-sodmann/Ironweaver", rev = "3b15149b199603cf65c614efc843ef2d1342e205", default-features = false }
+ironweaver-core = { git = "https://github.com/p-sodmann/Ironweaver", rev = "cd09ea0d7b63353f2599877818d3e42a23452b75", default-features = false }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 proptest = "1"

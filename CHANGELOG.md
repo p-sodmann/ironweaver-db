@@ -74,6 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upstream issue #31 filed: `Value`'s serde rejects empty containers at the depth limit that the file format accepts.
 - Bumped `ironweaver-core` from `02cefab` to `a14149e` (PR #25, which implements all seven upstream drafts). Core review updated; follow-up draft 8 (edge budget) added.
 - Bumped `ironweaver-core` from `a14149e` to `3b15149`, which fixes upstream issues #26–#35. The pin tests now check the fixed behaviour. Upstream issue #46 filed: `Value`'s serde writes NaN and infinities to JSON as `null` (a gap in the #26 fix).
+- Bumped `ironweaver-core` from `3b15149` to `cd09ea0`, which fixes upstream #46: JSON exports keep NaN and infinities.
 - Upstream check after the `3b15149` bump: online index builds install the core's off-graph build (`begin_index_build` / `install_index`) instead of inserting pre-read keys under the write lock; per-index entries, distinct keys and memory in `status` (`IndexStatus::size`, Python `indexes()`, `iwctl`); `index_entries` is O(1); the depth limit accepts an empty list or dict at depth 100 (the core's rule); `DbRecord` uses the core's `record::lookup`; `verify` no longer checks checkpoint headers itself (the core's loaders do); the core is used without default features, so bincode is no longer a dependency and `deny.toml` ignores nothing.
 
 ### Fixed
