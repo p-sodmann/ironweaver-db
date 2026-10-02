@@ -339,11 +339,10 @@ fn the_seq_in_graph_meta_is_required_and_checked() {
     assert!(err.contains("too large to save"), "{}", err);
 }
 
-/// Known core deviation (in the core review, upstream #26): the JSON loader reads `-0.0`
-/// back as `0.0`; the binary format keeps it. When this fails, upstream
-/// has fixed it: allow -0.0 in `common::scalar` again.
+/// Fixed upstream (#26): the JSON loader keeps the sign of `-0.0` (it
+/// read it as `0.0`); the binary format always did.
 #[test]
-fn json_loses_the_sign_of_negative_zero() {
+fn json_keeps_the_sign_of_negative_zero() {
     let (_, meta) = social();
     let mut g = DbGraph::new();
     g.add_node("z", rec(1, [("x", Value::Float(-0.0))])).unwrap();
@@ -354,7 +353,29 @@ fn json_loses_the_sign_of_negative_zero() {
     assert!(x(codec::from_binary(&codec::to_binary(&g, &meta).unwrap()).unwrap()));
     let json = codec::to_json(&g, &meta, false).unwrap();
     assert!(String::from_utf8_lossy(&json).contains(r#"{"Float":-0.0}"#));
-    assert!(!x(codec::from_json(&json).unwrap()), "the JSON loader now keeps -0.0");
+    assert!(x(codec::from_json(&json).unwrap()));
+}
+
+/// Known core gap (in the core review, upstream #46): the core's
+/// own codec writes NaN and the infinities to JSON as `"NaN"`,
+/// `"Infinity"` and `"-Infinity"` (#26), but `Value`'s serde, which
+/// `value::serialize_sorted` and so `DbCodec` use, still writes them as
+/// `null`, which the loader refuses. The binary format keeps them. When
+/// this fails, upstream has fixed it: allow non-finite floats in JSON
+/// tests.
+#[test]
+fn json_export_of_non_finite_floats_does_not_load() {
+    let (_, meta) = social();
+    for f in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut g = DbGraph::new();
+        g.add_node("z", rec(1, [("x", Value::Float(f))])).unwrap();
+        let loaded = codec::from_binary(&codec::to_binary(&g, &meta).unwrap()).unwrap();
+        let x = loaded.graph.node(loaded.graph.node_ix("z").unwrap()).unwrap().data.attr["x"].clone();
+        assert!(matches!(x, Value::Float(y) if y.to_bits() == f.to_bits()), "binary keeps {}: {:?}", f, x);
+        let json = codec::to_json(&g, &meta, false).unwrap();
+        assert!(String::from_utf8_lossy(&json).contains(r#"{"Float":null}"#), "{} is written as null", f);
+        assert!(matches!(codec::from_json(&json), Err(Error::Graph(GraphError::Format(_)))), "{}", f);
+    }
 }
 
 #[test]

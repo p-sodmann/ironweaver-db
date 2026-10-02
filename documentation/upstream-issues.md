@@ -1,8 +1,8 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7; all are filed (links in the table).
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump.
 
-Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
+Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`. Titles are ready to paste; the text below each title is the issue body.
 
 | # | Title | Status |
 |---|---|---|
@@ -13,16 +13,17 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 5 | [Incremental memory accounting](#5-incremental-memory-accounting) | done upstream (PR #25, `a14149e`) |
 | 6 | [No panic in `apply_all` rollback](#6-no-panic-in-apply_all-rollback) | done upstream (PR #25, `a14149e`) |
 | 7 | [(Optional) Save index definitions in the file format](#7-optional-save-index-definitions-in-the-file-format) | done upstream (PR #25, `a14149e`) |
-| 8 | [Edge budget and per-edge cancellation in `bfs` and `expand`](#8-edge-budget-and-per-edge-cancellation-in-bfs-and-expand) | filed: [#27](https://github.com/p-sodmann/Ironweaver/issues/27) |
-| 9 | [JSON loader reads `-0.0` back as `0.0`](#9-json-loader-reads--00-back-as-00) | filed: [#26](https://github.com/p-sodmann/Ironweaver/issues/26) |
-| 10 | [`expect` on the op apply path in `remove_node` / `rename_node`](#10-expect-on-the-op-apply-path-in-remove_node--rename_node) | filed: [#28](https://github.com/p-sodmann/Ironweaver/issues/28) |
-| 11 | [`Expr` depth-limit errors lose their message under postcard](#11-expr-depth-limit-errors-lose-their-message-under-postcard) | filed: [#29](https://github.com/p-sodmann/Ironweaver/issues/29) |
-| 12 | [Small API and dependency cleanups: public attribute lookup, optional bincode, doc comments](#12-small-api-and-dependency-cleanups-public-attribute-lookup-optional-bincode-doc-comments) | filed: [#30](https://github.com/p-sodmann/Ironweaver/issues/30) |
-| 13 | [`Value` serde rejects empty containers at the depth limit that the file format accepts](#13-value-serde-rejects-empty-containers-at-the-depth-limit-that-the-file-format-accepts) | filed: [#31](https://github.com/p-sodmann/Ironweaver/issues/31) |
-| 14 | [`write_atomic` ignores a failed directory fsync after the rename](#14-write_atomic-ignores-a-failed-directory-fsync-after-the-rename) | filed: [#32](https://github.com/p-sodmann/Ironweaver/issues/32) |
-| 15 | [Binary format: the header's flags and reserved bytes are never checked](#15-binary-format-the-headers-flags-and-reserved-bytes-are-never-checked) | filed: [#33](https://github.com/p-sodmann/Ironweaver/issues/33) |
-| 16 | [No way to build an index off the graph and install it in O(1)](#16-no-way-to-build-an-index-off-the-graph-and-install-it-in-o1) | filed: [#34](https://github.com/p-sodmann/Ironweaver/issues/34) |
-| 17 | [No per-index entry count or memory accessor](#17-no-per-index-entry-count-or-memory-accessor) | filed: [#35](https://github.com/p-sodmann/Ironweaver/issues/35) |
+| 8 | [Edge budget and per-edge cancellation in `bfs` and `expand`](#8-edge-budget-and-per-edge-cancellation-in-bfs-and-expand) | fixed upstream (`3b15149`): [#27](https://github.com/p-sodmann/Ironweaver/issues/27) |
+| 9 | [JSON loader reads `-0.0` back as `0.0`](#9-json-loader-reads--00-back-as-00) | fixed upstream (`3b15149`): [#26](https://github.com/p-sodmann/Ironweaver/issues/26) |
+| 10 | [`expect` on the op apply path in `remove_node` / `rename_node`](#10-expect-on-the-op-apply-path-in-remove_node--rename_node) | fixed upstream (`3b15149`): [#28](https://github.com/p-sodmann/Ironweaver/issues/28) |
+| 11 | [`Expr` depth-limit errors lose their message under postcard](#11-expr-depth-limit-errors-lose-their-message-under-postcard) | fixed upstream (`3b15149`): [#29](https://github.com/p-sodmann/Ironweaver/issues/29) |
+| 12 | [Small API and dependency cleanups: public attribute lookup, optional bincode, doc comments](#12-small-api-and-dependency-cleanups-public-attribute-lookup-optional-bincode-doc-comments) | fixed upstream (`3b15149`): [#30](https://github.com/p-sodmann/Ironweaver/issues/30) |
+| 13 | [`Value` serde rejects empty containers at the depth limit that the file format accepts](#13-value-serde-rejects-empty-containers-at-the-depth-limit-that-the-file-format-accepts) | fixed upstream (`3b15149`): [#31](https://github.com/p-sodmann/Ironweaver/issues/31) |
+| 14 | [`write_atomic` ignores a failed directory fsync after the rename](#14-write_atomic-ignores-a-failed-directory-fsync-after-the-rename) | fixed upstream (`3b15149`): [#32](https://github.com/p-sodmann/Ironweaver/issues/32) |
+| 15 | [Binary format: the header's flags and reserved bytes are never checked](#15-binary-format-the-headers-flags-and-reserved-bytes-are-never-checked) | fixed upstream (`3b15149`): [#33](https://github.com/p-sodmann/Ironweaver/issues/33) |
+| 16 | [No way to build an index off the graph and install it in O(1)](#16-no-way-to-build-an-index-off-the-graph-and-install-it-in-o1) | fixed upstream (`3b15149`): [#34](https://github.com/p-sodmann/Ironweaver/issues/34) |
+| 17 | [No per-index entry count or memory accessor](#17-no-per-index-entry-count-or-memory-accessor) | fixed upstream (`3b15149`): [#35](https://github.com/p-sodmann/Ironweaver/issues/35) |
+| 18 | [`Value` serde writes NaN and infinities to JSON as `null`](#18-value-serde-writes-nan-and-infinities-to-json-as-null) | filed: [#46](https://github.com/p-sodmann/Ironweaver/issues/46) |
 
 ---
 
@@ -395,3 +396,30 @@ Add `Graph::index_stats(path) -> Option<IndexStats { entries, memory_bytes, ... 
 **Why the database needs it**
 
 Status views list each index with its size and memory. We currently count entries with range scans over the index (a range below and one above each key kind enumerate an index completely), which is O(entries) and ignores dirty nodes, and report only whole-graph memory.
+
+## 18. `Value` serde writes NaN and infinities to JSON as `null`
+
+Found in the `3b15149` bump (a gap in the fix for #26; filed as [#46](https://github.com/p-sodmann/Ironweaver/issues/46)), checked against `3b15149`.
+
+**Problem**
+
+#26 made the core's JSON files keep NaN and the infinities: `format::tagged::float` writes them as `"NaN"`, `"Infinity"` and `"-Infinity"`, and the loader reads them back. But only the core's own `RecordCodec` goes through `tagged::float` (via the private `Tagged` / `TaggedMap` wrappers). `Value`'s own `Serialize`, which `value::serialize_sorted` uses, and which the format docs recommend to custom codecs for writing attribute maps, still writes a non-finite `Float` as `{"Float":null}` in JSON. The loader then refuses the file. `Value`'s `Deserialize` doesn't accept the string forms either, so JSON `Op`s and `Value`s can't carry them at all.
+
+Minimal reproduction:
+
+```rust
+use ironweaver_core::Value;
+assert_eq!(serde_json::to_string(&Value::Float(f64::NAN)).unwrap(), r#"{"Float":null}"#);
+assert!(serde_json::from_str::<Value>(r#"{"Float":"NaN"}"#).is_err());
+// A custom Codec that writes attrs with value::serialize_sorted writes
+// {"Float":null}; format::from_json / LoadGraph refuse the file:
+// "invalid Float null: expected a finite number, "NaN", "Infinity" or "-Infinity"".
+```
+
+**Proposal**
+
+Make `Value`'s serde match the file format in human-readable encodings: serialize a non-finite `Float` as `"NaN"` / `"Infinity"` / `"-Infinity"` when `is_human_readable()`, and accept those strings (as well as numbers) when deserializing a `Float`. The binary encodings are unchanged. Alternatively, make `serialize_sorted` (or a new public `format::tagged::attrs`) use `Tagged`, so custom codecs write exactly what `RecordCodec` writes; but fixing `Value` also covers `Op` and `Expr` values in JSON.
+
+**Why the database needs it**
+
+Our codec (`DbCodec`) writes attribute maps with `value::serialize_sorted`, so a JSON export (step 13) of a graph holding a NaN or an infinity writes a file that doesn't load. The binary checkpoints are fine. The REST API (step 12) sends `Value`s and `Op`s as JSON and can't represent these floats either. Pinned in `value_serde_writes_non_finite_floats_to_json_as_null` (`core_smoke.rs`) and `json_export_of_non_finite_floats_does_not_load` (`tests/db_graph.rs`).

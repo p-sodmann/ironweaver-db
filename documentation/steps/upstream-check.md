@@ -1,7 +1,7 @@
 # Upstream check (recurring gate)
 
 Status: recurring
-Runs: before starting [step 10](step_10.md), [step 11](step_11.md), [step 13](step_13.md) and [step 17](step_17.md), and as part of every `ironweaver-core` bump ([ADR 0002](../adr/0002-ironweaver-core-dependency.md)).
+Runs: before starting [step 10](step_10.md), [step 11](step_11.md), [step 12](step_12.md), [step 13](step_13.md) and [step 17](step_17.md), and as part of every `ironweaver-core` bump ([ADR 0002](../adr/0002-ironweaver-core-dependency.md)).
 
 ## Goal
 
@@ -30,6 +30,7 @@ Last checked: 2026-10-01 (all open).
 | [#31](https://github.com/p-sodmann/Ironweaver/issues/31) | `Value` serde rejects empty containers at depth 100 that the file format accepts | Step 13 (bulk import: imported values must stay loggable and checkpointable) | The commit pipeline counts an empty container as holding a scalar (`MAX_VALUE_DEPTH`); imports must apply the same depth check | Keep or relax the pipeline's check to the core's rule; update `value_serde_rejects_empty_containers_at_the_depth_limit` in `core_smoke.rs` and the depth tests in `resolve.rs` and `tests/commit.rs` |
 | [#34](https://github.com/p-sodmann/Ironweaver/issues/34) | No way to build an index off the graph and install it in O(1) | Step 9 (online index build; worked around, measured) | `Namespace::apply_built` inserts pre-read keys under the write lock with `create_index_with_keys` (ADR 0019): ~40 % shorter stall than a plain build | Build the index off-graph and install it; drop the insertion under the lock; update `an_index_is_built_inside_a_mutable_borrow_and_leaves_unseen_nodes_dirty` in `core_smoke.rs` and the numbers in ADR 0019 |
 | [#35](https://github.com/p-sodmann/Ironweaver/issues/35) | No per-index entry count or memory accessor | Step 9 (status views; worked around) | `Ns::index_entries` counts entries with range scans; status reports whole-graph memory only | Use the core's accessor in `Ns::index_entries` and report per-index memory in `IndexStatus`; update `index_memory_is_only_reported_for_the_whole_graph` |
+| [#46](https://github.com/p-sodmann/Ironweaver/issues/46) | `Value`'s serde writes NaN and infinities to JSON as `null` (gap in the #26 fix) | Step 12 (`Expr` constants in JSON filters), step 13 (JSON export) | Binary checkpoints are unaffected. JSON export (step 13) must refuse non-finite floats with a clear error, or write attribute maps with `format::tagged` itself; REST filters can't carry them | Drop the restriction; update `value_serde_writes_non_finite_floats_to_json_as_null` in `core_smoke.rs` and `json_export_of_non_finite_floats_does_not_load` in `db_graph.rs`; allow non-finite floats in JSON tests |
 
 ## Closed issues
 

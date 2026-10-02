@@ -10,6 +10,7 @@ An HTTP/JSON API for browsers, scripts and curl, with the same semantics as gRPC
 
 ## Tasks
 
+- [ ] First: run the [upstream check](upstream-check.md). Issues this step depends on: #46 (`Expr` constants in JSON filters can't carry NaN or infinities).
 - [ ] axum router in `iwdb-server` over the same `Database` trait (no second implementation of any operation).
 - [ ] Resource-style routes, e.g. `POST /v1/{ns}/commit`, `GET /v1/{ns}/nodes/{id}`, `POST /v1/{ns}/neighbourhood`, `POST /v1/{ns}/match`, `POST /v1/{ns}/jobs/pagerank`, `GET /v1/namespaces`.
 - [ ] JSON bodies use the proto message shapes (`pbjson`), so both APIs share one schema; generate an OpenAPI document and publish it with the docs.

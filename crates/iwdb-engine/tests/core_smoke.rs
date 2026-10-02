@@ -227,17 +227,14 @@ fn graph_meta_survives_write_atomic_and_binary_format() {
     assert!(matches!(format::from_binary(&bytes[..bytes.len() - 3]), Err(GraphError::Format(_))));
 }
 
-/// Known core behaviour (upstream #32): `write_atomic` syncs the directory
-/// after the rename on a best-effort basis and ignores failures, so `Ok`
-/// doesn't mean the rename is durable. Pinned with a directory that can be
-/// written to but not opened for reading (mode 0o300): creating the
-/// temporary file and renaming it work, opening the directory to fsync it
-/// fails, and the save still returns `Ok`. When this fails, upstream
-/// reports the error: drop the extra directory sync after checkpoint writes
-/// in `iwdb_storage::checkpoint` (see `documentation/steps/upstream-check.md`).
+/// Fixed upstream (#32): `write_atomic` fsyncs the directory after the
+/// rename and returns the error if that fails, so `Ok` means the rename is
+/// durable. Checked with a directory that can be written to but not opened
+/// for reading (mode 0o300): creating the temporary file and renaming it
+/// work, opening the directory to fsync it fails, and the save reports it.
 #[cfg(unix)]
 #[test]
-fn write_atomic_ignores_a_failed_directory_sync() {
+fn write_atomic_reports_a_failed_directory_sync() {
     use std::os::unix::fs::PermissionsExt;
     let dir = TempDir::new("smoke-dirsync");
     let sub = dir.0.join("sub");
@@ -250,80 +247,91 @@ fn write_atomic_ignores_a_failed_directory_sync() {
     }
     let result = format::write_atomic(sub.join("file"), |out| out.write_all(b"data"));
     std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).expect("chmod");
-    assert!(result.is_ok(), "{:?}", result);
+    assert!(result.is_err(), "the failed directory sync is reported");
+    // The rename happened: the new file is in place, just not known durable
     assert_eq!(std::fs::read(sub.join("file")).expect("read"), b"data");
 }
 
-/// Known core behaviour (upstream #33): the binary header's `flags` (u16,
-/// bytes 10..12) and `reserved` (u32, bytes 12..16) are documented as 0,
-/// but the loaders don't check them, and the CRC32 covers only the
-/// payload. So damage there goes unnoticed (both loaders), and a flag a
-/// newer writer sets would be ignored rather than refused. Pinned: a file
-/// with both fields changed loads like the original. When this fails,
-/// upstream checks them: drop the header check in `iwdb_storage::verify`
-/// (see `documentation/steps/upstream-check.md`).
+/// Fixed upstream (#33): the binary header's `flags` (u16, bytes 10..12)
+/// and `reserved` (u32, bytes 12..16) are written as 0 and checked by both
+/// loaders (the CRC32 still covers only the payload): an unknown flag is
+/// refused as unsupported, a non-zero reserved field as damage.
 #[test]
-fn binary_header_flags_and_reserved_bytes_are_not_checked() {
+fn binary_header_flags_and_reserved_bytes_are_checked() {
     let mut g = G::new();
     g.apply_all(sample_batch(&g)).expect("setup");
     let meta = Attrs::new();
     let bytes = format::to_binary(&g, &meta, false).expect("save");
     assert_eq!(&bytes[..8], b"IRONWEAV");
     assert_eq!(&bytes[10..16], &[0; 6], "flags and reserved are written as 0");
-    let mut changed = bytes.clone();
-    changed[10] = 0x01; // a flag
-    changed[12..16].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]); // reserved
-    let (loaded, _) = format::from_binary(&changed).expect("the slice loader accepts it");
-    assert_eq!(canonical(&loaded), canonical(&g));
-    let (streamed, _) = format::from_binary_reader(&changed[..]).expect("the streaming loader accepts it");
-    assert_eq!(canonical(&streamed), canonical(&g));
+    for at in 10..16 {
+        let mut changed = bytes.clone();
+        changed[at] = 0x01;
+        assert!(matches!(format::from_binary(&changed), Err(GraphError::Format(_))), "slice loader, byte {}", at);
+        assert!(
+            matches!(format::from_binary_reader(&changed[..]), Err(GraphError::Format(_))),
+            "streaming loader, byte {}",
+            at
+        );
+    }
 }
 
-/// #34: an index can only be built through `&mut Graph`: even from keys
-/// read beforehand (`create_index_with_keys`) the keys are inserted into
-/// the index inside that call, and nodes without a key are left dirty (so
-/// every lookup scans the dirty set until `flush_indexes`). There is no
-/// way to build an index off the graph and install it in O(1), which the
-/// online index build (ADR 0019) would need to keep the write lock short.
-/// The absence of such a call can't be pinned by a failing test: when
-/// upstream adds it, adopt it in `Namespace::apply_built` and update this
-/// test and `documentation/steps/upstream-check.md`.
+/// Fixed upstream (#34): an index is built off the graph.
+/// `begin_index_build` is O(1), `IndexBuild::read` borrows the graph
+/// shared (so it can run under a read lock, in chunks), and
+/// `install_index` costs O(nodes changed meanwhile): those, and only
+/// those, are dirty after it. The online build (ADR 0019) relies on this.
 #[test]
-fn an_index_is_built_inside_a_mutable_borrow_and_leaves_unseen_nodes_dirty() {
+fn an_index_is_built_off_the_graph_and_installed() {
     let mut g = G::new();
     for i in 0..4 {
         g.apply(Op::AddNode { id: format!("n{}", i), labels: vec![], data: rec([("v", Value::Int(i))]) }).expect("add");
     }
-    let age = path("v");
-    let handles: Vec<_> = g.node_indices().collect();
-    let keys = handles.iter().take(3).map(|&ix| {
-        let key = g.node(ix).and_then(|n| n.data.attr.get("v")).and_then(ironweaver_core::Key::of);
-        (ix, key)
-    });
-    let keys: Vec<_> = keys.collect();
-    assert!(g.create_index_with_keys(&age, keys).expect("build"));
-    assert!(g.indexes_dirty(), "the node without a key is dirty until the next flush");
-    // Lookups are right meanwhile (they scan the dirty set)
-    let found = g.find_nodes(&age, &Value::Int(3)).expect("lookup").expect("indexed");
-    assert_eq!(ids(&g, found), ["n3"]);
+    g.create_index::<GraphError>(&path("other")).expect("create");
     g.flush_indexes().expect("flush");
-    assert!(!g.indexes_dirty());
+    let v = path("v");
+    let mut build = g.begin_index_build(&v).expect("begin");
+    let handles: Vec<_> = g.node_indices().collect();
+    build.read::<_, _, GraphError>(&g, handles[..2].iter().copied()).expect("read");
+    // A change between chunks: re-read when installed
+    g.apply(Op::SetNodeAttr { id: "n0".into(), key: "v".into(), value: Some(Value::Int(10)) }).expect("set");
+    build.read::<_, _, GraphError>(&g, handles[2..].iter().copied()).expect("read");
+    g.flush_indexes().expect("flush");
+    assert!(g.install_index(build).expect("install"));
+    assert_eq!(ids(&g, g.dirty_nodes()), ["n0"], "only the node changed meanwhile is dirty");
+    assert_eq!(ids(&g, g.find_nodes(&v, &Value::Int(10)).expect("lookup").expect("indexed")), ["n0"]);
+    assert!(g.find_nodes(&v, &Value::Int(0)).expect("lookup").expect("indexed").is_empty());
+    assert_eq!(ids(&g, g.find_nodes(&v, &Value::Int(3)).expect("lookup").expect("indexed")), ["n3"]);
+    // A second build of an indexed path fails; a cancelled one is gone
+    assert!(g.begin_index_build(&v).is_err());
+    let other = g.begin_index_build(&path("w")).expect("begin");
+    assert_eq!(g.open_index_builds(), 1);
+    assert!(g.cancel_index_build(other));
+    assert_eq!(g.open_index_builds(), 0);
 }
 
-/// #35: the core reports memory for the whole graph (indexes included) but
-/// not per index, and has no accessor for the number of entries in an
-/// index. `Ns::index_entries` counts them with range scans and the status
-/// shows whole-graph memory only. Pinned: an index raises `memory_usage`.
+/// Fixed upstream (#35): `index_stats` reports an index's entries,
+/// distinct keys, memory and the dirty count, in O(1); memory is the
+/// index's share of `memory_usage`.
 #[test]
-fn index_memory_is_only_reported_for_the_whole_graph() {
+fn index_stats_are_reported_per_index() {
     let mut g = G::new();
     for i in 0..200 {
-        g.apply(Op::AddNode { id: format!("n{}", i), labels: vec![], data: rec([("v", Value::Int(i))]) }).expect("add");
+        g.apply(Op::AddNode { id: format!("n{}", i), labels: vec![], data: rec([("v", Value::Int(i % 50))]) })
+            .expect("add");
     }
+    assert_eq!(g.index_stats(&path("v")), None);
     let before = g.memory_usage();
     assert!(g.create_index::<GraphError>(&path("v")).expect("create"));
     g.flush_indexes().expect("flush");
-    assert!(g.memory_usage() > before, "the index is part of memory_usage");
+    let stats = g.index_stats(&path("v")).expect("stats");
+    assert_eq!((stats.entries, stats.distinct_keys, stats.dirty), (200, 50, 0));
+    assert!(stats.memory_bytes > 0);
+    assert_eq!(g.memory_usage() - before, stats.memory_bytes, "the index's share of memory_usage");
+    g.apply(Op::SetNodeAttr { id: "n0".into(), key: "v".into(), value: None }).expect("unset");
+    assert_eq!(g.index_stats(&path("v")).expect("stats").dirty, 1);
+    g.flush_indexes().expect("flush");
+    assert_eq!(g.index_stats(&path("v")).expect("stats").entries, 199);
 }
 
 #[test]
@@ -490,13 +498,11 @@ fn memory_usage_leaves_out_payloads() {
     assert_eq!(build("").memory_usage(), build("x").memory_usage());
 }
 
-/// Known gap (documented in the review, upstream #27): `max_visited` counts nodes
-/// expanded, not edges examined, and the cancel token is checked per node.
-/// A hub's whole edge list is scanned under `max_visited(1)`, even when
-/// cancelled on the first edge. When this test fails, upstream has closed
-/// the gap: drop the edge-counting workaround and update the review.
+/// Fixed upstream (#27): `max_edges` bounds the edges a traversal
+/// examines, and the cancel token is checked per edge, so a hub's edge list
+/// is not scanned to the end under a small budget or after cancellation.
 #[test]
-fn visit_budget_counts_nodes_not_edges() {
+fn edge_budget_and_cancellation_bound_a_hub() {
     const FAN: usize = 10_000;
     let mut g = G::new();
     let hub = g.add_node("hub", Record::default()).expect("add");
@@ -511,7 +517,16 @@ fn visit_budget_counts_nodes_not_edges() {
         Ok::<_, GraphError>(true)
     };
     let _ = bfs_limited(&g, hub, None, Budget::default().max_visited(1).truncate(), counting).expect("bfs");
-    assert_eq!(calls.get(), FAN, "the budget does not bound edges examined");
+    assert_eq!(calls.get(), FAN, "max_visited still counts nodes");
+
+    calls.set(0);
+    let result = bfs_limited(&g, hub, None, Budget::default().max_edges(100), counting);
+    assert!(matches!(result, Err(GraphError::BudgetExceeded { edges: 100, .. })), "{:?}", result.map(|r| r.truncated));
+    assert!(calls.get() <= 101, "{} edges examined", calls.get());
+    calls.set(0);
+    let limited = bfs_limited(&g, hub, None, Budget::default().max_edges(100).truncate(), counting).expect("bfs");
+    assert!(limited.truncated);
+    assert!(calls.get() <= 101, "{} edges examined", calls.get());
 
     calls.set(0);
     let token = Token::new();
@@ -521,20 +536,7 @@ fn visit_budget_counts_nodes_not_edges() {
         Ok::<_, GraphError>(true)
     };
     let _ = cancel::run(&token, || bfs_limited(&g, hub, None, Budget::UNLIMITED, cancelling));
-    assert_eq!(calls.get(), FAN, "cancellation is checked per node, not per edge");
-
-    // The workaround: count edges in the closure and fail from it
-    calls.set(0);
-    let bounded = |_, _: &_| {
-        calls.set(calls.get() + 1);
-        if calls.get() > 100 {
-            return Err(GraphError::BudgetExceeded { visited: 1, results: 0 });
-        }
-        Ok(true)
-    };
-    let result = bfs_limited(&g, hub, None, Budget::UNLIMITED, bounded);
-    assert!(matches!(result, Err(GraphError::BudgetExceeded { .. })));
-    assert_eq!(calls.get(), 101);
+    assert!(calls.get() <= 2, "cancellation is checked per edge ({} edges examined)", calls.get());
 }
 
 #[test]
@@ -549,35 +551,56 @@ fn expr_and_pattern_round_trip() {
     let bytes = postcard::to_stdvec(&expr).expect("postcard");
     assert_eq!(postcard::from_bytes::<Expr>(&bytes).expect("postcard decode"), expr);
 
-    // Too deep is an error, not a stack overflow. Nit (in the review,
-    // upstream #29): under postcard the error loses its message.
+    // Too deep is an error, not a stack overflow. Postcard drops the
+    // message; `format::take_error` returns it (fixed upstream, #29).
     let mut deep = Expr::Const(true);
     for _ in 0..200 {
         deep = Expr::Not(Box::new(deep));
     }
     let json_err = serde_json::to_string(&deep).expect_err("too deep").to_string();
     assert!(json_err.contains("nested more than"), "{}", json_err);
+    let _ = format::take_error();
     let postcard_err = postcard::to_stdvec(&deep).expect_err("too deep").to_string();
     assert!(!postcard_err.contains("nested more than"), "{}", postcard_err);
+    let message = format::take_error().expect("remembered");
+    assert!(message.contains("nested more than"), "{}", message);
+    assert_eq!(format::take_error(), None, "taking it clears it");
 
     let pattern = Pattern::parse("(a:Person)-[:KNOWS*1..3]->(b)").expect("parse");
     assert_eq!(Pattern::parse(&pattern.to_string()).expect("reparse"), pattern);
+}
+
+/// Known core gap (in the review, upstream #46): `Value`'s serde
+/// writes NaN and the infinities to JSON as `null` and can't read the
+/// `"NaN"` / `"Infinity"` / `"-Infinity"` strings that the core's own JSON
+/// files use for them (#26). Codecs that write attribute maps with
+/// `value::serialize_sorted` (our `DbCodec`) write files that don't load.
+#[test]
+fn value_serde_writes_non_finite_floats_to_json_as_null() {
+    for (f, text) in [(f64::NAN, "NaN"), (f64::INFINITY, "Infinity"), (f64::NEG_INFINITY, "-Infinity")] {
+        assert_eq!(serde_json::to_string(&Value::Float(f)).expect("json"), r#"{"Float":null}"#);
+        assert!(serde_json::from_str::<Value>(&format!(r#"{{"Float":"{}"}}"#, text)).is_err(), "{}", text);
+        // The core's own codec keeps them
+        let mut g = G::new();
+        g.add_node("a", rec([("k", Value::Float(f))])).expect("add");
+        let json = format::to_json(&g, &Attrs::new(), false).expect("save");
+        assert!(String::from_utf8_lossy(&json).contains(&format!(r#""{}""#, text)));
+        let (loaded, _) = format::from_json(&json).expect("load");
+        let ix = loaded.node_ix("a").expect("node");
+        assert!(matches!(loaded.node(ix).expect("node").data.attr["k"], Value::Float(x) if x.to_bits() == f.to_bits()));
+    }
 }
 
 fn nest(levels: usize, inner: Value) -> Value {
     (0..levels).fold(inner, |v, _| Value::List(vec![v]))
 }
 
-/// Known deviation (in the review, upstream #31): `Value`'s
-/// serde counts containers entered, the file format counts value depth (a
-/// scalar is depth 1, `MAX_DEPTH` = 100). They agree when the innermost
-/// value is a scalar, but 100 nested lists with an empty innermost one
-/// (depth 100) save and load in the file format while `Value`'s serde (and
-/// so the log's postcard encoding) rejects them. The commit pipeline counts
-/// an empty container as holding a scalar (`MAX_VALUE_DEPTH`), so it never
-/// logs such a value. When this test fails, upstream has made the two agree.
+/// Fixed upstream (#31): `Value`'s serde counts depth like the file
+/// format (a scalar is depth 1, a container's items one deeper,
+/// `MAX_DEPTH` = 100), so an empty container at depth 100 is accepted by
+/// both, and anything deeper by neither.
 #[test]
-fn value_serde_rejects_empty_containers_at_the_depth_limit() {
+fn value_serde_and_the_file_format_agree_on_depth() {
     let file_ok = |v: &Value| {
         let mut g = G::new();
         g.add_node("a", rec([("k", v.clone())])).unwrap();
@@ -595,11 +618,11 @@ fn value_serde_rejects_empty_containers_at_the_depth_limit() {
     let beyond = nest(100, Value::Int(1));
     assert!(!file_ok(&beyond) && !serde_ok(&beyond));
 
-    // An empty list at depth 100: the file format takes it, serde doesn't
-    let empty_at_limit = nest(99, Value::List(vec![]));
-    assert!(file_ok(&empty_at_limit));
-    assert!(!serde_ok(&empty_at_limit));
-    let empty_dict_at_limit = nest(99, Value::Dict(Attrs::new()));
-    assert!(file_ok(&empty_dict_at_limit));
-    assert!(!serde_ok(&empty_dict_at_limit));
+    // An empty container at depth 100 is accepted by both, at 101 by neither
+    for empty in [Value::List(vec![]), Value::Dict(Attrs::new())] {
+        let at_limit = nest(99, empty.clone());
+        assert!(file_ok(&at_limit) && serde_ok(&at_limit));
+        let beyond = nest(100, empty);
+        assert!(!file_ok(&beyond) && !serde_ok(&beyond));
+    }
 }

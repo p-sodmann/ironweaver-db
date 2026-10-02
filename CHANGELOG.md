@@ -73,8 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Top-level attribute keys starting with `iwdb.` are reserved, like meta keys: commits, `DbRecord`'s serde and the codec reject them (step 3, ADR 0004).
 - Upstream issue #31 filed: `Value`'s serde rejects empty containers at the depth limit that the file format accepts.
 - Bumped `ironweaver-core` from `02cefab` to `a14149e` (PR #25, which implements all seven upstream drafts). Core review updated; follow-up draft 8 (edge budget) added.
+- Bumped `ironweaver-core` from `a14149e` to `3b15149`, which fixes upstream issues #26–#35. The pin tests now check the fixed behaviour. Upstream issue #46 filed: `Value`'s serde writes NaN and infinities to JSON as `null` (a gap in the #26 fix).
 
 ### Fixed
+- A crash while a WAL archive was first initialized (after `ns/` was created, before the `IWDBARCH` marker was written) left a directory that every later open refused as "not a WAL archive" (a step 9 bug, found by the short crash run).
 - `verify` reported a layout 1-3 directory whose layout 4 upgrade was interrupted as damaged; it now reads the files where the upgrade left them (found by the upgrade crash test, step 9).
 - Reopening a store right after closing it could fail with `Locked` while another thread of the process spawned processes (a spawned process holds a copy of the lock file until its exec): taking a lock now retries for about 80 ms (a step 5 bug, found in step 7).
 - Under the `off` fsync policy, `Wal::sync` (and so `Store::sync`, `checkpoint` and `close`) fsynced only the current segment and no directory, and a new writer claimed the whole log synced; now a sync covers every segment with unsynced records and the directory, and a writer under `off` starts with `synced_seq` 0 (step 6).
