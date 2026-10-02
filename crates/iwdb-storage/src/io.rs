@@ -30,9 +30,10 @@ pub trait LogFs {
     /// `format::write_atomic`: into a temporary file next to it (named
     /// `.<name>.<pid>.<n>.tmp`), fsynced, then renamed over `path`. On
     /// error the temporary file is removed when possible and a previous
-    /// file at `path` is untouched. The core syncs the directory only on a
-    /// best-effort basis (upstream #32): callers that need the rename to be
-    /// durable call [`sync_dir`](Self::sync_dir) afterwards.
+    /// file at `path` is untouched. On Unix the core then fsyncs the
+    /// directory and returns its error, so `Ok` means the rename is durable
+    /// (since `3b15149`, upstream #32). An error can still come after the
+    /// rename: the new file may then be in place but not durable.
     fn write_atomic(&self, path: &Path, write: &mut dyn FnMut(&mut dyn Write) -> io::Result<()>) -> io::Result<()>;
     /// Remove a file.
     fn remove_file(&self, path: &Path) -> io::Result<()>;

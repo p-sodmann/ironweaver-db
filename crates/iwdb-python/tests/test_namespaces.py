@@ -91,6 +91,8 @@ def test_unique_constraints_and_indexes_are_per_namespace(store):
     put(b, "p2", email="x@example.org")
     assert [i["path"] for i in a.indexes()] == [["email"]]
     assert a.indexes()[0]["state"] == "ready"
+    assert a.indexes()[0]["entries"] == a.indexes()[0]["distinct_keys"] > 0
+    assert a.indexes()[0]["memory_bytes"] > 0
     assert b.indexes() == [] and b.catalog()["constraints"] == []
     assert a.catalog()["constraints"][0]["kind"] == "unique"
 

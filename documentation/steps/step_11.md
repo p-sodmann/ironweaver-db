@@ -10,7 +10,7 @@ A server process that serves the `Database` trait over gRPC, with the proto file
 
 ## Tasks
 
-- [ ] First: run the [upstream check](upstream-check.md). Issues this step depends on: #27, #28, #29.
+- [ ] First: run the [upstream check](upstream-check.md). Issues this step depended on: #27, #28, #29, all fixed at `3b15149`. For #29, report a filter's decode error with the core's message (`format::take_error()` after a postcard failure). For #28, reconsider whether the server should still abort on a panic in the commit path ([ADR 0008](../adr/0008-panics-in-the-commit-path-abort.md)), now that the core's apply path returns `GraphError::Internal` instead of panicking.
 - [ ] `proto/ironweaver_db/v1/*.proto`: values, entities, mutations, commit, reads, match, analytics jobs, catalog, errors (status codes + details). `buf lint` and `buf breaking` in CI.
 - [ ] Create `crates/iwdb-server` (tonic): config file, data directory, adapters from protos to the trait.
 - [ ] Server-streaming for large results (subgraph, match, traversal).

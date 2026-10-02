@@ -617,9 +617,6 @@ fn replay(
 /// invariants. Problems go into the report; returns the namespace if it
 /// loaded.
 fn load_and_check(report: &mut VerifyReport, name: &NamespaceName, seq: u64, path: &Path) -> Option<Namespace> {
-    if let Err(reason) = check_checkpoint_header(path) {
-        report.problem(Some(path), reason);
-    }
     let loaded = match load_checkpoint(path, seq, name) {
         Ok(loaded) => loaded,
         Err(e) => {
@@ -641,28 +638,6 @@ fn load_and_check(report: &mut VerifyReport, name: &NamespaceName, seq: u64, pat
         report.problem(Some(path), violation);
     }
     Some(namespace)
-}
-
-/// Workaround for upstream #33: the core's loader checks only the magic
-/// and version of a binary file's 16-byte header, and its CRC covers only
-/// the payload, so damage in the `flags` (bytes 10..12) and `reserved`
-/// (12..16) fields, documented as 0, would go unnoticed. Remove once the
-/// core checks them (`documentation/steps/upstream-check.md`).
-fn check_checkpoint_header(path: &Path) -> Result<(), String> {
-    use std::io::Read;
-    let mut header = [0u8; 16];
-    let mut file = fs::File::open(path).map_err(|e| format!("can't be read: {}", e))?;
-    // A file too short for a header fails to load anyway
-    if file.read_exact(&mut header).is_err() || !header.starts_with(b"IRONWEAV") {
-        return Ok(());
-    }
-    if header[10..16] != [0; 6] {
-        return Err(format!(
-            "its header's flags and reserved bytes are {:02x?}, not zero (damaged, or written by a newer version)",
-            &header[10..16]
-        ));
-    }
-    Ok(())
 }
 
 fn read_manifest(report: &mut VerifyReport, root: &Path) -> Option<Manifest> {

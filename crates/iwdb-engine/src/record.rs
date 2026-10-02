@@ -37,25 +37,11 @@ impl DbRecord {
         DbRecord { attr: attr.into_iter().map(|(k, v)| (k.into(), v)).collect(), ..DbRecord::default() }
     }
 
-    // Copy of the private `Record::at` in ironweaver-core (record.rs,
-    // a14149e), so that `DbRecord` answers every `Attributes` method exactly
-    // like `Record` for the same attribute map. Keep in sync on core bumps;
-    // `tests/db_record.rs` checks the equivalence. Upstream #30 asks for a
-    // public `record::lookup(&Attrs, path)`.
+    /// The core's path lookup (`record::lookup`), so that `DbRecord`
+    /// answers every `Attributes` method exactly like `Record` for the same
+    /// attribute map (checked by `tests/db_record.rs`).
     fn at(&self, path: &[String]) -> Option<&Value> {
-        let (first, rest) = path.split_first()?;
-        let mut value = self.attr.get(first)?;
-        for key in rest {
-            value = match value {
-                Value::Dict(d) => d.get(key)?,
-                _ => return None,
-            };
-        }
-        if value.is_none() {
-            None
-        } else {
-            Some(value)
-        }
+        ironweaver_core::record::lookup(&self.attr, path)
     }
 }
 

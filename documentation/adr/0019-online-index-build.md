@@ -1,6 +1,6 @@
 # ADR 0019: Online index builds
 
-Status: accepted
+Status: accepted (amended 2026-10-02: core `3b15149`, see [Update](#update-2026-10-02-off-graph-build-in-the-core))
 Date: 2026-10-01
 
 ## Context
@@ -37,3 +37,23 @@ The write-lock hold of an index build shrinks from "read every payload and inser
 | unique constraint (validation holds the writer mutex) | 406 ms | 345 ms | |
 
 The scan phase is about 50 ms of the 156 and no longer blocks anyone; the install (inserting 500 000 keys under the write lock) is about 100 ms, so the **hold shrinks by roughly 40 %, not to near zero**. That is the honest limit of what the core allows today: only an off-graph build with an O(1) install (the upstream issue) removes the rest. A unique constraint still stalls writers for its whole validation, as the Decision says. Both stalls grow linearly with the number of nodes carrying the label or attribute.
+
+## Update 2026-10-02: off-graph build in the core
+
+Upstream #34 is fixed at `3b15149`: `Graph::begin_index_build` (O(1)) returns an `ironweaver_core::IndexBuild` that reads keys through `&Graph`, and `install_index` swaps it in, in time proportional to the nodes changed since the build began (the graph tracks them and marks them dirty). Phase 2 no longer inserts keys under the write lock:
+
+1. **Begin**: `Namespace::begin_index_build` under the write lock, O(1). Then the handles are listed under the read lock, as before.
+2. **Scan**: `IndexBuild::read`, `BUILD_CHUNK` nodes per read-lock hold. The chunk is now **2048** (was 8192), because the core inserts the keys into the index while reading, so a chunk holds the lock longer than a plain read did.
+3. **Install**: under the writer mutex and the write lock, `install_index` (measured: under 60 µs at 500 000 nodes), then the flush re-reads only the nodes changed meanwhile. Our per-node version check is gone: the core's change tracking replaces it.
+
+**The measured stall was mostly writer starvation, not the insertion.** Timing each phase showed that commits waited for most of the *scan*: the scan releases the read lock and takes it again right away, and `std`'s `RwLock` on macOS let it back in ahead of a waiting writer. With the old code (and the new core) only 5 commits got through during a build, and the longest stall was 111 ms. Commits now count themselves while they wait for the write lock (`applies_waiting`), and the scan yields to them before each chunk. This is the larger part of the improvement.
+
+| 500 000 nodes, release, fsync off | whole build | longest commit stall | commits during the build (p50 / p99) |
+|---|---|---|---|
+| index, in one lock hold (engine alone) | 171–183 ms | the hold | – |
+| index, online, before (`a14149e` code) | 156–164 ms | 105–111 ms | 5 commits |
+| index, online, now | 167–169 ms | about 5 ms | 250+ commits, 0.6 ms / 1.3 ms |
+| unique constraint (validation holds the writer mutex) | 430 ms | 190–200 ms | unchanged |
+
+A stall is now bounded by one chunk's read-lock hold (and the O(n) listing of handles, about 5 ms at this size), not by the size of the index. The unique constraint's validation still holds the writer mutex for its whole scan, as the Decision says; that is ours to improve, not the core's.
+

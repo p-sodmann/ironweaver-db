@@ -93,6 +93,9 @@ fn namespaces_are_independent_graphs_with_their_own_seqs() {
     assert_eq!(s.indexes.len(), 1);
     assert!(s.indexes[0].unique && !s.indexes[0].declared && s.indexes[0].state == IndexState::Ready);
     assert!(s.memory_bytes > 0);
+    let size = s.indexes[0].size.unwrap();
+    assert_eq!((size.entries, size.distinct_keys), (2, 2));
+    assert!(size.memory_bytes > 0 && size.memory_bytes < s.memory_bytes);
     assert_eq!(social.index_entries(&path("email")), Some(2));
 
     // Unknown and invalid names

@@ -86,15 +86,13 @@ pub(crate) fn value_at(data: &DbRecord, path: &[String]) -> Result<Option<Value>
 }
 
 /// Whether `value` (an attribute's own value, at depth 1) is nested deeper
-/// than [`MAX_VALUE_DEPTH`]. Empty containers count as if they held a
-/// scalar (see there). Recurses at most `MAX_VALUE_DEPTH + 1` levels.
+/// than [`MAX_VALUE_DEPTH`]. Recurses at most `MAX_VALUE_DEPTH + 1`
+/// levels.
 pub(crate) fn too_deep(value: &Value, level: usize) -> bool {
     if level > MAX_VALUE_DEPTH {
         return true;
     }
     match value {
-        Value::List(items) if items.is_empty() => level + 1 > MAX_VALUE_DEPTH,
-        Value::Dict(map) if map.is_empty() => level + 1 > MAX_VALUE_DEPTH,
         Value::List(items) => items.iter().any(|v| too_deep(v, level + 1)),
         Value::Dict(map) => map.values().any(|v| too_deep(v, level + 1)),
         _ => false,
@@ -598,14 +596,16 @@ mod tests {
     }
 
     #[test]
-    fn depth_limit_counts_empty_containers_as_holding_a_scalar() {
+    fn depth_limit_is_the_core_s() {
         // A scalar inside 99 lists is at depth 100: fine
         assert!(!too_deep(&nest(99, Value::Int(1)), 1));
         assert!(too_deep(&nest(100, Value::Int(1)), 1));
-        // 99 containers, the innermost empty: fine; 100: too deep
-        assert!(!too_deep(&nest(98, Value::List(vec![])), 1));
-        assert!(too_deep(&nest(99, Value::List(vec![])), 1));
-        assert!(too_deep(&nest(99, Value::Dict(Attrs::new())), 1));
+        // An empty container is a value like a scalar: at depth 100 fine,
+        // at 101 too deep
+        assert!(!too_deep(&nest(99, Value::List(vec![])), 1));
+        assert!(!too_deep(&nest(99, Value::Dict(Attrs::new())), 1));
+        assert!(too_deep(&nest(100, Value::List(vec![])), 1));
+        assert!(too_deep(&nest(100, Value::Dict(Attrs::new())), 1));
         let dict = |v: Value| Value::Dict([("k".to_owned(), v)].into());
         assert!(!too_deep(&(0..99).fold(Value::Int(1), |v, _| dict(v)), 1));
         assert!(too_deep(&(0..100).fold(Value::Int(1), |v, _| dict(v)), 1));

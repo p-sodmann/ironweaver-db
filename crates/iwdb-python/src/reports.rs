@@ -100,6 +100,9 @@ pub fn indexes(py: Python<'_>, list: &[IndexStatus]) -> PyResult<Py<PyAny>> {
                 ("unique", to(py, i.unique)?),
                 ("scanned", to(py, scanned)?),
                 ("total", to(py, total)?),
+                ("entries", to(py, i.size.map(|s| s.entries))?),
+                ("distinct_keys", to(py, i.size.map(|s| s.distinct_keys))?),
+                ("memory_bytes", to(py, i.size.map(|s| s.memory_bytes))?),
             ],
         )?)?;
     }

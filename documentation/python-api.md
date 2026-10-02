@@ -111,7 +111,7 @@ Each is its own commit, and returns the same result dict (with empty `edge_ids` 
 | `create_index(path, *, idempotency_key=None)`, `drop_index(path, *, idempotency_key=None)` | a property index on node attributes |
 | `add_constraint(kind, label, path, *, idempotency_key=None)`, `drop_constraint(kind, label, path, *, idempotency_key=None)` | `kind`: `"unique"` or `"required"`, for the nodes with `label` |
 | `catalog(*, min_seq=None, timeout=None) -> dict` | `{"indexes": [["a"], ["b", "c"]], "constraints": [{"kind": "unique", "label": "Person", "path": ["email"]}]}` |
-| `indexes() -> list[dict]` | every index with its state: `{"path": [..], "state": "ready" \| "building", "declared": bool, "unique": bool, "scanned": int \| None, "total": int \| None}`; `declared` by `create_index`, `unique` if a unique constraint needs it; `scanned` and `total` while building |
+| `indexes() -> list[dict]` | every index with its state: `{"path": [..], "state": "ready" \| "building", "declared": bool, "unique": bool, "scanned": int \| None, "total": int \| None, "entries": int \| None, "distinct_keys": int \| None, "memory_bytes": int \| None}`; `declared` by `create_index`, `unique` if a unique constraint needs it; `scanned` and `total` while building; `entries` (nodes with a value at the path), `distinct_keys` and `memory_bytes` once ready |
 
 ### Reads
 

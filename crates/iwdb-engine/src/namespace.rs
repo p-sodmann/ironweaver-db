@@ -1,7 +1,7 @@
 //! [`Namespace`]: a graph with its catalog and commit position, changed
 //! only through the commit pipeline.
 
-use ironweaver_core::{GraphError, Key, NodeIx};
+use ironweaver_core::{GraphError, NodeIx};
 
 use crate::catalog::{AttrPath, ConstraintKind, NamespaceCatalog, NamespaceName};
 use crate::idempotency::{fingerprint_catalog, fingerprint_data, IdempotencyKey, KeyEntry, KeyTable, Keyed};
@@ -65,32 +65,31 @@ pub struct Namespace {
     poisoned: bool,
 }
 
-/// The keys of an index being built off the write lock (step 9, ADR 0019):
-/// for each node the scan saw, its index key and its version at the time.
-/// [`Namespace::apply_built`] installs it, checking each node's version
-/// again; nodes that changed or appeared meanwhile are re-read then.
+/// An index being built off the write lock (step 9, ADR 0019), the core's
+/// off-graph build (`ironweaver_core::IndexBuild`): begun on the graph with
+/// [`Namespace::begin_index_build`], filled with
+/// [`Namespace::scan_index_keys`] under the read lock, and installed by
+/// [`Namespace::apply_built`]. The graph tracks the nodes that change
+/// meanwhile, and the install marks them dirty for the flush that
+/// follows. Dropping a build cancels it.
 #[derive(Debug)]
 pub struct IndexBuild {
     path: AttrPath,
-    keys: Vec<(NodeIx, Option<Key>, u64)>,
+    build: ironweaver_core::IndexBuild,
 }
 
 impl IndexBuild {
-    pub fn new(path: AttrPath) -> Self {
-        IndexBuild { path, keys: Vec::new() }
-    }
-
     pub fn path(&self) -> &AttrPath {
         &self.path
     }
 
     /// Nodes scanned so far.
     pub fn len(&self) -> usize {
-        self.keys.len()
+        self.build.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.build.is_empty()
     }
 }
 
@@ -207,16 +206,19 @@ impl Namespace {
         self.graph.node_indices().collect()
     }
 
+    /// Begin an online build of the index on `path` ([`IndexBuild`]): O(1),
+    /// but takes `&mut self`, so the write lock for an instant. Fails if
+    /// the path can't be indexed or is indexed already.
+    pub fn begin_index_build(&mut self, path: AttrPath) -> Result<IndexBuild, Error> {
+        let build = self.graph.begin_index_build(path.keys())?;
+        Ok(IndexBuild { path, build })
+    }
+
     /// Read the index keys of the nodes `handles` (handles that are stale
-    /// by now are skipped) into `build`. Reads only: run it under the read
-    /// lock, a chunk at a time.
+    /// by now are skipped) into `build`, begun on this namespace. Reads
+    /// only: run it under the read lock, a chunk at a time.
     pub fn scan_index_keys(&self, handles: &[NodeIx], build: &mut IndexBuild) -> Result<(), Error> {
-        use ironweaver_core::Attributes;
-        for &ix in handles {
-            let Some(node) = self.graph.node(ix) else { continue };
-            let key = node.data.with_value(build.path.keys(), |v| v.and_then(Key::of))?;
-            build.keys.push((ix, key, node.data.version));
-        }
+        build.build.read::<_, _, GraphError>(&self.graph, handles.iter().copied())?;
         Ok(())
     }
 
@@ -354,12 +356,13 @@ impl Namespace {
         self.apply_built(prepared, time, None)
     }
 
-    /// [`apply`](Self::apply) a catalog change with the keys of its index
-    /// already read ([`scan_index_keys`](Self::scan_index_keys)): the index
-    /// is created from them, minus every node whose version changed or
-    /// that is gone, and the nodes the scan didn't see are indexed by the
-    /// flush that follows. So the write lock is held for the insertion of
-    /// the keys, not for reading every node's payload.
+    /// [`apply`](Self::apply) a catalog change with its index already
+    /// built ([`begin_index_build`](Self::begin_index_build),
+    /// [`scan_index_keys`](Self::scan_index_keys)): the build is installed
+    /// in O(nodes changed since it began), and the flush that follows the
+    /// apply re-reads those nodes and any the scan didn't see. So the write
+    /// lock is held for the changes made during the build, not for the
+    /// whole index.
     pub fn apply_built(
         &mut self,
         prepared: Prepared,
@@ -367,18 +370,12 @@ impl Namespace {
         build: Option<IndexBuild>,
     ) -> Result<CommitResult, Error> {
         let Prepared { record, result } = prepared;
-        if let Some(build) = build {
-            if !self.poisoned && record.seq == self.seq.wrapping_add(1) && !self.graph.has_index(build.path.keys()) {
-                let graph = &self.graph;
-                let fresh: Vec<_> = build
-                    .keys
-                    .into_iter()
-                    .filter(|(ix, _, version)| graph.node(*ix).is_some_and(|n| n.data.version == *version))
-                    .map(|(ix, key, _)| (ix, key))
-                    .collect();
-                // An error leaves the graph without the index; the apply
-                // below then builds it the plain way
-                let _ = self.graph.create_index_with_keys(build.path.keys(), fresh);
+        if let Some(IndexBuild { build, .. }) = build {
+            if !self.poisoned && record.seq == self.seq.wrapping_add(1) {
+                // An error (a build from another graph) or false (indexed
+                // meanwhile) leaves the graph as it was; the apply below
+                // then builds the index the plain way if it is missing
+                let _ = self.graph.install_index(build);
             }
         }
         self.apply_record(record, time)?;

@@ -39,14 +39,11 @@ use serde::{Deserialize, Serialize};
 use crate::catalog::{Constraint, IndexDef};
 use crate::{CommitTime, DbRecord, Keyed};
 
-/// Deepest nesting of an attribute or meta value a mutation may carry (a
-/// scalar is depth 1), the core's [`MAX_DEPTH`](ironweaver_core::format::MAX_DEPTH).
-///
-/// The core encodes values with two depth counters that differ by one for
-/// empty containers: the file format accepts an empty list at depth 100,
-/// `Value`'s serde (which the log uses) doesn't. The commit pipeline
-/// therefore counts an empty list or dict as if it held a scalar, which
-/// keeps every accepted value within both limits.
+/// Deepest nesting of an attribute or meta value a mutation may carry, the
+/// core's [`MAX_DEPTH`](ironweaver_core::format::MAX_DEPTH): a value is
+/// depth 1 and a container's items are one deeper, so an empty list at
+/// depth 100 is fine. The file format and `Value`'s serde (which the log
+/// uses) count the same way since `3b15149` (upstream #31).
 pub const MAX_VALUE_DEPTH: usize = ironweaver_core::format::MAX_DEPTH;
 
 /// A node (by id) or an edge (by id).

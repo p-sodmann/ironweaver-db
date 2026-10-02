@@ -57,6 +57,6 @@ pub use ops::{restore, restore_namespaces, restore_with, restore_with_only, stat
 pub use options::{CheckpointOptions, StoreOptions};
 pub use request::{ReadOptions, DEFAULT_TIMEOUT};
 pub use store::{
-    Analysis, CommitOptions, Edge, IndexState, IndexStatus, NamespaceStatus, Node, Ns, ProjectionSpec, Store,
-    StoreStatus, NAMESPACE,
+    Analysis, CommitOptions, Edge, IndexSize, IndexState, IndexStatus, NamespaceStatus, Node, Ns, ProjectionSpec,
+    Store, StoreStatus, NAMESPACE,
 };

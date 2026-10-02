@@ -20,11 +20,11 @@ pub fn scalar() -> impl Strategy<Value = Value> {
     prop_oneof![
         "[a-z ]{0,6}".prop_map(Value::String),
         any::<i64>().prop_map(Value::Int),
-        // Finite floats: NaN is not equal to itself. No -0.0: the core's JSON
-        // loader reads it back as 0.0 (pinned in db_graph.rs)
-        any::<f64>()
-            .prop_filter("finite, not -0.0", |f| f.is_finite() && !(*f == 0.0 && f.is_sign_negative()))
-            .prop_map(Value::Float),
+        // Finite floats: NaN is not equal to itself, and our JSON export
+        // can't write NaN or infinities yet (upstream #46, pinned in
+        // db_graph.rs)
+        any::<f64>().prop_filter("finite", |f| f.is_finite()).prop_map(Value::Float),
+        Just(Value::Float(-0.0)),
         (-3i64..3).prop_map(|i| Value::Float(i as f64 * 0.5)),
         any::<bool>().prop_map(Value::Bool),
         Just(Value::None),

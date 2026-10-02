@@ -134,10 +134,11 @@ def test_the_depth_limit(store):
     assert same(round_trip(store, nested(99, 1)), nested(99, 1))
     with pytest.raises(ValueError, match="100 levels"):
         round_trip(store, nested(100, 1))
-    # An empty list counts as holding a scalar
-    assert same(round_trip(store, nested(98, [])), nested(98, []))
+    # An empty list is a value like a scalar
+    assert same(round_trip(store, nested(99, [])), nested(99, []))
+    assert same(round_trip(store, nested(99, {})), nested(99, {}))
     with pytest.raises(ValueError):
-        round_trip(store, nested(99, []))
+        round_trip(store, nested(100, []))
     # A list that contains itself
     loop = []
     loop.append(loop)

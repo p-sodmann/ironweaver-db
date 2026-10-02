@@ -7,12 +7,7 @@ all-features = true
 [advisories]
 # Every advisory fails the check unless ignored here, with a reason:
 # ignore = [{ id = "RUSTSEC-YYYY-NNNN", reason = "why it does not apply" }]
-ignore = [
-    # bincode 1 is unmaintained. ironweaver-core uses it only to read legacy
-    # format-1 files; our checkpoints are format 2 (postcard). Revisit on every
-    # core bump (upstream may drop or replace it). Still needed at a14149e; upstream #30.
-    { id = "RUSTSEC-2025-0141", reason = "only used by ironweaver-core to read legacy format-1 files" },
-]
+ignore = []
 
 [licenses]
 # Permissive licenses compatible with shipping Ironweaver DB under MIT.

@@ -75,6 +75,22 @@ pub struct IndexStatus {
     pub declared: bool,
     /// Needed by a unique constraint.
     pub unique: bool,
+    /// The index's size; `None` while it is being built.
+    pub size: Option<IndexSize>,
+}
+
+/// How big an index is ([`IndexStatus::size`]), from the core's
+/// `Graph::index_stats` (O(1)). The namespace's indexes are flushed after
+/// every commit, so the counts are exact.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IndexSize {
+    /// Nodes with an indexable (scalar) value at the path.
+    pub entries: usize,
+    /// Distinct values.
+    pub distinct_keys: usize,
+    /// Approximate bytes the index uses (its share of
+    /// [`NamespaceStatus::memory_bytes`]).
+    pub memory_bytes: usize,
 }
 
 /// What an open namespace reports about itself ([`Ns::status`]).
@@ -98,8 +114,8 @@ pub struct NamespaceStatus {
     pub nodes: usize,
     pub edges: usize,
     /// Approximate bytes the graph uses, indexes included (the core's
-    /// `Graph::memory_usage`: O(1)). The core has no per-index figure
-    /// (upstream issue, `documentation/upstream-issues.md`).
+    /// `Graph::memory_usage`: O(1)); each index's share is in its
+    /// [`IndexSize`]. Payloads (attribute maps) are not counted.
     pub memory_bytes: usize,
     /// Declared indexes and those unique constraints need, and builds in
     /// progress, sorted by path.
@@ -932,9 +948,10 @@ where
     /// Commit a catalog change (an index or a constraint), like
     /// [`commit`](Self::commit). An index the graph lacks is built online
     /// (ADR 0019): the nodes are read a chunk at a time under the read lock,
-    /// without the writer's mutex, and only the insertion of the keys and
-    /// the log append happen under it. Adding a constraint validates the
-    /// existing data first, under the writer's mutex (reads go on).
+    /// without the writer's mutex, and only the log append and the install
+    /// (O(nodes changed during the build)) happen under it. A commit waits
+    /// for at most one chunk. Adding a constraint validates the existing
+    /// data first, under the writer's mutex (reads go on).
     pub fn commit_catalog(&self, change: CatalogChange) -> Result<CommitResult, Error> {
         self.commit_catalog_with(change, &CommitOptions::default())
     }
@@ -1129,25 +1146,41 @@ where
         let fsync = self.store.shared.options.wal.fsync;
         let synced = self.synced_seq();
         let builds = self.live().builds();
-        let (nodes, edges, memory_bytes, catalog) = self.read(|ns| {
+        let (nodes, edges, memory_bytes, catalog, sizes) = self.read(|ns| {
             let g = ns.graph();
-            (g.node_count(), g.edge_count(), g.memory_usage(), ns.catalog().clone())
+            let sizes: BTreeMap<AttrPath, IndexSize> = ns
+                .catalog()
+                .index_paths()
+                .into_iter()
+                .filter_map(|path| {
+                    let stats = g.index_stats(path.keys())?;
+                    let size = IndexSize {
+                        entries: stats.entries,
+                        distinct_keys: stats.distinct_keys,
+                        memory_bytes: stats.memory_bytes,
+                    };
+                    Some((path.clone(), size))
+                })
+                .collect();
+            (g.node_count(), g.edge_count(), g.memory_usage(), ns.catalog().clone(), sizes)
         });
+        let ready = |path: &AttrPath, declared: bool, unique: bool| IndexStatus {
+            path: path.clone(),
+            state: IndexState::Ready,
+            declared,
+            unique,
+            size: sizes.get(path).copied(),
+        };
         let mut indexes: BTreeMap<AttrPath, IndexStatus> = BTreeMap::new();
         for index in catalog.indexes() {
-            indexes.insert(
-                index.path.clone(),
-                IndexStatus { path: index.path.clone(), state: IndexState::Ready, declared: true, unique: false },
-            );
+            indexes.insert(index.path.clone(), ready(&index.path, true, false));
         }
         for constraint in catalog.constraints() {
             if constraint.kind == iwdb_engine::catalog::ConstraintKind::Unique {
-                indexes.entry(constraint.path.clone()).and_modify(|i| i.unique = true).or_insert(IndexStatus {
-                    path: constraint.path.clone(),
-                    state: IndexState::Ready,
-                    declared: false,
-                    unique: true,
-                });
+                indexes
+                    .entry(constraint.path.clone())
+                    .and_modify(|i| i.unique = true)
+                    .or_insert_with(|| ready(&constraint.path, false, true));
             }
         }
         for build in builds {
@@ -1156,6 +1189,7 @@ where
                 state: IndexState::Building { scanned: build.scanned(), total: build.total },
                 declared: true,
                 unique: false,
+                size: None,
             });
         }
         NamespaceStatus {
@@ -1176,28 +1210,11 @@ where
         }
     }
 
-    /// The number of nodes with a value the index on `path` holds: an O(n)
-    /// scan under the read lock (the core exposes no per-index count,
-    /// upstream issue). `None` if the graph has no index on `path`.
+    /// The number of nodes with a value the index on `path` holds (the
+    /// core's `Graph::index_stats`: O(1), a read lock for an instant).
+    /// `None` if the graph has no index on `path`.
     pub fn index_entries(&self, path: &AttrPath) -> Option<usize> {
-        use ironweaver_core::Attributes;
-        self.read(|ns| {
-            let g = ns.graph();
-            if !g.has_index(path.keys()) {
-                return None;
-            }
-            Some(
-                g.nodes()
-                    .filter(|(_, n)| {
-                        n.data
-                            .with_value(path.keys(), |v| v.and_then(ironweaver_core::Key::of))
-                            .ok()
-                            .flatten()
-                            .is_some()
-                    })
-                    .count(),
-            )
-        })
+        self.read(|ns| ns.graph().index_stats(path.keys()).map(|stats| stats.entries))
     }
 
     fn write(
