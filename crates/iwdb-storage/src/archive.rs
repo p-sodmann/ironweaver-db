@@ -134,7 +134,9 @@ pub struct Archive<F: LogFs> {
 impl<F: LogFs> Archive<F> {
     /// Open the archive directory `dir` for a store of history `history`,
     /// creating and initializing it if it is missing or empty (`ns/`, then
-    /// the marker written with `write_atomic`, then the directory synced),
+    /// the marker written with `write_atomic`, then the directory synced;
+    /// an empty `ns/` without a marker counts as empty, since a crash
+    /// during initialization leaves it),
     /// and take its exclusive lock. A format 1 archive (one namespace, the
     /// segments at the top) is upgraded: its segments are renamed into
     /// `ns/1/` (each rename is atomic, and a crash leaves the format 1
@@ -169,8 +171,14 @@ impl<F: LogFs> Archive<F> {
             Some(_) => {}
             None => {
                 for entry in fs::read_dir(dir).map_err(|e| Error::io("list", dir, e))? {
-                    let name = entry.map_err(|e| Error::io("list", dir, e))?.file_name();
+                    let entry = entry.map_err(|e| Error::io("list", dir, e))?;
+                    let name = entry.file_name();
                     let name = name.to_string_lossy();
+                    // An empty `ns/` is what a crash between creating it and
+                    // writing the marker leaves behind.
+                    if name == NS_DIR && dir_is_empty(&entry.path())? {
+                        continue;
+                    }
                     if name != LOCK_NAME && !name.ends_with(TEMP_SUFFIX) {
                         return Err(Error::NotAnArchive {
                             path: dir.to_path_buf(),
@@ -482,6 +490,12 @@ fn verify_namespace_segments(report: &mut VerifyReport, dir: &Path, version: u32
     Ok(())
 }
 
+/// Whether directory `dir` has no entries.
+fn dir_is_empty(dir: &Path) -> Result<bool, Error> {
+    let mut entries = fs::read_dir(dir).map_err(|e| Error::io("list", dir, e))?;
+    Ok(entries.next().is_none())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,5 +514,20 @@ mod tests {
             fs::write(dir.path().join(ARCHIVE_MARKER_NAME), bad).expect("write");
             assert!(matches!(read_archive_marker(dir.path()), Err(Error::NotAnArchive { .. })), "byte {}", at);
         }
+    }
+
+    #[test]
+    fn an_empty_ns_dir_without_a_marker_is_initialized() {
+        // A crash between creating `ns/` and writing the marker
+        let dir = tempfile::tempdir().expect("dir");
+        fs::create_dir(dir.path().join(NS_DIR)).expect("create");
+        let id = HistoryId([3; 16]);
+        drop(Archive::open(crate::io::StdFs, dir.path(), id).expect("open"));
+        assert_eq!(read_archive_marker(dir.path()).expect("read"), Some(id));
+
+        // A non-empty `ns/` without a marker is still refused
+        let dir = tempfile::tempdir().expect("dir");
+        fs::create_dir_all(dir.path().join(NS_DIR).join("1")).expect("create");
+        assert!(matches!(Archive::open(crate::io::StdFs, dir.path(), id), Err(Error::NotAnArchive { .. })));
     }
 }
