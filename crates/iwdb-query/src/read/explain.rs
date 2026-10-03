@@ -1,14 +1,8 @@
-//! `explain`: how `find` would read a filter.
-//!
-//! WORKAROUND (upstream #50, `index_candidates` doesn't say which index it
-//! used; see `documentation/steps/upstream-check.md`): [`plan`] mirrors
-//! the choice the core's `Graph::index_candidates` makes at the pinned
-//! revision, and estimates sizes from the O(1) `index_stats`. The test
-//! `the_plan_agrees_with_index_candidates` checks it against the core on
-//! every bump. Remove the mirror once the core reports its plan.
+//! `explain`: how `find` would read a filter, from the core's
+//! `Graph::index_plan` (the plan `index_candidates` follows).
 
-use ironweaver_core::{CmpOp, Expr};
-use iwdb_engine::{DbGraph, Namespace};
+use ironweaver_core::{Expr, IndexPlan};
+use iwdb_engine::Namespace;
 
 use super::ReadContext;
 use crate::{Answer, Error, ExplainRequest, Work};
@@ -38,6 +32,23 @@ pub enum Plan {
     Union(Vec<Plan>),
     /// No index narrows the filter down: every node is a candidate.
     Scan,
+    /// A plan of a newer core this version doesn't know (its debug form).
+    Other(String),
+}
+
+impl Plan {
+    fn of(plan: &IndexPlan) -> Plan {
+        let index = |path: &Vec<String>, lookup| Plan::Index { path: path.clone(), lookup };
+        match plan {
+            IndexPlan::Empty => Plan::Empty,
+            IndexPlan::Label(label) => Plan::Label { label: label.clone() },
+            IndexPlan::Point { path, .. } => index(path, Lookup::Point),
+            IndexPlan::In { path, values } => index(path, Lookup::In { values: values.len() }),
+            IndexPlan::Range { path, .. } => index(path, Lookup::Range),
+            IndexPlan::Union(plans) => Plan::Union(plans.iter().map(Plan::of).collect()),
+            other => Plan::Other(format!("{:?}", other)),
+        }
+    }
 }
 
 /// The answer of [`explain`].
@@ -45,8 +56,10 @@ pub enum Plan {
 pub struct Explain {
     pub plan: Plan,
     /// The estimated number of candidates `find` checks (each counts as
-    /// visited): from the index sizes (entries per distinct value for a
-    /// point lookup, all entries for a range), or every node for a scan.
+    /// visited), from the core's `index_plan_estimate`: exact for labels
+    /// and point lookups, for a range exact if it spans a few dozen keys
+    /// and the index's size otherwise, the sum of the parts for a union,
+    /// every node for a scan.
     pub estimated_candidates: usize,
     /// With `analyze`: the exact number of candidates.
     pub candidates: Option<usize>,
@@ -67,11 +80,15 @@ pub fn explain(
     _cx: &ReadContext,
 ) -> Result<Answer<Explain>, Error> {
     let g = ns.graph();
-    let (plan, estimated_candidates) = plan(g, &request.filter).unwrap_or((Plan::Scan, g.node_count()));
-    let candidates = if request.analyze {
-        Some(g.index_candidates(&request.filter)?.map_or(g.node_count(), |c| c.len()))
-    } else {
-        None
+    let core = g.index_plan(&request.filter);
+    let (plan, estimated_candidates) = match &core {
+        Some(p) => (Plan::of(p), g.index_plan_estimate(p)),
+        None => (Plan::Scan, g.node_count()),
+    };
+    let candidates = match (&core, request.analyze) {
+        (_, false) => None,
+        (Some(p), true) => Some(g.execute_index_plan(p)?.len()),
+        (None, true) => Some(g.node_count()),
     };
     let mut paths = Vec::new();
     referenced_paths(&request.filter, &mut paths);
@@ -94,105 +111,24 @@ fn referenced_paths(expr: &Expr, out: &mut Vec<Vec<String>>) {
     }
 }
 
-/// Entries per distinct value of the index on `path`.
-fn per_value(g: &DbGraph, path: &[String]) -> usize {
-    g.index_stats(path).map_or(0, |s| s.entries.div_ceil(s.distinct_keys.max(1)))
-}
-
-fn entries(g: &DbGraph, path: &[String]) -> usize {
-    g.index_stats(path).map_or(0, |s| s.entries)
-}
-
-fn is_open_range(e: &Expr) -> bool {
-    matches!(e, Expr::Compare { op: CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge, .. })
-}
-
-/// The plan `index_candidates` follows for `expr` and its estimated size;
-/// `None` where it returns `None` (a scan).
-pub(crate) fn plan(g: &DbGraph, expr: &Expr) -> Option<(Plan, usize)> {
-    match expr {
-        Expr::Const(false) => Some((Plan::Empty, 0)),
-        Expr::Label(label) => Some((Plan::Label { label: label.clone() }, g.label_count(label))),
-        Expr::Compare { path, op, .. } if g.has_index(path) => {
-            let (lookup, size) = match op {
-                CmpOp::Ne => return None,
-                CmpOp::Eq => (Lookup::Point, per_value(g, path)),
-                _ => (Lookup::Range, entries(g, path)),
-            };
-            Some((Plan::Index { path: path.clone(), lookup }, size))
-        }
-        Expr::In { path, values } if g.has_index(path) => {
-            let size = per_value(g, path).saturating_mul(values.len()).min(entries(g, path));
-            Some((Plan::Index { path: path.clone(), lookup: Lookup::In { values: values.len() } }, size))
-        }
-        Expr::And(items) => {
-            let mut best: Option<(Plan, usize)> = None;
-            let keep = |candidate: (Plan, usize), best: &mut Option<(Plan, usize)>| {
-                if best.as_ref().is_none_or(|b| candidate.1 < b.1) {
-                    *best = Some(candidate);
-                }
-            };
-            // A lower and an upper bound on one indexed path: one range
-            let mut combined: Vec<&Vec<String>> = Vec::new();
-            for a in items {
-                let Expr::Compare { path, op: CmpOp::Gt | CmpOp::Ge, .. } = a else { continue };
-                if !g.has_index(path) {
-                    continue;
-                }
-                let upper = items
-                    .iter()
-                    .any(|b| matches!(b, Expr::Compare { path: p, op: CmpOp::Lt | CmpOp::Le, .. } if p == path));
-                if upper {
-                    combined.push(path);
-                    keep((Plan::Index { path: path.clone(), lookup: Lookup::Range }, entries(g, path)), &mut best);
-                }
-            }
-            // Then the rest; open-ended ranges only if nothing narrower
-            for pass in [false, true] {
-                if pass && best.is_some() {
-                    break;
-                }
-                for item in items.iter().filter(|e| is_open_range(e) == pass) {
-                    if let Expr::Compare { path, .. } = item {
-                        if combined.contains(&path) {
-                            continue;
-                        }
-                    }
-                    if let Some(p) = plan(g, item) {
-                        keep(p, &mut best);
-                    }
-                }
-            }
-            best
-        }
-        Expr::Or(items) => {
-            let mut plans = Vec::new();
-            let mut size = 0usize;
-            for item in items {
-                let (p, n) = plan(g, item)?;
-                plans.push(p);
-                size = size.saturating_add(n);
-            }
-            Some((Plan::Union(plans), size.min(g.node_count())))
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use ironweaver_core::Value;
-    use iwdb_engine::catalog::{AttrPath, NamespaceName};
+    use ironweaver_core::{CmpOp, Value};
+    use iwdb_engine::catalog::{AttrPath, IndexDef, NamespaceName};
     use iwdb_engine::{CatalogChange, Mutation};
+    use iwdb_storage::HistoryId;
 
     use super::*;
+    use crate::{Bounds, QueryOptions};
 
     fn cmp(path: &str, op: CmpOp, v: i64) -> Expr {
         Expr::Compare { path: vec![path.into()], op, value: Value::Int(v) }
     }
 
+    /// 40 nodes, `age` 0..10 (indexed, 4 nodes each), `x` 0..40, every
+    /// fourth labelled `Four`.
     fn namespace() -> Namespace {
         let mut ns = Namespace::new(NamespaceName::new("t").unwrap());
         let mutations: Vec<Mutation> = (0..40)
@@ -206,43 +142,44 @@ mod tests {
             .collect();
         ns.commit(&mutations).unwrap();
         let path = AttrPath::new(["age"]).unwrap();
-        ns.commit_catalog(CatalogChange::CreateIndex(iwdb_engine::catalog::IndexDef { path })).unwrap();
+        ns.commit_catalog(CatalogChange::CreateIndex(IndexDef { path })).unwrap();
         ns
     }
 
+    const BOUNDS: Bounds = Bounds { max_results: 100, max_visited: 1_000, max_edges: 1_000 };
+
+    fn run(ns: &Namespace, filter: Expr) -> Explain {
+        let cx = ReadContext::new(BOUNDS, &QueryOptions::default(), 1, HistoryId::default());
+        explain(ns, &ExplainRequest { filter, analyze: true }, &[], &cx).unwrap().value
+    }
+
     #[test]
-    fn the_plan_agrees_with_index_candidates() {
+    fn the_plan_and_its_estimate_come_from_the_core() {
         let ns = namespace();
-        let g = ns.graph();
-        let exprs = [
-            Expr::Const(false),
-            Expr::Const(true),
-            Expr::Label("Four".into()),
-            Expr::Label("Nope".into()),
-            cmp("age", CmpOp::Eq, 3),
-            cmp("age", CmpOp::Ne, 3),
-            cmp("age", CmpOp::Ge, 3),
-            cmp("x", CmpOp::Eq, 3),
-            Expr::In { path: vec!["age".into()], values: vec![Value::Int(1), Value::Int(2)] },
-            Expr::And(vec![cmp("age", CmpOp::Ge, 2), cmp("age", CmpOp::Lt, 4)]),
-            Expr::And(vec![cmp("age", CmpOp::Ge, 2), Expr::Label("Four".into())]),
-            Expr::And(vec![cmp("x", CmpOp::Eq, 2), cmp("x", CmpOp::Gt, 1)]),
-            Expr::Or(vec![cmp("age", CmpOp::Eq, 1), Expr::Label("Four".into())]),
-            Expr::Or(vec![cmp("age", CmpOp::Eq, 1), cmp("x", CmpOp::Eq, 1)]),
-            Expr::Not(Box::new(cmp("age", CmpOp::Eq, 1))),
-            Expr::Exists { path: vec!["age".into()] },
+        let age = || vec!["age".to_owned()];
+        let index = |lookup| Plan::Index { path: age(), lookup };
+        let cases = [
+            (Expr::Const(false), Plan::Empty, 0),
+            (Expr::Label("Four".into()), Plan::Label { label: "Four".into() }, 10),
+            (cmp("age", CmpOp::Eq, 3), index(Lookup::Point), 4),
+            (Expr::In { path: age(), values: vec![Value::Int(1), Value::Int(2)] }, index(Lookup::In { values: 2 }), 8),
+            (Expr::And(vec![cmp("age", CmpOp::Ge, 2), cmp("age", CmpOp::Lt, 4)]), index(Lookup::Range), 8),
+            // The smaller estimate wins: the point lookup, not the label
+            (Expr::And(vec![Expr::Label("Four".into()), cmp("age", CmpOp::Eq, 4)]), index(Lookup::Point), 4),
+            (
+                Expr::Or(vec![cmp("age", CmpOp::Eq, 1), Expr::Label("Four".into())]),
+                Plan::Union(vec![index(Lookup::Point), Plan::Label { label: "Four".into() }]),
+                14,
+            ),
+            (cmp("age", CmpOp::Ne, 3), Plan::Scan, 40),
+            (cmp("x", CmpOp::Eq, 3), Plan::Scan, 40),
+            (Expr::Or(vec![cmp("age", CmpOp::Eq, 1), cmp("x", CmpOp::Eq, 1)]), Plan::Scan, 40),
         ];
-        for expr in &exprs {
-            let core = g.index_candidates(expr).unwrap();
-            let ours = plan(g, expr);
-            assert_eq!(ours.is_some(), core.is_some(), "{:?}", expr);
-            if let (Some((_, estimate)), Some(core)) = (ours, core) {
-                // Exact for points, labels and unions here; ranges are
-                // upper bounds
-                assert!(core.len() <= estimate.max(core.len()), "{:?}", expr);
-            }
+        for (filter, plan, estimate) in cases {
+            let explained = run(&ns, filter.clone());
+            assert_eq!((&explained.plan, explained.estimated_candidates), (&plan, estimate), "{:?}", filter);
+            // Exact estimates here (no range spans more than a few keys)
+            assert_eq!(explained.candidates, Some(estimate.min(40)), "{:?}", filter);
         }
-        assert_eq!(plan(g, &cmp("age", CmpOp::Eq, 3)).map(|p| p.1), Some(4));
-        assert_eq!(plan(g, &Expr::Label("Four".into())).map(|p| p.1), Some(10));
     }
 }

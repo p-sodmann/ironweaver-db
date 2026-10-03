@@ -8,15 +8,15 @@ use ironweaver_core::random_walks::{self, WalkOptions};
 use ironweaver_core::{traversal, Direction, EdgeIx, GraphError, NodeIx};
 use iwdb_engine::{DbGraph, DbRecord, Namespace};
 
-use super::{existing, expand_filtered, node_ix, EdgeFilter, Meter, ReadContext, TopK};
+use super::{existing, node_ix, EdgeFilter, Meter, ReadContext, TopK};
 use crate::{
     Answer, Edge, Error, NeighbourhoodRequest, Node, Order, Path, PathMethod, PathRequest, Subgraph, SubgraphRequest,
     TraverseRequest, WalkRequest, Work,
 };
 
-/// The nodes within `depth` of `seeds`: the core's `expand_limited`, or
-/// our filtered expansion when edges are filtered. Also the work done and
-/// whether a limit truncated it.
+/// The nodes within `depth` of `seeds` along the edges `filter` accepts
+/// (the core's `expand_limited`), the work done and whether a limit
+/// truncated it.
 fn reach(
     g: &DbGraph,
     seeds: &[NodeIx],
@@ -25,17 +25,10 @@ fn reach(
     filter: &EdgeFilter<'_>,
     cx: &ReadContext,
 ) -> Result<(Vec<NodeIx>, Work, bool), Error> {
-    if filter.is_all() {
-        let limited = traversal::expand_limited(g, seeds.iter().copied(), depth, direction, cx.budget(false))?;
-        let work = Work { visited: limited.visited, edges: limited.edges };
-        return Ok((limited.value, work, limited.truncated));
-    }
-    let mut meter = Meter::new(&cx.bounds);
-    let reached = expand_filtered(g, seeds, depth, direction, filter, &mut meter)?;
-    if let Some(what) = &meter.hit {
-        cx.reached(what)?;
-    }
-    Ok((reached, meter.work(), meter.hit.is_some()))
+    let edge_ok = |e: EdgeIx, _: &ironweaver_core::Edge<DbRecord>| filter.accepts(g, e);
+    let limited = traversal::expand_limited(g, seeds.iter().copied(), depth, direction, cx.budget(false), edge_ok)?;
+    let work = Work { visited: limited.visited, edges: limited.edges };
+    Ok((limited.value, work, limited.truncated))
 }
 
 fn check_seeds(seeds: &[String], cx: &ReadContext) -> Result<(), Error> {
@@ -90,8 +83,9 @@ pub fn neighbourhood(
 }
 
 /// The ids of the nodes a breadth- or depth-first traversal from `start`
-/// reaches along outgoing edges, in traversal order (the core's
-/// `bfs_limited` / `dfs_limited`).
+/// reaches along edges in `direction`, in traversal order (the core's
+/// `bfs_limited` / `dfs_limited`; with `Both`, a node's outgoing edges come
+/// before its incoming ones).
 ///
 /// Bounded by `max_visited`, `max_edges` and `max_results` (no cursor: the
 /// order isn't a sort key). Among the nodes reached through the edges of
@@ -105,8 +99,8 @@ pub fn traverse(ns: &Namespace, request: &TraverseRequest, cx: &ReadContext) -> 
     let edge_ok = |e: EdgeIx, _: &ironweaver_core::Edge<DbRecord>| filter.accepts(g, e);
     let budget = cx.budget(true);
     let limited = match request.order {
-        Order::Bfs => traversal::bfs_limited(g, start, request.depth, budget, edge_ok)?,
-        Order::Dfs => traversal::dfs_limited(g, start, request.depth, budget, edge_ok)?,
+        Order::Bfs => traversal::bfs_limited(g, start, request.depth, request.direction, budget, edge_ok)?,
+        Order::Dfs => traversal::dfs_limited(g, start, request.depth, request.direction, budget, edge_ok)?,
     };
     let value = limited.value.iter().filter_map(|&ix| g.node(ix).map(|n| n.id().to_owned())).collect();
     let work = Work { visited: limited.visited, edges: limited.edges };
@@ -172,22 +166,18 @@ pub fn subgraph(ns: &Namespace, request: &SubgraphRequest, cx: &ReadContext) -> 
 /// A shortest path from `from` to `to`, or `None` if there is none within
 /// the request's limits (`max_depth`, `max_cost`).
 ///
-/// WORKAROUND (upstream #48, no budget for shortest paths; see
-/// `documentation/steps/upstream-check.md`): the core's path search takes
-/// no `Budget`. BFS runs the core's `bidirectional_bfs` with an edge
-/// filter that counts each edge to a new node as one examined edge and one
-/// visited node. Dijkstra and A* run the core's A* with a heuristic that
-/// counts each node discovered as visited (Dijkstra: an estimate of 0);
-/// their edges examined can't be counted (reported as 0). Cancellation is
-/// checked per edge (BFS) or per node settled (Dijkstra, A*). With
-/// `partial`, a search a limit stopped answers `None` with `truncated`.
+/// Bounded by `max_visited` and `max_edges` (the core's
+/// `bidirectional_bfs_limited` for BFS, `find_path_limited` for Dijkstra
+/// and A*: nodes settled or frontier nodes expanded, edges relaxed or
+/// listed), with cancellation checked per edge. With `partial`, a search a
+/// limit stopped answers `None` with `truncated`.
 pub fn shortest_path(ns: &Namespace, request: &PathRequest, cx: &ReadContext) -> Result<Answer<Option<Path>>, Error> {
     let g = ns.graph();
     let from = node_ix(g, &request.from)?;
     let to = node_ix(g, &request.to)?;
     pathfinding::check_max_cost(request.max_cost)?;
-    let mut meter = Meter::new(&cx.bounds);
-    let found: Result<Option<(Vec<NodeIx>, f64)>, Error> = match &request.method {
+    let budget = cx.budget(false);
+    let (found, work, truncated) = match &request.method {
         PathMethod::Bfs => {
             if request.cost != EdgeCost::Unit {
                 return Err(Error::invalid("a BFS path counts edges; use Dijkstra or A* for a weighted cost"));
@@ -198,69 +188,49 @@ pub fn shortest_path(ns: &Namespace, request: &PathRequest, cx: &ReadContext) ->
                 (Some(d), Some(c)) => Some(d.min(c)),
                 (d, c) => d.or(c),
             };
-            let edge_ok = |_: EdgeIx, _: &ironweaver_core::Edge<DbRecord>| {
-                if !meter.examine() || !meter.enter() {
-                    return Err(Error::budget("the path search"));
-                }
-                Ok(true)
-            };
-            traversal::bidirectional_bfs(g, from, to, max_depth, request.direction, edge_ok)
-                .map(|path| path.map(|nodes| (nodes.clone(), nodes.len().saturating_sub(1) as f64)))
+            let all = |_: EdgeIx, _: &ironweaver_core::Edge<DbRecord>| Ok::<_, GraphError>(true);
+            let limited = traversal::bidirectional_bfs_limited(g, from, to, max_depth, request.direction, budget, all)?;
+            let found = limited.value.map(|nodes| {
+                let cost = nodes.len().saturating_sub(1) as f64;
+                (nodes, cost)
+            });
+            (found, Work { visited: limited.visited, edges: limited.edges }, limited.truncated)
         }
         PathMethod::Dijkstra | PathMethod::AStar { .. } => {
             if request.max_depth.is_some() {
                 return Err(Error::invalid("max_depth limits BFS paths; use max_cost for Dijkstra and A*"));
             }
-            let mut inner: Heuristic<'_, DbRecord, GraphError> = match &request.method {
-                PathMethod::AStar { coords, metric } => Heuristic::coords(g, to, *metric, coords.clone())?,
-                _ => Heuristic::Zero,
-            };
-            let meter = &mut meter;
-            let estimate = Box::new(move |node: &ironweaver_core::Node<DbRecord>| {
-                if !meter.enter() {
-                    return Err(GraphError::BudgetExceeded { visited: meter.visited, edges: 0, results: 0 });
+            let mut query: PathQuery<'_, DbRecord, GraphError> = match &request.method {
+                PathMethod::AStar { coords, metric } => {
+                    PathQuery::astar(Heuristic::coords(g, to, *metric, coords.clone())?)
                 }
-                inner.estimate(node)
-            });
-            let mut query = PathQuery::astar(Heuristic::Custom(estimate));
+                _ => PathQuery::dijkstra(),
+            };
             query.cost = request.cost.clone();
             query.direction = request.direction;
             query.max_cost = request.max_cost;
-            let result = pathfinding::find_path(g, from, to, &mut query);
-            drop(query);
-            result.map(|r| r.map(|r| (r.nodes, r.cost))).map_err(Error::from)
+            let limited = pathfinding::find_path_limited(g, from, to, &mut query, budget)?;
+            let found = limited.value.map(|r| (r.nodes, r.cost));
+            (found, Work { visited: limited.visited, edges: limited.edges }, limited.truncated)
         }
     };
-    let work = meter.work();
-    let (value, truncated) = match found {
-        Ok(path) => (path, false),
-        Err(e) => match &meter.hit {
-            Some(what) => {
-                cx.reached(what)?;
-                (None, true)
-            }
-            None => return Err(e),
-        },
-    };
-    let value = value.map(|(nodes, cost)| Path {
+    let value = found.map(|(nodes, cost)| Path {
         nodes: nodes.iter().filter_map(|&ix| g.node(ix).map(|n| n.id().to_owned())).collect(),
         cost,
     });
     Ok(Answer { value, seq: ns.seq(), next: None, truncated, work })
 }
 
-/// Random walks from `start`, as lists of node ids (the core's
-/// `WalkPlan::run_limited`: `max_results` walks, `max_visited` nodes
-/// walked through, `max_edges` steps).
+/// Random walks from `start`, as lists of node ids.
 ///
-/// WORKAROUND (upstream #48, no budget for walk planning; see
-/// `documentation/steps/upstream-check.md`): the core's `plan` indexes the
-/// whole graph before walking (O(nodes + edges), without a budget or
-/// cancellation check), so the read needs `max_visited` of at least the
-/// number of nodes and `max_edges` of at least the number of edges, or
-/// fails with `budget_exceeded` (also with `partial`); the indexing is
-/// counted in the work. Walks with a seed repeat for the same state in the
-/// same process; the edge order they depend on isn't part of the contract.
+/// The core's `plan_limited` first indexes the nodes and edges the walks
+/// can reach (within `max_length - 1` steps of the start); then
+/// `WalkPlan::run_limited` walks with what is left of the budget:
+/// `max_results` walks, `max_visited` nodes walked through, `max_edges`
+/// steps. The work reports both. A plan is all or nothing: with `partial`,
+/// a limit reached while indexing answers no walks with `truncated`. Walks
+/// with a seed repeat for the same state in the same process; the edge
+/// order they depend on isn't part of the contract.
 pub fn random_walks(
     ns: &Namespace,
     request: &WalkRequest,
@@ -268,20 +238,21 @@ pub fn random_walks(
 ) -> Result<Answer<Vec<Vec<String>>>, Error> {
     let g = ns.graph();
     node_ix(g, &request.start)?;
-    let (nodes, edges) = (g.node_count(), g.edge_count());
-    if nodes > cx.bounds.max_visited || edges > cx.bounds.max_edges {
-        return Err(Error::budget(format!(
-            "{} nodes visited and {} edges examined (random walks index the whole graph first: {} nodes, {} edges)",
-            cx.bounds.max_visited, cx.bounds.max_edges, nodes, edges
-        )));
-    }
     let mut options = WalkOptions::new(request.max_length, request.walks);
     options.min_length = request.min_length;
     options.allow_revisit = request.allow_revisit;
     options.seed = request.seed;
-    let plan = random_walks::plan::<_, _, GraphError>(g, Some(&request.start), options)?;
-    let limited = plan.run_limited(cx.budget(true))?;
+    let planned = random_walks::plan_limited::<_, _, GraphError>(g, Some(&request.start), options, cx.budget(false))?;
+    let mut work = Work { visited: planned.visited, edges: planned.edges };
+    let Some(plan) = planned.value else {
+        return Ok(Answer { value: Vec::new(), seq: ns.seq(), next: None, truncated: true, work });
+    };
+    let mut budget = cx.budget(true);
+    budget.max_visited = budget.max_visited.map(|m| m.saturating_sub(planned.visited));
+    budget.max_edges = budget.max_edges.map(|m| m.saturating_sub(planned.edges));
+    let limited = plan.run_limited(budget)?;
     let value = limited.value.iter().map(|w| plan.items(w).map(str::to_owned).collect()).collect();
-    let work = Work { visited: nodes + limited.visited, edges: edges + limited.edges };
+    work.visited += limited.visited;
+    work.edges += limited.edges;
     Ok(Answer { value, seq: ns.seq(), next: None, truncated: limited.truncated, work })
 }

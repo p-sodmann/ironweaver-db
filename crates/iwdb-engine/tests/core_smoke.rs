@@ -516,15 +516,17 @@ fn edge_budget_and_cancellation_bound_a_hub() {
         calls.set(calls.get() + 1);
         Ok::<_, GraphError>(true)
     };
-    let _ = bfs_limited(&g, hub, None, Budget::default().max_visited(1).truncate(), counting).expect("bfs");
+    let _ =
+        bfs_limited(&g, hub, None, Direction::Out, Budget::default().max_visited(1).truncate(), counting).expect("bfs");
     assert_eq!(calls.get(), FAN, "max_visited still counts nodes");
 
     calls.set(0);
-    let result = bfs_limited(&g, hub, None, Budget::default().max_edges(100), counting);
+    let result = bfs_limited(&g, hub, None, Direction::Out, Budget::default().max_edges(100), counting);
     assert!(matches!(result, Err(GraphError::BudgetExceeded { edges: 100, .. })), "{:?}", result.map(|r| r.truncated));
     assert!(calls.get() <= 101, "{} edges examined", calls.get());
     calls.set(0);
-    let limited = bfs_limited(&g, hub, None, Budget::default().max_edges(100).truncate(), counting).expect("bfs");
+    let limited =
+        bfs_limited(&g, hub, None, Direction::Out, Budget::default().max_edges(100).truncate(), counting).expect("bfs");
     assert!(limited.truncated);
     assert!(calls.get() <= 101, "{} edges examined", calls.get());
 
@@ -535,7 +537,7 @@ fn edge_budget_and_cancellation_bound_a_hub() {
         token.cancel();
         Ok::<_, GraphError>(true)
     };
-    let _ = cancel::run(&token, || bfs_limited(&g, hub, None, Budget::UNLIMITED, cancelling));
+    let _ = cancel::run(&token, || bfs_limited(&g, hub, None, Direction::Out, Budget::UNLIMITED, cancelling));
     assert!(calls.get() <= 2, "cancellation is checked per edge ({} edges examined)", calls.get());
 }
 
@@ -631,16 +633,17 @@ fn value_serde_and_the_file_format_agree_on_depth() {
     }
 }
 
-/// Upstream #48: no budget for shortest paths (and pattern matching, walk
-/// planning). Dijkstra and A* take no `Budget` and check cancellation once
-/// per node they settle, not per edge: after the token is cancelled while
-/// the hub is expanded, every one of the hub's neighbours is still
-/// estimated. `iwdb_query::read::shortest_path` bounds visited nodes
-/// through the heuristic, the only per-node hook. Fails once the core
-/// checks per edge (then the heuristic runs at most a few times).
+/// Fixed upstream (#48): shortest paths, pattern matching and walk
+/// planning take a `Budget`. Dijkstra and A* poll cancellation per edge
+/// (after the token is cancelled while the hub is expanded, at most a few
+/// more neighbours are estimated) and count the edges they relax; the
+/// matcher counts the edges it looks at from a bound node; a walk plan
+/// reads only what walks from the start can reach.
 #[test]
-fn path_search_checks_cancellation_per_settled_node() {
-    use ironweaver_core::pathfinding::{find_path, Heuristic, PathQuery};
+fn path_search_matching_and_walk_planning_are_budgeted() {
+    use ironweaver_core::pathfinding::{find_path, find_path_limited, Heuristic, PathQuery};
+    use ironweaver_core::query::for_each_match_limited;
+    use ironweaver_core::random_walks::{plan_limited, WalkOptions};
     const FAN: usize = 2_000;
     let mut g = G::new();
     let hub = g.add_node("hub", Record::default()).expect("add");
@@ -649,6 +652,7 @@ fn path_search_checks_cancellation_per_settled_node() {
         let leaf = g.add_node(format!("l{}", i), Record::default()).expect("add");
         g.add_edge(hub, leaf, Record::default()).expect("edge");
     }
+
     let token = Token::new();
     let calls = Cell::new(0usize);
     let estimate = Box::new(|_: &ironweaver_core::Node<Record>| {
@@ -663,24 +667,55 @@ fn path_search_checks_cancellation_per_settled_node() {
     let result = cancel::run(&token, || find_path::<_, _, GraphError>(&g, hub, end, &mut query));
     drop(query);
     assert_eq!(result, Err(GraphError::Interrupted));
-    assert_eq!(calls.get(), FAN + 1, "every neighbour of the hub was estimated after the cancel");
+    assert!(calls.get() <= 3, "cancellation is checked per edge ({} estimates)", calls.get());
+
+    let mut query = PathQuery::dijkstra();
+    query.cost = EdgeCost::Unit;
+    let result = find_path_limited::<_, _, GraphError>(&g, hub, end, &mut query, Budget::default().max_edges(100));
+    assert!(matches!(result, Err(GraphError::BudgetExceeded { edges: 100, .. })), "{:?}", result.map(|r| r.edges));
+    let limited =
+        find_path_limited::<_, _, GraphError>(&g, hub, end, &mut query, Budget::default().max_edges(100).truncate())
+            .expect("path");
+    assert!(limited.truncated && limited.value.is_none());
+
+    let pattern = Pattern::parse("(a)-->(b)").expect("parse");
+    let mut matches = 0usize;
+    let limited =
+        for_each_match_limited::<_, _, GraphError>(&g, &pattern, Budget::default().max_edges(10).truncate(), |_| {
+            matches += 1;
+            Ok(true)
+        })
+        .expect("match");
+    assert!(limited.truncated && limited.edges <= 10 && matches <= 10, "{} edges, {} matches", limited.edges, matches);
+
+    // `end` has no edges: its plan reads one node, not the whole graph
+    let options = WalkOptions::new(3, 2);
+    let plan =
+        plan_limited::<_, _, GraphError>(&g, Some("end"), options, Budget::default().max_visited(1).max_edges(0))
+            .expect("plan");
+    assert!(plan.value.is_some() && plan.visited <= 1 && plan.edges == 0, "{} visited", plan.visited);
 }
 
-/// Upstream #49: traversal gaps. `bfs_limited` (and `dfs_limited`) follow
-/// outgoing edges only, and `expand_limited`, which takes a direction,
-/// takes no edge filter. `iwdb_query` keeps `traverse` to outgoing edges
-/// and filters a neighbourhood with its own BFS (`expand_filtered`).
-/// Fails (to compile) once `bfs_limited` takes a direction.
+/// Fixed upstream (#49): `bfs_limited` and `dfs_limited` take a direction,
+/// and `expand_limited` takes an edge filter.
 #[test]
-fn bfs_follows_outgoing_edges_only() {
+fn traversals_take_a_direction_and_an_edge_filter() {
+    use ironweaver_core::traversal::{dfs_limited, expand_limited};
     let mut g = G::new();
     let a = g.add_node("a", Record::default()).expect("add");
     let b = g.add_node("b", Record::default()).expect("add");
-    g.add_edge(a, b, Record::default()).expect("edge");
+    let c = g.add_node("c", Record::default()).expect("add");
+    let ab = g.add_edge(a, b, Record::default()).expect("edge");
+    g.add_edge(b, c, Record::default()).expect("edge");
     let all = |_, _: &_| Ok::<_, GraphError>(true);
-    let from_b = bfs_limited(&g, b, None, Budget::UNLIMITED, all).expect("bfs");
-    assert_eq!(ids(&g, from_b.value), ["b"]);
-    let both =
-        ironweaver_core::traversal::expand_limited(&g, [b], 1, Direction::Both, Budget::UNLIMITED).expect("expand");
-    assert_eq!(ids(&g, both.value), ["a", "b"]);
+    let out = bfs_limited(&g, b, None, Direction::Out, Budget::UNLIMITED, all).expect("bfs");
+    assert_eq!(ids(&g, out.value), ["b", "c"]);
+    let incoming = dfs_limited(&g, b, None, Direction::In, Budget::UNLIMITED, all).expect("dfs");
+    assert_eq!(ids(&g, incoming.value), ["a", "b"]);
+    let both = bfs_limited(&g, b, None, Direction::Both, Budget::UNLIMITED, all).expect("bfs");
+    assert_eq!(ids(&g, both.value), ["a", "b", "c"]);
+
+    let only_ab = |e, _: &_| Ok::<_, GraphError>(e == ab);
+    let expanded = expand_limited(&g, [b], 1, Direction::Both, Budget::UNLIMITED, only_ab).expect("expand");
+    assert_eq!(ids(&g, expanded.value), ["a", "b"]);
 }

@@ -47,8 +47,8 @@ fn a_timeout_stops_a_read_in_progress() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(dir.path());
     block_on(db.commit("default", complete(30), CommitOptions::default())).unwrap();
-    // Billions of trails: only the deadline can stop it (the matcher has
-    // no budget, and every limit is at its cap)
+    // Billions of trails: with every limit at its cap, the deadline stops
+    // it long before the budget does
     let request = MatchRequest::parse("(a)-[*1..10]->(b)").unwrap();
     let options = QueryOptions { timeout: Some(Duration::from_millis(200)), ..QueryOptions::default() }.with_limits(
         Some(usize::MAX),

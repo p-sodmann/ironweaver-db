@@ -127,7 +127,7 @@ pub trait Database: Send + Sync {
         options: QueryOptions,
     ) -> impl Future<Output = Result<Answer<Vec<Node>>, Error>> + Send;
 
-    /// A BFS or DFS along outgoing edges, in traversal order. See
+    /// A BFS or DFS along edges in a direction, in traversal order. See
     /// [`read::traverse`](crate::read::traverse).
     fn traverse(
         &self,

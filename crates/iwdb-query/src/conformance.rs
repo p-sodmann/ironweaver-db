@@ -422,6 +422,18 @@ pub async fn traverse_in_breadth_and_depth_first_order<D: Database>(db: &D) {
     assert_eq!(db.traverse(NS, knows, options()).await.expect("dfs").value, ["ann", "bob"]);
     let dfs = db.traverse(NS, TraverseRequest::new("cat", Order::Dfs), options()).await.expect("dfs");
     assert_eq!(dfs.value.len(), 5);
+    let sorted = |mut ids: Vec<String>| {
+        ids.sort();
+        ids
+    };
+    let incoming = TraverseRequest { direction: Direction::In, ..TraverseRequest::new("acme", Order::Bfs) };
+    let reached = db.traverse(NS, incoming.clone(), options()).await.expect("bfs").value;
+    assert_eq!(sorted(reached), ["acme", "ann", "bob", "cat"]);
+    let employees = TraverseRequest { edge_types: vec!["works_at".into()], ..incoming };
+    assert_eq!(sorted(db.traverse(NS, employees, options()).await.expect("bfs").value), ["acme", "ann", "bob"]);
+    let both =
+        TraverseRequest { direction: Direction::Both, depth: Some(1), ..TraverseRequest::new("dan", Order::Dfs) };
+    assert_eq!(db.traverse(NS, both, options()).await.expect("dfs").value, ["dan", "bob"]);
     assert_eq!(code(db.traverse(NS, TraverseRequest::new("nobody", Order::Bfs), options()).await), Code::NotFound);
 }
 
@@ -473,17 +485,22 @@ pub async fn shortest_path_is_bounded<D: Database>(db: &D) {
     commit(db, vec![node("far", &[], &[]), edge("l0199", "far", "to", &[])]).await;
     let weighted = EdgeCost::Weighted { key: "w".into(), default: 1.0 };
     let dijkstra = PathRequest { method: PathMethod::Dijkstra, cost: weighted, ..PathRequest::bfs("hub", "far") };
+    // The hub's 200 edges stop both methods (BFS expands only two nodes)
     for request in [PathRequest::bfs("hub", "far"), dijkstra] {
         assert_eq!(
-            code(db.shortest_path(NS, request.clone(), limits(None, Some(20), None)).await),
+            code(db.shortest_path(NS, request.clone(), limits(None, None, Some(20))).await),
             Code::BudgetExceeded
         );
         let answer =
-            db.shortest_path(NS, request.clone(), partial(limits(None, Some(20), None))).await.expect("partial");
+            db.shortest_path(NS, request.clone(), partial(limits(None, None, Some(20)))).await.expect("partial");
         assert!(answer.truncated && answer.value.is_none());
         let found = db.shortest_path(NS, request, options()).await.expect("path");
+        assert!(found.work.edges > 200, "{:?}", found.work);
         assert_eq!(found.value.map(|p| p.nodes.len()), Some(3));
     }
+    // Dijkstra settles each leaf it reaches
+    let dijkstra = PathRequest { method: PathMethod::Dijkstra, ..PathRequest::bfs("hub", "far") };
+    assert_eq!(code(db.shortest_path(NS, dijkstra, limits(None, Some(20), None)).await), Code::BudgetExceeded);
 }
 
 pub async fn random_walks_start_at_the_start<D: Database>(db: &D) {
@@ -499,9 +516,17 @@ pub async fn random_walks_start_at_the_start<D: Database>(db: &D) {
 
 pub async fn random_walks_are_bounded<D: Database>(db: &D) {
     hub(db, 200).await;
+    commit(db, vec![node("x", &[], &[]), node("y", &[], &[]), edge("x", "y", "to", &[])]).await;
+    // Planning reads what walks can reach (x and y), not the whole graph
+    let small = WalkRequest { seed: Some(1), ..WalkRequest::new("x", 2, 3) };
+    let answer = db.random_walks(NS, small, limits(None, Some(20), Some(20))).await.expect("walks");
+    assert!(answer.value == [["x", "y"]] && answer.work.visited <= 20, "{:?}", answer);
+    // Planning from the hub reads its 200 edges; a plan is all or nothing
     let request = WalkRequest { allow_revisit: true, seed: Some(1), ..WalkRequest::new("hub", 2, 100) };
-    // The core indexes the whole graph first: it must fit the limits
-    assert_eq!(code(db.random_walks(NS, request.clone(), limits(None, Some(100), None)).await), Code::BudgetExceeded);
+    assert_eq!(code(db.random_walks(NS, request.clone(), limits(None, None, Some(100))).await), Code::BudgetExceeded);
+    let answer = db.random_walks(NS, request.clone(), partial(limits(None, None, Some(100)))).await.expect("partial");
+    assert!(answer.truncated && answer.value.is_empty(), "{:?}", answer);
+    // Walking: 100 walks asked for, 5 results allowed
     assert_eq!(code(db.random_walks(NS, request.clone(), limits(Some(5), None, None)).await), Code::BudgetExceeded);
     let answer = db.random_walks(NS, request, partial(limits(Some(5), None, None))).await.expect("partial");
     assert!(answer.truncated && answer.value.len() == 5);

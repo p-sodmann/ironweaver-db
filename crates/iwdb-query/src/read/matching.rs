@@ -1,6 +1,6 @@
 //! `match`: every occurrence of a pattern.
 
-use ironweaver_core::query::{for_each_match, Bound, Match};
+use ironweaver_core::query::{for_each_match_limited, Bound, Match};
 use ironweaver_core::EdgeId;
 use iwdb_engine::{DbGraph, Namespace};
 
@@ -11,13 +11,11 @@ use crate::{Answer, Error, MatchRequest, MatchRow, Work};
 /// rows sorted by node ids then edge ids, a page of `max_results` at a
 /// time.
 ///
-/// WORKAROUND (upstream #48, no budget for pattern matching; see
-/// `documentation/steps/upstream-check.md`): the core's matcher takes no
-/// `Budget`, only cancellation (checked per step of the search). Each
-/// match it produces counts as one visited node, so `max_visited` bounds
-/// the matches enumerated; the work between two matches is bounded by the
-/// timeout only, and edges examined are reported as 0. Every page
-/// enumerates the matches again, at the seq of the first.
+/// Bounded by `max_visited` and `max_edges` of the search (the core's
+/// `for_each_match_limited`: every node checked against a node variable
+/// and every step of a variable-length edge counts as visited, every edge
+/// looked at from a bound node as examined), with cancellation checked per
+/// step. Every page enumerates the matches again, at the seq of the first.
 pub fn match_pattern(ns: &Namespace, request: &MatchRequest, cx: &ReadContext) -> Result<Answer<Vec<MatchRow>>, Error> {
     let fingerprint = request.fingerprint();
     let mut pattern = request.pattern.clone();
@@ -29,32 +27,23 @@ pub fn match_pattern(ns: &Namespace, request: &MatchRequest, cx: &ReadContext) -
         None => None,
     };
     let g = ns.graph();
-    let max_visited = cx.bounds.max_visited;
-    let mut count = 0usize;
-    let mut hit = false;
     let mut top = TopK::new(cx.bounds.max_results);
-    for_each_match::<_, _, Error>(g, &pattern, |m| {
-        if count >= max_visited {
-            hit = true;
-            return Ok(false);
-        }
-        count += 1;
+    let limited = for_each_match_limited::<_, _, Error>(g, &pattern, cx.budget(false), |m| {
         let row = row(g, m);
         if after.as_ref().is_none_or(|a| &row > a) {
             top.push(row, ());
         }
         Ok(true)
     })?;
-    if hit {
-        cx.reached(format!("{} matches enumerated (max_visited)", max_visited))?;
-    }
+    let truncated = limited.truncated;
     let (page, more) = top.finish();
     let next = match page.last() {
-        Some((last, ())) if more && !hit => Some(cx.next(ns, fingerprint, encode(last))),
+        Some((last, ())) if more && !truncated => Some(cx.next(ns, fingerprint, encode(last))),
         _ => None,
     };
     let value = page.into_iter().map(|(row, ())| row).collect();
-    Ok(Answer { value, seq: ns.seq(), next, truncated: hit, work: Work { visited: count, edges: 0 } })
+    let work = Work { visited: limited.visited, edges: limited.edges };
+    Ok(Answer { value, seq: ns.seq(), next, truncated, work })
 }
 
 fn row(g: &DbGraph, m: &Match) -> MatchRow {

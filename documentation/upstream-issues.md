@@ -24,9 +24,9 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 16 | [No way to build an index off the graph and install it in O(1)](#16-no-way-to-build-an-index-off-the-graph-and-install-it-in-o1) | fixed upstream (`3b15149`): [#34](https://github.com/p-sodmann/Ironweaver/issues/34) |
 | 17 | [No per-index entry count or memory accessor](#17-no-per-index-entry-count-or-memory-accessor) | fixed upstream (`3b15149`): [#35](https://github.com/p-sodmann/Ironweaver/issues/35) |
 | 18 | [`Value` serde writes NaN and infinities to JSON as `null`](#18-value-serde-writes-nan-and-infinities-to-json-as-null) | fixed upstream (`cd09ea0`): [#46](https://github.com/p-sodmann/Ironweaver/issues/46) |
-| 19 | [Budgets for shortest paths, pattern matching and walk planning](#19-budgets-for-shortest-paths-pattern-matching-and-walk-planning) | open: [#48](https://github.com/p-sodmann/Ironweaver/issues/48) |
-| 20 | [Traversals: `bfs` / `dfs` follow outgoing edges only, `expand` takes no edge filter](#20-traversals-bfs--dfs-follow-outgoing-edges-only-expand-takes-no-edge-filter) | open: [#49](https://github.com/p-sodmann/Ironweaver/issues/49) |
-| 21 | [`index_candidates` doesn't say which index it used](#21-index_candidates-doesnt-say-which-index-it-used) | open: [#50](https://github.com/p-sodmann/Ironweaver/issues/50) |
+| 19 | [Budgets for shortest paths, pattern matching and walk planning](#19-budgets-for-shortest-paths-pattern-matching-and-walk-planning) | fixed upstream (`ace9a0d`): [#48](https://github.com/p-sodmann/Ironweaver/issues/48) |
+| 20 | [Traversals: `bfs` / `dfs` follow outgoing edges only, `expand` takes no edge filter](#20-traversals-bfs--dfs-follow-outgoing-edges-only-expand-takes-no-edge-filter) | fixed upstream (`ace9a0d`): [#49](https://github.com/p-sodmann/Ironweaver/issues/49) |
+| 21 | [`index_candidates` doesn't say which index it used](#21-index_candidates-doesnt-say-which-index-it-used) | fixed upstream (`ace9a0d`): [#50](https://github.com/p-sodmann/Ironweaver/issues/50) |
 
 ---
 

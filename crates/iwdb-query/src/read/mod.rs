@@ -20,7 +20,7 @@ mod matching;
 
 use std::collections::BinaryHeap;
 
-use ironweaver_core::{Budget, Direction, EdgeIx, Expr, NodeIx, OnLimit, Symbol};
+use ironweaver_core::{Budget, EdgeIx, Expr, NodeIx, OnLimit, Symbol};
 use iwdb_engine::{DbGraph, Namespace};
 use iwdb_storage::HistoryId;
 
@@ -152,11 +152,6 @@ impl<'a> EdgeFilter<'a> {
         EdgeFilter { types, expr }
     }
 
-    /// Every edge passes.
-    pub fn is_all(&self) -> bool {
-        self.types.is_none() && self.expr.is_none()
-    }
-
     pub fn accepts(&self, g: &DbGraph, e: EdgeIx) -> Result<bool, Error> {
         if let Some(types) = &self.types {
             let ty = g.edge(e).and_then(|edge| edge.edge_type());
@@ -169,53 +164,6 @@ impl<'a> EdgeFilter<'a> {
             None => Ok(true),
         }
     }
-}
-
-/// WORKAROUND (upstream #49, traversal gaps; see
-/// `documentation/steps/upstream-check.md`): the core's `expand_limited`
-/// takes no edge filter, and its `bfs_limited` follows outgoing edges from
-/// one start only. This is `expand_limited` with an edge filter: a
-/// multi-source BFS in `direction`, counting nodes entered and edges
-/// examined like the core does, and polling cancellation per edge. Remove
-/// it once the core's `expand_limited` takes an edge filter.
-pub(crate) fn expand_filtered(
-    g: &DbGraph,
-    seeds: &[NodeIx],
-    depth: usize,
-    direction: Direction,
-    filter: &EdgeFilter<'_>,
-    meter: &mut Meter,
-) -> Result<Vec<NodeIx>, Error> {
-    let mut order = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut queue = std::collections::VecDeque::new();
-    for &seed in seeds {
-        if g.node(seed).is_some() && seen.insert(seed) {
-            order.push(seed);
-            queue.push_back((seed, 0usize));
-        }
-    }
-    let stop = ironweaver_core::cancel::stop();
-    'search: while let Some((ix, d)) = queue.pop_front() {
-        if d >= depth {
-            continue;
-        }
-        if stop.poll() || !meter.enter() {
-            break;
-        }
-        for (e, next) in g.neighbors(ix, direction) {
-            if stop.poll() || !meter.examine() {
-                break 'search;
-            }
-            if seen.contains(&next) || !filter.accepts(g, e)? {
-                continue;
-            }
-            seen.insert(next);
-            order.push(next);
-            queue.push_back((next, d + 1));
-        }
-    }
-    Ok(order)
 }
 
 /// The first `limit` items by key, keeping at most `limit + 1` in memory.

@@ -15,8 +15,8 @@ pub struct Limits {
     /// Most results in the answer: the page size of a paginated read, the
     /// size of the answer of the others (see each operation).
     pub max_results: Option<usize>,
-    /// Most nodes a read may visit: enter during a search, check as an
-    /// index or scan candidate, or (pattern matching) matches enumerated.
+    /// Most nodes a read may visit: enter during a search, or check as an
+    /// index or scan candidate or against a pattern's node variable.
     pub max_visited: Option<usize>,
     /// Most edges a read may examine (the core's `Budget::max_edges`).
     pub max_edges: Option<usize>,

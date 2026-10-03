@@ -95,7 +95,7 @@ pub enum Order {
     Dfs,
 }
 
-/// A breadth- or depth-first traversal along outgoing edges
+/// A breadth- or depth-first traversal
 /// ([`Database::traverse`](crate::Database::traverse)).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TraverseRequest {
@@ -103,13 +103,22 @@ pub struct TraverseRequest {
     pub order: Order,
     /// How many edges away from the start a node may be (`None`: any).
     pub depth: Option<usize>,
+    /// Which edges to follow (default `Out`).
+    pub direction: Direction,
     pub edge_types: Vec<String>,
     pub edge_filter: Option<Expr>,
 }
 
 impl TraverseRequest {
     pub fn new(start: impl Into<String>, order: Order) -> Self {
-        TraverseRequest { start: start.into(), order, depth: None, edge_types: Vec::new(), edge_filter: None }
+        TraverseRequest {
+            start: start.into(),
+            order,
+            depth: None,
+            direction: Direction::Out,
+            edge_types: Vec::new(),
+            edge_filter: None,
+        }
     }
 }
 

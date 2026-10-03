@@ -36,7 +36,7 @@ One protocol-independent service interface that every access method uses, with b
 - **Bounds** ([ADR 0021](../adr/0021-bounded-reads-and-cursors.md)): defaults 1 000 results / 100 000 visited / 1 000 000 edges / 30 s, caps 100 000 / 10 M / 100 M / 5 min.
 - **Behaviour change for Python**: an existing namespace or index and a reused idempotency key raise `ConflictError` (was `InvalidError`); dropping a missing index raises `NotFoundError` ([python-api.md](../python-api.md)).
 - **Upstream**: [#48](https://github.com/p-sodmann/Ironweaver/issues/48), [#49](https://github.com/p-sodmann/Ironweaver/issues/49), [#50](https://github.com/p-sodmann/Ironweaver/issues/50) filed, none blocking; workarounds in the [upstream check](upstream-check.md).
-- **Deferred**: managed analytics jobs (job ids, progress, results kept, cancel) to step 16 ([ADR 0022](../adr/0022-analytics-jobs.md)); Python query methods to step 14; `traverse` in other directions until #49.
+- **Deferred**: managed analytics jobs (job ids, progress, results kept, cancel) to step 16 ([ADR 0022](../adr/0022-analytics-jobs.md)); Python query methods to step 14; `traverse` in other directions until #49 *(done in step 11's upstream check, core `ace9a0d`)*.
 
 ## Notes for step 11
 
