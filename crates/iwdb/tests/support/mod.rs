@@ -10,7 +10,7 @@ use iwdb::{
     CheckpointOptions, Error, FsyncPolicy, LogFs, Namespace, NamespaceCatalog, Store, StoreOptions, WalOptions,
 };
 use iwdb_engine::catalog::NamespaceName;
-use iwdb_engine::testutil::canonical;
+pub use iwdb_engine::testutil::{canonical, keys, state, State};
 use iwdb_storage::MIN_SEGMENT_SIZE;
 
 pub use iwdb_engine::testutil::workload::{self, pad, Step};
@@ -28,26 +28,6 @@ pub fn options(keep: usize) -> StoreOptions {
 
 pub fn reference() -> Namespace {
     Namespace::new(NamespaceName::new(iwdb::NAMESPACE).unwrap())
-}
-
-/// The observable state: canonical graph, catalog, seq, and the
-/// idempotency key table (without commit times, which a reference that
-/// has no log doesn't know).
-pub type State = (Vec<String>, NamespaceCatalog, u64, Vec<String>);
-
-pub fn state(ns: &Namespace) -> State {
-    (canonical(ns.graph()), ns.catalog().clone(), ns.seq(), keys(ns))
-}
-
-/// The key table, one line per entry, without times.
-pub fn keys(ns: &Namespace) -> Vec<String> {
-    let entries = ns.keys().entries();
-    entries
-        .map(|e| {
-            let r = &e.result;
-            format!("{} {} {:08x} {:?} {:?}", r.seq, e.key, e.fingerprint, r.edge_ids, r.versions)
-        })
-        .collect()
 }
 
 /// Run `steps` with idempotency keys `<prefix><i>` against the store and

@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use common::{namespace, replay, segments, state, upsert, Call, Fault, TestFs};
 use ironweaver_core::Value;
+use iwdb_engine::testutil::State;
 use iwdb_engine::{Change, CommitRecord};
 use iwdb_storage::format::{Damage, SEGMENT_HEADER_LEN};
 use iwdb_storage::{read_log, Error, FsyncPolicy, LoggedNamespace, Wal, WalOptions, MIN_SEGMENT_SIZE};
@@ -31,11 +32,7 @@ fn commit_n(logged: &mut LoggedNamespace<TestFs>, n: i64) {
 
 /// After a failed commit: the namespace is unchanged and read-only, every
 /// write is refused, and nothing touches the files again.
-fn assert_read_only(
-    logged: &mut LoggedNamespace<TestFs>,
-    fs: &TestFs,
-    before: &(Vec<String>, impl std::fmt::Debug + PartialEq, u64),
-) {
+fn assert_read_only(logged: &mut LoggedNamespace<TestFs>, fs: &TestFs, before: &State) {
     assert_eq!(state(&logged.namespace()).0, before.0);
     assert_eq!(logged.namespace().seq(), before.2);
     assert!(logged.read_only().is_some());

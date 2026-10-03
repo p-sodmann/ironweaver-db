@@ -32,10 +32,7 @@ pub fn upsert(id: &str, x: Value) -> Mutation {
     }
 }
 
-/// The observable state of a namespace.
-pub fn state(ns: &Namespace) -> (Vec<String>, iwdb_engine::catalog::NamespaceCatalog, u64) {
-    (canonical(ns.graph()), ns.catalog().clone(), ns.seq())
-}
+pub use iwdb_engine::testutil::state;
 
 /// Replay `records` onto an empty namespace.
 pub fn replay(records: impl IntoIterator<Item = CommitRecord>) -> Namespace {

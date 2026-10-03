@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ironweaver_core::{Attributes, Attrs, EdgeId, Key, Op, Value};
 use iwdb_engine::catalog::{Constraint, ConstraintKind, NamespaceCatalog, NamespaceName};
-use iwdb_engine::testutil::canonical;
+use iwdb_engine::testutil::{canonical, state};
 use iwdb_engine::{
     CatalogChange, Change, CommitRecord, CommitResult, DbGraph, DbRecord, EdgeKey, Error, Mutation, Namespace,
     Prepared, Target,
@@ -376,11 +376,6 @@ fn index_paths(g: &DbGraph) -> BTreeSet<Vec<String>> {
 
 fn catalog_paths(c: &NamespaceCatalog) -> BTreeSet<Vec<String>> {
     c.index_paths().into_iter().map(|p| p.keys().to_vec()).collect()
-}
-
-/// The namespace's observable state.
-fn state(ns: &Namespace) -> (Vec<String>, NamespaceCatalog, u64) {
-    (canonical(ns.graph()), ns.catalog().clone(), ns.seq())
 }
 
 proptest! {
