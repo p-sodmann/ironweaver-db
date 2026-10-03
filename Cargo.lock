@@ -535,7 +535,7 @@ dependencies = [
 [[package]]
 name = "ironweaver-core"
 version = "0.2.0"
-source = "git+https://github.com/p-sodmann/Ironweaver?rev=ca308f090b85722c3698c744371350725f140523#ca308f090b85722c3698c744371350725f140523"
+source = "git+https://github.com/p-sodmann/Ironweaver?rev=7e7b7fa40e3224b512d59d046f28b5bc0ffe7144#7e7b7fa40e3224b512d59d046f28b5bc0ffe7144"
 dependencies = [
  "chrono",
  "crc32fast",
@@ -545,6 +545,7 @@ dependencies = [
  "rand",
  "rayon",
  "serde",
+ "serde_json",
  "sonic-rs",
 ]
 

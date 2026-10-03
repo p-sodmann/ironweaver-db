@@ -1,6 +1,6 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`. Drafts 19–21 are findings from step 10, fixed upstream in `ace9a0d`. Draft 22 is a finding from step 11, filed and open.
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`. Drafts 19–21 are findings from step 10, fixed upstream in `ace9a0d`. Draft 22 is a finding from step 11, fixed upstream in `7e7b7fa`.
 
 Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`, drafts 19–21 against `cd09ea0`, draft 22 against `d15a7ec`. Titles are ready to paste; the text below each title is the issue body.
 
@@ -27,7 +27,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 19 | [Budgets for shortest paths, pattern matching and walk planning](#19-budgets-for-shortest-paths-pattern-matching-and-walk-planning) | fixed upstream (`ace9a0d`): [#48](https://github.com/p-sodmann/Ironweaver/issues/48) |
 | 20 | [Traversals: `bfs` / `dfs` follow outgoing edges only, `expand` takes no edge filter](#20-traversals-bfs--dfs-follow-outgoing-edges-only-expand-takes-no-edge-filter) | fixed upstream (`ace9a0d`): [#49](https://github.com/p-sodmann/Ironweaver/issues/49) |
 | 21 | [`index_candidates` doesn't say which index it used](#21-index_candidates-doesnt-say-which-index-it-used) | fixed upstream (`ace9a0d`): [#50](https://github.com/p-sodmann/Ironweaver/issues/50) |
-| 22 | [`Value` / `Expr` serde can't be read from JSON beyond 64 levels, and skips unknown fields](#22-value--expr-serde-cant-be-read-from-json-beyond-64-levels-and-skips-unknown-fields) | filed, open: [#57](https://github.com/p-sodmann/Ironweaver/issues/57) |
+| 22 | [`Value` / `Expr` serde can't be read from JSON beyond 64 levels, and skips unknown fields](#22-value--expr-serde-cant-be-read-from-json-beyond-64-levels-and-skips-unknown-fields) | fixed upstream (`7e7b7fa`): [#57](https://github.com/p-sodmann/Ironweaver/issues/57) |
 
 ---
 
