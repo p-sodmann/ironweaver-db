@@ -87,6 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bumped `ironweaver-core` from `ace9a0d` to `d15a7ec` (upstream #54): the core no longer reads ironweaver 0.1 binary files and has no `format-v1` feature, so the workspace no longer turns default features off. Our files are format 2 and load as before.
 - Bumped `ironweaver-core` from `d15a7ec` to `ca308f0` (upstream PR #56: edition 2024, Rust 1.99, `rand` 0.9). For a given seed, random walks, node2vec and Leiden now give different (still deterministic) results; nothing stored changes. `rand` 0.8 leaves the dependency tree.
 - The data directory's lock uses std's `File::try_lock` instead of the `fs4` crate: the same `flock` / `LockFileEx` calls, one dependency fewer (step 11b).
+- Rust 1.99 and edition 2024 (step 11b, ADR 0029): building needs Rust 1.99 or later; CI fails on any warning (`build.warnings`). On-disk formats, protos, the public API and the Python module are unchanged; data directories move freely between builds before and after.
 
 ### Fixed
 - A read waiting for a worker of the embedded `Database` (`Embedded`) didn't fail at its deadline but only when a worker took it, so it could wait as long as the reads ahead of it (found by the gRPC tests in step 11). The pool now ends a queued or running request at its deadline.
