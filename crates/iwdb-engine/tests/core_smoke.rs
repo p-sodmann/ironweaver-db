@@ -485,6 +485,28 @@ fn streaming_loader_matches_the_slice_loader() {
     assert!(matches!(format::from_binary_reader(&bytes[..bytes.len() - 3]), Err(GraphError::Format(_))));
 }
 
+/// Since `d15a7ec` (upstream #54) the core reads no ironweaver 0.1 binary
+/// files (headerless bincode): both loaders refuse them, and any other file
+/// without the header or shorter than it, with a `Format` error (recovery
+/// treats such a checkpoint as damaged). The streaming loader no longer
+/// reads a headerless file into memory first.
+#[test]
+fn files_without_the_binary_header_are_refused() {
+    // The start of a format 1 file: node count, then the first id's length
+    // (little-endian u64s)
+    let mut v1 = Vec::new();
+    v1.extend_from_slice(&2u64.to_le_bytes());
+    v1.extend_from_slice(&1u64.to_le_bytes());
+    v1.extend_from_slice(b"a and more bytes");
+    let header = save(&G::new(), &Attrs::new())[..8].to_vec();
+    for bytes in [v1, b"not a graph file at all".to_vec(), header, Vec::new()] {
+        let sliced = format::from_binary(&bytes);
+        let streamed = format::from_binary_reader(&bytes[..]);
+        assert!(matches!(sliced, Err(GraphError::Format(_))), "{:?}: {:?}", bytes, sliced.map(|_| ()));
+        assert!(matches!(streamed, Err(GraphError::Format(_))), "{:?}: {:?}", bytes, streamed.map(|_| ()));
+    }
+}
+
 #[test]
 fn memory_usage_leaves_out_payloads() {
     let build = |text: &str| {
