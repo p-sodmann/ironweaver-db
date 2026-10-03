@@ -19,6 +19,8 @@ doctest = false
 [dependencies]
 ironweaver-core.workspace = true
 iwdb = { path = "../iwdb" }
+# The Database trait the bindings call (through iwdb::Embedded)
+iwdb-query = { path = "../iwdb-query" }
 iwdb-engine = { path = "../iwdb-engine" }
 iwdb-storage = { path = "../iwdb-storage" }
 # The bindings (design rule 1: only in this crate). abi3: one wheel per

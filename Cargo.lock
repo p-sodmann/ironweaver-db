@@ -418,6 +418,7 @@ dependencies = [
  "ironweaver-core",
  "iwdb",
  "iwdb-engine",
+ "iwdb-query",
  "iwdb-storage",
  "pyo3",
 ]

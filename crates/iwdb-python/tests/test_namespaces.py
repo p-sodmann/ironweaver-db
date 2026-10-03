@@ -35,7 +35,7 @@ def test_names_and_errors(store):
         with pytest.raises(iwdb.InvalidError):
             store.create_namespace(bad)
     store.create_namespace("ok_1-x")
-    with pytest.raises(iwdb.InvalidError):
+    with pytest.raises(iwdb.ConflictError):
         store.create_namespace("ok_1-x")
     with pytest.raises(iwdb.InvalidError):
         store.drop_namespace("default")
@@ -49,7 +49,7 @@ def test_keys_for_create_and_drop(store):
     first = store.create_namespace("a", idempotency_key="mk-a")
     again = store.create_namespace("a", idempotency_key="mk-a")
     assert again["deduplicated"] is True and again["id"] == first["id"]
-    with pytest.raises(iwdb.InvalidError):
+    with pytest.raises(iwdb.ConflictError):
         store.create_namespace("b", idempotency_key="mk-a")
     dropped = store.drop_namespace("a", idempotency_key="rm-a")
     assert store.drop_namespace("a", idempotency_key="rm-a")["deduplicated"] is True

@@ -195,7 +195,7 @@ def test_catalog(store):
         commit(store, id="b", labels=["Person"], attr={"name": "B", "email": "a@x"})
     with pytest.raises(iwdb.ConstraintError):
         commit(store, id="c", labels=["Person"], attr={"email": "c@x"})
-    with pytest.raises(iwdb.InvalidError):
+    with pytest.raises(iwdb.ConflictError):
         store.create_index("email")
     with pytest.raises(ValueError):
         store.add_constraint("sometimes", "Person", "email")
@@ -206,6 +206,8 @@ def test_catalog(store):
     store.drop_index("email")
     store.drop_index(["address", "city"])
     assert store.catalog() == {"indexes": [], "constraints": []}
+    with pytest.raises(iwdb.NotFoundError):
+        store.drop_index("email")
 
 
 def test_reads_status_sync_and_checkpoint(path):

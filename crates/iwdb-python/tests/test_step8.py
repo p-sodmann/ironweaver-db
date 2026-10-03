@@ -41,7 +41,7 @@ def test_the_same_key_for_another_request_is_refused(store):
         tx.upsert_node("a", attr={"n": 1})
     tx = store.transaction(idempotency_key="k")
     tx.upsert_node("a", attr={"n": 2})
-    with pytest.raises(iwdb.InvalidError, match="different request"):
+    with pytest.raises(iwdb.ConflictError, match="different request"):
         tx.commit()
     assert store.node("a")["attr"] == {"n": 1}
 
@@ -57,7 +57,7 @@ def test_catalog_changes_take_keys(store):
     first = store.create_index("email", idempotency_key="ix")
     again = store.create_index("email", idempotency_key="ix")
     assert again["deduplicated"] and again["seq"] == first["seq"]
-    with pytest.raises(iwdb.InvalidError):
+    with pytest.raises(iwdb.ConflictError):
         store.create_index("email")
 
 

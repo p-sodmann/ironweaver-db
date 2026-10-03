@@ -74,7 +74,7 @@ Mutations (all arguments after the first ones are keyword-only; `expected_versio
 
 A commit returns (and `tx.result` holds) `{"seq": int, "edge_ids": [int, ...], "versions": {"nodes": {id: version}, "edges": {id: version}}, "time": datetime, "deduplicated": bool}`: the commit's seq, one edge id per `add_edge` / `upsert_edge` in order, the new version of every node and edge it wrote that still exists, the commit time (an aware `datetime` in UTC, from the store's clock when the WAL appended the commit; [ADR 0010](adr/0010-commit-times.md)), and whether the commit was answered from its idempotency key instead of being applied now.
 
-**Idempotency keys** (step 8, [ADR 0015](adr/0015-idempotency-keys.md)). `idempotency_key` (a `str` of 1 to 255 UTF-8 bytes, such as a UUID) makes a commit apply at most once: retrying it with the same key after an unknown outcome (an `iwdb.IoError`, a timeout, a crash of the process) returns the original result, with `"deduplicated": True`, if the first attempt was applied, and commits now if it wasn't. The store remembers the last 10 000 keyed commits, across restarts, checkpoints, backups and restores (a restore keeps the keys of the commits it restores). Reusing a key for **different** mutations raises `iwdb.InvalidError` and changes nothing. The catalog methods take `idempotency_key` too.
+**Idempotency keys** (step 8, [ADR 0015](adr/0015-idempotency-keys.md)). `idempotency_key` (a `str` of 1 to 255 UTF-8 bytes, such as a UUID) makes a commit apply at most once: retrying it with the same key after an unknown outcome (an `iwdb.IoError`, a timeout, a crash of the process) returns the original result, with `"deduplicated": True`, if the first attempt was applied, and commits now if it wasn't. The store remembers the last 10 000 keyed commits, across restarts, checkpoints, backups and restores (a restore keeps the keys of the commits it restores). Reusing a key for **different** mutations raises `iwdb.ConflictError` (`iwdb.InvalidError` before step 10) and changes nothing. The catalog methods take `idempotency_key` too.
 
 ### Namespaces
 
@@ -126,7 +126,7 @@ Each is its own commit, and returns the same result dict (with empty `edge_ids` 
 | `history() -> str` | the history id (32 hex digits) |
 | `status() -> dict` | `{"seq", "synced_seq", "checkpoint", "read_only", "checkpoint_failure"` (of `"default"`)`, "history", "fsync", "archive", "catalog_failure", "recovery": {...}, "namespaces": [...]}`. Each of `namespaces` (and `namespace.status()`) is `{"id", "name", "created", "seq", "synced_seq", "checkpoint", "read_only", "checkpoint_failure", "nodes", "edges", "memory_bytes", "constraints", "indexes": [{"path", "state", "declared", "unique"}], "recovery": {...}}`; `memory_bytes` is the graph's approximate memory, indexes included |
 
-**Read-your-writes** (step 8, [ADR 0016](adr/0016-read-your-writes-and-deadlines.md)): with `min_seq` (for example `result["seq"]` of an earlier commit), a read first waits until that commit is applied, so it sees it and everything before it. `timeout` (seconds, default 30) bounds the wait: after it, `iwdb.TimeoutError`. A store that is read-only below `min_seq` raises `iwdb.ReadOnlyError` at once (it can't get there). In the embedded store every commit is applied before it returns, so a thread's own commits are always visible; `min_seq` matters for seqs from other threads, and for the remote client (step 14), which tracks the seq of its last commit and sends it. Reads run concurrently with each other and with commits; they never see part of a transaction.
+**Read-your-writes** (step 8, [ADR 0016](adr/0016-read-your-writes-and-deadlines.md)): with `min_seq` (for example `result["seq"]` of an earlier commit), a read first waits until that commit is applied, so it sees it and everything before it. `timeout` (seconds, default 30; `float("inf")`: none) bounds the wait and, since step 10, the read itself: after it, `iwdb.TimeoutError`. A store that is read-only below `min_seq` raises `iwdb.ReadOnlyError` at once (it can't get there). In the embedded store every commit is applied before it returns, so a thread's own commits are always visible; `min_seq` matters for seqs from other threads, and for the remote client (step 14), which tracks the seq of its last commit and sends it. Reads run concurrently with each other and with commits; they never see part of a transaction.
 
 ### Operations
 
@@ -166,19 +166,19 @@ Anything else raises `TypeError`. Values nest at most 100 levels (a scalar is 1;
 
 ## Exceptions
 
-Every error is an `iwdb.Error` (an `Exception`), with the Rust message as its text, except argument errors, which are Python's own (`TypeError`, `ValueError`, `OverflowError`).
+Every error is an `iwdb.Error` (an `Exception`), with the Rust message as its text, except argument errors, which are Python's own (`TypeError`, `ValueError`, `OverflowError`). Since step 10 the store's reads, commits, catalog and namespace calls go through the `Database` trait (`iwdb::Embedded`), and their exceptions follow its error codes (`documentation/api/errors.md`): `conflict` is `ConflictError`, `not_found` is `NotFoundError`, and so on. Codes without a class of their own here (`budget_exceeded`, `cursor_expired`, `cancelled`, `unavailable`) raise `iwdb.Error`; the query methods that can produce them come with step 14.
 
 | Exception | Raised for |
 |---|---|
-| `iwdb.ConflictError` | a version conflict (`expected_version`); nothing changed |
+| `iwdb.ConflictError` | a version conflict (`expected_version`), a namespace or index that exists already, or an idempotency key reused for another request; nothing changed |
 | `iwdb.ConstraintError` | a unique or required constraint violated by the transaction; nothing changed |
-| `iwdb.NotFoundError` | a mutation addressed a node or edge that doesn't exist, or a namespace doesn't exist (any more); nothing changed |
-| `iwdb.InvalidError` | any other invalid commit (reserved key, empty transaction, value too deep, ambiguous edge, index exists, an idempotency key reused for another request or of an invalid length, ...), invalid options, a directory that isn't a store (or is a backup), a destination that isn't empty |
+| `iwdb.NotFoundError` | a mutation addressed a node or edge that doesn't exist, an index or constraint to drop doesn't exist, or a namespace doesn't exist (any more); nothing changed |
+| `iwdb.InvalidError` | any other invalid commit (reserved key, empty transaction, value too deep, ambiguous edge, an idempotency key of an invalid length, ...), invalid options, a directory that isn't a store (or is a backup), a destination that isn't empty |
 | `iwdb.ReadOnlyError` | the store is read-only after a failed WAL write or fsync, until reopened |
 | `iwdb.LockedError` | another store has the directory (or archive) open |
 | `iwdb.IoError` | a file operation failed; for a commit, its outcome is unknown and the store is read-only ([guarantees.md](guarantees.md)) |
 | `iwdb.CorruptError` | damage in the WAL, a checkpoint, a marker, a manifest or the namespace log, or a namespace directory that is missing; recovery refused |
-| `iwdb.TimeoutError` | a read's `min_seq` wasn't applied within its `timeout`; nothing changed |
+| `iwdb.TimeoutError` | a read (its `min_seq` wait included) didn't finish within its `timeout`; nothing changed |
 | `iwdb.ClosedError` | the store is closed |
 | `iwdb.InternalError` | a bug: a Rust panic outside the commit path |
 

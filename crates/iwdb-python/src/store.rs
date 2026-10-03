@@ -1,5 +1,7 @@
-//! `iwdb.Store` and `iwdb.Transaction`: translations to `iwdb::Store`
-//! (design rule 8; `documentation/python-api.md`).
+//! `iwdb.Store` and `iwdb.Transaction`: translations to the `Database`
+//! trait, served by `iwdb::Embedded` (design rule 8; step 10), and to
+//! `iwdb::Store` for what the trait doesn't cover (backups, checkpoints,
+//! syncs, the store's status). See `documentation/python-api.md`.
 
 use std::path::PathBuf;
 use std::sync::{PoisonError, RwLock};
@@ -7,35 +9,64 @@ use std::time::Duration;
 
 use iwdb::{
     AttrPath, CatalogChange, CheckpointOptions, CommitOptions, CommitResult, Constraint, ConstraintKind, EdgeId,
-    EdgeKey, Error, FsyncPolicy, IdempotencyKey, IndexDef, Label, Mutation, NamespaceResult, ReadOptions, Store,
-    StoreOptions, Target, WalOptions, NAMESPACE,
+    EdgeKey, Embedded, Error, FsyncPolicy, IdempotencyKey, IndexDef, Label, Mutation, NamespaceResult, QueryConfig,
+    Store, StoreOptions, Target, WalOptions, NAMESPACE,
 };
+use iwdb_query::exec::block_on;
+use iwdb_query::{Database, LimitConfig, QueryOptions};
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
 
 use crate::convert::{from_attrs, to_attrs, to_value};
-use crate::errors::{closed, guard, invalid, to_py, value_error};
+use crate::errors::{closed, guard, invalid, query_to_py, to_py, value_error};
 use crate::reports;
 
-/// A store, shared between Python threads. Calls hold the read side of the
-/// lock (with the GIL released) while they run; `close` takes the write
-/// side, so it waits for calls in progress, and leaves `None`.
+/// A store, shared between Python threads, served as a `Database`
+/// (`iwdb::Embedded`). Calls hold the read side of the lock (with the GIL
+/// released) while they run; `close` takes the write side, so it waits for
+/// calls in progress, and leaves `None`.
 #[pyclass(module = "iwdb", name = "Store", frozen)]
 pub struct PyStore {
-    inner: RwLock<Option<Store>>,
+    inner: RwLock<Option<Embedded>>,
     path: PathBuf,
 }
 
+/// The embedded database's config: the default limits, and no cap on
+/// timeouts (`timeout=inf` means none, as before step 10; ADR 0020).
+fn query_config() -> QueryConfig {
+    QueryConfig {
+        limits: LimitConfig { max_timeout: Duration::MAX, ..LimitConfig::default() },
+        ..QueryConfig::default()
+    }
+}
+
 impl PyStore {
-    /// Run `f` on the open store with the GIL released.
+    /// Run `f` on the open store with the GIL released (for what the
+    /// `Database` trait doesn't cover).
     pub fn with<R: Send>(&self, py: Python<'_>, f: impl FnOnce(&Store) -> Result<R, Error> + Send) -> PyResult<R> {
+        let result = py.detach(|| {
+            let inner = self.inner.read().unwrap_or_else(PoisonError::into_inner);
+            inner.as_ref().map(|db| f(db.store()))
+        });
+        match result {
+            Some(result) => result.map_err(to_py),
+            None => Err(closed()),
+        }
+    }
+
+    /// Run `f` on the `Database` with the GIL released.
+    pub fn query<R: Send>(
+        &self,
+        py: Python<'_>,
+        f: impl FnOnce(&Embedded) -> Result<R, iwdb_query::Error> + Send,
+    ) -> PyResult<R> {
         let result = py.detach(|| {
             let inner = self.inner.read().unwrap_or_else(PoisonError::into_inner);
             inner.as_ref().map(f)
         });
         match result {
-            Some(result) => result.map_err(to_py),
+            Some(result) => result.map_err(query_to_py),
             None => Err(closed()),
         }
     }
@@ -58,13 +89,13 @@ fn commit_options(idempotency_key: Option<String>) -> PyResult<CommitOptions> {
 
 /// Read options: `min_seq`, and `timeout` in seconds (`None`: the default;
 /// `inf`: none).
-fn read_options(min_seq: Option<u64>, timeout: Option<f64>) -> PyResult<ReadOptions> {
+fn read_options(min_seq: Option<u64>, timeout: Option<f64>) -> PyResult<QueryOptions> {
     let timeout = match timeout {
         Some(t) if t == f64::INFINITY => Some(Duration::MAX),
         Some(t) => Some(seconds(t, "timeout")?),
         None => None,
     };
-    Ok(ReadOptions { min_seq, timeout, ..ReadOptions::default() })
+    Ok(QueryOptions { min_seq, timeout, ..QueryOptions::default() })
 }
 
 fn seconds(s: f64, what: &str) -> PyResult<Duration> {
@@ -162,7 +193,8 @@ impl PyStore {
                 archive,
             };
             let store = py.detach(|| Store::open(&path, options)).map_err(to_py)?;
-            Ok(PyStore { inner: RwLock::new(Some(store)), path })
+            let db = Embedded::new(store, query_config()).map_err(query_to_py)?;
+            Ok(PyStore { inner: RwLock::new(Some(db)), path })
         })
     }
 
@@ -172,8 +204,8 @@ impl PyStore {
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         guard(|| {
             let result = py.detach(|| {
-                let store = self.inner.write().unwrap_or_else(PoisonError::into_inner).take();
-                store.map(Store::close)
+                let db = self.inner.write().unwrap_or_else(PoisonError::into_inner).take();
+                db.map(Embedded::close)
             });
             result.transpose().map(drop).map_err(to_py)
         })
@@ -215,7 +247,7 @@ impl PyStore {
         guard(|| {
             let key = idempotency_key.map(IdempotencyKey::new).transpose().map_err(|e| invalid(e.to_string()))?;
             let name = name.to_owned();
-            let result = self.with(py, move |s| s.create_namespace(&name, key.as_ref()))?;
+            let result = self.query(py, move |db| block_on(db.create_namespace(&name, key)))?;
             namespace_result(py, &result)
         })
     }
@@ -226,7 +258,7 @@ impl PyStore {
         guard(|| {
             let key = idempotency_key.map(IdempotencyKey::new).transpose().map_err(|e| invalid(e.to_string()))?;
             let name = name.to_owned();
-            let result = self.with(py, move |s| s.drop_namespace(&name, key.as_ref()))?;
+            let result = self.query(py, move |db| block_on(db.drop_namespace(&name, key)))?;
             namespace_result(py, &result)
         })
     }
@@ -234,7 +266,7 @@ impl PyStore {
     /// The namespaces, sorted by name.
     fn namespaces(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         guard(|| {
-            let list = self.with(py, |s| Ok(s.namespaces()))?;
+            let list = self.query(py, |db| block_on(db.namespaces()))?;
             let out = PyList::empty(py);
             for info in list {
                 let dict = PyDict::new(py);
@@ -441,13 +473,10 @@ impl PyStore {
         timeout: Option<f64>,
     ) -> PyResult<Option<Py<PyAny>>> {
         guard(|| {
-            let id = id.to_owned();
+            let (ns, id) = (ns.to_owned(), id.to_owned());
             let options = read_options(min_seq, timeout)?;
-            let node = self.with_ns(py, ns, move |n| {
-                n.read_with(&options, |_| ())?;
-                Ok(n.node(&id))
-            })?;
-            let Some(node) = node else { return Ok(None) };
+            let mut nodes = self.query(py, move |db| block_on(db.get_nodes(&ns, vec![id], options)))?.value;
+            let Some(node) = nodes.pop().flatten() else { return Ok(None) };
             let dict = PyDict::new(py);
             dict.set_item("id", &node.id)?;
             dict.set_item("labels", PyList::new(py, &node.labels)?)?;
@@ -467,12 +496,10 @@ impl PyStore {
         timeout: Option<f64>,
     ) -> PyResult<Option<Py<PyAny>>> {
         guard(|| {
+            let ns = ns.to_owned();
             let options = read_options(min_seq, timeout)?;
-            let edge = self.with_ns(py, ns, move |n| {
-                n.read_with(&options, |_| ())?;
-                Ok(n.edge(EdgeId(id)))
-            })?;
-            let Some(edge) = edge else { return Ok(None) };
+            let mut edges = self.query(py, move |db| block_on(db.get_edges(&ns, vec![EdgeId(id)], options)))?.value;
+            let Some(edge) = edges.pop().flatten() else { return Ok(None) };
             let dict = PyDict::new(py);
             dict.set_item("id", edge.id.0)?;
             dict.set_item("from", &edge.from)?;
@@ -487,15 +514,17 @@ impl PyStore {
 
     fn wait_in(&self, py: Python<'_>, ns: &str, seq: u64, timeout: Option<f64>) -> PyResult<u64> {
         guard(|| {
+            let ns = ns.to_owned();
             let options = read_options(None, timeout)?;
-            self.with_ns(py, ns, move |n| n.wait_for_seq(seq, &options))
+            self.query(py, move |db| block_on(db.wait_for_seq(&ns, seq, options)))
         })
     }
 
     fn catalog_in(&self, py: Python<'_>, ns: &str, min_seq: Option<u64>, timeout: Option<f64>) -> PyResult<Py<PyAny>> {
         guard(|| {
+            let ns = ns.to_owned();
             let options = read_options(min_seq, timeout)?;
-            let catalog = self.with_ns(py, ns, move |n| n.read_with(&options, |ns| ns.catalog().clone()))?;
+            let catalog = self.query(py, move |db| block_on(db.catalog(&ns, options)))?.value;
             let indexes = PyList::empty(py);
             for index in catalog.indexes() {
                 indexes.append(PyList::new(py, index.path.keys())?)?;
@@ -521,7 +550,7 @@ impl PyStore {
 
     fn indexes_in(&self, py: Python<'_>, ns: &str) -> PyResult<Py<PyAny>> {
         guard(|| {
-            let status = self.with_ns(py, ns, |n| Ok(n.status()))?;
+            let status = self.status_of(py, ns)?;
             reports::indexes(py, &status.indexes)
         })
     }
@@ -541,10 +570,16 @@ impl PyStore {
         key: Option<String>,
     ) -> PyResult<Py<PyAny>> {
         guard(|| {
+            let ns = ns.to_owned();
             let options = commit_options(key)?;
-            let result = self.with_ns(py, ns, move |n| n.commit_catalog_with(change, &options))?;
+            let result = self.query(py, move |db| block_on(db.commit_catalog(&ns, change, options)))?;
             commit_result(py, &result)
         })
+    }
+
+    fn status_of(&self, py: Python<'_>, ns: &str) -> PyResult<iwdb::NamespaceStatus> {
+        let ns = ns.to_owned();
+        self.query(py, move |db| block_on(db.namespace_status(&ns)))
     }
 }
 
@@ -617,7 +652,7 @@ impl PyNamespace {
     /// The namespace's state: counts, indexes, memory.
     fn status(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         guard(|| {
-            let status = self.store.get().with_ns(py, &self.name, |n| Ok(n.status()))?;
+            let status = self.store.get().status_of(py, &self.name)?;
             reports::namespace_status(py, &status)
         })
     }
@@ -856,7 +891,7 @@ impl PyTransaction {
         let store = self.store.get();
         let options = self.options.clone();
         let namespace = self.namespace.clone();
-        let result = guard(|| store.with_ns(py, &namespace, move |n| n.commit_with(&mutations, &options)))?;
+        let result = guard(|| store.query(py, move |db| block_on(db.commit(&namespace, mutations, options))))?;
         let result = commit_result(py, &result)?;
         self.result = Some(result.clone_ref(py));
         Ok(result)
