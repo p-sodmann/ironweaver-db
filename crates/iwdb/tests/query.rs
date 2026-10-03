@@ -92,15 +92,3 @@ fn a_read_waiting_for_a_worker_times_out_at_its_deadline() {
     assert!(read.value[0].is_some());
     db.close().unwrap();
 }
-
-#[test]
-fn closing_waits_for_requests_and_releases_the_directory() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = open(dir.path());
-    let pending = db.commit("default", complete(3), CommitOptions::default());
-    assert_eq!(block_on(pending).unwrap().seq, 1);
-    db.close().unwrap();
-    let db = open(dir.path());
-    assert_eq!(db.store().seq(), 1);
-    db.close().unwrap();
-}

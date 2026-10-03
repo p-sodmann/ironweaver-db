@@ -681,20 +681,6 @@ fn replay_rejects_gaps_and_repeats() {
 // Saved files
 
 #[test]
-fn committed_graphs_save_and_load_with_their_versions() {
-    let mut ns = ns();
-    ns.commit_catalog(CatalogChange::AddConstraint(unique("P", &["k"]))).unwrap();
-    ns.commit(&[upsert("a", &["P"], &[("k", Value::Int(1))]), upsert("b", &["P"], &[]), edge("a", "b", Some("T"))])
-        .unwrap();
-    ns.commit(&[set(node("b"), "k", Value::Int(2)), set(Target::Edge(EdgeId(0)), "w", Value::Int(1))]).unwrap();
-    let meta = ns.graph_meta();
-    let loaded = codec::from_binary(&codec::to_binary(ns.graph(), &meta).unwrap()).unwrap();
-    assert_eq!(canonical(&loaded.graph), canonical(ns.graph()));
-    assert_eq!(loaded.meta, meta);
-    assert!(loaded.index_changes.created.is_empty() && loaded.index_changes.dropped.is_empty());
-}
-
-#[test]
 fn a_namespace_from_a_loaded_file_continues_where_the_original_was() {
     let mut original = ns();
     original.commit_catalog(CatalogChange::AddConstraint(unique("P", &["k"]))).unwrap();

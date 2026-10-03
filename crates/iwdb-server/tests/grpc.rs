@@ -68,16 +68,8 @@ fn errors_carry_their_code_in_the_trailer() {
     let dir = tempfile::tempdir().unwrap();
     let server = Running::start(store(dir.path(), 2));
     let mut client = raw(&server);
-    let commit = pb::CommitRequest {
-        namespace: "nope".into(),
-        mutations: vec![pb::Mutation {
-            kind: Some(pb::mutation::Kind::DeleteNode(pb::DeleteNode { id: "x".into(), expected_version: None })),
-        }],
-        options: None,
-    };
-    let status = server.block_on(client.commit(commit)).unwrap_err();
-    assert_eq!((status.code(), code_of(&status)), (tonic::Code::NotFound, Some("not_found")));
-    // A message that isn't complete is the request's fault
+    // A message that isn't complete is the request's fault (the other codes:
+    // `status.rs` and the conformance suite)
     let empty = pb::CommitRequest { namespace: NS.into(), mutations: vec![pb::Mutation { kind: None }], options: None };
     let status = server.block_on(client.commit(empty)).unwrap_err();
     assert_eq!((status.code(), code_of(&status)), (tonic::Code::InvalidArgument, Some("invalid_argument")));

@@ -1,21 +1,19 @@
-//! Smoke tests for the `ironweaver-core` guarantees the database builds on.
-//!
-//! Each test checks one assumption from
-//! `documentation/ironweaver-core-review.md` against the pinned revision.
-//! If one fails after a core bump, the review (and the code relying on it)
-//! must be revisited before the bump lands.
+//! Smoke tests for `ironweaver-core` assumptions from
+//! `documentation/ironweaver-core-review.md` that no database test covers.
+//! Saves, loads, indexes and op replay are checked through the database's
+//! own types (`db_graph.rs`, `commit_model.rs`), cancellation of analytics
+//! by `iwdb/tests/concurrency.rs`. A failure after a core bump means the
+//! review must be revisited before the bump lands.
 
 // Test helpers outside `#[test]` functions may panic too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::cell::Cell;
-use std::io::{self, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
-use ironweaver_core::algo::{pagerank, PageRank};
 use ironweaver_core::cancel::{self, Token};
-use ironweaver_core::format::{self, GraphWriter, LoadGraph, RecordCodec};
+use ironweaver_core::format::{self, GraphWriter, RecordCodec};
 use ironweaver_core::pathfinding::EdgeCost;
 use ironweaver_core::query::Pattern;
 use ironweaver_core::traversal::bfs_limited;
@@ -114,31 +112,6 @@ fn builds_without_python() {
 }
 
 #[test]
-fn ops_round_trip_through_serde_and_replay_with_identical_edge_ids() {
-    let mut g = G::new();
-    let batch = sample_batch(&g);
-    g.apply_all(batch.clone()).expect("batch applies");
-
-    let bytes = postcard::to_stdvec(&batch).expect("postcard encode");
-    let from_postcard: Vec<O> = postcard::from_bytes(&bytes).expect("postcard decode");
-    assert_eq!(from_postcard, batch);
-
-    let json = serde_json::to_string(&batch).expect("json encode");
-    let from_json: Vec<O> = serde_json::from_str(&json).expect("json decode");
-    assert_eq!(from_json, batch);
-
-    for replayed in [from_postcard, from_json] {
-        let mut g2 = G::new();
-        g2.apply_all(replayed).expect("replay applies");
-        assert_eq!(canonical(&g2), canonical(&g));
-        let mut edge_ids: Vec<u64> = g2.edges().map(|(_, e)| e.id().0).collect();
-        edge_ids.sort();
-        assert_eq!(edge_ids, vec![0, 1]);
-        assert_eq!(g2.next_edge_id(), g.next_edge_id());
-    }
-}
-
-#[test]
 fn failing_apply_all_leaves_the_graph_unchanged() {
     let mut g = G::new();
     g.apply_all(sample_batch(&g)).expect("setup");
@@ -183,48 +156,6 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
-}
-
-#[test]
-fn graph_meta_survives_write_atomic_and_binary_format() {
-    let mut g = G::new();
-    g.apply_all(sample_batch(&g)).expect("setup");
-    // Graph-level meta is not stored in `Graph`; it travels next to it
-    // through the codec and comes back from the loader.
-    let mut meta = Attrs::new();
-    meta.insert("iwdb.seq".into(), Value::Int(42));
-
-    let dir = TempDir::new("smoke-format");
-    let file = dir.0.join("checkpoint.iwg");
-    for round in 0..2 {
-        format::write_atomic(&file, |out| {
-            GraphWriter::new(&g, &RecordCodec { meta: &meta, half: false })
-                .write_binary(&mut *out)
-                .map_err(io::Error::other)?;
-            out.flush()
-        })
-        .expect("atomic save");
-        // Only the target file is left, also when overwriting
-        let entries: Vec<_> = std::fs::read_dir(&dir.0).expect("read dir").collect();
-        assert_eq!(entries.len(), 1, "round {}: temp files left behind", round);
-    }
-
-    let bytes = std::fs::read(&file).expect("read checkpoint");
-    assert!(bytes.starts_with(b"IRONWEAV"));
-    // The convenience encoder writes the same format
-    assert_eq!(format::to_binary(&g, &meta, false).expect("encode").len(), bytes.len());
-
-    let (loaded, loaded_meta) = format::from_binary(&bytes).expect("load");
-    assert_eq!(loaded_meta.get("iwdb.seq"), Some(&Value::Int(42)));
-    assert_eq!(canonical(&loaded), canonical(&g));
-    assert_eq!(loaded.next_edge_id(), g.next_edge_id());
-
-    // Corruption is an error, not a panic
-    let mut corrupt = bytes.clone();
-    let mid = corrupt.len() / 2;
-    corrupt[mid] ^= 0xff;
-    assert!(matches!(format::from_binary(&corrupt), Err(GraphError::Format(_))));
-    assert!(matches!(format::from_binary(&bytes[..bytes.len() - 3]), Err(GraphError::Format(_))));
 }
 
 /// Fixed upstream (#32): `write_atomic` fsyncs the directory after the
@@ -334,155 +265,11 @@ fn index_stats_are_reported_per_index() {
     assert_eq!(g.index_stats(&path("v")).expect("stats").entries, 199);
 }
 
-#[test]
-fn property_index_lookups() {
-    let mut g = G::new();
-    g.apply_all(sample_batch(&g)).expect("setup");
-    let age = path("age");
-    assert!(g.find_nodes(&age, &Value::Int(30)).expect("lookup").is_none(), "no index yet");
-
-    assert!(g.create_index::<GraphError>(&age).expect("create"));
-    assert!(!g.create_index::<GraphError>(&age).expect("create again"));
-    let found = g.find_nodes(&age, &Value::Int(30)).expect("lookup").expect("indexed");
-    assert_eq!(ids(&g, found), ["alice"]);
-    // Numbers match across int and float
-    let found = g.find_nodes(&age, &Value::Float(42.0)).expect("lookup").expect("indexed");
-    assert_eq!(ids(&g, found), ["carol"]);
-
-    // Changes made through ops are visible before and after flushing
-    g.apply(Op::SetNodeAttr { id: "bob".into(), key: "age".into(), value: Some(Value::Int(30)) }).expect("set");
-    let found = g.find_nodes(&age, &Value::Int(30)).expect("lookup").expect("indexed");
-    assert_eq!(ids(&g, found), ["alice", "bob"]);
-    g.flush_indexes().expect("flush");
-    assert!(!g.indexes_dirty());
-    let found = g.find_nodes(&age, &Value::Int(30)).expect("lookup").expect("indexed");
-    assert_eq!(ids(&g, found), ["alice", "bob"]);
-
-    // Candidates for a filter: a superset, to be checked with `matches_node`
-    let expr = Expr::And(vec![
-        Expr::Label("Person".into()),
-        Expr::Compare { path: age.clone(), op: CmpOp::Gt, value: Value::Int(29) },
-        Expr::Compare { path: age.clone(), op: CmpOp::Lt, value: Value::Int(40) },
-    ]);
-    let candidates = g.index_candidates(&expr).expect("candidates").expect("narrowed");
-    let matching: Vec<_> = candidates.into_iter().filter(|&ix| expr.matches_node(&g, ix).expect("evaluate")).collect();
-    assert_eq!(ids(&g, matching), ["alice", "bob"]);
-    // Not-equal can't use the index
-    let ne = Expr::Compare { path: age, op: CmpOp::Ne, value: Value::Int(1) };
-    assert!(g.index_candidates(&ne).expect("candidates").is_none());
-}
-
-/// A deterministic pseudo-random graph (xorshift), `n` nodes and `m` edges.
-fn random_graph(n: usize, m: usize) -> G {
-    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-    let mut next = move || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        state
-    };
-    let mut g = G::with_capacity(n, m);
-    let nodes: Vec<_> = (0..n).map(|i| g.add_node(format!("n{}", i), Record::default()).expect("add node")).collect();
-    for _ in 0..m {
-        let (a, b) = (nodes[next() as usize % n], nodes[next() as usize % n]);
-        g.add_edge(a, b, Record::default()).expect("add edge");
-    }
-    g
-}
-
-#[test]
-fn cancel_token_stops_pagerank_from_another_thread() {
-    let g = random_graph(50_000, 250_000);
-    let projection = Projection::build::<_, _, GraphError>(&g, Direction::Out, &EdgeCost::Unit).expect("projection");
-    assert_eq!(projection.node_count(), 50_000);
-    // tol = 0 runs exactly max_iter iterations: effectively forever
-    let opts = PageRank { max_iter: usize::MAX, tol: 0.0, ..PageRank::default() };
-
-    let token = Token::new();
-    let canceller = {
-        let token = token.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(200));
-            token.cancel();
-        })
-    };
-    let started = Instant::now();
-    let result = cancel::run(&token, || pagerank(&projection, &opts));
-    canceller.join().expect("canceller thread");
-    assert_eq!(result, Err(GraphError::Interrupted));
-    assert!(started.elapsed() < Duration::from_secs(30), "stopped too late: {:?}", started.elapsed());
-
-    // The token is per computation: a fresh one runs to completion
-    let opts = PageRank { max_iter: 3, tol: 0.0, ..PageRank::default() };
-    let ranks = cancel::run(&Token::new(), || pagerank(&projection, &opts)).expect("not cancelled").expect("ranks");
-    assert_eq!(ranks.len(), 50_000);
-}
-
 /// Binary bytes of `g` without a timestamp, so equal graphs give equal bytes.
 fn save(g: &G, meta: &Attrs) -> Vec<u8> {
     let mut out = Vec::new();
     GraphWriter::new(g, &RecordCodec { meta, half: false }).with_timestamp(None).write_binary(&mut out).expect("save");
     out
-}
-
-#[test]
-fn saves_are_deterministic_and_carry_index_definitions() {
-    // Two graphs built the same way have attribute maps with different hash
-    // seeds, so their iteration orders differ; saves are sorted anyway.
-    let build = || {
-        let mut g = G::new();
-        g.apply_all(sample_batch(&g)).expect("setup");
-        g.create_index::<GraphError>(&path("age")).expect("index");
-        g
-    };
-    let mut meta = Attrs::new();
-    for i in 0..32 {
-        meta.insert(format!("k{}", i), Value::Int(i));
-    }
-    let (a, b) = (build(), build());
-    let bytes = save(&a, &meta);
-    assert_eq!(bytes, save(&b, &meta));
-    assert_eq!(bytes, save(&a, &meta.clone()));
-
-    // Index definitions travel in `metadata.indexes`; loaders recreate them
-    // unflushed, and the Record convenience loaders flush them.
-    let doc = LoadGraph::from_binary_slice(&bytes).expect("parse");
-    assert_eq!(doc.index_paths().expect("paths"), vec![path("age")]);
-    let built: G = doc
-        .build(
-            |n| Ok::<_, GraphError>(Record { attr: n.attr().to_attrs(), meta: n.meta().to_attrs() }),
-            |e| Ok(Record { attr: e.attr().to_attrs(), meta: e.meta().to_attrs() }),
-        )
-        .expect("build");
-    assert!(built.has_index(&path("age")));
-    assert!(built.indexes_dirty());
-    let (loaded, _) = format::from_binary(&bytes).expect("load");
-    assert!(!loaded.indexes_dirty());
-    let found = loaded.find_nodes(&path("age"), &Value::Int(30)).expect("lookup").expect("indexed");
-    assert_eq!(ids(&loaded, found), ["alice"]);
-}
-
-#[test]
-fn streaming_loader_matches_the_slice_loader() {
-    let mut g = G::new();
-    g.apply_all(sample_batch(&g)).expect("setup");
-    let mut meta = Attrs::new();
-    meta.insert("iwdb.seq".into(), Value::Int(7));
-    let bytes = save(&g, &meta);
-
-    let (streamed, streamed_meta) = format::from_binary_reader(&bytes[..]).expect("stream");
-    let (sliced, sliced_meta) = format::from_binary(&bytes).expect("slice");
-    assert_eq!(canonical(&streamed), canonical(&sliced));
-    assert_eq!(streamed_meta, sliced_meta);
-    assert_eq!(streamed.next_edge_id(), g.next_edge_id());
-
-    // The checksum is checked at the end: a damaged file is an error, and
-    // the partly built graph is never returned
-    let mut corrupt = bytes.clone();
-    let mid = corrupt.len() / 2;
-    corrupt[mid] ^= 0xff;
-    assert!(matches!(format::from_binary_reader(&corrupt[..]), Err(GraphError::Format(_))));
-    assert!(matches!(format::from_binary_reader(&bytes[..bytes.len() - 3]), Err(GraphError::Format(_))));
 }
 
 /// Since `d15a7ec` (upstream #54) the core reads no ironweaver 0.1 binary

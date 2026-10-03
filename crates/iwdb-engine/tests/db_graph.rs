@@ -158,21 +158,11 @@ proptest! {
         // ... and from then on saves are stable
         let third = codec::to_binary(&codec::from_binary(&again).unwrap().graph, &meta).unwrap();
         prop_assert_eq!(third, again);
+        // `GraphWriter::with_timestamp(None)` directly gives the same bytes
+        let mut direct = Vec::new();
+        GraphWriter::new(&a, &codec::DbCodec::new(&meta)).with_timestamp(None).write_binary(&mut direct).unwrap();
+        prop_assert_eq!(direct, bytes);
     }
-}
-
-#[test]
-fn saving_twice_gives_identical_bytes() {
-    let (a, meta) = social();
-    let (b, _) = social();
-    let bytes = codec::to_binary(&a, &meta).unwrap();
-    assert_eq!(bytes, codec::to_binary(&a, &meta).unwrap());
-    assert_eq!(bytes, codec::to_binary(&b, &meta).unwrap());
-    // `GraphWriter::with_timestamp(None)` directly gives the same bytes
-    let mut direct = Vec::new();
-    GraphWriter::new(&a, &codec::DbCodec::new(&meta)).with_timestamp(None).write_binary(&mut direct).unwrap();
-    assert_eq!(direct, bytes);
-    assert_eq!(codec::to_json(&a, &meta, true).unwrap(), codec::to_json(&b, &meta, true).unwrap());
 }
 
 /// `g` rebuilt with payloads `conv(..)`, in the same slot and adjacency
@@ -443,6 +433,7 @@ fn filters_and_indexes_work_on_db_records() {
         .is_none());
 
     assert!(g.create_index::<GraphError>(&age).unwrap());
+    assert!(!g.create_index::<GraphError>(&age).unwrap(), "already indexed");
     // Numbers match across int and float
     assert_eq!(ids(&g, g.find_nodes(&age, &Value::Int(41)).unwrap().unwrap()), ["carol"]);
     let candidates = g.index_candidates(&adults).unwrap().expect("narrowed by the index");
@@ -451,6 +442,9 @@ fn filters_and_indexes_work_on_db_records() {
     let range =
         g.find_nodes_in_range::<GraphError>(&age, Included(&Value::Int(20)), Excluded(&Value::Int(35))).unwrap();
     assert_eq!(ids(&g, range.unwrap()), ["alice", "bob"]);
+    // Not-equal can't use the index
+    let ne = Expr::Compare { path: age.clone(), op: CmpOp::Ne, value: Value::Int(1) };
+    assert!(g.index_candidates(&ne).unwrap().is_none());
 
     // Edge filters read the edge's DbRecord
     let heavy = Expr::Compare { path: keys(&["weight"]), op: CmpOp::Gt, value: Value::Float(1.0) };
@@ -458,9 +452,12 @@ fn filters_and_indexes_work_on_db_records() {
         g.edges().filter(|&(e, _)| heavy.matches_edge(&g, e).unwrap()).map(|(_, edge)| edge.id().0).collect();
     assert_eq!(edges, [5]);
 
-    // Ops keep indexes current; versions don't affect lookups
+    // Ops keep indexes current, before and after a flush; versions don't
+    // affect lookups
     g.apply(Op::SetNodeAttr { id: "bob".into(), key: "age".into(), value: Some(Value::Int(41)) }).unwrap();
+    assert_eq!(ids(&g, g.find_nodes(&age, &Value::Int(41)).unwrap().unwrap()), ["bob", "carol"]);
     g.flush_indexes().unwrap();
+    assert!(!g.indexes_dirty());
     assert_eq!(ids(&g, g.find_nodes(&age, &Value::Int(41)).unwrap().unwrap()), ["bob", "carol"]);
 }
 

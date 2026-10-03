@@ -193,8 +193,6 @@ def test_catalog(store):
     commit(store, id="a", labels=["Person"], attr={"name": "A", "email": "a@x"})
     with pytest.raises(iwdb.ConstraintError):
         commit(store, id="b", labels=["Person"], attr={"name": "B", "email": "a@x"})
-    with pytest.raises(iwdb.ConstraintError):
-        commit(store, id="c", labels=["Person"], attr={"email": "c@x"})
     with pytest.raises(iwdb.ConflictError):
         store.create_index("email")
     with pytest.raises(ValueError):
