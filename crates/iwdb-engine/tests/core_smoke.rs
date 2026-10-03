@@ -655,6 +655,27 @@ fn value_serde_and_the_file_format_agree_on_depth() {
     }
 }
 
+/// Not fixed upstream (draft 22): the serde form of `Value` and `Expr`
+/// can't be read from JSON with serde_json beyond 64 levels of list, dict
+/// or `And` / `Or` nesting (each is two JSON levels, and serde_json stops at
+/// 128), although the core accepts 100. A reader can't lift serde_json's
+/// limit safely: `Expr`'s struct variants skip unknown fields, and skipping
+/// recurses without the core's depth counters. gRPC is unaffected (postcard,
+/// ADR 0023); REST (step 12) needs the fix. When it lands, the last
+/// assertion fails: drop it, and read JSON with the core's reader.
+#[test]
+fn value_serde_json_stops_at_64_levels_and_expr_skips_unknown_fields() {
+    let read = |v: &Value| serde_json::from_str::<Value>(&serde_json::to_string(v).expect("write"));
+    assert!(read(&nest(63, Value::Int(1))).is_ok(), "depth 64");
+    let e = read(&nest(64, Value::Int(1))).expect_err("depth 65, valid for the core");
+    assert!(e.to_string().contains("recursion limit exceeded"), "{}", e);
+    let and = (1..65).fold(Expr::Const(true), |e, _| Expr::And(vec![e]));
+    assert!(serde_json::from_str::<Expr>(&serde_json::to_string(&and).expect("write")).is_err());
+    // Unknown fields are skipped, however deeply they nest
+    let junk = format!(r#"{{"Exists":{{"path":["a"],"junk":{}1{}}}}}"#, "[".repeat(100), "]".repeat(100));
+    assert!(serde_json::from_str::<Expr>(&junk).is_ok_and(|e| e == Expr::Exists { path: path("a") }));
+}
+
 /// Fixed upstream (#48): shortest paths, pattern matching and walk
 /// planning take a `Budget`. Dijkstra and A* poll cancellation per edge
 /// (after the token is cancelled while the hub is expanded, at most a few

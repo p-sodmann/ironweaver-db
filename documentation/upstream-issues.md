@@ -1,8 +1,8 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`. Drafts 19–21 are findings from step 10, filed and open.
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`. Drafts 19–21 are findings from step 10, fixed upstream in `ace9a0d`. Draft 22 is a finding from step 11, filed and open.
 
-Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`, drafts 19–21 against `cd09ea0`. Titles are ready to paste; the text below each title is the issue body.
+Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`, drafts 19–21 against `cd09ea0`, draft 22 against `d15a7ec`. Titles are ready to paste; the text below each title is the issue body.
 
 | # | Title | Status |
 |---|---|---|
@@ -27,6 +27,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 19 | [Budgets for shortest paths, pattern matching and walk planning](#19-budgets-for-shortest-paths-pattern-matching-and-walk-planning) | fixed upstream (`ace9a0d`): [#48](https://github.com/p-sodmann/Ironweaver/issues/48) |
 | 20 | [Traversals: `bfs` / `dfs` follow outgoing edges only, `expand` takes no edge filter](#20-traversals-bfs--dfs-follow-outgoing-edges-only-expand-takes-no-edge-filter) | fixed upstream (`ace9a0d`): [#49](https://github.com/p-sodmann/Ironweaver/issues/49) |
 | 21 | [`index_candidates` doesn't say which index it used](#21-index_candidates-doesnt-say-which-index-it-used) | fixed upstream (`ace9a0d`): [#50](https://github.com/p-sodmann/Ironweaver/issues/50) |
+| 22 | [`Value` / `Expr` serde can't be read from JSON beyond 64 levels, and skips unknown fields](#22-value--expr-serde-cant-be-read-from-json-beyond-64-levels-and-skips-unknown-fields) | filed, open: [#57](https://github.com/p-sodmann/Ironweaver/issues/57) |
 
 ---
 
@@ -494,3 +495,37 @@ A planning function that doesn't read the postings, for example `Graph::index_pl
 **Why the database needs it**
 
 `explain` must say which index `find` would use and the estimated scan size, in O(size of the filter). `iwdb_query::read::explain::plan` mirrors `index_candidates`' rules at `cd09ea0`; the test `the_plan_agrees_with_index_candidates` (`iwdb-query`) catches drift on a bump, but a mirror of the core's planner is the kind of reimplementation design rule 9 asks us to avoid.
+
+## 22. `Value` / `Expr` serde can't be read from JSON beyond 64 levels, and skips unknown fields
+
+Found in step 11 while choosing the wire encoding of values and filters (filed as [#57](https://github.com/p-sodmann/Ironweaver/issues/57); [ADR 0023](adr/0023-wire-encoding-of-values-filters-and-patterns.md)), checked against `d15a7ec`.
+
+**Problem**
+
+`Value` and `Expr` refuse nesting deeper than `MAX_DEPTH` / `MAX_EXPR_DEPTH` (100) through their serde impls, and the file format accepts values 100 levels deep, so 100 is the documented limit everywhere. But their serde form can't be read from JSON with `serde_json` beyond 64 levels of list, dict, `And` or `Or` nesting: each of those is two JSON levels (`{"List":[...]}`, `{"And":[...]}`), and `serde_json` stops at 128 by default. A value the core stores and saves can't travel as JSON; `format::from_json` is fine (its loader doesn't use `serde_json`'s recursion), only the serde form is affected.
+
+A reader can't simply turn `serde_json`'s limit off (`unbounded_depth` + `disable_recursion_limit`): `Expr`'s struct variants (`Compare`, `In`, `Exists`) skip unknown fields, and skipping (`IgnoredAny`) recurses without the core's depth counters, so a crafted document overflows the stack.
+
+Minimal reproduction:
+
+```rust
+use ironweaver_core::{Expr, Value};
+let nest = |n: usize| (0..n).fold(Value::Int(1), |v, _| Value::List(vec![v]));
+let read = |v: &Value| serde_json::from_str::<Value>(&serde_json::to_string(v).unwrap());
+assert!(read(&nest(63)).is_ok());              // depth 64
+assert!(read(&nest(64)).is_err());             // depth 65: "recursion limit exceeded"
+// Unknown fields are skipped, at any depth (only serde_json's limit stops it):
+let junk = format!(r#"{{"Exists":{{"path":["a"],"junk":{}1{}}}}}"#, "[".repeat(100), "]".repeat(100));
+assert!(serde_json::from_str::<Expr>(&junk).is_ok());
+```
+
+**Proposal**
+
+1. `#[serde(deny_unknown_fields)]` on `Expr`'s struct variants (and on the pattern structs, `NodePattern`, `EdgePattern`, `Hops`), so that every level of recursion in `Value`, `Expr` and `Pattern` deserialization goes through the core's own counters, and nothing is skipped.
+2. A JSON reader in the core that relies on them instead of `serde_json`'s limit, for example `value::from_json_str`, `Expr::from_json_str` and `Pattern::from_json_str` (behind a `json` feature if `serde_json` shouldn't be a dependency), built on `serde_json::Deserializer::disable_recursion_limit` (the `unbounded_depth` feature), with a test that a value 100 levels deep round-trips and 101 is refused with the core's message.
+
+With 1 alone, callers can do 2 themselves; 2 makes the safe way the easy one.
+
+**Why the database needs it**
+
+Step 12 serves the `Database` trait over REST/JSON with the core's serde form for values and filters (ADR 0023): `{"Int": 30}`, `{"Compare": {...}}`. With `serde_json`'s default limit, a node whose attribute is nested 65 to 100 levels deep can be committed over gRPC but not over REST, and REST can't return it in the same JSON form. Lifting the limit ourselves would let a crafted filter overflow the server's stack. Until this is fixed, the REST API documents a JSON nesting limit of 64 for values and filters and refuses deeper ones with `invalid_argument`; gRPC carries postcard and is unaffected. Pinned in `value_serde_json_stops_at_64_levels_and_expr_skips_unknown_fields` (`core_smoke.rs`).

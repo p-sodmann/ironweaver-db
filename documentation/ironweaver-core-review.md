@@ -161,10 +161,18 @@ Bumped from `ace9a0d` to `d15a7ec` (2026-10-03): upstream [#54](https://github.c
 - **Files without the header** (format-1 binary, anything else, or shorter than the 16-byte header) are refused with `GraphError::Format` by both loaders; the streaming loader no longer reads such a file into memory first. A format-1 file gets a message saying how to convert it. Recovery treats such a checkpoint as damaged, as before. Checked in `files_without_the_binary_header_are_refused` (`core_smoke.rs`).
 - **Step 13** can't import ironweaver 0.1 binary files (0.1 JSON files still load and are migrated); noted in the step file.
 
+## Findings from step 11
+
+Checked at `d15a7ec` while building the gRPC server.
+
+- **#28 and #29 applied.** The apply path returns `GraphError::Internal` instead of panicking (#28); the store now aborts on it as on a panic, because the graph may hold part of the transaction ([ADR 0028](adr/0028-internal-apply-errors-abort.md); before, the namespace was only poisoned and kept serving reads). `format::take_error()` (#29) gives the server the core's message when a value, filter or pattern fails to decode from postcard (`iwdb_server::convert`; tests at depth 100/101).
+- **`Value` / `Expr` serde and JSON depth.** The serde form can't be read from JSON with `serde_json` beyond 64 levels of list, dict or `And` / `Or` nesting (two JSON levels each, `serde_json` stops at 128), although the core accepts 100; and `Expr`'s struct variants skip unknown fields, so a reader can't lift `serde_json`'s limit safely. The core's file format JSON is fine. Pinned in `value_serde_json_stops_at_64_levels_and_expr_skips_unknown_fields` (`core_smoke.rs`). gRPC is unaffected: it carries postcard, whose recursion goes through the core's counters only (ADR 0023). REST (step 12) needs the fix; until then it documents a JSON nesting limit of 64. Upstream issue: [#57](https://github.com/p-sodmann/Ironweaver/issues/57) ([draft 22](upstream-issues.md#22-value--expr-serde-cant-be-read-from-json-beyond-64-levels-and-skips-unknown-fields)).
+- **What works as documented.** postcard of `Value`, `Expr` and `Pattern` keeps the depth limits exactly (100 passes, 101 fails with the core's message); `Pattern::to_text` / `parse` round-trip for the patterns the text can express, and `to_text` refuses the rest, so the server takes patterns as text or postcard.
+
 ## Design consequences for the database
 
 - **A failed `apply_all` can advance the edge id counter.** Rollback restores ids, labels, types and payloads, but `next_edge_id()` stays above any explicit id the failed batch used *(step 1; now documented upstream)*. Ids are still never reused, and the WAL carries explicit ids, so replay is exact; but the counter is not comparable between a primary and a replayed graph, and the canonical-state helper leaves it out.
-- **`GraphError::Internal` from `apply_all` means the graph may be inconsistent.** The database fails the transaction and reloads the namespace from checkpoint + WAL instead of continuing on it *(a14149e)*.
+- **`GraphError::Internal` from `apply_all` means the graph may be inconsistent.** The database aborts the process and recovers from checkpoint + WAL instead of continuing on it *(a14149e; the abort since step 11, ADR 0028)*.
 - **Iteration order is not part of the contract.** Slots are reused and save/load compacts them, so order after recovery differs from order before. Database results that need an order sort by id; recovery tests compare a canonical form of the state.
 - **The write path owns the graph.** Users of the database never get `node_mut` / `edge_mut`; all changes go through ops, so the WAL, indexes and versions stay consistent.
 - **Panics in the core are fatal for the process**, not for the data: the store aborts the process on a panic in the commit path and relies on recovery from checkpoint + WAL (ADR 0008, step 6).
