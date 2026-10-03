@@ -210,7 +210,14 @@ fn min_seq_waits_until_the_seq_is_applied_and_no_longer() {
     let first = store.commit(&node("a")).unwrap();
     // Applied already: no wait, even with a zero timeout
     let at_once = ReadOptions { timeout: Some(Duration::ZERO), ..ReadOptions::min_seq(first.seq) };
-    assert_eq!(store.read_with(&at_once, |ns| ns.seq()).unwrap(), first.seq);
+    assert_eq!(store.wait_for_seq(first.seq, &at_once).unwrap(), first.seq);
+    // But a read with no time left fails, every time: it doesn't race the
+    // timer thread (it used to succeed unless the timer cancelled it first)
+    for _ in 0..1000 {
+        assert!(matches!(store.read_with(&at_once, |ns| ns.seq()), Err(Error::Timeout { .. })));
+        let job = |_: &_| Ok(());
+        assert!(matches!(store.analyze(&ProjectionSpec::default(), &at_once, job), Err(Error::Timeout { .. })));
+    }
 
     // A reader waiting for the next seq returns once it is applied
     let waiter = {

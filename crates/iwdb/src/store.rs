@@ -23,7 +23,7 @@ use iwdb_storage::{
     HistoryId, LockStats, LoggedNamespace, Recovered, RecoveryReport, StoreRecovery, Wait,
 };
 
-use crate::request::{Deadline, ReadOptions, Timer};
+use crate::request::{Deadline, ReadOptions, Scheduled, Timer};
 use crate::StoreOptions;
 
 /// The name of the namespace every store has. It is created with the store
@@ -889,17 +889,14 @@ where
     /// cancels at the deadline (and the caller through `options.cancel`).
     /// The core's algorithms check it and stop; `f`'s result is then
     /// dropped and the read fails. So the deadline bounds the whole read,
-    /// as long as `f` spends its time in the core. Errors:
+    /// as long as `f` spends its time in the core. If no time is left after
+    /// the wait (a zero timeout, say), the read fails without running `f`,
+    /// even if `min_seq` was applied already. Errors:
     /// [`Error::OtherHistory`], [`Error::Timeout`], [`Error::Cancelled`],
     /// [`Error::ReadOnly`], [`Error::NamespaceDropped`].
     pub fn read_with<R>(&self, options: &ReadOptions, f: impl FnOnce(&Namespace) -> R) -> Result<R, Error> {
         let deadline = options.deadline();
-        self.wait(options, &deadline)?;
-        let token = options.cancel.clone().unwrap_or_default();
-        let _scheduled = match deadline.at {
-            Some(at) => Some(self.store.timer.schedule(at, token.clone())?),
-            None => None,
-        };
+        let (token, _scheduled) = self.start(options, &deadline, "the read")?;
         cancel::run(&token, || self.read(f)).map_err(|_| stopped(&deadline, options.cancel.as_ref(), "the read"))
     }
 
@@ -929,12 +926,7 @@ where
         job: impl FnOnce(&Projection) -> Result<R, GraphError>,
     ) -> Result<Analysis<R>, Error> {
         let deadline = options.deadline();
-        self.wait(options, &deadline)?;
-        let token = options.cancel.clone().unwrap_or_default();
-        let _scheduled = match deadline.at {
-            Some(at) => Some(self.store.timer.schedule(at, token.clone())?),
-            None => None,
-        };
+        let (token, _scheduled) = self.start(options, &deadline, "the analytics job")?;
         let (raw, seq) = self.read(|ns| {
             let raw = Projection::collect::<_, _, GraphError>(
                 ns.graph(),
@@ -1098,6 +1090,29 @@ where
             shared.wake.notify_all();
         }
         Ok(result)
+    }
+
+    /// [`wait`](Self::wait), then the cancel token for `what`, which the
+    /// store's timer cancels at the deadline (dropping the guard
+    /// unschedules it). A deadline that has passed already fails here with
+    /// [`Error::Timeout`]: otherwise the outcome would depend on whether
+    /// the timer thread cancels the token before the work ends.
+    fn start(
+        &self,
+        options: &ReadOptions,
+        deadline: &Deadline,
+        what: &str,
+    ) -> Result<(Token, Option<Scheduled<'_>>), Error> {
+        self.wait(options, deadline)?;
+        if deadline.passed() {
+            return Err(deadline.timeout(what));
+        }
+        let token = options.cancel.clone().unwrap_or_default();
+        let scheduled = match deadline.at {
+            Some(at) => Some(self.store.timer.schedule(at, token.clone())?),
+            None => None,
+        };
+        Ok((token, scheduled))
     }
 
     /// Check `options.history` and wait for `options.min_seq` until the
