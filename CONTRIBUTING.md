@@ -13,9 +13,11 @@ Thanks for helping. Start with [AGENTS.md](AGENTS.md): it holds the design rules
 
 ```
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
 ```
+
+You need Rust 1.99 or later (`rustup update`); `rust-toolchain.toml` selects the current stable. Since Rust 1.97 symbols use the v0 mangling scheme: profile and debug with current tools (`samply`, `perf`, `lldb`/`gdb`), older ones show mangled names.
 
 ## Python bindings
 
