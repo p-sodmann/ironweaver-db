@@ -16,6 +16,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [10](step_10.md) | Query layer and the `Database` service trait | M2 | done |
 | [11](step_11.md) | gRPC server | M3 | done |
 | [11a](step_11a.md) | Maintenance round | M3 | done |
+| [11b](step_11b.md) | Rust 1.99 and edition 2024 | M3 | in progress |
 | [12](step_12.md) | REST/JSON API | M3 | todo |
 | [13](step_13.md) | Change stream, projection mode, bulk import/export | M3 | todo |
 | [14](step_14.md) | Clients, query shell and benchmarks | M3 | todo |
