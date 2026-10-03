@@ -1,6 +1,7 @@
 //! `iwdb-server --config <file>`: open the data directory the config file
-//! names and serve it over gRPC until SIGINT or SIGTERM, then shut down
-//! gracefully (ADR 0027). A second signal ends the drain early.
+//! names and serve it over gRPC and REST (one port) until SIGINT or
+//! SIGTERM, then shut down gracefully (ADR 0027). A second signal ends the
+//! drain early.
 //!
 //! Exit codes: 0 after a clean shutdown, 1 if serving or closing the store
 //! failed, 2 for a bad command line or config file.
@@ -18,9 +19,10 @@ use tokio::sync::watch;
 
 const USAGE: &str = "usage: iwdb-server --config <file>
 
-Serves an Ironweaver DB data directory over gRPC (proto/ironweaver_db/v1).
-The config file is TOML; only data_dir is required (see the iwdb_server::config
-docs or documentation/api/grpc.md). SIGINT or SIGTERM shuts down gracefully;
+Serves an Ironweaver DB data directory over gRPC (proto/ironweaver_db/v1) and
+REST/JSON (/v1/..., OpenAPI at /v1/openapi.json) on one port. The config file
+is TOML; only data_dir is required (see the iwdb_server::config docs or
+documentation/api/grpc.md). SIGINT or SIGTERM shuts down gracefully;
 a second one cancels the calls still running.";
 
 fn main() -> ExitCode {

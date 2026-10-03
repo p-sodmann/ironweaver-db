@@ -1,6 +1,11 @@
 //! Serving a [`Server`] on a TCP listener, and shutting it down gracefully
 //! (ADR 0027).
 //!
+//! One port serves both APIs (ADR 0030): connections speak HTTP/2 or
+//! HTTP/1.1 (detected per connection), and a request whose content type is
+//! `application/grpc...` goes to the gRPC service, every other one to the
+//! REST router.
+//!
 //! The accept loop is ours rather than tonic's `transport::Server`, for two
 //! reasons: tonic's server wraps every service in a `grpc-timeout` layer
 //! that would race the database's own deadline and answer `CANCELLED`
@@ -9,19 +14,79 @@
 //! `JoinSet`: shutdown asks them to finish (HTTP/2 GOAWAY), and cancels the
 //! ones still running at the end of the drain.
 
+use std::convert::Infallible;
 use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use axum::body::Body;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use iwdb_query::Database;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
+use tower_service::Service;
 
-use crate::Server;
+use crate::proto::database_service_server::DatabaseServiceServer;
+use crate::{Adapter, Server};
+
+/// Both APIs as one service: gRPC by content type, REST otherwise.
+pub(crate) struct Dispatch<D> {
+    grpc: DatabaseServiceServer<Adapter<D>>,
+    rest: axum::Router,
+}
+
+// Not derived: that would require `D: Clone`
+impl<D> Clone for Dispatch<D> {
+    fn clone(&self) -> Self {
+        Dispatch { grpc: self.grpc.clone(), rest: self.rest.clone() }
+    }
+}
+
+impl<D> Dispatch<D> {
+    pub(crate) fn new(grpc: DatabaseServiceServer<Adapter<D>>, rest: axum::Router) -> Self {
+        Dispatch { grpc, rest }
+    }
+}
+
+fn is_grpc<B>(request: &http::Request<B>) -> bool {
+    request.headers().get(http::header::CONTENT_TYPE).is_some_and(|v| v.as_bytes().starts_with(b"application/grpc"))
+}
+
+type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
+impl<D, B> Service<http::Request<B>> for Dispatch<D>
+where
+    D: Database + 'static,
+    B: hyper::body::Body<Data = bytes::Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
+{
+    type Response = http::Response<Body>;
+    type Error = Infallible;
+    type Future = BoxFuture<Result<Self::Response, Infallible>>;
+
+    /// Both services are always ready (tonic's server and axum's router).
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: http::Request<B>) -> Self::Future {
+        if is_grpc(&request) {
+            let mut grpc = self.grpc.clone();
+            Box::pin(async move {
+                let response = grpc.call(request).await?;
+                Ok(response.map(Body::new))
+            })
+        } else {
+            let mut rest = self.rest.clone();
+            Box::pin(async move { rest.call(request.map(Body::new)).await })
+        }
+    }
+}
 
 /// How a shutdown went ([`Server::serve`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,10 +100,12 @@ pub struct Drain {
 }
 
 impl<D: Database + 'static> Server<D> {
-    /// Serve on `listener` until `stop` completes; then shut down (ADR
-    /// 0027): close the listener, send every connection GOAWAY (new calls
-    /// fail with `UNAVAILABLE`), and let running calls finish until the
-    /// future that `drain` returns completes (a timeout, a second signal).
+    /// Serve gRPC and REST on `listener` until `stop` completes; then shut
+    /// down (ADR 0027): close the listener, send every HTTP/2 connection
+    /// GOAWAY (new calls fail with `UNAVAILABLE`) and close every HTTP/1.1
+    /// connection after its current request, and let running calls finish
+    /// until the future that `drain` returns completes (a timeout, a second
+    /// signal).
     /// Connections still open then are closed. Returns once every
     /// connection is gone.
     ///
@@ -54,8 +121,8 @@ impl<D: Database + 'static> Server<D> {
         F: FnOnce() -> G,
         G: Future<Output = ()>,
     {
-        let service = self.service();
-        let builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+        let service = self.http_service();
+        let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
         let graceful = GracefulShutdown::new();
         let mut connections = JoinSet::new();
         tokio::pin!(stop);
@@ -67,7 +134,8 @@ impl<D: Database + 'static> Server<D> {
                         // Small answers shouldn't wait for Nagle's algorithm
                         let _ = stream.set_nodelay(true);
                         let service = TowerToHyperService::new(service.clone());
-                        let connection = graceful.watch(builder.serve_connection(TokioIo::new(stream), service));
+                        let connection =
+                            graceful.watch(builder.serve_connection(TokioIo::new(stream), service).into_owned());
                         connections.spawn(async move {
                             // A connection error (a client that went away)
                             // concerns that connection only

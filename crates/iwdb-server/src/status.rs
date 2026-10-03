@@ -1,7 +1,9 @@
 //! Errors on the wire: an [`Error`]'s [`Code`] becomes the gRPC status that
 //! `documentation/api/errors.md` lists for it, and travels itself, as its
-//! string, in the trailing metadata key [`CODE_KEY`]. Clients branch on
-//! that, never on the message: several codes share a gRPC status.
+//! string, in the trailing metadata key [`CODE_KEY`]. Over REST it becomes
+//! the HTTP status errors.md lists, with the code in the body (the `Error`
+//! message). Clients branch on the code, never on the message: several
+//! codes share a gRPC or HTTP status.
 //!
 //! This is the only place that maps codes (design rule 8).
 
@@ -28,6 +30,43 @@ pub fn grpc_code(code: Code) -> tonic::Code {
         // A code added later: its own string still travels in `CODE_KEY`
         _ => tonic::Code::Unknown,
     }
+}
+
+/// The HTTP status of `code` (the "HTTP" column of errors.md). 499 is
+/// nginx's "client closed request": no standard status says "cancelled".
+pub fn http_status(code: Code) -> http::StatusCode {
+    use http::StatusCode as S;
+    match code {
+        Code::InvalidArgument => S::BAD_REQUEST,
+        Code::NotFound => S::NOT_FOUND,
+        Code::Conflict | Code::ConstraintViolation => S::CONFLICT,
+        Code::BudgetExceeded => S::UNPROCESSABLE_ENTITY,
+        Code::Timeout => S::GATEWAY_TIMEOUT,
+        Code::Cancelled => S::from_u16(499).unwrap_or(S::BAD_REQUEST),
+        Code::CursorExpired => S::GONE,
+        Code::ReadOnly | Code::Unavailable | Code::Io => S::SERVICE_UNAVAILABLE,
+        Code::Corrupt | Code::Internal => S::INTERNAL_SERVER_ERROR,
+        // A code added later: its own string still travels in the body
+        _ => S::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// The error a REST answer stands for: the code of its body if it has
+/// one this client knows, otherwise (a proxy's answer, a code added later)
+/// the code closest to the HTTP status.
+pub fn from_http(status: http::StatusCode, code: Option<&str>, message: &str) -> Error {
+    let code = code.and_then(Code::parse).unwrap_or(match status.as_u16() {
+        400 | 405 | 411 | 413 | 414 | 415 | 431 => Code::InvalidArgument,
+        404 => Code::NotFound,
+        409 => Code::Conflict,
+        410 => Code::CursorExpired,
+        422 => Code::BudgetExceeded,
+        408 | 504 => Code::Timeout,
+        499 => Code::Cancelled,
+        429 | 502 | 503 => Code::Unavailable,
+        _ => Code::Internal,
+    });
+    Error::new(code, message)
 }
 
 /// The status a failed call ends with.
@@ -88,6 +127,40 @@ mod tests {
             assert_eq!(status.metadata().get(CODE_KEY).and_then(|v| v.to_str().ok()), Some(code.as_str()));
             assert_eq!(from_status(&status), e);
         }
+    }
+
+    /// The HTTP column of errors.md.
+    const HTTP: [(Code, u16); 13] = [
+        (Code::InvalidArgument, 400),
+        (Code::NotFound, 404),
+        (Code::Conflict, 409),
+        (Code::ConstraintViolation, 409),
+        (Code::BudgetExceeded, 422),
+        (Code::Timeout, 504),
+        (Code::Cancelled, 499),
+        (Code::CursorExpired, 410),
+        (Code::ReadOnly, 503),
+        (Code::Unavailable, 503),
+        (Code::Io, 503),
+        (Code::Corrupt, 500),
+        (Code::Internal, 500),
+    ];
+
+    #[test]
+    fn every_code_maps_to_the_http_status_of_errors_md_and_back() {
+        assert_eq!(HTTP.map(|(c, _)| c), Code::ALL);
+        let doc = include_str!("../../../documentation/api/errors.md");
+        for (code, http) in HTTP {
+            let status = http_status(code);
+            assert_eq!(status.as_u16(), http, "{}", code);
+            assert_eq!(from_http(status, Some(code.as_str()), "m"), Error::new(code, "m"));
+            let row = doc.lines().find(|l| l.starts_with(&format!("| `{}` |", code))).expect("a row");
+            assert!(row.trim_end().ends_with(&format!("| {} |", http)), "{}: {} not in {}", code, http, row);
+        }
+        // Without a code (or one this client doesn't know): by the status
+        assert_eq!(from_http(http::StatusCode::BAD_GATEWAY, None, "proxy").code(), Code::Unavailable);
+        assert_eq!(from_http(http::StatusCode::NOT_FOUND, Some("from_the_future"), "x").code(), Code::NotFound);
+        assert_eq!(from_http(http::StatusCode::IM_A_TEAPOT, None, "?").code(), Code::Internal);
     }
 
     #[test]

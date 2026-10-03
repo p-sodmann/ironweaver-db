@@ -2,7 +2,7 @@
 //!
 //! ```toml
 //! data_dir = "/var/lib/iwdb"        # relative paths are relative to this file
-//! listen = "127.0.0.1:7600"
+//! listen = "127.0.0.1:7600"           # gRPC and REST
 //!
 //! [store]
 //! fsync = "always"                  # always | group | off
@@ -12,7 +12,7 @@
 //!
 //! [server]
 //! drain_timeout_secs = 30           # how long running calls may finish on shutdown
-//! max_message_bytes = 67108864      # largest request or answer message
+//! max_message_bytes = 67108864      # largest request or answer message (REST: body)
 //! workers = 0                       # threads running requests (0: one per CPU)
 //! queue = 1024                      # requests that may wait for a worker
 //!

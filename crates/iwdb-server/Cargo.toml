@@ -1,6 +1,6 @@
 [package]
 name = "iwdb-server"
-description = "Ironweaver DB server: the Database trait over gRPC (tonic), and a Rust client"
+description = "Ironweaver DB server: the Database trait over gRPC (tonic) and REST/JSON (axum), and Rust clients"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,8 +9,9 @@ repository.workspace = true
 publish = false
 
 [features]
-# The Rust gRPC client (`client::Remote`, ADR 0024); the tests turn it on
-client = []
+# The Rust clients (`client::Remote` over gRPC, ADR 0024; `client::RestRemote`
+# over REST, ADR 0030); the tests turn it on
+client = ["hyper/client", "hyper/http1", "hyper-util/client-legacy", "hyper-util/http1"]
 
 [[bin]]
 name = "iwdb-server"
@@ -28,11 +29,22 @@ tonic-prost.workspace = true
 prost.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
-hyper.workspace = true
-hyper-util.workspace = true
+# One port for both APIs: HTTP/2 (gRPC, REST) and HTTP/1.1 (REST)
+hyper = { workspace = true, features = ["http1"] }
+hyper-util = { workspace = true, features = ["http1", "server-auto"] }
+axum.workspace = true
+pbjson.workspace = true
+prost-types.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+tower-service.workspace = true
 # Values, filters and patterns on the wire: the core's serde in postcard (ADR 0023)
 postcard.workspace = true
 serde.workspace = true
+# REST bodies; `raw_value` lets a value or filter be read by the core's own
+# JSON reader (ADR 0030), `float_roundtrip` reads every float exactly
+serde_json = { workspace = true, features = ["raw_value", "float_roundtrip"] }
 toml.workspace = true
 thiserror.workspace = true
 log.workspace = true
@@ -40,6 +52,8 @@ log.workspace = true
 [build-dependencies]
 tonic-prost-build.workspace = true
 protox.workspace = true
+pbjson-build.workspace = true
+prost.workspace = true
 
 [dev-dependencies]
 iwdb-server = { path = ".", features = ["client"] }
@@ -50,6 +64,7 @@ tempfile.workspace = true
 # A raw HTTP/2 client for the tests that send headers tonic's channel would
 # act on itself (grpc-timeout) or bytes `Remote` refuses to send
 hyper-util = { workspace = true, features = ["client-legacy", "http2"] }
+serde_json = { workspace = true, features = ["unbounded_depth"] }
 
 [lints]
 workspace = true

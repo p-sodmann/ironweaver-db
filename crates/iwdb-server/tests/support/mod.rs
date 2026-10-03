@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use iwdb::{CheckpointOptions, Embedded, FsyncPolicy, LogFs, QueryConfig, Store, StoreOptions, WalOptions};
 use iwdb_query::Database;
-use iwdb_server::client::Remote;
+use iwdb_server::client::{Remote, RestRemote};
 use iwdb_server::{Drain, Server};
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
@@ -72,6 +72,10 @@ impl<D: Database + 'static> Running<D> {
         Remote::connect(&self.endpoint()).unwrap()
     }
 
+    pub fn rest_client(&self) -> RestRemote {
+        RestRemote::connect(&self.endpoint()).unwrap()
+    }
+
     /// Shut down with a drain of `drain`; the report and the database.
     pub fn shutdown(mut self, drain: Duration) -> (Drain, D) {
         let runtime = self.runtime.take().unwrap();
@@ -119,25 +123,36 @@ where
     Embedded::new(store, QueryConfig::default()).unwrap()
 }
 
-/// A fresh store served over gRPC, and a client of it: the conformance
-/// fixture.
-pub struct Fresh {
-    remote: Remote,
-    _server: Running<Embedded>,
+/// A fresh store behind a server, and a client of it (`C`: gRPC or REST):
+/// the conformance fixture.
+pub struct Fresh<C = Remote> {
+    remote: C,
+    pub server: Running<Embedded>,
     _dir: tempfile::TempDir,
 }
 
-impl Deref for Fresh {
-    type Target = Remote;
+impl<C> Deref for Fresh<C> {
+    type Target = C;
 
-    fn deref(&self) -> &Remote {
+    fn deref(&self) -> &C {
         &self.remote
     }
 }
 
-pub fn fresh() -> Fresh {
+fn served() -> (Running<Embedded>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), options()).unwrap();
-    let server = Running::start(Embedded::new(store, QueryConfig::default()).unwrap());
-    Fresh { remote: server.client(), _server: server, _dir: dir }
+    (Running::start(Embedded::new(store, QueryConfig::default()).unwrap()), dir)
+}
+
+/// Over gRPC.
+pub fn fresh() -> Fresh {
+    let (server, dir) = served();
+    Fresh { remote: server.client(), server, _dir: dir }
+}
+
+/// Over REST; streamed answers as NDJSON or as one JSON message.
+pub fn fresh_rest(ndjson: bool) -> Fresh<RestRemote> {
+    let (server, dir) = served();
+    Fresh { remote: server.rest_client().ndjson(ndjson), server, _dir: dir }
 }
