@@ -9,8 +9,10 @@
 //! a failed read changes nothing on disk.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
+
+use crate::Error;
 
 /// The operations that change files: the log writer's, and those of
 /// checkpoints and recovery (step 5).
@@ -78,7 +80,7 @@ impl LogFs for StdFs {
     }
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
-        sync_dir(dir)
+        fsync_dir(dir)
     }
 
     fn write_atomic(&self, path: &Path, write: &mut dyn FnMut(&mut dyn Write) -> io::Result<()>) -> io::Result<()> {
@@ -119,11 +121,63 @@ impl LogFile for File {
 /// the directory). Windows can't open directories this way; there it does
 /// nothing (Windows is not a supported platform yet).
 #[cfg(unix)]
-fn sync_dir(dir: &Path) -> io::Result<()> {
+fn fsync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> io::Result<()> {
+fn fsync_dir(_dir: &Path) -> io::Result<()> {
     Ok(())
+}
+
+/// The size of the chunks files are written, copied and compared in.
+pub(crate) const CHUNK: usize = 1 << 20;
+
+/// Create `dir` (and its parents) if missing, and sync its parent.
+pub(crate) fn create_dir<F: LogFs>(fs: &F, dir: &Path) -> Result<(), Error> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(dir).map_err(|e| Error::io("create directory", dir, e))?;
+    match dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(parent) => sync_dir(fs, parent),
+        None => Ok(()),
+    }
+}
+
+pub(crate) fn sync_dir<F: LogFs>(fs: &F, dir: &Path) -> Result<(), Error> {
+    fs.sync_dir(dir).map_err(|e| Error::io("sync directory", dir, e))
+}
+
+pub(crate) fn write_atomic<F: LogFs>(fs: &F, path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    fs.write_atomic(path, &mut |out| out.write_all(bytes)).map_err(|e| Error::io("write", path, e))
+}
+
+/// Create `target` with `content`, in chunks, and fsync it.
+pub(crate) fn write_file<F: LogFs>(fs: &F, target: &Path, content: &[u8]) -> Result<(), Error> {
+    let mut file = fs.create(target).map_err(|e| Error::io("create", target, e))?;
+    for chunk in content.chunks(CHUNK) {
+        file.write_all(chunk).map_err(|e| Error::io("write", target, e))?;
+    }
+    file.sync().map_err(|e| Error::io("fsync", target, e))
+}
+
+/// Copy `source` to a new file `target` in chunks, and fsync it. Returns
+/// its length and CRC32C.
+pub(crate) fn copy_file<F: LogFs>(fs: &F, source: &Path, target: &Path) -> Result<(u64, u32), Error> {
+    let mut input = File::open(source).map_err(|e| Error::io("open", source, e))?;
+    let mut file = fs.create(target).map_err(|e| Error::io("create", target, e))?;
+    let mut buf = vec![0u8; CHUNK];
+    let (mut len, mut crc) = (0u64, 0u32);
+    loop {
+        let n = input.read(&mut buf).map_err(|e| Error::io("read", source, e))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buf[..n]).map_err(|e| Error::io("write", target, e))?;
+        crc = crc32c::crc32c_append(crc, &buf[..n]);
+        len += n as u64;
+    }
+    file.sync().map_err(|e| Error::io("fsync", target, e))?;
+    Ok((len, crc))
 }

@@ -21,7 +21,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::history::HistoryId;
-use crate::io::{LogFile, LogFs};
+use crate::io::{copy_file, LogFs, CHUNK};
 use crate::layout::{LOCK_NAME, TEMP_SUFFIX};
 use crate::namespaces::{
     ns_dir_name, parse_ns_dir_name, read_log, write_whole, Event, EventKind, DEFAULT_ID, NAMESPACES_NAME, NS_DIR,
@@ -39,7 +39,6 @@ pub const ARCHIVE_MAGIC: [u8; 8] = *b"IWDBARC\n";
 pub const ARCHIVE_VERSION: u32 = 2;
 /// Length of the archive marker.
 pub const ARCHIVE_MARKER_LEN: usize = 32;
-const CHUNK: usize = 1 << 20;
 
 /// The archive marker of history `history` in the current format: magic,
 /// version (u32 LE), the history id, CRC32C of the 28 bytes before it.
@@ -151,7 +150,7 @@ impl<F: LogFs> Archive<F> {
     /// archives into it; [`Error::Io`].
     pub fn open(fs: F, dir: &Path, history: HistoryId) -> Result<Self, Error> {
         if !dir.is_dir() {
-            crate::backup::create_dir(&fs, dir)?;
+            crate::io::create_dir(&fs, dir)?;
         }
         let lock_path = dir.join(LOCK_NAME);
         let lock = OpenOptions::new()
@@ -188,8 +187,8 @@ impl<F: LogFs> Archive<F> {
                 }
                 archive.make_dir(&archive.dir.join(NS_DIR))?;
                 let marker = encode_archive_marker(history);
-                crate::backup::write_atomic(&archive.fs, &dir.join(ARCHIVE_MARKER_NAME), &marker)?;
-                crate::backup::sync_dir(&archive.fs, dir)?;
+                crate::io::write_atomic(&archive.fs, &dir.join(ARCHIVE_MARKER_NAME), &marker)?;
+                crate::io::sync_dir(&archive.fs, dir)?;
             }
         }
         Ok(archive)
@@ -210,7 +209,7 @@ impl<F: LogFs> Archive<F> {
         let target = ns_root.join(ns_dir_name(DEFAULT_ID));
         self.make_dir(&ns_root)?;
         self.make_dir(&target)?;
-        crate::backup::sync_dir(&self.fs, &ns_root)?;
+        crate::io::sync_dir(&self.fs, &ns_root)?;
         for (first_seq, source) in reader::list_segments(&self.dir)? {
             let to = target.join(format::segment_name(first_seq));
             if to.exists() {
@@ -218,11 +217,11 @@ impl<F: LogFs> Archive<F> {
             }
             self.fs.rename(&source, &to).map_err(|e| Error::io("rename", &source, e))?;
         }
-        crate::backup::sync_dir(&self.fs, &target)?;
-        crate::backup::sync_dir(&self.fs, &self.dir)?;
+        crate::io::sync_dir(&self.fs, &target)?;
+        crate::io::sync_dir(&self.fs, &self.dir)?;
         let marker = encode_archive_marker(self.history);
-        crate::backup::write_atomic(&self.fs, &self.dir.join(ARCHIVE_MARKER_NAME), &marker)?;
-        crate::backup::sync_dir(&self.fs, &self.dir)
+        crate::io::write_atomic(&self.fs, &self.dir.join(ARCHIVE_MARKER_NAME), &marker)?;
+        crate::io::sync_dir(&self.fs, &self.dir)
     }
 
     pub fn dir(&self) -> &Path {
@@ -269,8 +268,8 @@ impl<F: LogFs> Archive<F> {
         if !dir.is_dir() {
             self.make_dir(&ns_root)?;
             self.make_dir(&dir)?;
-            crate::backup::sync_dir(&self.fs, &ns_root)?;
-            crate::backup::sync_dir(&self.fs, &self.dir)?;
+            crate::io::sync_dir(&self.fs, &ns_root)?;
+            crate::io::sync_dir(&self.fs, &self.dir)?;
         }
         Ok(())
     }
@@ -278,7 +277,7 @@ impl<F: LogFs> Archive<F> {
     /// Sync the directory of namespace `id`: the segments copied are then
     /// durable. The caller must never retry a failed sync (ADR 0005).
     pub fn sync(&self, id: u64) -> Result<(), Error> {
-        crate::backup::sync_dir(&self.fs, &self.dir.join(NS_DIR).join(ns_dir_name(id)))
+        crate::io::sync_dir(&self.fs, &self.dir.join(NS_DIR).join(ns_dir_name(id)))
     }
 
     /// Replace the archive's copy of the store's namespace log with
@@ -286,7 +285,7 @@ impl<F: LogFs> Archive<F> {
     /// to know which namespaces existed when.
     pub fn write_log(&self, events: &[Event]) -> Result<(), Error> {
         write_whole(&self.fs, &self.dir.join(NAMESPACES_NAME), events)?;
-        crate::backup::sync_dir(&self.fs, &self.dir)
+        crate::io::sync_dir(&self.fs, &self.dir)
     }
 }
 
@@ -352,21 +351,6 @@ fn read_full(file: &mut File, buf: &mut [u8]) -> io::Result<usize> {
         }
     }
     Ok(n)
-}
-
-/// Copy `source` to a new file `target` in chunks, and fsync it.
-fn copy_file<F: LogFs>(fs: &F, source: &Path, target: &Path) -> Result<(), Error> {
-    let mut input = File::open(source).map_err(|e| Error::io("open", source, e))?;
-    let mut file = fs.create(target).map_err(|e| Error::io("create", target, e))?;
-    let mut buf = vec![0u8; CHUNK];
-    loop {
-        let n = input.read(&mut buf).map_err(|e| Error::io("read", source, e))?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n]).map_err(|e| Error::io("write", target, e))?;
-    }
-    file.sync().map_err(|e| Error::io("fsync", target, e))
 }
 
 /// Verify an archive directory without changing it: its marker, the

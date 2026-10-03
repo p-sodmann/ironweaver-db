@@ -29,6 +29,24 @@
 //!
 //! The guarantees of each fsync policy are in `documentation/guarantees.md`.
 
+/// Single-namespace convenience: field access to the `default` namespace's
+/// part of a report (an empty one if there is none).
+macro_rules! default_deref {
+    ($report:ty, $part:ty, $field:ident, |$n:ident| $name:expr) => {
+        impl std::ops::Deref for $report {
+            type Target = $part;
+            fn deref(&self) -> &$part {
+                static EMPTY: std::sync::OnceLock<$part> = std::sync::OnceLock::new();
+                self.$field
+                    .iter()
+                    .find(|$n| $name == $crate::namespaces::DEFAULT_NAME)
+                    .unwrap_or_else(|| EMPTY.get_or_init(Default::default))
+            }
+        }
+    };
+}
+pub(crate) use default_deref;
+
 pub mod archive;
 pub mod backup;
 pub mod checkpoint;

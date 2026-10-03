@@ -555,7 +555,7 @@ fn write_restored<F: LogFs>(
                 return Err(Error::DestinationNotEmpty { path: dest.to_path_buf() });
             }
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => backup::create_dir(fs, dest)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => crate::io::create_dir(fs, dest)?,
         Err(e) => return Err(Error::io("list", dest, e)),
     }
     let restoring = dest.join(RESTORING_NAME);
@@ -575,7 +575,7 @@ fn write_restored<F: LogFs>(
     crate::layout::lock_file(&lock, &lock_path, true)?;
     let ns_root = dest.join(NS_DIR);
     fs.create_dir(&ns_root).map_err(|e| Error::io("create directory", &ns_root, e))?;
-    backup::sync_dir(fs, dest)?;
+    crate::io::sync_dir(fs, dest)?;
     let mut paths = Vec::new();
     for (report, _) in restored {
         paths.push(crate::layout::create_ns_dir(fs, dest, report.id)?);
@@ -583,17 +583,17 @@ fn write_restored<F: LogFs>(
     for ((_, namespace), paths) in restored.iter().zip(&paths) {
         if namespace.seq() > 0 {
             write_checkpoint(fs, &paths.checkpoints, namespace)?;
-            backup::sync_dir(fs, &paths.checkpoints)?;
+            crate::io::sync_dir(fs, &paths.checkpoints)?;
         }
     }
     write_whole(fs, &dest.join(NAMESPACES_NAME), events)?;
-    backup::sync_dir(fs, dest)?;
+    crate::io::sync_dir(fs, dest)?;
     fs.remove_file(&restoring).map_err(|e| Error::io("remove", &restoring, e))?;
-    backup::sync_dir(fs, dest)?;
-    backup::write_atomic(fs, &dest.join(MARKER_NAME), &encode_marker(history))?;
-    backup::sync_dir(fs, dest)?;
+    crate::io::sync_dir(fs, dest)?;
+    crate::io::write_atomic(fs, &dest.join(MARKER_NAME), &encode_marker(history))?;
+    crate::io::sync_dir(fs, dest)?;
     drop(lock);
     Ok(())
 }
 
-crate::backup::default_deref!(RestoreReport, NamespaceRestore, namespaces, |n| n.name.as_str());
+crate::default_deref!(RestoreReport, NamespaceRestore, namespaces, |n| n.name.as_str());

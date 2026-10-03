@@ -189,4 +189,4 @@ fn archive_names(dir: &Path, version: u32) -> Result<(BTreeMap<u64, String>, Opt
     Ok((names, Some(table.events().len())))
 }
 
-crate::backup::default_deref!(DirStatus, NamespaceFiles, namespaces, |n| n.name.as_deref().unwrap_or(""));
+crate::default_deref!(DirStatus, NamespaceFiles, namespaces, |n| n.name.as_deref().unwrap_or(""));

@@ -28,23 +28,22 @@ use crate::namespaces::{
     NAMESPACES_NAME, NS_DIR,
 };
 use crate::Error;
+
+mod lock;
+mod marker;
+
 use iwdb_engine::catalog::NamespaceName;
 use iwdb_engine::CommitTime;
+pub use lock::{lock_file, lock_shared};
+pub use marker::{encode_marker, encode_marker_with, read_marker, MarkerInfo};
 
-/// The layout version this version writes. It reads layouts 1 to 3 too,
-/// and upgrades them when it opens a store (see [`DataDir::open`]).
-/// Layout 3 (step 8) adds the idempotency key table (`iwdb.keys`) to the
-/// checkpoints' graph meta; its marker is layout 2's with version 3.
-/// Layout 4 (step 9) puts each namespace in `ns/<id>/` and adds the
-/// namespace log `NAMESPACES`; its marker is layout 3's with version 4.
+/// The layout version this version writes. It reads layouts 1 to 3 and
+/// upgrades them on open ([`DataDir::open`]; versions in
+/// `documentation/formats/data-dir.md`).
 pub const LAYOUT_VERSION: u32 = 4;
-/// The marker file's name.
 pub const MARKER_NAME: &str = "IWDB";
-/// The lock file's name.
 pub const LOCK_NAME: &str = "LOCK";
-/// The checkpoint directory's name.
 pub const CHECKPOINT_DIR: &str = "checkpoints";
-/// The WAL directory's name.
 pub const WAL_DIR: &str = "wal";
 /// A backup's manifest. A directory with it is a backup, which a store
 /// refuses to open: it is restored instead.
@@ -61,68 +60,6 @@ pub const MARKER_LEN_V1: usize = 16;
 /// Suffix of temporary files (a checkpoint, marker or segment being
 /// written). Any file with it is stale when a store opens.
 pub const TEMP_SUFFIX: &str = ".tmp";
-
-/// A marker of layout `version`: magic, version (u32 LE), `body`, and the
-/// CRC32C of everything before it. Every layout keeps this frame, so that a
-/// reader can tell a newer marker from a damaged one.
-pub fn encode_marker_with(version: u32, body: &[u8]) -> Vec<u8> {
-    let mut marker = MARKER_MAGIC.to_vec();
-    marker.extend_from_slice(&version.to_le_bytes());
-    marker.extend_from_slice(body);
-    let crc = crc32c::crc32c(&marker);
-    marker.extend_from_slice(&crc.to_le_bytes());
-    marker
-}
-
-/// The marker (current layout) of a directory of history `history`.
-pub fn encode_marker(history: HistoryId) -> Vec<u8> {
-    encode_marker_with(LAYOUT_VERSION, &history.0)
-}
-
-/// What a valid marker says.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MarkerInfo {
-    /// The layout version (1 to 4).
-    pub version: u32,
-    /// The history id (from layout 2; `None` in layout 1).
-    pub history: Option<HistoryId>,
-}
-
-/// What a marker file says.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Marker {
-    Valid(MarkerInfo),
-    /// A valid marker of a layout this version doesn't know.
-    Newer(u32),
-    /// Not our magic: some other file.
-    Foreign,
-    /// Our magic, but the wrong length or checksum.
-    Damaged,
-}
-
-fn decode_marker(bytes: &[u8]) -> Marker {
-    if !bytes.starts_with(&MARKER_MAGIC) {
-        return Marker::Foreign;
-    }
-    if bytes.len() < MARKER_LEN_V1 {
-        return Marker::Damaged;
-    }
-    let (data, crc) = bytes.split_at(bytes.len() - 4);
-    if crc32c::crc32c(data).to_le_bytes() != crc {
-        return Marker::Damaged;
-    }
-    let version = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-    match (version, bytes.len()) {
-        (1, MARKER_LEN_V1) => Marker::Valid(MarkerInfo { version, history: None }),
-        (2..=4, MARKER_LEN) => {
-            let mut id = [0u8; 16];
-            id.copy_from_slice(&bytes[12..28]);
-            Marker::Valid(MarkerInfo { version, history: Some(HistoryId(id)) })
-        }
-        (version, _) if version > LAYOUT_VERSION => Marker::Newer(version),
-        _ => Marker::Damaged,
-    }
-}
 
 /// The paths of one namespace's files: its directory, `checkpoints/` and
 /// `wal/`.
@@ -567,31 +504,6 @@ pub fn remove_ns_dir<F: LogFs>(fs: &F, root: &Path, id: u64) -> Result<(), Error
     fs.sync_dir(&ns_root).map_err(|e| Error::io("sync directory", &ns_root, e))
 }
 
-/// Read the marker of the data directory `root`, without taking the lock
-/// or changing anything: `None` if it has none. Errors:
-/// [`Error::UnsupportedLayout`] (a newer layout), [`Error::NotADataDir`]
-/// (a file named `IWDB` that isn't ours), [`Error::InvalidDataDir`] (a
-/// damaged marker), [`Error::Io`].
-pub fn read_marker(root: &Path) -> Result<Option<MarkerInfo>, Error> {
-    let path = root.join(MARKER_NAME);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(Error::io("read", &path, e)),
-    };
-    match decode_marker(&bytes) {
-        Marker::Valid(info) => Ok(Some(info)),
-        Marker::Newer(version) => Err(Error::UnsupportedLayout { path: root.to_path_buf(), version }),
-        Marker::Foreign => Err(Error::NotADataDir {
-            path: root.to_path_buf(),
-            reason: format!("'{}' is not an Ironweaver DB marker", MARKER_NAME),
-        }),
-        Marker::Damaged => {
-            Err(Error::InvalidDataDir { path: root.to_path_buf(), reason: format!("'{}' is damaged", MARKER_NAME) })
-        }
-    }
-}
-
 /// A store opens neither an interrupted restore nor a backup.
 fn check_openable(root: &Path) -> Result<(), Error> {
     if root.join(RESTORING_NAME).exists() {
@@ -655,92 +567,4 @@ fn is_initial_log(path: &Path) -> bool {
     read_log(path).is_ok_and(|(_, table)| {
         table.events().len() == 1 && table.get_id(DEFAULT_ID).is_some_and(|n| n.name.as_str() == DEFAULT_NAME)
     })
-}
-
-/// Take a shared lock on `<root>/LOCK`, if that file exists, without
-/// creating it: readers that must not run while a store has the directory
-/// open (verify, restore reading a data directory) hold it while they
-/// read. Shared locks don't exclude each other. Returns the locked file,
-/// or `None` if there is no `LOCK` file (then no store has it open: a
-/// store creates `LOCK` before anything else). Fails with
-/// [`Error::Locked`] if a store has it open.
-pub fn lock_shared(root: &Path) -> Result<Option<File>, Error> {
-    let path = root.join(LOCK_NAME);
-    let file = match File::open(&path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(Error::io("open", &path, e)),
-    };
-    lock_file(&file, &path, false)?;
-    Ok(Some(file))
-}
-
-/// How long [`lock_file`] waits between attempts, in milliseconds: about
-/// 80 ms in all.
-const LOCK_RETRIES_MS: [u64; 6] = [1, 2, 5, 10, 20, 40];
-
-/// Lock `file` (the lock file at `path`), exclusively or shared, without
-/// blocking; [`Error::Locked`] if it is held.
-///
-/// A held lock is tried again a few times over about 80 ms before giving
-/// up. A process that another thread of this process is spawning holds a
-/// copy of every open file between its fork and its exec (close-on-exec
-/// takes effect only at the exec), and a `flock` belongs to the open file,
-/// so the lock of a store that was just closed can look held for that
-/// moment. Without the retries, reopening a store while another thread
-/// starts processes failed now and then (step 7 found it: 3.5% of reopens
-/// under heavy spawning). A real holder makes the open fail after the
-/// retries.
-pub fn lock_file(file: &File, path: &Path, exclusive: bool) -> Result<(), Error> {
-    let attempt = || {
-        if exclusive {
-            fs4::FileExt::try_lock(file)
-        } else {
-            fs4::FileExt::try_lock_shared(file)
-        }
-    };
-    for wait in LOCK_RETRIES_MS.iter().map(|ms| Some(std::time::Duration::from_millis(*ms))).chain([None]) {
-        match attempt() {
-            Ok(()) => return Ok(()),
-            Err(fs4::TryLockError::WouldBlock) => match wait {
-                Some(wait) => std::thread::sleep(wait),
-                None => return Err(Error::Locked { path: path.to_path_buf() }),
-            },
-            Err(fs4::TryLockError::Error(e)) => return Err(Error::io("lock", path, e)),
-        }
-    }
-    Err(Error::Locked { path: path.to_path_buf() })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn markers_are_checked() {
-        let history = HistoryId([7; 16]);
-        let marker = encode_marker(history);
-        assert_eq!(marker.len(), MARKER_LEN);
-        assert_eq!(decode_marker(&marker), Marker::Valid(MarkerInfo { version: 4, history: Some(history) }));
-        let v3 = encode_marker_with(3, &history.0);
-        assert_eq!(decode_marker(&v3), Marker::Valid(MarkerInfo { version: 3, history: Some(history) }));
-        let v2 = encode_marker_with(2, &history.0);
-        assert_eq!(decode_marker(&v2), Marker::Valid(MarkerInfo { version: 2, history: Some(history) }));
-        let v1 = encode_marker_with(1, &[]);
-        assert_eq!(v1.len(), MARKER_LEN_V1);
-        assert_eq!(decode_marker(&v1), Marker::Valid(MarkerInfo { version: 1, history: None }));
-        // A newer layout may have any body
-        assert_eq!(decode_marker(&encode_marker_with(7, b"whatever")), Marker::Newer(7));
-        assert_eq!(decode_marker(&encode_marker_with(5, b"whatever")), Marker::Newer(5));
-        assert_eq!(decode_marker(&encode_marker_with(1, &[0; 16])), Marker::Damaged);
-        assert_eq!(decode_marker(&encode_marker_with(0, &[])), Marker::Damaged);
-        assert_eq!(decode_marker(b"hello"), Marker::Foreign);
-        assert_eq!(decode_marker(&marker[..15]), Marker::Damaged);
-        assert_eq!(decode_marker(&marker[..31]), Marker::Damaged);
-        for bit in 64..MARKER_LEN * 8 {
-            let mut bad = marker.clone();
-            bad[bit / 8] ^= 1 << (bit % 8);
-            assert_eq!(decode_marker(&bad), Marker::Damaged, "bit {}", bit);
-        }
-    }
 }
