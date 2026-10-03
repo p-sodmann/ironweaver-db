@@ -13,6 +13,7 @@
 mod common;
 mod support;
 
+use std::assert_matches;
 use std::path::Path;
 use std::time::Duration;
 
@@ -81,9 +82,9 @@ impl Case {
     /// read-only, refuses commits, and reads see the reference.
     fn failed_commit(&self, mutations: &[Mutation]) -> Error {
         let error = self.store.commit(mutations).expect_err("the commit fails");
-        assert!(matches!(error, Error::Io { .. }), "{:?}", error);
+        assert_matches!(error, Error::Io { .. }, "{:?}", error);
         assert!(self.store.read_only().is_some());
-        assert!(matches!(self.store.commit(&tx(pad(0))), Err(Error::ReadOnly { .. })));
+        assert_matches!(self.store.commit(&tx(pad(0))), Err(Error::ReadOnly { .. }));
         assert_eq!(store_state(&self.store), state(&self.reference), "not applied");
         error
     }
@@ -142,7 +143,7 @@ fn a_failed_wal_fsync_is_not_retried_and_its_record_is_recovered() {
         c.fs.add(Rule::new(Call::Sync, when, action));
         c.failed_commit(&tx(pad(9)));
         let syncs = c.fs.count(Call::Sync);
-        assert!(matches!(c.store.sync(), Err(Error::ReadOnly { .. })));
+        assert_matches!(c.store.sync(), Err(Error::ReadOnly { .. }));
         // A read-only store still checkpoints what was synced, without an fsync
         assert!(c.store.checkpoint().is_ok());
         assert_eq!(c.fs.count(Call::Sync), syncs, "{:?} {:?}: never retried", when, action);
@@ -202,7 +203,7 @@ fn a_failed_group_commit_timer_fsync_makes_the_store_read_only() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(c.store.synced_seq() < c.store.seq());
-    assert!(matches!(c.store.commit(&tx(pad(3))), Err(Error::ReadOnly { .. })));
+    assert_matches!(c.store.commit(&tx(pad(3))), Err(Error::ReadOnly { .. }));
     Case { reference, ..c }.reopen(None);
 }
 
@@ -233,7 +234,7 @@ fn open_fails(dir: &Path, rule: Rule) -> Error {
     fs.add(rule.clone());
     let error = Store::open_with(fs.clone(), dir, options(2)).expect_err("the open fails");
     assert_eq!(fs.state().fired, vec![rule]);
-    assert!(matches!(error, Error::Io { .. }), "{:?}", error);
+    assert_matches!(error, Error::Io { .. }, "{:?}", error);
     error
 }
 
@@ -362,7 +363,7 @@ fn a_checkpoint_that_fails_before_its_rename_deletes_nothing_and_is_retried() {
         Rule::new(Call::WriteAtomic, When::WriterDone, Action::Fail),
     ] {
         let (mut c, error, before, segments) = failed_checkpoint(rule.clone());
-        assert!(matches!(error, Error::Io { op: "write checkpoint", .. }), "{}: {:?}", rule, error);
+        assert_matches!(error, Error::Io { op: "write checkpoint", .. }, "{}: {:?}", rule, error);
         assert_eq!(
             snapshot(&c.dir.path().join("ns/00000000000000000001/checkpoints")),
             before,
@@ -385,7 +386,7 @@ fn a_checkpoint_that_fails_before_its_rename_deletes_nothing_and_is_retried() {
 #[test]
 fn a_checkpoint_whose_write_reports_an_error_after_the_rename_deletes_nothing() {
     let (c, error, _, segments) = failed_checkpoint(Rule::new(Call::WriteAtomic, When::After, Action::Fail));
-    assert!(matches!(error, Error::Io { op: "write checkpoint", .. }), "{:?}", error);
+    assert_matches!(error, Error::Io { op: "write checkpoint", .. }, "{:?}", error);
     assert_eq!(checkpoints(c.dir.path()).len(), 2);
     assert_eq!(segment_seqs(c.dir.path()), segments);
     let newest = checkpoints(c.dir.path())[1];
@@ -408,7 +409,7 @@ fn a_checkpoint_that_fails_after_its_rename_disables_checkpoints_until_reopened(
     ];
     for rule in rules {
         let (mut c, error, _, segments) = failed_checkpoint(rule.clone());
-        assert!(matches!(error, Error::Io { .. }), "{}: {:?}", rule, error);
+        assert_matches!(error, Error::Io { .. }, "{}: {:?}", rule, error);
         let newest = *checkpoints(c.dir.path()).last().unwrap();
         assert_eq!(newest, c.reference.seq(), "{}: the new checkpoint is in place", rule);
         let removed = segments.len() - segment_seqs(c.dir.path()).len();
@@ -417,7 +418,7 @@ fn a_checkpoint_that_fails_after_its_rename_disables_checkpoints_until_reopened(
             _ if rule.path == "/wal" => assert!(removed > 0, "{}", rule),
             _ => assert_eq!(removed, 0, "{}", rule),
         }
-        assert!(matches!(c.store.checkpoint(), Err(Error::CheckpointsDisabled { .. })), "{}", rule);
+        assert_matches!(c.store.checkpoint(), Err(Error::CheckpointsDisabled { .. }), "{}", rule);
         run(&c.store, &mut c.reference, &[pad(1)]);
         let (dir, store, mut reference) = c.reopen(None);
         assert_eq!(store.recovery().checkpoint, Some(newest), "{}", rule);

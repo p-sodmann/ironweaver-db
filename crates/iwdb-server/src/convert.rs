@@ -274,6 +274,7 @@ pub(crate) fn answer_from_pb<T>(value: T, meta: pb::AnswerMeta) -> Answer<T> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::assert_matches;
 
     use super::*;
     use iwdb_query::MatchRequest;
@@ -342,12 +343,12 @@ mod tests {
     fn patterns_go_as_text_when_the_text_can_express_them() {
         let text = MatchRequest::parse("(a:Person {age: 30})-[:knows*1..3]->(b)").unwrap();
         let pb = pattern_to_pb(&text.pattern).unwrap();
-        assert!(matches!(pb.form, Some(pb::pattern::Form::Text(_))));
+        assert_matches!(pb.form, Some(pb::pattern::Form::Text(_)));
         assert_eq!(pattern_from_pb(Some(pb)).unwrap(), text.pattern);
         let mut bound = text.pattern.clone();
         bound.bind_ids("b", vec!["x".into()]).unwrap();
         let pb = pattern_to_pb(&bound).unwrap();
-        assert!(matches!(pb.form, Some(pb::pattern::Form::Postcard(_))));
+        assert_matches!(pb.form, Some(pb::pattern::Form::Postcard(_)));
         assert_eq!(pattern_from_pb(Some(pb)).unwrap(), bound);
     }
 

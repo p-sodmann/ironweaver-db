@@ -569,6 +569,7 @@ pub fn read_log(path: &Path) -> Result<(ParsedLog, NamespaceTable), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn name(s: &str) -> NamespaceName {
         NamespaceName::new(s).expect("name")
@@ -631,12 +632,12 @@ mod tests {
         keyed.keyed = Some((k.clone(), fingerprint(EventKind::Create, &name("a"))));
         let table = NamespaceTable::from_events(vec![keyed.clone()]).expect("table");
         assert_eq!(table.plan(EventKind::Create, &name("a"), Some(&k)).expect("plan"), Plan::Duplicate(keyed));
-        assert!(matches!(table.plan(EventKind::Create, &name("b"), Some(&k)), Err(Error::Engine(_))));
-        assert!(matches!(table.plan(EventKind::Drop, &name("a"), Some(&k)), Err(Error::Engine(_))));
-        assert!(matches!(table.plan(EventKind::Create, &name("a"), None), Err(Error::NamespaceExists { .. })));
+        assert_matches!(table.plan(EventKind::Create, &name("b"), Some(&k)), Err(Error::Engine(_)));
+        assert_matches!(table.plan(EventKind::Drop, &name("a"), Some(&k)), Err(Error::Engine(_)));
+        assert_matches!(table.plan(EventKind::Create, &name("a"), None), Err(Error::NamespaceExists { .. }));
         assert_eq!(table.plan(EventKind::Create, &name("b"), None).expect("plan"), Plan::New { id: 2 });
         assert_eq!(table.plan(EventKind::Drop, &name("a"), None).expect("plan"), Plan::New { id: 1 });
-        assert!(matches!(table.plan(EventKind::Drop, &name("b"), None), Err(Error::NoSuchNamespace { .. })));
+        assert_matches!(table.plan(EventKind::Drop, &name("b"), None), Err(Error::NoSuchNamespace { .. }));
     }
 
     #[test]

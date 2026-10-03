@@ -11,6 +11,7 @@
 mod common;
 mod support;
 
+use std::assert_matches;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -104,12 +105,12 @@ fn an_archive_belongs_to_one_history() {
     fs::create_dir(&foreign).unwrap();
     fs::write(foreign.join("notes.txt"), b"x").unwrap();
     let opts = StoreOptions { archive: Some(foreign.clone()), ..options(1) };
-    assert!(matches!(Store::open(&dir.path().join("third"), opts), Err(Error::NotAnArchive { .. })));
+    assert_matches!(Store::open(&dir.path().join("third"), opts), Err(Error::NotAnArchive { .. }));
     assert!(!foreign.join(ARCHIVE_MARKER_NAME).exists());
     // The marker and lock, opened directly
     let id = HistoryId::random();
     let archive = Archive::open(StdFs, &dir.path().join("direct"), id).unwrap();
-    assert!(matches!(Archive::open(StdFs, &dir.path().join("direct"), id), Err(Error::Locked { .. })));
+    assert_matches!(Archive::open(StdFs, &dir.path().join("direct"), id), Err(Error::Locked { .. }));
     drop(archive);
     Archive::open(StdFs, &dir.path().join("direct"), id).unwrap();
 }
@@ -205,7 +206,7 @@ fn every_archive_write_can_fail_without_losing_a_segment() {
         run(&store, &mut reference, &workload(10, 60 + i as u64));
         let next = store.checkpoint();
         if disables {
-            assert!(matches!(next, Err(Error::CheckpointsDisabled { .. })), "{}: {:?}", rule, next);
+            assert_matches!(next, Err(Error::CheckpointsDisabled { .. }), "{}: {:?}", rule, next);
             drop(store);
             let store = Store::open(&dir.path().join("data"), opts).unwrap();
             commit_with_checkpoints(&store, &mut reference, &workload(10, 90 + i as u64));

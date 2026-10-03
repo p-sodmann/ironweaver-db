@@ -10,6 +10,7 @@
 mod common;
 mod support;
 
+use std::assert_matches;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -78,7 +79,7 @@ fn a_store_verifies_clean_and_reports_what_recovery_reaches() {
 fn verify_takes_a_shared_lock_and_changes_nothing() {
     let (dir, _) = store_dir(2);
     let store = Store::open(dir.path(), options(2)).unwrap();
-    assert!(matches!(verify(dir.path()), Err(Error::Locked { .. })));
+    assert_matches!(verify(dir.path()), Err(Error::Locked { .. }));
     drop(store);
     let before = snapshot(dir.path());
     clean(&verify(dir.path()).unwrap());
@@ -92,7 +93,7 @@ fn verify_takes_a_shared_lock_and_changes_nothing() {
     fs::write(dir.path().join("LOCK"), b"").unwrap();
     let held = iwdb_storage::layout::lock_shared(dir.path()).unwrap();
     clean(&verify(dir.path()).unwrap());
-    assert!(matches!(Store::open(dir.path(), options(2)), Err(Error::Locked { .. })));
+    assert_matches!(Store::open(dir.path(), options(2)), Err(Error::Locked { .. }));
     drop(held);
     Store::open(dir.path(), options(2)).unwrap();
 }
@@ -281,8 +282,8 @@ fn invariants_broken_behind_the_stores_back_are_problems() {
 #[test]
 fn directories_that_are_not_data_directories_are_errors() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(matches!(verify(dir.path()), Err(Error::NotADataDir { .. })));
-    assert!(matches!(verify(&dir.path().join("missing")), Err(Error::NotADataDir { .. })));
+    assert_matches!(verify(dir.path()), Err(Error::NotADataDir { .. }));
+    assert_matches!(verify(&dir.path().join("missing")), Err(Error::NotADataDir { .. }));
     fs::write(dir.path().join("RESTORING"), b"").unwrap();
     match verify(dir.path()) {
         Err(Error::NotADataDir { reason, .. }) => assert!(reason.contains("interrupted restore"), "{}", reason),

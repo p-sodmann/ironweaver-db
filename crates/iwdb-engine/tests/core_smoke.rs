@@ -8,6 +8,7 @@
 // Test helpers outside `#[test]` functions may panic too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::assert_matches;
 use std::cell::Cell;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -198,9 +199,10 @@ fn binary_header_flags_and_reserved_bytes_are_checked() {
     for at in 10..16 {
         let mut changed = bytes.clone();
         changed[at] = 0x01;
-        assert!(matches!(format::from_binary(&changed), Err(GraphError::Format(_))), "slice loader, byte {}", at);
-        assert!(
-            matches!(format::from_binary_reader(&changed[..]), Err(GraphError::Format(_))),
+        assert_matches!(format::from_binary(&changed), Err(GraphError::Format(_)), "slice loader, byte {}", at);
+        assert_matches!(
+            format::from_binary_reader(&changed[..]),
+            Err(GraphError::Format(_)),
             "streaming loader, byte {}",
             at
         );

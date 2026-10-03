@@ -11,6 +11,7 @@
 mod common;
 mod support;
 
+use std::assert_matches;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -116,10 +117,10 @@ fn pitr_from_a_backup_alone() {
     restore_and_check(work.path(), &history, &from_backup(&backup), RestoreTarget::Latest, report.seq);
     // Before its oldest checkpoint, the backup alone can't restore
     let early = restore(&work.path().join("early"), &from_backup(&backup), RestoreTarget::Seq(oldest - 1));
-    assert!(matches!(early, Err(Error::MissingRecords { .. })), "{:?}", early);
+    assert_matches!(early, Err(Error::MissingRecords { .. }), "{:?}", early);
     // Beyond its seq neither
     let late = restore(&work.path().join("late"), &from_backup(&backup), RestoreTarget::Seq(report.seq + 1));
-    assert!(matches!(late, Err(Error::LogEndsBefore { .. })), "{:?}", late);
+    assert_matches!(late, Err(Error::LogEndsBefore { .. }), "{:?}", late);
 }
 
 #[test]
@@ -244,24 +245,24 @@ fn restores_that_must_be_refused() {
     let before = (snapshot(&backup), snapshot(&archive));
 
     // No source; a destination that isn't empty or is inside a source
-    assert!(matches!(
+    assert_matches!(
         restore(&work.path().join("x"), &RestoreSources::default(), RestoreTarget::Latest),
         Err(Error::InvalidOptions(_))
-    ));
+    );
     let taken = work.path().join("taken");
     std::fs::create_dir(&taken).unwrap();
     std::fs::write(taken.join("f"), b"x").unwrap();
-    assert!(matches!(
+    assert_matches!(
         restore(&taken, &from_backup(&backup), RestoreTarget::Latest),
         Err(Error::DestinationNotEmpty { .. })
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         restore(&backup.join("inside"), &from_backup(&backup), RestoreTarget::Latest),
         Err(Error::InvalidOptions(_))
-    ));
+    );
     // A store's directory while it is open
     let live = restore(&work.path().join("live"), &from_backup(&work.path().join("data")), RestoreTarget::Latest);
-    assert!(matches!(live, Err(Error::Locked { .. })), "{:?}", live);
+    assert_matches!(live, Err(Error::Locked { .. }), "{:?}", live);
 
     // Another history's archive
     let other_work = tempfile::tempdir().unwrap();
@@ -272,21 +273,21 @@ fn restores_that_must_be_refused() {
         &from_both(&backup, &other_work.path().join("archive")),
         RestoreTarget::Latest,
     );
-    assert!(matches!(mixed, Err(Error::HistoryMismatch { .. })), "{:?}", mixed);
+    assert_matches!(mixed, Err(Error::HistoryMismatch { .. }), "{:?}", mixed);
     // A layout 1 directory has no history to match an archive with
     let v1 = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/data-dir-v1/store");
-    assert!(matches!(
+    assert_matches!(
         restore(&work.path().join("v1"), &from_both(&v1, &archive), RestoreTarget::Latest),
         Err(Error::HistoryMismatch { .. })
-    ));
+    );
     // An interrupted backup
     let partial = work.path().join("partial");
     std::fs::create_dir_all(partial.join("ns/00000000000000000001/wal")).unwrap();
     std::fs::write(partial.join("BACKUP"), b"").unwrap();
-    assert!(matches!(
+    assert_matches!(
         restore(&work.path().join("p"), &from_backup(&partial), RestoreTarget::Latest),
         Err(Error::NotADataDir { .. })
-    ));
+    );
     // The sources are unchanged
     assert_eq!((snapshot(&backup), snapshot(&archive)), before);
 
@@ -461,7 +462,7 @@ fn every_write_of_a_restore_can_fail_and_leaves_nothing_wrong() {
         let dest = work.path().join(format!("case-{}", i)).join("dest");
         let error = restore_with(&fs, &dest, &from_backup(&backup), target).expect_err("the restore fails");
         assert_eq!(fs.state().fired, vec![rule.clone()], "{}", rule);
-        assert!(matches!(error, Error::Io { .. }), "{}: {:?}", rule, error);
+        assert_matches!(error, Error::Io { .. }, "{}: {:?}", rule, error);
         // Failed before anything was written: just the directory, as for
         // any empty directory
         let empty = std::fs::read_dir(&dest).unwrap().next().is_none();

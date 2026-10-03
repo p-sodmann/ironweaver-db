@@ -8,6 +8,7 @@
 mod common;
 mod support;
 
+use std::assert_matches;
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -66,7 +67,7 @@ fn a_backup_holds_the_checkpoints_and_the_wal_up_to_its_seq() {
 
     // The store goes on; a store doesn't open the backup
     run(&store, &mut reference_at(&store), &[pad(1)]);
-    assert!(matches!(Store::open(&dest, options(2)), Err(Error::IsBackup { .. })));
+    assert_matches!(Store::open(&dest, options(2)), Err(Error::IsBackup { .. }));
 }
 
 /// A reference at the store's state, to commit more steps against.
@@ -101,12 +102,12 @@ fn the_destination_must_be_new_or_empty_and_outside_the_store() {
     fs::create_dir(&taken).unwrap();
     fs::write(taken.join("x"), b"x").unwrap();
     let before = snapshot(&taken);
-    assert!(matches!(store.backup(&taken), Err(Error::DestinationNotEmpty { .. })));
+    assert_matches!(store.backup(&taken), Err(Error::DestinationNotEmpty { .. }));
     assert_eq!(snapshot(&taken), before);
     let file = dir.path().join("file");
     fs::write(&file, b"x").unwrap();
-    assert!(matches!(store.backup(&file), Err(Error::DestinationNotEmpty { .. })));
-    assert!(matches!(store.backup(&dir.path().join("data").join("inside")), Err(Error::InvalidOptions(_))));
+    assert_matches!(store.backup(&file), Err(Error::DestinationNotEmpty { .. }));
+    assert_matches!(store.backup(&dir.path().join("data").join("inside")), Err(Error::InvalidOptions(_)));
     assert!(!dir.path().join("data").join("inside").exists());
     // An empty directory is fine
     let empty = dir.path().join("empty");
@@ -248,17 +249,17 @@ fn every_write_of_a_backup_can_fail_and_leaves_nothing_valid_looking() {
             let dest = dir.path().join("dest");
             let error = store.backup(&dest).expect_err("the backup fails");
             assert_eq!(fs.state().fired, vec![rule.clone()], "{}", rule);
-            assert!(matches!(error, Error::Io { .. }), "{}: {:?}", rule, error);
+            assert_matches!(error, Error::Io { .. }, "{}: {:?}", rule, error);
             if complete {
                 assert!(verify(&dest).unwrap().is_ok(), "{}", rule);
             } else {
                 assert!(!dest.join(MARKER_NAME).exists(), "{}", rule);
-                assert!(matches!(verify(&dest), Err(Error::NotADataDir { .. })), "{}", rule);
+                assert_matches!(verify(&dest), Err(Error::NotADataDir { .. }), "{}", rule);
                 // Either nothing but the directory, or refused
                 let empty = fs::read_dir(&dest).unwrap().next().is_none();
                 if !empty {
                     assert!(dest.join(BACKUP_NAME).exists(), "{}", rule);
-                    assert!(matches!(Store::open(&dest, options(2)), Err(Error::NotADataDir { .. })), "{}", rule);
+                    assert_matches!(Store::open(&dest, options(2)), Err(Error::NotADataDir { .. }), "{}", rule);
                 }
             }
             // The store is unaffected, and a new backup works

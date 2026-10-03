@@ -344,6 +344,7 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
 mod tests {
     use super::*;
     use iwdb_engine::catalog::{AttrPath, IndexDef};
+    use std::assert_matches;
 
     #[test]
     fn segment_names_sort_like_seqs() {
@@ -438,11 +439,11 @@ mod tests {
         assert_eq!(frame(1, 0, 0, &[0]), Err(Invalid::UnknownKind(0)));
         assert_eq!(frame(1, 0, 3, &[0]), Err(Invalid::UnknownKind(3)));
         assert_eq!(frame(1, 1, KIND_DATA, &[0]), Err(Invalid::SyncedSeq { seq: 1, synced_seq: 1 }));
-        assert!(matches!(frame(1, 0, KIND_DATA, &[0, 0, 0]), Err(Invalid::Undecodable(_))));
+        assert_matches!(frame(1, 0, KIND_DATA, &[0, 0, 0]), Err(Invalid::Undecodable(_)));
         // Format 3 needs the key's option byte
-        assert!(matches!(frame(1, 0, KIND_DATA, &[0]), Err(Invalid::Undecodable(_))));
-        assert!(matches!(frame(1, 0, KIND_DATA, &[]), Err(Invalid::Undecodable(_))));
-        assert!(matches!(frame(1, 0, KIND_CATALOG, &[9]), Err(Invalid::Undecodable(_))));
+        assert_matches!(frame(1, 0, KIND_DATA, &[0]), Err(Invalid::Undecodable(_)));
+        assert_matches!(frame(1, 0, KIND_DATA, &[]), Err(Invalid::Undecodable(_)));
+        assert_matches!(frame(1, 0, KIND_CATALOG, &[9]), Err(Invalid::Undecodable(_)));
     }
 
     #[test]

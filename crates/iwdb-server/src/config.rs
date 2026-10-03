@@ -214,6 +214,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::assert_matches;
 
     use super::*;
 
@@ -264,7 +265,7 @@ mod tests {
         let config =
             Config::parse("data_dir = \"d\"\n[store]\nfsync = \"group\"\ncheckpoint_on_shutdown = false").unwrap();
         let options = config.store_options();
-        assert!(matches!(options.wal.fsync, FsyncPolicy::Group { max_batch: 64, .. }));
+        assert_matches!(options.wal.fsync, FsyncPolicy::Group { max_batch: 64, .. });
         assert!(!options.checkpoint.on_close);
     }
 
@@ -274,6 +275,6 @@ mod tests {
         let path = dir.path().join("server.toml");
         std::fs::write(&path, "data_dir = \"data\"").unwrap();
         assert_eq!(Config::load(&path).unwrap().data_dir, dir.path().join("data"));
-        assert!(matches!(Config::load(&dir.path().join("missing.toml")), Err(ConfigError::Read { .. })));
+        assert_matches!(Config::load(&dir.path().join("missing.toml")), Err(ConfigError::Read { .. }));
     }
 }

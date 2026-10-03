@@ -6,6 +6,7 @@
 
 mod common;
 
+use std::assert_matches;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -122,10 +123,10 @@ fn garbage_after_the_log_is_a_torn_tail() {
     // Complete records with the wrong seq are never a tail: a repeat
     let mut repeated = bytes.clone();
     repeated.extend_from_slice(&bytes[SEGMENT_HEADER_LEN..]);
-    assert!(matches!(
+    assert_matches!(
         read_segment(&path(), &repeated, 1, true),
         Err(Error::SeqMismatch { expected: 6, found: 1, offset, .. }) if offset as usize == bytes.len()
-    ));
+    );
 }
 
 proptest! {
@@ -217,7 +218,7 @@ fn gaps_and_mismatches_between_segments_are_errors() {
     // A missing middle segment
     let (dir, _, segments) = multi_segment();
     fs::remove_file(&segments[2]).unwrap();
-    assert!(matches!(read_log(dir.path(), 1), Err(Error::SeqMismatch { offset: 0, .. })));
+    assert_matches!(read_log(dir.path(), 1), Err(Error::SeqMismatch { offset: 0, .. }));
 
     // A segment whose name doesn't match its header
     let (dir, _, segments) = multi_segment();
@@ -227,17 +228,17 @@ fn gaps_and_mismatches_between_segments_are_errors() {
         Err(Error::SeqMismatch { .. }) => {}
         other => panic!("{:?}", other.map(|(r, _)| r.len())),
     }
-    assert!(matches!(
+    assert_matches!(
         read_segment(&renamed, &fs::read(&renamed).unwrap(), 999, true),
         Err(Error::HeaderMismatch { expected: 999, .. })
-    ));
+    );
 
     // A copy of a segment under a later name: records repeat
     let (dir, records, segments) = multi_segment();
     let next = records.last().unwrap().seq + 1;
     let copy = dir.path().join(format!("{:020}.wal", next));
     fs::copy(&segments[0], &copy).unwrap();
-    assert!(matches!(read_log(dir.path(), 1), Err(Error::HeaderMismatch { .. })));
+    assert_matches!(read_log(dir.path(), 1), Err(Error::HeaderMismatch { .. }));
 
     // Files that aren't segments are ignored (e.g. a rotation's temporary file)
     let (dir, records, _) = multi_segment();
@@ -251,7 +252,7 @@ fn a_huge_segment_file_is_rejected_before_it_is_read() {
     let (dir, _, segments) = multi_segment();
     let file = fs::OpenOptions::new().write(true).open(segments.last().unwrap()).unwrap();
     file.set_len(iwdb_storage::MAX_SEGMENT_FILE_LEN + 1).unwrap();
-    assert!(matches!(read_log(dir.path(), 1), Err(Error::SegmentTooLarge { .. })));
+    assert_matches!(read_log(dir.path(), 1), Err(Error::SegmentTooLarge { .. }));
 }
 
 /// Group commit: records written before an fsync can reach the disk in any
@@ -283,14 +284,13 @@ fn group_commit_tolerates_out_of_order_loss_of_unsynced_records_only() {
     // Record 5 damaged, but record 7 says 4-6 were synced: corruption
     let mut damaged = bytes[..ends[7]].to_vec();
     lose(&mut damaged, 5);
-    assert!(
-        matches!(read_segment(segment, &damaged, 1, true), Err(Error::Corrupt { offset, .. }) if offset as usize == ends[4])
+    assert_matches!(read_segment(segment, &damaged, 1, true), Err(Error::Corrupt { offset, .. }) if offset as usize == ends[4]
     );
 
     // Record 6 damaged, 7 and 8 written after 4-6 were synced: corruption
     let mut damaged = bytes.clone();
     lose(&mut damaged, 6);
-    assert!(matches!(read_segment(segment, &damaged, 1, true), Err(Error::Corrupt { .. })));
+    assert_matches!(read_segment(segment, &damaged, 1, true), Err(Error::Corrupt { .. }));
 
     // Record 8 lost, 9 survived: both unsynced (synced_seq 6)
     let mut crash = bytes.clone();
@@ -303,5 +303,5 @@ fn group_commit_tolerates_out_of_order_loss_of_unsynced_records_only() {
     let ends = frame_ends(&bytes);
     let mut damaged = bytes.clone();
     damaged[ends[2]..ends[3]].fill(0);
-    assert!(matches!(read_segment(segment, &damaged, 1, true), Err(Error::Corrupt { .. })));
+    assert_matches!(read_segment(segment, &damaged, 1, true), Err(Error::Corrupt { .. }));
 }

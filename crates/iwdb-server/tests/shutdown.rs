@@ -9,6 +9,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::assert_matches;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -209,8 +210,9 @@ fn calls_still_running_at_the_end_of_the_drain_are_cancelled() {
     db.close().unwrap();
     assert!(start.elapsed() < Duration::from_secs(10), "shutdown took {:?}", start.elapsed());
     let e = block_on(call).unwrap_err();
-    assert!(
-        matches!(e.code(), iwdb_query::Code::Unavailable | iwdb_query::Code::Cancelled | iwdb_query::Code::Internal),
+    assert_matches!(
+        e.code(),
+        iwdb_query::Code::Unavailable | iwdb_query::Code::Cancelled | iwdb_query::Code::Internal,
         "{}",
         e
     );

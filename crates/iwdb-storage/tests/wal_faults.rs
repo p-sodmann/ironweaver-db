@@ -8,6 +8,7 @@
 
 mod common;
 
+use std::assert_matches;
 use std::path::Path;
 use std::time::Duration;
 
@@ -37,10 +38,10 @@ fn assert_read_only(logged: &mut LoggedNamespace<TestFs>, fs: &TestFs, before: &
     assert_eq!(logged.namespace().seq(), before.2);
     assert!(logged.read_only().is_some());
     let calls = fs.state().calls.len();
-    assert!(matches!(logged.commit(&[upsert("z", Value::Int(0))]), Err(Error::ReadOnly { .. })));
-    assert!(matches!(logged.commit_catalog(index("y")), Err(Error::ReadOnly { .. })));
-    assert!(matches!(logged.sync(), Err(Error::ReadOnly { .. })));
-    assert!(matches!(logged.sync_due(), Err(Error::ReadOnly { .. })));
+    assert_matches!(logged.commit(&[upsert("z", Value::Int(0))]), Err(Error::ReadOnly { .. }));
+    assert_matches!(logged.commit_catalog(index("y")), Err(Error::ReadOnly { .. }));
+    assert_matches!(logged.sync(), Err(Error::ReadOnly { .. }));
+    assert_matches!(logged.sync_due(), Err(Error::ReadOnly { .. }));
     // No retry: no write or fsync after the failure
     assert_eq!(fs.state().calls.len(), calls);
     assert_eq!(logged.namespace().seq(), before.2);
@@ -103,7 +104,7 @@ fn a_failed_fsync_is_not_applied_not_retried_and_makes_the_namespace_read_only()
     assert_eq!(logged.wal().synced_seq(), 3);
     assert_read_only(&mut logged, &fs, &before);
     // Closing doesn't sync either
-    assert!(matches!(logged.close(), Err(Error::ReadOnly { .. })));
+    assert_matches!(logged.close(), Err(Error::ReadOnly { .. }));
     assert_eq!(fs.state().failed, vec![Call::Sync]);
 
     // The record was written before the fsync failed, so here (the page
@@ -127,7 +128,7 @@ fn a_failed_group_fsync_fails_the_commit_that_waits_for_it() {
     let before = state(&logged.namespace());
 
     fs.inject(Call::Sync, Fault::Fail);
-    assert!(matches!(logged.commit(&[upsert("b", Value::Int(1))]), Err(Error::Io { op: "fsync", .. })));
+    assert_matches!(logged.commit(&[upsert("b", Value::Int(1))]), Err(Error::Io { op: "fsync", .. }));
     assert_read_only(&mut logged, &fs, &before);
 }
 
@@ -142,7 +143,7 @@ fn a_failed_sync_due_makes_the_namespace_read_only() {
     let before = state(&logged.namespace());
     std::thread::sleep(Duration::from_millis(30));
     fs.inject(Call::Sync, Fault::Fail);
-    assert!(matches!(logged.sync_due(), Err(Error::Io { op: "fsync", .. })));
+    assert_matches!(logged.sync_due(), Err(Error::Io { op: "fsync", .. }));
     assert_read_only(&mut logged, &fs, &before);
 }
 
@@ -203,13 +204,13 @@ fn a_poisoned_namespace_is_read_only() {
     // can't fail to apply through the public API, short of a bug)
     let mut ns = namespace();
     let bad = CommitRecord::new(1, Change::Data(vec![ironweaver_core::Op::RemoveNode { id: "x".into() }]));
-    assert!(matches!(ns.replay(bad, None), Err(iwdb_engine::Error::ApplyFailed { .. })));
+    assert_matches!(ns.replay(bad, None), Err(iwdb_engine::Error::ApplyFailed { .. }));
     let logged = LoggedNamespace::new(ns, wal).unwrap();
     let before = state(&logged.namespace());
     assert!(logged.read_only().is_some());
     let calls = fs.state().calls.len();
-    assert!(matches!(logged.commit(&[upsert("a", Value::Int(0))]), Err(Error::ReadOnly { .. })));
-    assert!(matches!(logged.commit_catalog(index("x")), Err(Error::ReadOnly { .. })));
+    assert_matches!(logged.commit(&[upsert("a", Value::Int(0))]), Err(Error::ReadOnly { .. }));
+    assert_matches!(logged.commit_catalog(index("x")), Err(Error::ReadOnly { .. }));
     assert_eq!(fs.state().calls.len(), calls);
     assert_eq!(state(&logged.namespace()), before);
 }
@@ -220,6 +221,6 @@ fn a_failed_segment_creation_fails_the_writer() {
         let dir = tempfile::tempdir().unwrap();
         let fs = TestFs::default();
         fs.inject(call, Fault::Fail);
-        assert!(matches!(Wal::create_with(fs.clone(), dir.path(), WalOptions::default(), 1), Err(Error::Io { .. })));
+        assert_matches!(Wal::create_with(fs.clone(), dir.path(), WalOptions::default(), 1), Err(Error::Io { .. }));
     }
 }

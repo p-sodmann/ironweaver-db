@@ -253,6 +253,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn parse_words(s: &str) -> Result<Parsed, String> {
         parse(&s.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
@@ -277,7 +278,7 @@ mod tests {
             }
         );
         let p = parse_words("restore r --archive a --time 2026-10-01T12:00:00Z").expect("parse");
-        assert!(matches!(p.command, Command::Restore { target: RestoreTarget::Time(_), .. }));
+        assert_matches!(p.command, Command::Restore { target: RestoreTarget::Time(_), .. });
         for bad in [
             "",
             "frobnicate",

@@ -16,6 +16,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::assert_matches;
 use std::time::Duration;
 
 use ironweaver_core::algo::PageRank;
@@ -346,7 +347,7 @@ pub async fn explain_reports_the_index_and_the_scan_size<D: Database>(db: &D) {
     let index = CatalogChange::CreateIndex(IndexDef { path: AttrPath::new(["age"]).expect("path") });
     db.commit_catalog(NS, index, CommitOptions::default()).await.expect("index");
     let point = db.explain(NS, request(int("age", CmpOp::Eq, 25), true), options()).await.expect("explain");
-    assert!(matches!(&point.value.plan, Plan::Index { path, .. } if path == &["age".to_owned()]));
+    assert_matches!(&point.value.plan, Plan::Index { path, .. } if path == &["age".to_owned()]);
     assert_eq!((point.value.estimated_candidates, point.value.candidates), (1, Some(1)));
     let label = db.explain(NS, request(Expr::Label("Person".into()), false), options()).await.expect("explain");
     assert_eq!(
@@ -614,9 +615,9 @@ pub async fn analytics_rank_their_results<D: Database>(db: &D) {
     assert!((scores.iter().map(|s| s.1).sum::<f64>() - 1.0).abs() < 1e-6);
     let top = run(Job::PageRank(PageRank::default()), limits(Some(2), None, None)).await.expect("top 2");
     assert!(top.truncated);
-    assert!(matches!(&top.value, JobResult::Scores(s) if s.len() == 2 && s[0] == scores[0]));
+    assert_matches!(&top.value, JobResult::Scores(s) if s.len() == 2 && s[0] == scores[0]);
     let wcc = run(Job::WeaklyConnectedComponents, options()).await.expect("wcc");
-    assert!(matches!(&wcc.value, JobResult::Groups(g) if g.len() == 1 && g[0].len() == 5));
+    assert_matches!(&wcc.value, JobResult::Groups(g) if g.len() == 1 && g[0].len() == 5);
     let scc = run(Job::StronglyConnectedComponents, options()).await.expect("scc");
     let JobResult::Groups(groups) = &scc.value else { panic!("groups") };
     assert_eq!(groups[0], ["ann", "bob", "cat"]);

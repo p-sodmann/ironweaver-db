@@ -533,6 +533,7 @@ mod tests {
     };
     use iwdb_engine::Change;
     use proptest::prelude::*;
+    use std::assert_matches;
 
     fn path() -> PathBuf {
         PathBuf::from("test.wal")
@@ -583,13 +584,13 @@ mod tests {
     fn a_checked_but_invalid_last_record_is_an_error_not_a_tail() {
         for (kind, payload) in [(9, EMPTY), (KIND_DATA, &[1u8][..]), (KIND_CATALOG, &[0xff, 0xff][..])] {
             let bytes = segment(1, &[(1, 0, KIND_DATA, EMPTY), (2, 1, kind, payload)]);
-            assert!(matches!(read_segment(&path(), &bytes, 1, true), Err(Error::InvalidRecord { .. })));
+            assert_matches!(read_segment(&path(), &bytes, 1, true), Err(Error::InvalidRecord { .. }));
         }
         let bytes = segment(u64::MAX, &[(u64::MAX, 0, KIND_DATA, EMPTY)]);
-        assert!(matches!(
+        assert_matches!(
             read_segment(&path(), &bytes, u64::MAX, true),
             Err(Error::InvalidRecord { invalid: Invalid::SeqOutOfRange, .. })
-        ));
+        );
     }
 
     #[test]
@@ -600,11 +601,11 @@ mod tests {
         assert!(records.is_empty());
         assert_eq!((end.valid_len, end.next_seq), (0, 1));
         assert_eq!(end.torn.map(|t| t.damage), Some(Damage::BadHeader));
-        assert!(matches!(read_segment(&path(), &bytes, 1, false), Err(Error::Corrupt { offset: 0, .. })));
+        assert_matches!(read_segment(&path(), &bytes, 1, false), Err(Error::Corrupt { offset: 0, .. }));
 
         let mut bytes = segment(1, &[(1, 0, KIND_DATA, EMPTY)]);
         bytes[0] ^= 1;
-        assert!(matches!(read_segment(&path(), &bytes, 1, true), Err(Error::Corrupt { offset: 0, .. })));
+        assert_matches!(read_segment(&path(), &bytes, 1, true), Err(Error::Corrupt { offset: 0, .. }));
     }
 
     #[test]
@@ -641,14 +642,14 @@ mod tests {
         assert_eq!(segment_prefix(&file, 5, 6).expect("prefix"), (two.clone(), Some(CommitTime(60))));
         assert_eq!(segment_prefix(&file, 5, 5).expect("prefix"), (one, Some(CommitTime(50))));
         assert_eq!(segment_prefix(&file, 5, 4).expect("prefix"), (encode_segment_header(5).to_vec(), None));
-        assert!(matches!(segment_prefix(&file, 5, 7), Err(Error::Corrupt { .. })));
+        assert_matches!(segment_prefix(&file, 5, 7), Err(Error::Corrupt { .. }));
         fs::write(&file, &two).expect("write");
-        assert!(matches!(segment_prefix(&file, 5, 7), Err(Error::LogEndsBefore { from: 7, next_seq: 7 })));
+        assert_matches!(segment_prefix(&file, 5, 7), Err(Error::LogEndsBefore { from: 7, next_seq: 7 }));
         // Damage before the record is corruption, not a tail
         let mut bad = full;
         bad[30] ^= 1;
         fs::write(&file, &bad).expect("write");
-        assert!(matches!(segment_prefix(&file, 5, 6), Err(Error::Corrupt { .. })));
+        assert_matches!(segment_prefix(&file, 5, 6), Err(Error::Corrupt { .. }));
     }
 
     proptest! {

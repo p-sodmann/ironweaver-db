@@ -479,6 +479,7 @@ fn dir_is_empty(dir: &Path) -> Result<bool, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn markers_round_trip_and_damage_is_found() {
@@ -492,7 +493,7 @@ mod tests {
             let mut bad = marker;
             bad[at] ^= 1;
             fs::write(dir.path().join(ARCHIVE_MARKER_NAME), bad).expect("write");
-            assert!(matches!(read_archive_marker(dir.path()), Err(Error::NotAnArchive { .. })), "byte {}", at);
+            assert_matches!(read_archive_marker(dir.path()), Err(Error::NotAnArchive { .. }), "byte {}", at);
         }
     }
 
@@ -508,6 +509,6 @@ mod tests {
         // A non-empty `ns/` without a marker is still refused
         let dir = tempfile::tempdir().expect("dir");
         fs::create_dir_all(dir.path().join(NS_DIR).join("1")).expect("create");
-        assert!(matches!(Archive::open(crate::io::StdFs, dir.path(), id), Err(Error::NotAnArchive { .. })));
+        assert_matches!(Archive::open(crate::io::StdFs, dir.path(), id), Err(Error::NotAnArchive { .. }));
     }
 }

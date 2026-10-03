@@ -28,6 +28,7 @@
 mod common;
 mod support;
 
+use std::assert_matches;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -231,7 +232,7 @@ fn a_failed_marker_upgrade_fails_the_open_and_the_next_one_finishes_it() {
             let fs = TestFs::default();
             fs.add(Rule::new(Call::WriteAtomic, when, Action::Fail).path("IWDB"));
             let error = Store::open_with(fs, dir.path(), options(2)).unwrap_err();
-            assert!(matches!(error, iwdb::Error::Io { .. }), "{} {:?}: {}", version, when, error);
+            assert_matches!(error, iwdb::Error::Io { .. }, "{} {:?}: {}", version, when, error);
             let marker = read_marker(dir.path()).unwrap().unwrap();
             let expected = if when == When::After { LAYOUT_VERSION } else { version };
             assert_eq!(marker.version, expected, "{} {:?}", version, when);

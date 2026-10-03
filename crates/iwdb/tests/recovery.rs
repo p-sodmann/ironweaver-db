@@ -12,6 +12,7 @@
 mod common;
 mod support;
 
+use std::assert_matches;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
@@ -173,12 +174,12 @@ fn crash_mid_checkpoint_before_the_wal_is_cut() {
     let segments_before = segment_seqs(dir.path());
 
     fs.inject(Call::RemoveFile, Fault::Fail);
-    assert!(matches!(store.checkpoint(), Err(Error::Io { op: "remove", .. })));
+    assert_matches!(store.checkpoint(), Err(Error::Io { op: "remove", .. }));
     let second = reference.seq();
     assert_eq!(checkpoints(dir.path()), vec![first, second], "the new checkpoint exists, the old one too");
     assert_eq!(segment_seqs(dir.path()), segments_before, "no segment was removed");
     // Checkpoints are disabled until reopened; commits are not affected
-    assert!(matches!(store.checkpoint(), Err(Error::CheckpointsDisabled { .. })));
+    assert_matches!(store.checkpoint(), Err(Error::CheckpointsDisabled { .. }));
     assert!(store.checkpoint_failure().is_some());
     run(&store, &mut reference, &steps[60..]);
     drop(store);
@@ -286,7 +287,7 @@ fn wal_corruption_is_refused_without_changes() {
     fs::write(path, &bytes).unwrap();
 
     let before = snapshot(dir.path());
-    assert!(matches!(Store::open(dir.path(), options(2)), Err(Error::Corrupt { .. })));
+    assert_matches!(Store::open(dir.path(), options(2)), Err(Error::Corrupt { .. }));
     assert_eq!(snapshot(dir.path()), before);
 }
 
@@ -329,6 +330,6 @@ fn a_wal_that_ends_before_the_checkpoint_is_refused() {
     Wal::create(&wal, WalOptions::default(), 1).unwrap().close().unwrap();
 
     let before = snapshot(dir.path());
-    assert!(matches!(Store::open(dir.path(), options(2)), Err(Error::LogEndsBefore { .. })));
+    assert_matches!(Store::open(dir.path(), options(2)), Err(Error::LogEndsBefore { .. }));
     assert_eq!(snapshot(dir.path()), before);
 }

@@ -8,6 +8,7 @@
 mod common;
 mod support;
 
+use std::assert_matches;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
@@ -100,12 +101,12 @@ fn namespaces_are_independent_graphs_with_their_own_seqs() {
 
     // Unknown and invalid names
     assert!(matches!(store.namespace("nope"), Err(Error::NoSuchNamespace { .. })));
-    assert!(matches!(store.create_namespace("social", None), Err(Error::NamespaceExists { .. })));
+    assert_matches!(store.create_namespace("social", None), Err(Error::NamespaceExists { .. }));
     for bad in ["", "-x", "a b", "a/b", "..", &"n".repeat(65)] {
-        assert!(matches!(store.create_namespace(bad, None), Err(Error::Engine(_))), "{}", bad);
+        assert_matches!(store.create_namespace(bad, None), Err(Error::Engine(_)), "{}", bad);
     }
-    assert!(matches!(store.drop_namespace("default", None), Err(Error::InvalidOptions(_))));
-    assert!(matches!(store.drop_namespace("nope", None), Err(Error::NoSuchNamespace { .. })));
+    assert_matches!(store.drop_namespace("default", None), Err(Error::InvalidOptions(_)));
+    assert_matches!(store.drop_namespace("nope", None), Err(Error::NoSuchNamespace { .. }));
 }
 
 #[test]
@@ -160,7 +161,7 @@ fn ids_are_never_reused() {
     // The new namespace is empty and at seq 0; the old handle fails
     assert_eq!(store.namespace("x").unwrap().seq(), 0);
     assert!(store.namespace("x").unwrap().node("a").is_none());
-    assert!(matches!(handle.commit(&[upsert("b", "b@x")]), Err(Error::NamespaceDropped { .. })));
+    assert_matches!(handle.commit(&[upsert("b", "b@x")]), Err(Error::NamespaceDropped { .. }));
     drop(store);
     // Ids survive a reopen: the next one is higher than every earlier one
     let store = Store::open(dir.path(), options(2)).unwrap();
@@ -179,11 +180,11 @@ fn namespace_operations_take_idempotency_keys() {
     assert!(!first.deduplicated && again.deduplicated);
     assert_eq!(first.event, again.event);
     // Another request under the key
-    assert!(matches!(
+    assert_matches!(
         store.create_namespace("b", Some(&k)),
         Err(Error::Engine(iwdb_engine::Error::IdempotencyKeyReused { .. }))
-    ));
-    assert!(matches!(store.drop_namespace("a", Some(&k)), Err(Error::Engine(_))));
+    );
+    assert_matches!(store.drop_namespace("a", Some(&k)), Err(Error::Engine(_)));
     assert_eq!(names(&store), ["a", "default"]);
     // A drop's key is answered after the namespace is gone, and after a reopen
     let d = key("drop-1");
@@ -243,15 +244,15 @@ fn a_dropped_namespace_fails_commits_and_wakes_waiters_but_finishes_reads() {
         std::thread::spawn(move || store.drop_namespace("gone", None).unwrap())
     };
     let waited = waiter.join().unwrap();
-    assert!(matches!(waited, Err(Error::NamespaceDropped { .. })), "{:?}", waited);
+    assert_matches!(waited, Err(Error::NamespaceDropped { .. }), "{:?}", waited);
     go_tx.send(()).unwrap();
     assert_eq!(reader.join().unwrap(), 1);
     dropper.join().unwrap();
-    assert!(matches!(ns.commit(&[upsert("b", "b@x")]), Err(Error::NamespaceDropped { .. })));
-    assert!(matches!(
+    assert_matches!(ns.commit(&[upsert("b", "b@x")]), Err(Error::NamespaceDropped { .. }));
+    assert_matches!(
         ns.commit_catalog(CatalogChange::CreateIndex(IndexDef { path: path("email") })),
         Err(Error::NamespaceDropped { .. })
-    ));
+    );
     assert!(matches!(store.namespace("gone"), Err(Error::NoSuchNamespace { .. })));
     assert!(!dir.path().join("ns/00000000000000000002").exists());
 }

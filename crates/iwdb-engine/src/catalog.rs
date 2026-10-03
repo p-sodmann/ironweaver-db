@@ -393,6 +393,7 @@ impl NamespaceCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn path(keys: &[&str]) -> AttrPath {
         AttrPath::new(keys.iter().copied()).expect("valid path")
@@ -427,7 +428,7 @@ mod tests {
             assert!(NamespaceName::new(ok).is_ok(), "{}", ok);
         }
         for bad in ["", "-a", "_a", "a b", "a/b", "..", "ä", &"n".repeat(65)] {
-            assert!(matches!(NamespaceName::new(bad), Err(CatalogError::InvalidNamespaceName { .. })), "{}", bad);
+            assert_matches!(NamespaceName::new(bad), Err(CatalogError::InvalidNamespaceName { .. }), "{}", bad);
         }
     }
 
@@ -464,21 +465,21 @@ mod tests {
     #[test]
     fn stored_form_errors_are_typed() {
         let read = |v: Value| NamespaceCatalog::from_meta_value(&v);
-        assert!(matches!(read(Value::Int(1)), Err(CatalogError::NotAString { .. })));
-        assert!(matches!(read(Value::from("not json")), Err(CatalogError::Decode(_))));
-        assert!(matches!(read(Value::from(r#"{"namespace": "a"}"#)), Err(CatalogError::Decode(_))));
+        assert_matches!(read(Value::Int(1)), Err(CatalogError::NotAString { .. }));
+        assert_matches!(read(Value::from("not json")), Err(CatalogError::Decode(_)));
+        assert_matches!(read(Value::from(r#"{"namespace": "a"}"#)), Err(CatalogError::Decode(_)));
         assert_eq!(
             read(Value::from(r#"{"format": 2, "namespace": "a", "graphs": {}}"#)),
             Err(CatalogError::UnsupportedFormat { found: 2 })
         );
-        assert!(matches!(
+        assert_matches!(
             read(Value::from(r#"{"format": 1, "namespace": "a", "indexes": [{"path": []}]}"#)),
             Err(CatalogError::Decode(msg)) if msg.contains("attribute path is empty")
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             read(Value::from(r#"{"format": 1, "namespace": "", "indexes": []}"#)),
             Err(CatalogError::Decode(msg)) if msg.contains("invalid namespace name")
-        ));
+        );
     }
 
     #[test]

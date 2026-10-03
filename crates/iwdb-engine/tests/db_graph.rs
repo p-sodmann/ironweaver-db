@@ -6,6 +6,7 @@
 
 mod common;
 
+use std::assert_matches;
 use std::ops::Bound::{Excluded, Included};
 
 use ironweaver_core::algo::{PageRank, pagerank};
@@ -301,7 +302,7 @@ fn unknown_reserved_keys_and_foreign_graph_meta_are_errors() {
 
     // A plain Record graph (no versions) is not a database file
     let plain = convert(&g, |r| Record { attr: r.attr.clone(), meta: Attrs::new() });
-    assert!(matches!(load_error(&plain, &graph_meta), Error::MissingVersion { .. }));
+    assert_matches!(load_error(&plain, &graph_meta), Error::MissingVersion { .. });
 }
 
 #[test]
@@ -366,8 +367,8 @@ fn damaged_files_are_errors() {
         assert!(matches!(result, Err(Error::Graph(GraphError::Format(_)))), "{:?}", result.map(|l| l.meta));
     }
     let short = &bytes[..bytes.len() - 5];
-    assert!(matches!(codec::from_binary_reader(short), Err(Error::Graph(GraphError::Format(_)))));
-    assert!(matches!(codec::from_json(b"{\"nodes\": 1}"), Err(Error::Graph(GraphError::Format(_)))));
+    assert_matches!(codec::from_binary_reader(short), Err(Error::Graph(GraphError::Format(_))));
+    assert_matches!(codec::from_json(b"{\"nodes\": 1}"), Err(Error::Graph(GraphError::Format(_))));
 }
 
 #[test]
