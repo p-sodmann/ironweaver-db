@@ -15,6 +15,17 @@ iwdb-storage = { path = "../iwdb-storage" }
 # The Database trait this crate implements (`Embedded`), and the types it shares
 iwdb-query = { path = "../iwdb-query" }
 log.workspace = true
+# Projection errors (step 13) and the declarative mapping's config (`projection::Rules`)
+thiserror.workspace = true
+serde.workspace = true
+# The Postgres source of projection mode (step 13, feature `postgres`): the sync
+# client (tokio-postgres inside, on its own runtime); `jsonb` columns as JSON
+postgres = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+# `projection::postgres::PostgresSource` (ADR 0032)
+postgres = ["dep:postgres", "dep:serde_json"]
 
 [dev-dependencies]
 iwdb-query = { path = "../iwdb-query", features = ["conformance"] }
@@ -22,6 +33,7 @@ iwdb-storage = { path = "../iwdb-storage", features = ["failpoints"] }
 iwdb-engine = { path = "../iwdb-engine", features = ["testutil", "failpoints"] }
 proptest.workspace = true
 tempfile.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

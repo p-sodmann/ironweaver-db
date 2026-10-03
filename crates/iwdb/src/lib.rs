@@ -39,6 +39,7 @@
 mod embedded;
 mod ops;
 mod options;
+pub mod projection;
 mod request;
 mod store;
 

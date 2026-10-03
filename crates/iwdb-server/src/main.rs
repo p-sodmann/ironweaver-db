@@ -61,6 +61,12 @@ fn main() -> ExitCode {
 fn run(config: &Config) -> Result<(), String> {
     let dir = config.data_dir.display();
     let store = Store::open(&config.data_dir, config.store_options()).map_err(|e| format!("opening {}: {}", dir, e))?;
+    // Projections (ADR 0032) run until the store closes, at the end
+    let projections = config.start_projections(&store)?;
+    for p in &projections {
+        let status = p.status();
+        eprintln!("iwdb-server: projection {:?} into {:?} from mark {:?}", status.name, status.namespace, status.mark);
+    }
     let db = Embedded::new(store, config.query_config()).map_err(|e| e.to_string())?;
     let server = Server::new(Arc::new(db)).max_message_bytes(config.server.max_message_bytes);
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -93,6 +99,11 @@ fn run(config: &Config) -> Result<(), String> {
         server.into_database(Duration::from_secs(10)).await.map_err(|_| "a call still holds the database".to_owned())
     });
     drop(runtime);
+    // Stop the projections before the store closes, so that their last
+    // commits are in its final checkpoint
+    for p in &projections {
+        p.stop();
+    }
     let db = served?;
     // Finishes the queued requests, flushes every WAL, checkpoints (if
     // configured) and releases the data directory

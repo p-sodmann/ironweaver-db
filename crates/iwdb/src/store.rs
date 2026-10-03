@@ -25,6 +25,7 @@ use crate::request::{ReadOptions, Timer};
 
 mod background;
 mod ns;
+mod projections;
 mod wait;
 
 use background::{checkpoint_loop, or_abort, run_checkpoint, spawn, sync_loop};
@@ -118,6 +119,9 @@ struct Shared<F: LogFs> {
     signal: Mutex<Signal>,
     wake: Condvar,
     options: StoreOptions,
+    /// The projections started on the store (ADR 0032), stopped first
+    /// when it stops.
+    projections: Mutex<Vec<Arc<crate::projection::Control>>>,
 }
 
 /// Lock a mutex whatever a panicking holder left. The store's own state
@@ -270,6 +274,7 @@ where
             signal: Mutex::new(Signal::default()),
             wake: Condvar::new(),
             options,
+            projections: Mutex::new(Vec::new()),
         });
         let mut threads = Vec::new();
         let checkpoint = &shared.options.checkpoint;
