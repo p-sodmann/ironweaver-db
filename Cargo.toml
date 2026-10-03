@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/iwdb-engine", "crates/iwdb-storage", "crates/iwdb", "crates/iwctl", "crates/iwdb-python", "tests/crash"]
+members = ["crates/iwdb-engine", "crates/iwdb-storage", "crates/iwdb-query", "crates/iwdb", "crates/iwctl", "crates/iwdb-python", "tests/crash"]
 # The cargo-fuzz targets need nightly and are a workspace of their own
 exclude = ["fuzz"]
 

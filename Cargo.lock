@@ -380,6 +380,7 @@ version = "0.1.0"
 dependencies = [
  "ironweaver-core",
  "iwdb-engine",
+ "iwdb-query",
  "iwdb-storage",
  "log",
  "proptest",
@@ -419,6 +420,18 @@ dependencies = [
  "iwdb-engine",
  "iwdb-storage",
  "pyo3",
+]
+
+[[package]]
+name = "iwdb-query"
+version = "0.1.0"
+dependencies = [
+ "ironweaver-core",
+ "iwdb-engine",
+ "iwdb-storage",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
