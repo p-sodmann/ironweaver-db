@@ -9,10 +9,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use ironweaver_core::cancel::{self, Token};
-use ironweaver_core::pathfinding::EdgeCost;
-use ironweaver_core::{Attrs, Direction, EdgeId, GraphError, Projection};
+use ironweaver_core::{EdgeId, GraphError, Projection};
 use iwdb_engine::catalog::{AttrPath, NamespaceCatalog, NamespaceName};
-use iwdb_engine::{CatalogChange, CommitResult, CommitTime, IdempotencyKey, Mutation, Namespace};
+use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation, Namespace};
+use iwdb_query::{CommitOptions, Edge, IndexSize, IndexState, IndexStatus, NamespaceStatus, Node, ProjectionSpec};
 use iwdb_storage::archive::{Archive, ArchiveHandle};
 use iwdb_storage::backup::{self, NamespaceSource};
 use iwdb_storage::io::{LogFs, StdFs};
@@ -31,100 +31,6 @@ use crate::StoreOptions;
 /// dropped: the store's shorthand methods ([`Store::commit`], ...) act on
 /// it.
 pub const NAMESPACE: &str = DEFAULT_NAME;
-
-/// A node, as read from the store.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Node {
-    pub id: String,
-    /// Sorted by name.
-    pub labels: Vec<String>,
-    pub attr: Attrs,
-    /// User meta (without the database's `iwdb.*` keys).
-    pub meta: Attrs,
-    pub version: u64,
-}
-
-/// An edge, as read from the store.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Edge {
-    pub id: EdgeId,
-    pub from: String,
-    pub to: String,
-    pub ty: Option<String>,
-    pub attr: Attrs,
-    pub meta: Attrs,
-    pub version: u64,
-}
-
-/// The state of an index ([`IndexStatus`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum IndexState {
-    /// Built and kept up to date by every commit.
-    Ready,
-    /// An online build is reading the nodes (ADR 0019); the index isn't in
-    /// the catalog yet.
-    Building { scanned: usize, total: usize },
-}
-
-/// One index of a namespace.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IndexStatus {
-    pub path: AttrPath,
-    pub state: IndexState,
-    /// Declared with `CreateIndex`.
-    pub declared: bool,
-    /// Needed by a unique constraint.
-    pub unique: bool,
-    /// The index's size; `None` while it is being built.
-    pub size: Option<IndexSize>,
-}
-
-/// How big an index is ([`IndexStatus::size`]), from the core's
-/// `Graph::index_stats` (O(1)). The namespace's indexes are flushed after
-/// every commit, so the counts are exact.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct IndexSize {
-    /// Nodes with an indexable (scalar) value at the path.
-    pub entries: usize,
-    /// Distinct values.
-    pub distinct_keys: usize,
-    /// Approximate bytes the index uses (its share of
-    /// [`NamespaceStatus::memory_bytes`]).
-    pub memory_bytes: usize,
-}
-
-/// What an open namespace reports about itself ([`Ns::status`]).
-#[derive(Clone, Debug, PartialEq)]
-pub struct NamespaceStatus {
-    pub id: u64,
-    pub name: String,
-    /// When the namespace was created (0 for one that predates layout 4).
-    pub created: CommitTime,
-    /// The seq of the last applied commit.
-    pub seq: u64,
-    /// The highest seq known to be durable; `None` under
-    /// [`FsyncPolicy::Off`] until an explicit sync.
-    pub synced_seq: Option<u64>,
-    /// The newest checkpoint's seq.
-    pub checkpoint: Option<u64>,
-    /// Why the namespace is read-only, if it is.
-    pub read_only: Option<String>,
-    /// The last checkpoint error, if the last checkpoint failed.
-    pub checkpoint_failure: Option<String>,
-    pub nodes: usize,
-    pub edges: usize,
-    /// Approximate bytes the graph uses, indexes included (the core's
-    /// `Graph::memory_usage`: O(1)); each index's share is in its
-    /// [`IndexSize`]. Payloads (attribute maps) are not counted.
-    pub memory_bytes: usize,
-    /// Declared indexes and those unique constraints need, and builds in
-    /// progress, sorted by path.
-    pub indexes: Vec<IndexStatus>,
-    pub constraints: usize,
-    /// What recovery did to this namespace when the store opened (for a
-    /// namespace created since: nothing).
-    pub recovery: RecoveryReport,
-}
 
 /// What an open store reports about itself ([`Store::status`]).
 ///
@@ -155,34 +61,6 @@ pub struct StoreStatus {
     pub recovery: StoreRecovery,
     /// Every namespace, by name.
     pub namespaces: Vec<NamespaceStatus>,
-}
-
-/// Options of a commit ([`Store::commit_with`]).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CommitOptions {
-    /// Commit at most once under this key (ADR 0015): if the store has a
-    /// commit with this key and the same request, it returns that commit's
-    /// result (with [`CommitResult::deduplicated`] set) and commits
-    /// nothing; with another request, it fails with
-    /// `IdempotencyKeyReused`. The store remembers the last
-    /// [`KEY_TABLE_CAPACITY`](iwdb_engine::idempotency::KEY_TABLE_CAPACITY)
-    /// keyed commits, across restarts, checkpoints, backups and restores.
-    pub idempotency_key: Option<IdempotencyKey>,
-}
-
-/// What a projection holds ([`Store::analyze`]): every node, and the edges
-/// followed in `direction`, weighted by `cost`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ProjectionSpec {
-    pub direction: Direction,
-    pub cost: EdgeCost,
-}
-
-impl Default for ProjectionSpec {
-    /// Outgoing edges, unweighted.
-    fn default() -> Self {
-        ProjectionSpec { direction: Direction::Out, cost: EdgeCost::Unit }
-    }
 }
 
 /// The result of an analytics job, and the seq of the state it ran on.
@@ -971,40 +849,12 @@ where
 
     /// The node `id`, if it exists.
     pub fn node(&self, id: &str) -> Option<Node> {
-        self.read(|ns| {
-            let g = ns.graph();
-            let ix = g.node_ix(id)?;
-            let node = g.node(ix)?;
-            let mut labels: Vec<String> = g.label_names(ix)?.into_iter().map(str::to_owned).collect();
-            labels.sort_unstable();
-            let data = &node.data;
-            Some(Node {
-                id: node.id().to_owned(),
-                labels,
-                attr: data.attr.clone(),
-                meta: data.meta.clone(),
-                version: data.version,
-            })
-        })
+        self.read(|ns| Node::read(ns.graph(), ns.graph().node_ix(id)?))
     }
 
     /// The edge `id`, if it exists.
     pub fn edge(&self, id: EdgeId) -> Option<Edge> {
-        self.read(|ns| {
-            let g = ns.graph();
-            let ix = g.edge_ix(id)?;
-            let edge = g.edge(ix)?;
-            let data = &edge.data;
-            Some(Edge {
-                id,
-                from: g.node(edge.source())?.id().to_owned(),
-                to: g.node(edge.target())?.id().to_owned(),
-                ty: g.edge_type_name(ix).map(str::to_owned),
-                attr: data.attr.clone(),
-                meta: data.meta.clone(),
-                version: data.version,
-            })
-        })
+        self.read(|ns| Edge::read(ns.graph(), ns.graph().edge_ix(id)?))
     }
 
     /// The namespace's catalog.
@@ -1034,12 +884,23 @@ where
     }
 
     /// [`read`](Self::read) with options: first wait until `min_seq` is
-    /// applied (read-your-writes), at most until the deadline. Errors:
+    /// applied (read-your-writes), at most until the deadline; then run `f`
+    /// under a cancel token ([`cancel::run`]) that the store's timer
+    /// cancels at the deadline (and the caller through `options.cancel`).
+    /// The core's algorithms check it and stop; `f`'s result is then
+    /// dropped and the read fails. So the deadline bounds the whole read,
+    /// as long as `f` spends its time in the core. Errors:
     /// [`Error::OtherHistory`], [`Error::Timeout`], [`Error::Cancelled`],
     /// [`Error::ReadOnly`], [`Error::NamespaceDropped`].
     pub fn read_with<R>(&self, options: &ReadOptions, f: impl FnOnce(&Namespace) -> R) -> Result<R, Error> {
-        self.wait(options, &options.deadline())?;
-        Ok(self.read(f))
+        let deadline = options.deadline();
+        self.wait(options, &deadline)?;
+        let token = options.cancel.clone().unwrap_or_default();
+        let _scheduled = match deadline.at {
+            Some(at) => Some(self.store.timer.schedule(at, token.clone())?),
+            None => None,
+        };
+        cancel::run(&token, || self.read(f)).map_err(|_| stopped(&deadline, options.cancel.as_ref(), "the read"))
     }
 
     /// Wait until commit `seq` is applied, at most until the deadline of
@@ -1092,7 +953,7 @@ where
         match outcome {
             Ok(Ok(value)) => Ok(Analysis { seq, value }),
             Ok(Err(GraphError::Interrupted)) | Err(GraphError::Interrupted) => {
-                Err(stopped(&deadline, options.cancel.as_ref()))
+                Err(stopped(&deadline, options.cancel.as_ref(), "the analytics job"))
             }
             Ok(Err(e)) | Err(e) => Err(iwdb_engine::Error::from(e).into()),
         }
@@ -1210,6 +1071,13 @@ where
         }
     }
 
+    /// The paths of the index builds in progress (ADR 0019): indexes that
+    /// aren't in the catalog yet, so reads don't use them. Takes only the
+    /// build list's own mutex, never the namespace's lock.
+    pub fn index_builds(&self) -> Vec<AttrPath> {
+        self.live().builds().iter().map(|b| b.path.clone()).collect()
+    }
+
     /// The number of nodes with a value the index on `path` holds (the
     /// core's `Graph::index_stats`: O(1), a read lock for an instant).
     /// `None` if the graph has no index on `path`.
@@ -1254,9 +1122,9 @@ where
 }
 
 /// Why a job stopped: its deadline passed, or the caller cancelled it.
-fn stopped(deadline: &Deadline, cancel: Option<&Token>) -> Error {
+fn stopped(deadline: &Deadline, cancel: Option<&Token>, what: &str) -> Error {
     if deadline.passed() || !cancel.is_some_and(Token::is_cancelled) {
-        deadline.timeout("the analytics job")
+        deadline.timeout(what)
     } else {
         Error::Cancelled
     }
