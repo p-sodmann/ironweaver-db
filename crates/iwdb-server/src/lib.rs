@@ -8,7 +8,7 @@
 //!   code string in the `iwdb-code` trailer (`documentation/api/errors.md`).
 //! - [`config`]: the `iwdb-server` binary's config file.
 //! - [`proto`]: the generated messages, server and client.
-//! - `client` (feature `client`): [`client::Remote`], the trait over gRPC.
+//! - `client` (feature `client`): `client::Remote`, the trait over gRPC.
 //!
 //! Values, filters and patterns travel in the core's serde form, encoded
 //! with postcard (ADR 0023). Streaming RPCs send one answer in chunks

@@ -6,7 +6,7 @@
 //!   state on any I/O error.
 //! - [`WalReader`] / [`read_log`]: iterate the records from a `seq`,
 //!   telling a torn tail (the clean end of the log) from corruption.
-//! - [`format`]: the on-disk format (`documentation/formats/wal.md`).
+//! - [`format`](mod@format): the on-disk format (`documentation/formats/wal.md`).
 //! - [`io`]: the file operations behind a trait, the seam for fault
 //!   injection; `failpoint` (feature `failpoints`) puts failpoints on it.
 //! - [`LoggedNamespace`]: a namespace whose commits are logged before they

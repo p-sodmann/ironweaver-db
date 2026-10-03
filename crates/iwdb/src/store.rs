@@ -332,7 +332,7 @@ where
     /// (the log is never truncated).
     ///
     /// Errors: [`Error::NamespaceExists`]; an invalid name or key
-    /// ([`Error::Engine`]); [`Error::IdempotencyKeyReused`] (as
+    /// ([`Error::Engine`]); [`IdempotencyKeyReused`](iwdb_engine::Error::IdempotencyKeyReused) (as
     /// [`Error::Engine`]); [`Error::ReadOnly`] (the namespace log failed);
     /// [`Error::Io`] (nothing is created, or the outcome is unknown: the
     /// namespace log is failed until reopening).

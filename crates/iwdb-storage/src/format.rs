@@ -29,7 +29,7 @@
 //! ```
 //!
 //! Version 3 (ADR 0015) prefixes the payload with the record's
-//! idempotency key and result ([`Keyed`](iwdb_engine::Keyed)), `None` (one
+//! idempotency key and result ([`iwdb_engine::Keyed`]), `None` (one
 //! zero byte) for a commit without a key.
 
 use iwdb_engine::{CatalogChange, Change, CommitRecord, DbRecord, Keyed};
