@@ -31,7 +31,6 @@ mod resolve;
 pub mod testutil;
 mod time;
 
-pub use catalog::Catalog;
 pub use error::{Entity, Error};
 pub use idempotency::{IdempotencyKey, KeyTable, Keyed};
 pub use mutation::{CatalogChange, Change, CommitRecord, CommitResult, EdgeKey, Mutation, Target};

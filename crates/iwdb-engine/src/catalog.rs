@@ -16,7 +16,7 @@
 //! definitions (`metadata.indexes`), and [`NamespaceCatalog::apply_indexes`]
 //! makes the graph's indexes match the catalog.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
 
 use ironweaver_core::{GraphError, Value};
@@ -390,45 +390,6 @@ impl NamespaceCatalog {
     }
 }
 
-/// The catalog of a store: its namespaces, each with its
-/// [`NamespaceCatalog`], sorted by name.
-///
-/// In a saved file only one namespace's catalog is stored (ADR 0003);
-/// this type is the store-wide view that step 9 builds from them.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Catalog {
-    namespaces: BTreeMap<NamespaceName, NamespaceCatalog>,
-}
-
-impl Catalog {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The namespaces with their catalogs, sorted by name.
-    pub fn namespaces(&self) -> impl Iterator<Item = (&NamespaceName, &NamespaceCatalog)> {
-        self.namespaces.iter()
-    }
-
-    pub fn namespace(&self, name: &NamespaceName) -> Option<&NamespaceCatalog> {
-        self.namespaces.get(name)
-    }
-
-    pub fn namespace_mut(&mut self, name: &NamespaceName) -> Option<&mut NamespaceCatalog> {
-        self.namespaces.get_mut(name)
-    }
-
-    /// Add or replace a namespace's catalog; returns the one replaced.
-    pub fn insert_namespace(&mut self, name: NamespaceName, catalog: NamespaceCatalog) -> Option<NamespaceCatalog> {
-        self.namespaces.insert(name, catalog)
-    }
-
-    pub fn remove_namespace(&mut self, name: &NamespaceName) -> Option<NamespaceCatalog> {
-        self.namespaces.remove(name)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,8 +442,8 @@ mod tests {
         );
         assert!(err(r#"{"indexes": [], "views": []}"#).contains("unknown field"));
         assert!(err(r#"{"indexes": [{"path": ["a"], "kind": "hash"}]}"#).contains("unknown field"));
-        let bad_name = r#"{"namespaces": {"a/b": {}}}"#;
-        assert!(serde_json::from_str::<Catalog>(bad_name).expect_err("name").to_string().contains("invalid namespace"));
+        let bad_name = serde_json::from_str::<NamespaceName>(r#""a/b""#).expect_err("name").to_string();
+        assert!(bad_name.contains("invalid namespace"), "{}", bad_name);
     }
 
     #[test]
@@ -535,20 +496,5 @@ mod tests {
         let c = sample();
         let paths: Vec<String> = c.index_paths().into_iter().map(ToString::to_string).collect();
         assert_eq!(paths, ["address.city", "age", "email"]);
-    }
-
-    #[test]
-    fn store_catalog_round_trips() {
-        let mut catalog = Catalog::new();
-        let social = NamespaceName::new("social").expect("name");
-        assert!(catalog.insert_namespace(social.clone(), sample()).is_none());
-        catalog.insert_namespace(NamespaceName::new("empty").expect("name"), NamespaceCatalog::new());
-        let json = serde_json::to_string(&catalog).expect("encode");
-        assert_eq!(serde_json::from_str::<Catalog>(&json).expect("decode"), catalog);
-        let names: Vec<&str> = catalog.namespaces().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["empty", "social"]);
-        assert_eq!(catalog.namespace(&social), Some(&sample()));
-        assert!(catalog.remove_namespace(&social).is_some());
-        assert!(catalog.namespace(&social).is_none());
     }
 }
