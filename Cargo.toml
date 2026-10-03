@@ -27,8 +27,6 @@ crc32c = "0.6"
 tempfile = "3"
 # Warnings from recovery and the background threads of the embedded store (already in the tree)
 log = "0.4"
-# The data directory's lock (flock / LockFileEx)
-fs4 = { version = "1", default-features = false, features = ["sync"] }
 # The gRPC server and client (step 11, iwdb-server only): tonic and prost, the
 # Rust gRPC stack; no TLS features until step 15
 tonic = { version = "0.14", default-features = false, features = ["transport", "codegen"] }

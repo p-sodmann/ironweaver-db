@@ -1,6 +1,6 @@
 //! The data directory's lock file `LOCK`.
 
-use std::fs::File;
+use std::fs::{File, TryLockError};
 use std::io;
 use std::path::Path;
 
@@ -36,16 +36,16 @@ pub fn lock_file(file: &File, path: &Path, exclusive: bool) -> Result<(), Error>
     // A child being spawned by another thread holds a copy of every open
     // file until its exec, so a just-released flock can look held briefly
     let attempt = || {
-        if exclusive { fs4::FileExt::try_lock(file) } else { fs4::FileExt::try_lock_shared(file) }
+        if exclusive { file.try_lock() } else { file.try_lock_shared() }
     };
     for wait in LOCK_RETRIES_MS.iter().map(|ms| Some(std::time::Duration::from_millis(*ms))).chain([None]) {
         match attempt() {
             Ok(()) => return Ok(()),
-            Err(fs4::TryLockError::WouldBlock) => match wait {
+            Err(TryLockError::WouldBlock) => match wait {
                 Some(wait) => std::thread::sleep(wait),
                 None => return Err(Error::Locked { path: path.to_path_buf() }),
             },
-            Err(fs4::TryLockError::Error(e)) => return Err(Error::io("lock", path, e)),
+            Err(TryLockError::Error(e)) => return Err(Error::io("lock", path, e)),
         }
     }
     Err(Error::Locked { path: path.to_path_buf() })
