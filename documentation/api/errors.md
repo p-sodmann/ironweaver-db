@@ -2,9 +2,9 @@
 
 Every error of the `Database` trait (`iwdb_query::Error`) has a **code** and a message. The codes below are a contract shared by every access method: the embedded store, Python, gRPC (step 11) and REST (step 12) report the same code for the same failure, and clients branch on the code, never on the message. Adding a code is a minor change; renaming or removing one breaks clients.
 
-The engine's and the storage layer's errors are mapped to codes in one place (`crates/iwdb-query/src/error.rs`). The **gRPC column is implemented** (step 11) in one place too, `crates/iwdb-server/src/status.rs`, tested for every code; the code itself travels as its string in the trailing metadata key `iwdb-code` ([grpc.md](grpc.md#errors)). The HTTP column is the mapping step 12 will implement.
+The engine's and the storage layer's errors are mapped to codes in one place (`crates/iwdb-query/src/error.rs`). The **gRPC column** (step 11) and the **HTTP column** (step 12) are implemented in one place too, `crates/iwdb-server/src/status.rs`, tested for every code against this table. Over gRPC the code itself travels as its string in the trailing metadata key `iwdb-code` ([grpc.md](grpc.md#errors)); over REST it is the `code` of the `Error` body ([rest.md](rest.md#errors)).
 
-| Code | Meaning | Retry? | Python exception | gRPC (implemented) | HTTP (step 12) |
+| Code | Meaning | Retry? | Python exception | gRPC | HTTP |
 |---|---|---|---|---|---|
 | `invalid_argument` | The request is invalid: a bad argument or name, a limit of 0, a filter or pattern the core rejects, an invalid transaction (reserved key, empty, value too deep, ambiguous edge, record too large), a seq of another history, a cursor that isn't one or belongs to another request | no, fix the request | `InvalidError` | `INVALID_ARGUMENT` | 400 |
 | `not_found` | A namespace doesn't exist (or was dropped); in a mutation, a node or edge; an index or constraint to drop; the start or end of a path | no | `NotFoundError` | `NOT_FOUND` | 404 |
@@ -25,4 +25,5 @@ Notes:
 - The message is for people. It is the Rust error's text, for example `version conflict on node 'ann': expected version 7, found 1`, or for a budget: `budget exceeded after visiting 100 nodes, examining 512 edges and producing 0 results`.
 - A partial answer is not an error: with `QueryOptions::partial`, a read that reaches a limit answers with `truncated: true` instead of `budget_exceeded`.
 - Errors of the operations outside the trait (opening a store, backup, restore, verify) are the storage layer's (`iwdb::Error`); `iwdb_query::Error::from` maps them to the codes above where an adapter needs one (a locked directory is `unavailable`).
-- `cancelled` is rarely seen: the caller that cancelled has usually gone away.
+- `cancelled` is rarely seen: the caller that cancelled has usually gone away. Its HTTP status, 499, is nginx's "client closed request"; no standard status says "cancelled".
+- Over REST, requests the HTTP layer refuses before any operation runs (no such route, wrong method, wrong media type, body too large) are `invalid_argument` with 404, 405, 415 or 413 ([rest.md](rest.md#errors)).
