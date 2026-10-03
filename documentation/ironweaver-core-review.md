@@ -1,10 +1,10 @@
 # Review: `ironweaver-core` 0.2 as a database foundation
 
-Reviewed: Ironweaver `origin/main` at `d15a7ec` (2026-10-03, "0.2.0 — unreleased", merge of PR #55), crate `crates/ironweaver-core`. Previous reviews: `ace9a0d`, `cd09ea0`, `3b15149`, `a14149e`, `02cefab`.
+Reviewed: Ironweaver `origin/main` at `ca308f0` (2026-10-03, "0.2.0 — unreleased", merge of PR #56), crate `crates/ironweaver-core`. Previous reviews: `d15a7ec`, `ace9a0d`, `cd09ea0`, `3b15149`, `a14149e`, `02cefab`.
 Question: which changes does Ironweaver need so that a production-grade database can sit on top of it?
 Verified: the claims below are checked against the pinned revision by `crates/iwdb-engine/tests/core_smoke.rs`, or, where the database relies on them through its own types, by `db_graph.rs` (saves, loads, indexes), `commit_model.rs` (op replay with explicit edge ids) and `crates/iwdb/tests/concurrency.rs` (cancelling analytics). Corrections from step 1 (against `02cefab`) are marked *(step 1)*; findings from the `a14149e` bump are marked *(a14149e)*. The `3b15149` bump is summarized in [its own section](#findings-from-the-3b15149-bump); the findings below that it fixed are marked *(fixed in `3b15149`)*.
 
-**Short answer: none are blocking.** The core provides the foundations a database layer needs. The seven upstream changes this review recommended all landed in PR #25 (`a14149e`). Our ten follow-up issues (#26–#35) are fixed as of `3b15149`. That bump found one gap in the fix for #26 (non-finite floats in JSON through `Value`'s serde, [#46](https://github.com/p-sodmann/Ironweaver/issues/46)), fixed in `cd09ea0`. Step 10 filed three more ([#48](https://github.com/p-sodmann/Ironweaver/issues/48)–[#50](https://github.com/p-sodmann/Ironweaver/issues/50)), fixed in `ace9a0d`; no upstream issue is open. See [Findings from the `3b15149` bump](#findings-from-the-3b15149-bump), [Findings from step 10](#findings-from-step-10) [Findings from the `ace9a0d` bump](#findings-from-the-ace9a0d-bump) and [the `d15a7ec` bump](#findings-from-the-d15a7ec-bump).
+**Short answer: none are blocking.** The core provides the foundations a database layer needs. The seven upstream changes this review recommended all landed in PR #25 (`a14149e`). Our ten follow-up issues (#26–#35) are fixed as of `3b15149`. That bump found one gap in the fix for #26 (non-finite floats in JSON through `Value`'s serde, [#46](https://github.com/p-sodmann/Ironweaver/issues/46)), fixed in `cd09ea0`. Step 10 filed three more ([#48](https://github.com/p-sodmann/Ironweaver/issues/48)–[#50](https://github.com/p-sodmann/Ironweaver/issues/50)), fixed in `ace9a0d`; no upstream issue is open. See [Findings from the `3b15149` bump](#findings-from-the-3b15149-bump), [Findings from step 10](#findings-from-step-10) [Findings from the `ace9a0d` bump](#findings-from-the-ace9a0d-bump) and [the `d15a7ec` bump](#findings-from-the-d15a7ec-bump) and [the `ca308f0` bump](#findings-from-the-ca308f0-bump).
 
 ## What the core already provides
 
@@ -160,6 +160,15 @@ Bumped from `ace9a0d` to `d15a7ec` (2026-10-03): upstream [#54](https://github.c
 - **No effect on our files.** Checkpoints and exports are format 2; the compatibility and crash suites pass unchanged. We already built without the feature, so the dependency graph is the same; the workspace no longer sets `default-features = false` (the core has no features).
 - **Files without the header** (format-1 binary, anything else, or shorter than the 16-byte header) are refused with `GraphError::Format` by both loaders; the streaming loader no longer reads such a file into memory first. A format-1 file gets a message saying how to convert it. Recovery treats such a checkpoint as damaged, as before. Checked in `files_without_the_binary_header_are_refused` (`core_smoke.rs`).
 - **Step 13** can't import ironweaver 0.1 binary files (0.1 JSON files still load and are migrated); noted in the step file.
+
+## Findings from the `ca308f0` bump
+
+Bumped from `d15a7ec` to `ca308f0` (2026-10-03, step 11b): upstream PR #56 moves the core to edition 2024 and Rust 1.99 (`rust-version = "1.99"`) and `rand` from 0.8 to 0.9. The code changes are let chains, `array_windows` and the `rand` renames (`gen` → `random`, `gen_range` → `random_range`); the file format and its loaders are unchanged.
+
+- **MSRV.** The core's `rust-version` is now 1.99, the same as ours (step 11b, ADR 0029); ADR 0002 requires ours to be at least the core's.
+- **Seeded results change.** For a given seed, random walks, node2vec walks and Leiden give different results than with `rand` 0.8, still the same on every run and with any number of cores (FastRP and sampled betweenness don't change). These are read results and never stored; no test of ours pins them, and the conformance suite passes unchanged. Clients that compare seeded walks across versions see the change (CHANGELOG).
+- **Dependencies.** `rand` 0.8, `rand_chacha` 0.3, `rand_core` 0.6 and `getrandom` 0.2 leave the tree: one copy of `rand` remains (0.9, shared with `proptest`). `cargo deny check` passes.
+- The compatibility fixtures, the crash run and the cross-version check of step 11b pass unchanged.
 
 ## Findings from step 11
 

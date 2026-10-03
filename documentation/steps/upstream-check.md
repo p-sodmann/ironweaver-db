@@ -16,7 +16,7 @@ Find out which of our upstream issues have been fixed, adopt the fixes, and remo
 
 ## Open issues
 
-Last checked: 2026-10-03 at core `d15a7ec`, again at the start of step 11 (core `main` unchanged). #26–#35 were fixed in `3b15149`, #46 in `cd09ea0`, #48–#50 in `ace9a0d` (see Closed issues). #57 was filed in step 11 and is open. `d15a7ec` (upstream #54, not one of ours) removed the format-1 binary reader and the `format-v1` feature; see the #30 row.
+Last checked: 2026-10-03 at core `ca308f0` (step 11b bump: edition 2024, Rust 1.99, `rand` 0.9; no issue of ours fixed or affected). Before that at `d15a7ec`, at the start of step 11. #26–#35 were fixed in `3b15149`, #46 in `cd09ea0`, #48–#50 in `ace9a0d` (see Closed issues). #57 was filed in step 11 and is open. `d15a7ec` (upstream #54, not one of ours) removed the format-1 binary reader and the `format-v1` feature; see the #30 row.
 
 | Issue | Finding | Needed before | Until fixed | When fixed |
 |---|---|---|---|---|
