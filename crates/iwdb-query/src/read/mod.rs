@@ -171,7 +171,7 @@ impl<'a> EdgeFilter<'a> {
     }
 }
 
-/// WORKAROUND (upstream issue: traversal gaps, see
+/// WORKAROUND (upstream #49, traversal gaps; see
 /// `documentation/steps/upstream-check.md`): the core's `expand_limited`
 /// takes no edge filter, and its `bfs_limited` follows outgoing edges from
 /// one start only. This is `expand_limited` with an edge filter: a

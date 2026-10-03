@@ -1,7 +1,7 @@
 //! `explain`: how `find` would read a filter.
 //!
-//! WORKAROUND (upstream issue: `index_candidates` doesn't say which index
-//! it used, see `documentation/steps/upstream-check.md`): [`plan`] mirrors
+//! WORKAROUND (upstream #50, `index_candidates` doesn't say which index it
+//! used; see `documentation/steps/upstream-check.md`): [`plan`] mirrors
 //! the choice the core's `Graph::index_candidates` makes at the pinned
 //! revision, and estimates sizes from the O(1) `index_stats`. The test
 //! `the_plan_agrees_with_index_candidates` checks it against the core on

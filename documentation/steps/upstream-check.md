@@ -16,11 +16,13 @@ Find out which of our upstream issues have been fixed, adopt the fixes, and remo
 
 ## Open issues
 
-Last checked: 2026-10-02 at core `cd09ea0`: no open issues. #26–#35 were fixed in `3b15149`, #46 in `cd09ea0` (see Closed issues).
+Last checked: 2026-10-02 at core `cd09ea0`. #26–#35 were fixed in `3b15149`, #46 in `cd09ea0` (see Closed issues). Step 10 filed #48–#50 (2026-10-03); none blocks a step, each has a workaround.
 
 | Issue | Finding | Needed before | Until fixed | When fixed |
 |---|---|---|---|---|
-| – | none open | | | |
+| [#48](https://github.com/p-sodmann/Ironweaver/issues/48) | `find_path`, `for_each_match` and `random_walks::plan` take no `Budget`; Dijkstra/A* check cancellation per settled node | step 11 (served remotely); not blocking | `iwdb_query::read::shortest_path` counts edges through `bidirectional_bfs`'s filter (BFS) and visited nodes through the A* heuristic (Dijkstra, A*; edges reported as 0); `match_pattern` counts matches against `max_visited`; `random_walks` refuses graphs larger than the limits. The timeout bounds the rest | Use the limited variants, report edges examined, drop the counting heuristic and the whole-graph check; update `path_search_checks_cancellation_per_settled_node` (`core_smoke.rs`) and the `*_is_bounded` conformance cases if counts change |
+| [#49](https://github.com/p-sodmann/Ironweaver/issues/49) | `bfs_limited` / `dfs_limited` follow outgoing edges only; `expand_limited` takes no edge filter | not blocking | `traverse` follows outgoing edges only; `iwdb_query::read::expand_filtered` (a marked BFS of ours) serves `neighbourhood` and `subgraph` with edge types or an edge filter | Remove `expand_filtered`, give `TraverseRequest` a direction, update `bfs_follows_outgoing_edges_only` |
+| [#50](https://github.com/p-sodmann/Ironweaver/issues/50) | `index_candidates` doesn't report its plan | not blocking | `iwdb_query::read::explain::plan` mirrors its rules at `cd09ea0`; `the_plan_agrees_with_index_candidates` checks it on every bump | Use the core's plan in `explain`, delete the mirror and its test |
 
 ## Closed issues
 

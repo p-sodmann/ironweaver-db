@@ -1,8 +1,8 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`.
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`. Drafts 19–21 are findings from step 10, filed and open.
 
-Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`. Titles are ready to paste; the text below each title is the issue body.
+Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`, drafts 19–21 against `cd09ea0`. Titles are ready to paste; the text below each title is the issue body.
 
 | # | Title | Status |
 |---|---|---|
@@ -24,6 +24,9 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 16 | [No way to build an index off the graph and install it in O(1)](#16-no-way-to-build-an-index-off-the-graph-and-install-it-in-o1) | fixed upstream (`3b15149`): [#34](https://github.com/p-sodmann/Ironweaver/issues/34) |
 | 17 | [No per-index entry count or memory accessor](#17-no-per-index-entry-count-or-memory-accessor) | fixed upstream (`3b15149`): [#35](https://github.com/p-sodmann/Ironweaver/issues/35) |
 | 18 | [`Value` serde writes NaN and infinities to JSON as `null`](#18-value-serde-writes-nan-and-infinities-to-json-as-null) | fixed upstream (`cd09ea0`): [#46](https://github.com/p-sodmann/Ironweaver/issues/46) |
+| 19 | [Budgets for shortest paths, pattern matching and walk planning](#19-budgets-for-shortest-paths-pattern-matching-and-walk-planning) | open: [#48](https://github.com/p-sodmann/Ironweaver/issues/48) |
+| 20 | [Traversals: `bfs` / `dfs` follow outgoing edges only, `expand` takes no edge filter](#20-traversals-bfs--dfs-follow-outgoing-edges-only-expand-takes-no-edge-filter) | open: [#49](https://github.com/p-sodmann/Ironweaver/issues/49) |
+| 21 | [`index_candidates` doesn't say which index it used](#21-index_candidates-doesnt-say-which-index-it-used) | open: [#50](https://github.com/p-sodmann/Ironweaver/issues/50) |
 
 ---
 
@@ -423,3 +426,71 @@ Make `Value`'s serde match the file format in human-readable encodings: serializ
 **Why the database needs it**
 
 Our codec (`DbCodec`) writes attribute maps with `value::serialize_sorted`, so a JSON export (step 13) of a graph holding a NaN or an infinity writes a file that doesn't load. The binary checkpoints are fine. The REST API (step 12) sends `Value`s and `Op`s as JSON and can't represent these floats either. Pinned in `value_serde_writes_non_finite_floats_to_json_as_null` (`core_smoke.rs`) and `json_export_of_non_finite_floats_does_not_load` (`tests/db_graph.rs`).
+
+## 19. Budgets for shortest paths, pattern matching and walk planning
+
+Found in step 10 while bounding every read of the `Database` trait (filed as [#48](https://github.com/p-sodmann/Ironweaver/issues/48)), checked against `cd09ea0`.
+
+**Problem**
+
+#27 gave the traversals, `expand_paths` and `WalkPlan::run` a `Budget` with per-edge cancellation. Three searches still have neither:
+
+- `pathfinding::find_path` (BFS, Dijkstra, A*) takes no `Budget`. Dijkstra and A* (`best_first::search`) check cancellation once per node they settle; expanding a node with many edges runs its whole edge list, the edge cost and the heuristic for each, without a check.
+- `query::for_each_match` / `find_matches` take a result limit only. The work between two matches has no bound, and a variable-length pattern edge collects every path of `expand_paths` into a `Vec` before binding the next variable, so memory grows with the number of paths until cancellation stops it.
+- `random_walks::plan` builds a `WalkIndex` of the whole graph (O(nodes + edges)) before `run_limited` applies the budget, without a cancellation check.
+
+Minimal reproduction (A*, a hub with 2 000 leaves; pinned in `path_search_checks_cancellation_per_settled_node`, `core_smoke.rs`):
+
+```rust
+let token = Token::new();
+let calls = Cell::new(0);
+let estimate = Box::new(|_: &Node<Record>| { calls.set(calls.get() + 1); if calls.get() == 2 { token.cancel() } Ok(0.0) });
+let mut q = PathQuery::astar(Heuristic::Custom(estimate));
+let r = cancel::run(&token, || find_path::<_, _, GraphError>(&g, hub, end, &mut q));
+assert_eq!(r, Err(GraphError::Interrupted));
+assert_eq!(calls.get(), 2_001); // every neighbour was estimated after the cancel
+```
+
+**Proposal**
+
+- `find_path_limited(g, source, target, query, budget) -> Result<Limited<Option<PathResult>>, X>`: settled nodes as visited, edges relaxed as examined (and for BFS, `bidirectional_bfs` counting both frontiers), cancellation polled per edge.
+- `for_each_match_limited(g, pattern, budget, visit)`: nodes bound and steps taken as visited, edges tried as examined, matches as results; variable-length edges streamed (or expanded with the same meter) instead of collected.
+- `plan_limited(g, start, opts, budget)` (or a lazily built `WalkIndex`), so planning counts against `max_visited` / `max_edges` and checks cancellation.
+
+**Why the database needs it**
+
+Every read the server answers must be bounded by results, nodes visited and edges examined, not only by wall time (design rule 5). Until then `iwdb_query` bounds what it can from outside: BFS paths count edges through `bidirectional_bfs`'s edge filter; Dijkstra and A* count visited nodes through the heuristic (edges examined are reported as 0); `match` counts matches produced against `max_visited`; random walks refuse graphs larger than the limits, because planning reads all of it. A pathological hub or pattern is stopped only by the timeout.
+
+## 20. Traversals: `bfs` / `dfs` follow outgoing edges only, `expand` takes no edge filter
+
+Found in step 10 (filed as [#49](https://github.com/p-sodmann/Ironweaver/issues/49)), checked against `cd09ea0`.
+
+**Problem**
+
+`traversal::{bfs, dfs}_limited` take an edge filter but always follow `out_edges()`: there is no way to traverse incoming edges, or both. `expand_limited` takes a `Direction` but no edge filter, so a multi-source neighbourhood restricted to some edge types (or an `Expr` on edges) has no core function at all.
+
+Pinned in `bfs_follows_outgoing_edges_only` (`core_smoke.rs`): with an edge `a -> b`, `bfs_limited` from `b` returns `[b]`.
+
+**Proposal**
+
+Give `bfs_limited` and `dfs_limited` a `direction: Direction` (as `expand` has; `Both` lists a self-loop once, like `query::steps`), and give `expand_limited` an `edge_ok: FnMut(EdgeIx, &Edge<E>) -> Result<bool, X>` (or add `expand_filtered_limited`), counting examined edges before the filter as now.
+
+**Why the database needs it**
+
+The `Database` trait's `neighbourhood(seeds, depth, direction, edge types, filter)` and `subgraph` need a filtered multi-source BFS in any direction, and `traverse` (BFS/DFS) should take a direction. Until then `iwdb_query::read::expand_filtered` is a small BFS of our own (marked as a workaround), used only when edges are filtered, and `traverse` follows outgoing edges only.
+
+## 21. `index_candidates` doesn't say which index it used
+
+Found in step 10 while adding `explain` (filed as [#50](https://github.com/p-sodmann/Ironweaver/issues/50)), checked against `cd09ea0`.
+
+**Problem**
+
+`Graph::index_candidates(&Expr)` returns the candidate nodes, or `None` for a scan, but not how it found them: which index or label, a point lookup, a range, a combined lower and upper bound, the union of an `Or`. An `EXPLAIN` has to reproduce its choice, and the cost of finding out the candidate count is the lookup itself.
+
+**Proposal**
+
+A planning function that doesn't read the postings, for example `Graph::index_plan(&Expr) -> Option<IndexPlan>` with `IndexPlan::{Label(String), Point { path }, In { path, values }, Range { path, lower, upper }, Union(Vec<IndexPlan>), Empty}` and an estimated size from `index_stats`, which `index_candidates` then executes, so the two can't disagree.
+
+**Why the database needs it**
+
+`explain` must say which index `find` would use and the estimated scan size, in O(size of the filter). `iwdb_query::read::explain::plan` mirrors `index_candidates`' rules at `cd09ea0`; the test `the_plan_agrees_with_index_candidates` (`iwdb-query`) catches drift on a bump, but a mirror of the core's planner is the kind of reimplementation design rule 9 asks us to avoid.

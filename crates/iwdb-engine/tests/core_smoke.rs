@@ -630,3 +630,57 @@ fn value_serde_and_the_file_format_agree_on_depth() {
         assert!(!file_ok(&beyond) && !serde_ok(&beyond));
     }
 }
+
+/// Upstream #48: no budget for shortest paths (and pattern matching, walk
+/// planning). Dijkstra and A* take no `Budget` and check cancellation once
+/// per node they settle, not per edge: after the token is cancelled while
+/// the hub is expanded, every one of the hub's neighbours is still
+/// estimated. `iwdb_query::read::shortest_path` bounds visited nodes
+/// through the heuristic, the only per-node hook. Fails once the core
+/// checks per edge (then the heuristic runs at most a few times).
+#[test]
+fn path_search_checks_cancellation_per_settled_node() {
+    use ironweaver_core::pathfinding::{find_path, Heuristic, PathQuery};
+    const FAN: usize = 2_000;
+    let mut g = G::new();
+    let hub = g.add_node("hub", Record::default()).expect("add");
+    let end = g.add_node("end", Record::default()).expect("add");
+    for i in 0..FAN {
+        let leaf = g.add_node(format!("l{}", i), Record::default()).expect("add");
+        g.add_edge(hub, leaf, Record::default()).expect("edge");
+    }
+    let token = Token::new();
+    let calls = Cell::new(0usize);
+    let estimate = Box::new(|_: &ironweaver_core::Node<Record>| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 2 {
+            token.cancel();
+        }
+        Ok::<f64, GraphError>(0.0)
+    });
+    let mut query = PathQuery::astar(Heuristic::Custom(estimate));
+    query.cost = EdgeCost::Unit;
+    let result = cancel::run(&token, || find_path::<_, _, GraphError>(&g, hub, end, &mut query));
+    drop(query);
+    assert_eq!(result, Err(GraphError::Interrupted));
+    assert_eq!(calls.get(), FAN + 1, "every neighbour of the hub was estimated after the cancel");
+}
+
+/// Upstream #49: traversal gaps. `bfs_limited` (and `dfs_limited`) follow
+/// outgoing edges only, and `expand_limited`, which takes a direction,
+/// takes no edge filter. `iwdb_query` keeps `traverse` to outgoing edges
+/// and filters a neighbourhood with its own BFS (`expand_filtered`).
+/// Fails (to compile) once `bfs_limited` takes a direction.
+#[test]
+fn bfs_follows_outgoing_edges_only() {
+    let mut g = G::new();
+    let a = g.add_node("a", Record::default()).expect("add");
+    let b = g.add_node("b", Record::default()).expect("add");
+    g.add_edge(a, b, Record::default()).expect("edge");
+    let all = |_, _: &_| Ok::<_, GraphError>(true);
+    let from_b = bfs_limited(&g, b, None, Budget::UNLIMITED, all).expect("bfs");
+    assert_eq!(ids(&g, from_b.value), ["b"]);
+    let both =
+        ironweaver_core::traversal::expand_limited(&g, [b], 1, Direction::Both, Budget::UNLIMITED).expect("expand");
+    assert_eq!(ids(&g, both.value), ["a", "b"]);
+}

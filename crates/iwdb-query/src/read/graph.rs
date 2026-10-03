@@ -172,7 +172,7 @@ pub fn subgraph(ns: &Namespace, request: &SubgraphRequest, cx: &ReadContext) -> 
 /// A shortest path from `from` to `to`, or `None` if there is none within
 /// the request's limits (`max_depth`, `max_cost`).
 ///
-/// WORKAROUND (upstream issue: no budget for shortest paths, see
+/// WORKAROUND (upstream #48, no budget for shortest paths; see
 /// `documentation/steps/upstream-check.md`): the core's path search takes
 /// no `Budget`. BFS runs the core's `bidirectional_bfs` with an edge
 /// filter that counts each edge to a new node as one examined edge and one
@@ -253,7 +253,7 @@ pub fn shortest_path(ns: &Namespace, request: &PathRequest, cx: &ReadContext) ->
 /// `WalkPlan::run_limited`: `max_results` walks, `max_visited` nodes
 /// walked through, `max_edges` steps).
 ///
-/// WORKAROUND (upstream issue: no budget for walk planning, see
+/// WORKAROUND (upstream #48, no budget for walk planning; see
 /// `documentation/steps/upstream-check.md`): the core's `plan` indexes the
 /// whole graph before walking (O(nodes + edges), without a budget or
 /// cancellation check), so the read needs `max_visited` of at least the

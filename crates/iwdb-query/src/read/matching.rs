@@ -11,7 +11,7 @@ use crate::{Answer, Error, MatchRequest, MatchRow, Work};
 /// rows sorted by node ids then edge ids, a page of `max_results` at a
 /// time.
 ///
-/// WORKAROUND (upstream issue: no budget for pattern matching, see
+/// WORKAROUND (upstream #48, no budget for pattern matching; see
 /// `documentation/steps/upstream-check.md`): the core's matcher takes no
 /// `Budget`, only cancellation (checked per step of the search). Each
 /// match it produces counts as one visited node, so `max_visited` bounds
