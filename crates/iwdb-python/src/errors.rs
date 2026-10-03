@@ -3,9 +3,9 @@
 //! "Exceptions").
 
 use iwdb::Error;
+use pyo3::PyErr;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::PyErr;
 
 /// The exception classes, as Python sees them (`iwdb.Error`, ...).
 pub mod exc {

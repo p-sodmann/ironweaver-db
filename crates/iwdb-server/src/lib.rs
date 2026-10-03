@@ -28,7 +28,7 @@ pub mod status;
 pub mod client;
 
 pub use serve::Drain;
-pub use service::{Adapter, Server, CHUNK_BYTES, DEFAULT_MAX_MESSAGE_BYTES};
+pub use service::{Adapter, CHUNK_BYTES, DEFAULT_MAX_MESSAGE_BYTES, Server};
 
 /// The generated messages and services of `ironweaver_db.v1`.
 #[allow(clippy::all, clippy::pedantic, missing_docs, rustdoc::all)]

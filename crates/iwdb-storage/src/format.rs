@@ -68,11 +68,7 @@ const HEADER_CRC_AT: usize = 20;
 
 /// Length of a frame header in segment format `version` (1, 2 or 3).
 pub fn frame_header_len(version: u32) -> usize {
-    if version == 1 {
-        FRAME_HEADER_LEN_V1
-    } else {
-        FRAME_HEADER_LEN
-    }
+    if version == 1 { FRAME_HEADER_LEN_V1 } else { FRAME_HEADER_LEN }
 }
 
 /// The file name of the segment whose first record is `first_seq`:

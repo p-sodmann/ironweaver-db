@@ -15,7 +15,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use common::{Action, Call, Rule, TestFs, When};
-use iwdb::{verify, Error, Kind, Store, Value, VerifyReport};
+use iwdb::{Error, Kind, Store, Value, VerifyReport, verify};
 use iwdb_engine::catalog::NamespaceName;
 use iwdb_engine::codec::{self, GraphMeta};
 use iwdb_storage::checkpoint::load_checkpoint;

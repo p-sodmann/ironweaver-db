@@ -69,17 +69,17 @@ pub use backup::{BackupReport, NamespaceBackup};
 pub use checkpoint::{CheckpointOutcome, Checkpointer, SkippedCheckpoint};
 pub use error::Error;
 pub use history::HistoryId;
-pub use inspect::{inspect, DirStatus, NamespaceFiles};
+pub use inspect::{DirStatus, NamespaceFiles, inspect};
 pub use iwdb_engine::CommitTime;
-pub use logged::{BuildProgress, LockStats, LoggedNamespace, Wait, BUILD_CHUNK};
+pub use logged::{BUILD_CHUNK, BuildProgress, LockStats, LoggedNamespace, Wait};
 pub use reader::{
-    list_segments, read_log, read_segment, segment_prefix, LogEnd, SegmentEnd, TornTail, WalReader,
-    MAX_SEGMENT_FILE_LEN,
+    LogEnd, MAX_SEGMENT_FILE_LEN, SegmentEnd, TornTail, WalReader, list_segments, read_log, read_segment,
+    segment_prefix,
 };
 pub use recovery::{
-    read_namespace, recover, start_namespace, CutTail, ReadNamespace, Recovered, RecoveredNamespace, RecoveryReport,
-    StoreRecovery,
+    CutTail, ReadNamespace, Recovered, RecoveredNamespace, RecoveryReport, StoreRecovery, read_namespace, recover,
+    start_namespace,
 };
-pub use restore::{restore, NamespaceRestore, RestoreReport, RestoreSources, RestoreTarget};
-pub use verify::{verify, Finding, Kind, NamespaceVerify, VerifyReport};
-pub use writer::{FsyncPolicy, Wal, WalOptions, DEFAULT_SEGMENT_SIZE, MAX_SEGMENT_SIZE, MIN_SEGMENT_SIZE};
+pub use restore::{NamespaceRestore, RestoreReport, RestoreSources, RestoreTarget, restore};
+pub use verify::{Finding, Kind, NamespaceVerify, VerifyReport, verify};
+pub use writer::{DEFAULT_SEGMENT_SIZE, FsyncPolicy, MAX_SEGMENT_SIZE, MIN_SEGMENT_SIZE, Wal, WalOptions};

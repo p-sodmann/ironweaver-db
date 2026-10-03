@@ -9,7 +9,7 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use iwdb::{verify, Mutation, Store, Value, VerifyReport};
+use iwdb::{Mutation, Store, Value, VerifyReport, verify};
 use support::options;
 
 const A: &str = "ns/00000000000000000002";

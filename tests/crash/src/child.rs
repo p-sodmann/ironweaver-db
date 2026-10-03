@@ -37,7 +37,7 @@ use iwdb_engine::testutil::workload::Step;
 use iwdb_storage::failpoint::{Call, FailFs, Rule};
 
 use crate::model::digest;
-use crate::script::{child_options, Act, Policy, Script};
+use crate::script::{Act, Policy, Script, child_options};
 
 /// The name of the sync log in the work directory.
 pub const SYNC_LOG: &str = "synclog";

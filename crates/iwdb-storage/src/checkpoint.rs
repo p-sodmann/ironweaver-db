@@ -13,14 +13,14 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use iwdb_engine::Namespace;
 use iwdb_engine::catalog::{IndexChanges, NamespaceName};
 use iwdb_engine::codec::{self, Loaded};
-use iwdb_engine::Namespace;
 
 use crate::archive::ArchiveHandle;
 use crate::io::LogFs;
 use crate::layout::NsPaths;
-use crate::{reader, Error, WalReader};
+use crate::{Error, WalReader, reader};
 
 /// Suffix of checkpoint file names: `<seq, 20 digits>.ckpt`.
 pub const CHECKPOINT_SUFFIX: &str = ".ckpt";

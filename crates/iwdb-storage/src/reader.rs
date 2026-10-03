@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 
 use iwdb_engine::CommitRecord;
 
-use crate::format::{self, Damage, Header, Invalid, FRAME_HEADER_LEN, MAX_RECORD_LEN, SEGMENT_HEADER_LEN};
-use crate::writer::MAX_SEGMENT_SIZE;
 use crate::Error;
+use crate::format::{self, Damage, FRAME_HEADER_LEN, Header, Invalid, MAX_RECORD_LEN, SEGMENT_HEADER_LEN};
+use crate::writer::MAX_SEGMENT_SIZE;
 use iwdb_engine::CommitTime;
 
 /// The largest segment file the writer can produce: a full segment plus one
@@ -115,10 +115,10 @@ impl Cursor {
         match format::decode_segment_header(bytes) {
             Header::Valid { first_seq: found, version } if found == first_seq => cursor.version = Some(version),
             Header::Valid { first_seq: found, .. } => {
-                return Err(Error::HeaderMismatch { path: path.into(), expected: first_seq, found })
+                return Err(Error::HeaderMismatch { path: path.into(), expected: first_seq, found });
             }
             Header::UnsupportedVersion(version) => {
-                return Err(Error::UnsupportedVersion { path: path.into(), version })
+                return Err(Error::UnsupportedVersion { path: path.into(), version });
             }
             // The header is synced before any record is written, so any
             // valid frame after it proves corruption
@@ -530,8 +530,8 @@ pub fn read_log(dir: &Path, from: u64) -> Result<(Vec<CommitRecord>, LogEnd), Er
 mod tests {
     use super::*;
     use crate::format::{
-        encode_frame, encode_segment_header, encode_segment_header_version, FrameHeader, FORMAT_VERSION, KIND_CATALOG,
-        KIND_DATA,
+        FORMAT_VERSION, FrameHeader, KIND_CATALOG, KIND_DATA, encode_frame, encode_segment_header,
+        encode_segment_header_version,
     };
     use iwdb_engine::Change;
     use proptest::prelude::*;

@@ -17,7 +17,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 use iwdb::{Namespace, Store};
-use support::{options, reference, state, store_state, workload, Step};
+use support::{Step, options, reference, state, store_state, workload};
 
 /// The reference after the workload's commits up to `seq`.
 fn reference_at(seq: u64) -> Namespace {

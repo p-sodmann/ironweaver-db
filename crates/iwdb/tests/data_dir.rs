@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 
 use iwdb::{Error, Store};
 use iwdb_storage::layout::{
-    encode_marker, encode_marker_with, BACKUP_NAME, LAYOUT_VERSION, LOCK_NAME, MARKER_NAME, RESTORING_NAME,
+    BACKUP_NAME, LAYOUT_VERSION, LOCK_NAME, MARKER_NAME, RESTORING_NAME, encode_marker, encode_marker_with,
 };
 use support::{options, pad, reference, run, snapshot, state, store_state};
 
@@ -217,8 +217,8 @@ fn backups_and_interrupted_restores_are_refused() {
 #[cfg(unix)]
 #[test]
 fn reopening_while_another_thread_spawns_processes() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     let dir = tempfile::tempdir().unwrap();
     let mut opts = options(2);
     opts.wal.fsync = iwdb::FsyncPolicy::Off;

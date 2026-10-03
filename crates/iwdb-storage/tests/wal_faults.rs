@@ -11,12 +11,12 @@ mod common;
 use std::path::Path;
 use std::time::Duration;
 
-use common::{namespace, replay, segments, state, upsert, Call, Fault, TestFs};
+use common::{Call, Fault, TestFs, namespace, replay, segments, state, upsert};
 use ironweaver_core::Value;
 use iwdb_engine::testutil::State;
 use iwdb_engine::{Change, CommitRecord};
 use iwdb_storage::format::{Damage, SEGMENT_HEADER_LEN};
-use iwdb_storage::{read_log, Error, FsyncPolicy, LoggedNamespace, Wal, WalOptions, MIN_SEGMENT_SIZE};
+use iwdb_storage::{Error, FsyncPolicy, LoggedNamespace, MIN_SEGMENT_SIZE, Wal, WalOptions, read_log};
 
 fn logged(fs: &TestFs, dir: &Path, fsync: FsyncPolicy, segment_size: u64) -> LoggedNamespace<TestFs> {
     let wal = Wal::create_with(fs.clone(), dir, WalOptions { fsync, segment_size }, 1).unwrap();

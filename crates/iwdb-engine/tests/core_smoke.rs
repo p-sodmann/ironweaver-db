@@ -471,9 +471,9 @@ fn value_serde_json_stops_at_64_levels_and_expr_skips_unknown_fields() {
 /// reads only what walks from the start can reach.
 #[test]
 fn path_search_matching_and_walk_planning_are_budgeted() {
-    use ironweaver_core::pathfinding::{find_path, find_path_limited, Heuristic, PathQuery};
+    use ironweaver_core::pathfinding::{Heuristic, PathQuery, find_path, find_path_limited};
     use ironweaver_core::query::for_each_match_limited;
-    use ironweaver_core::random_walks::{plan_limited, WalkOptions};
+    use ironweaver_core::random_walks::{WalkOptions, plan_limited};
     const FAN: usize = 2_000;
     let mut g = G::new();
     let hub = g.add_node("hub", Record::default()).expect("add");

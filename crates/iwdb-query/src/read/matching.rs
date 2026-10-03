@@ -1,7 +1,7 @@
 //! `match`: every occurrence of a pattern.
 
-use ironweaver_core::query::{for_each_match_limited, Bound, Match};
 use ironweaver_core::EdgeId;
+use ironweaver_core::query::{Bound, Match, for_each_match_limited};
 use iwdb_engine::{DbGraph, Namespace};
 
 use super::{ReadContext, TopK};

@@ -8,7 +8,7 @@ mod common;
 
 use std::ops::Bound::{Excluded, Included};
 
-use ironweaver_core::algo::{pagerank, PageRank};
+use ironweaver_core::algo::{PageRank, pagerank};
 use ironweaver_core::format::{self, GraphWriter, RecordCodec};
 use ironweaver_core::pathfinding::EdgeCost;
 use ironweaver_core::{
@@ -427,10 +427,11 @@ fn filters_and_indexes_work_on_db_records() {
     ]);
     let scan: Vec<NodeIx> = g.node_indices().filter(|&ix| adults.matches_node(&g, ix).unwrap()).collect();
     assert_eq!(ids(&g, scan), ["alice", "carol"]);
-    assert!(g
-        .index_candidates(&Expr::Compare { path: age.clone(), op: CmpOp::Ge, value: Value::Int(30) })
-        .unwrap()
-        .is_none());
+    assert!(
+        g.index_candidates(&Expr::Compare { path: age.clone(), op: CmpOp::Ge, value: Value::Int(30) })
+            .unwrap()
+            .is_none()
+    );
 
     assert!(g.create_index::<GraphError>(&age).unwrap());
     assert!(!g.create_index::<GraphError>(&age).unwrap(), "already indexed");

@@ -13,7 +13,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 
 use iwdb::Store;
-use iwdb_engine::testutil::workload::{seed, step, Step};
+use iwdb_engine::testutil::workload::{Step, seed, step};
 use proptest::collection::vec;
 use proptest::prelude::*;
 use support::{checkpoints, frame, last_segment, options, pad, reference, run, segment_seqs, state, store_state};

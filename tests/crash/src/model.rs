@@ -21,7 +21,7 @@ use iwdb_engine::{CommitRecord, Prepare};
 
 use crate::script::Script;
 
-pub use iwdb_engine::testutil::{state, State};
+pub use iwdb_engine::testutil::{State, state};
 
 /// A commit the child may make: its step and idempotency key.
 pub type Commit = (Step, Option<IdempotencyKey>);

@@ -61,7 +61,7 @@ pub use iwdb_storage::{
     NamespaceBackup, NamespaceFiles, NamespaceRestore, NamespaceVerify, RecoveryReport, RestoreReport, RestoreSources,
     RestoreTarget, SkippedCheckpoint, StoreRecovery, VerifyReport, WalOptions,
 };
-pub use ops::{restore, restore_namespaces, restore_with, restore_with_only, status, verify, Status};
+pub use ops::{Status, restore, restore_namespaces, restore_with, restore_with_only, status, verify};
 pub use options::{CheckpointOptions, StoreOptions};
-pub use request::{ReadOptions, DEFAULT_TIMEOUT};
-pub use store::{Analysis, Ns, Store, StoreStatus, NAMESPACE};
+pub use request::{DEFAULT_TIMEOUT, ReadOptions};
+pub use store::{Analysis, NAMESPACE, Ns, Store, StoreStatus};

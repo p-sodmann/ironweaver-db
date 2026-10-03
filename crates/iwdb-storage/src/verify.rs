@@ -7,14 +7,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use iwdb_engine::catalog::NamespaceName;
-use iwdb_engine::{invariants, Namespace};
+use iwdb_engine::{Namespace, invariants};
 
 use crate::backup::{self, Manifest};
 use crate::checkpoint::{list_checkpoints, load_checkpoint};
 use crate::history::HistoryId;
-use crate::layout::{self, NsPaths, BACKUP_NAME, CHECKPOINT_DIR, LOCK_NAME, MARKER_NAME, TEMP_SUFFIX, WAL_DIR};
-use crate::namespaces::{parse_ns_dir_name, read_log, DEFAULT_ID, DEFAULT_NAME, NAMESPACES_NAME, NS_DIR};
-use crate::{format, reader, Error, WalReader};
+use crate::layout::{self, BACKUP_NAME, CHECKPOINT_DIR, LOCK_NAME, MARKER_NAME, NsPaths, TEMP_SUFFIX, WAL_DIR};
+use crate::namespaces::{DEFAULT_ID, DEFAULT_NAME, NAMESPACES_NAME, NS_DIR, parse_ns_dir_name, read_log};
+use crate::{Error, WalReader, format, reader};
 use iwdb_engine::CommitTime;
 
 /// Something verify found, with the file it is about.
@@ -140,11 +140,7 @@ impl VerifyReport {
     /// its name if `prefix`, and its counts.
     pub(crate) fn merge(&mut self, id: u64, name: &str, prefix: bool, sub: VerifyReport) {
         let tag = |f: Finding| {
-            if prefix {
-                Finding { path: f.path, message: format!("namespace '{}': {}", name, f.message) }
-            } else {
-                f
-            }
+            if prefix { Finding { path: f.path, message: format!("namespace '{}': {}", name, f.message) } } else { f }
         };
         self.problems.extend(sub.problems.into_iter().map(tag));
         self.notes.extend(sub.notes.into_iter().map(tag));

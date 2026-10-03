@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 
 use crate::errors::guard;
 use crate::reports;
-use crate::store::{attr_path, constraint, PyStore};
+use crate::store::{PyStore, attr_path, constraint};
 use crate::transaction::PyTransaction;
 
 /// A handle on one namespace of a store (`store.namespace(name)`): the

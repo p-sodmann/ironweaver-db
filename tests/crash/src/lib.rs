@@ -66,8 +66,8 @@ pub mod script;
 
 pub use child::ChildArgs;
 pub use harness::{
-    check, check_archive, check_backups, check_recovery, crash, restore_in_child, run, Bounds, CheckError,
-    ChildProcess, Config, Crashed, Failure, Outcome, Plan, RestorePlan, Restored, Summary, Target,
+    Bounds, CheckError, ChildProcess, Config, Crashed, Failure, Outcome, Plan, RestorePlan, Restored, Summary, Target,
+    check, check_archive, check_backups, check_recovery, crash, restore_in_child, run,
 };
 pub use model::Model;
 pub use script::Policy;

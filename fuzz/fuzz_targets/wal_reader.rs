@@ -13,7 +13,9 @@
 
 use std::path::Path;
 
-use iwdb_storage::format::{encode_frame, encode_segment_header, encode_segment_header_version, FrameHeader, FORMAT_VERSION};
+use iwdb_storage::format::{
+    FORMAT_VERSION, FrameHeader, encode_frame, encode_segment_header, encode_segment_header_version,
+};
 use iwdb_storage::read_segment;
 use libfuzzer_sys::fuzz_target;
 

@@ -13,15 +13,15 @@ use iwdb_query::{CommitOptions, Edge, NamespaceStatus, Node, ProjectionSpec};
 use iwdb_storage::archive::{Archive, ArchiveHandle};
 use iwdb_storage::backup::{self, NamespaceSource};
 use iwdb_storage::io::{LogFs, StdFs};
-use iwdb_storage::layout::{create_ns_dir, remove_ns_dir, DataDir, NsPaths};
-use iwdb_storage::namespaces::{EventKind, NamespaceInfo, NamespaceLog, NamespaceResult, Plan, DEFAULT_NAME};
+use iwdb_storage::layout::{DataDir, NsPaths, create_ns_dir, remove_ns_dir};
+use iwdb_storage::namespaces::{DEFAULT_NAME, EventKind, NamespaceInfo, NamespaceLog, NamespaceResult, Plan};
 use iwdb_storage::{
-    read_namespace, recover, start_namespace, BackupReport, CheckpointOutcome, Checkpointer, Error, FsyncPolicy,
-    HistoryId, LockStats, LoggedNamespace, Recovered, RecoveryReport, StoreRecovery,
+    BackupReport, CheckpointOutcome, Checkpointer, Error, FsyncPolicy, HistoryId, LockStats, LoggedNamespace,
+    Recovered, RecoveryReport, StoreRecovery, read_namespace, recover, start_namespace,
 };
 
-use crate::request::{ReadOptions, Timer};
 use crate::StoreOptions;
+use crate::request::{ReadOptions, Timer};
 
 mod background;
 mod ns;

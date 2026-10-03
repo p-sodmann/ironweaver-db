@@ -19,7 +19,7 @@ use std::time::Duration;
 use common::{Action, Call, Rule, TestFs, When};
 use iwdb::{Error, FsyncPolicy, Mutation, Namespace, Store, StoreOptions};
 use iwdb_storage::layout::MARKER_NAME;
-use support::{checkpoints, options, pad, reference, run, segment_seqs, snapshot, state, store_state, workload, Step};
+use support::{Step, checkpoints, options, pad, reference, run, segment_seqs, snapshot, state, store_state, workload};
 use tempfile::TempDir;
 
 /// A store (through a `TestFs`) with a history: a workload with a

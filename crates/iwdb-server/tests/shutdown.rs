@@ -22,7 +22,7 @@ use iwdb_query::exec::block_on;
 use iwdb_query::{CommitOptions, Database, MatchRequest, QueryOptions};
 use iwdb_server::client::Remote;
 use iwdb_storage::failpoint::{Call, FailFs};
-use support::{embedded, options, Running};
+use support::{Running, embedded, options};
 
 mod support;
 

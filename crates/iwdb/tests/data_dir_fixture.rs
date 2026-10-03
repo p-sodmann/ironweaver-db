@@ -32,7 +32,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use iwdb::{HistoryId, Namespace, Store};
-use iwdb_storage::layout::{read_marker, LAYOUT_VERSION, MARKER_NAME};
+use iwdb_storage::layout::{LAYOUT_VERSION, MARKER_NAME, read_marker};
 use support::{options, pad, reference, run, run_keyed, snapshot, workload};
 
 fn fixture(version: u32) -> PathBuf {

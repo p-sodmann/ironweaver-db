@@ -5,10 +5,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use iwdb::{verify, Error, Store, StoreRecovery};
+use iwdb::{Error, Store, StoreRecovery, verify};
 
 use crate::model::{self, Model};
-use crate::script::{check_options, Policy};
+use crate::script::{Policy, check_options};
 
 /// What a run did, to show that it covered what it should.
 #[derive(Clone, Debug, Default)]
@@ -93,7 +93,12 @@ impl fmt::Display for Summary {
         writeln!(
             f,
             "  recovery: {} from a checkpoint, {} torn tails cut ({} frames discarded), {} temporary files removed, {} refused (off), {} data directories",
-            self.from_checkpoint, self.torn_tails, self.discarded_frames, self.temp_files_removed, self.refused, self.directories
+            self.from_checkpoint,
+            self.torn_tails,
+            self.discarded_frames,
+            self.temp_files_removed,
+            self.refused,
+            self.directories
         )?;
         writeln!(
             f,
@@ -201,7 +206,7 @@ pub fn check_recovery(
             return Err(CheckError::Violation(format!(
                 "verify before recovery found problems or another seq ({:?}, recovered {}): {:#?}",
                 report.seq, seq, report.problems
-            )))
+            )));
         }
         // An interrupted initialization has no marker yet; the open finished it
         Err(Error::NotADataDir { .. }) if store.recovery().created => {}

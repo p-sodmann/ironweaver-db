@@ -21,13 +21,13 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::history::HistoryId;
-use crate::io::{copy_file, LogFs, CHUNK};
+use crate::io::{CHUNK, LogFs, copy_file};
 use crate::layout::{LOCK_NAME, TEMP_SUFFIX};
 use crate::namespaces::{
-    ns_dir_name, parse_ns_dir_name, read_log, write_whole, Event, EventKind, DEFAULT_ID, NAMESPACES_NAME, NS_DIR,
+    DEFAULT_ID, Event, EventKind, NAMESPACES_NAME, NS_DIR, ns_dir_name, parse_ns_dir_name, read_log, write_whole,
 };
 use crate::verify::{Kind, VerifyReport};
-use crate::{format, reader, Error, WalReader};
+use crate::{Error, WalReader, format, reader};
 
 /// The archive marker's name.
 pub const ARCHIVE_MARKER_NAME: &str = "IWDBARCH";
@@ -96,11 +96,7 @@ pub fn archive_segments(dir: &Path, version: u32, id: u64) -> Result<Vec<(u64, P
         return if id == DEFAULT_ID { reader::list_segments(dir) } else { Ok(Vec::new()) };
     }
     let ns_dir = dir.join(NS_DIR).join(ns_dir_name(id));
-    if ns_dir.is_dir() {
-        reader::list_segments(&ns_dir)
-    } else {
-        Ok(Vec::new())
-    }
+    if ns_dir.is_dir() { reader::list_segments(&ns_dir) } else { Ok(Vec::new()) }
 }
 
 /// The ids of the namespaces that have a directory in the format 2 archive
@@ -374,7 +370,7 @@ pub fn verify_archive(dir: &Path) -> Result<VerifyReport, Error> {
             return Err(Error::NotAnArchive {
                 path: dir.to_path_buf(),
                 reason: format!("it has no '{}' marker", ARCHIVE_MARKER_NAME),
-            })
+            });
         }
         Err(Error::NotAnArchive { reason, .. }) => report.problem(Some(&dir.join(ARCHIVE_MARKER_NAME)), reason),
         Err(e) => return Err(e),

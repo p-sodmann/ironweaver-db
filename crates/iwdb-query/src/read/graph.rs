@@ -5,10 +5,10 @@ use std::collections::HashSet;
 
 use ironweaver_core::pathfinding::{self, EdgeCost, Heuristic, PathQuery};
 use ironweaver_core::random_walks::{self, WalkOptions};
-use ironweaver_core::{traversal, Direction, EdgeIx, GraphError, NodeIx};
+use ironweaver_core::{Direction, EdgeIx, GraphError, NodeIx, traversal};
 use iwdb_engine::{DbGraph, DbRecord, Namespace};
 
-use super::{existing, node_ix, EdgeFilter, Meter, ReadContext, TopK};
+use super::{EdgeFilter, Meter, ReadContext, TopK, existing, node_ix};
 use crate::{
     Answer, Edge, Error, NeighbourhoodRequest, Node, Order, Path, PathMethod, PathRequest, Subgraph, SubgraphRequest,
     TraverseRequest, WalkRequest, Work,

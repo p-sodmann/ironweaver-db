@@ -4,12 +4,12 @@ use std::fs::{self};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use iwdb::{verify, Error, RestoreSources, RestoreTarget, Store};
+use iwdb::{Error, RestoreSources, RestoreTarget, Store, verify};
 use iwdb_storage::failpoint::{Action, Rule};
 use iwdb_storage::layout::{MARKER_NAME, RESTORING_NAME};
 
 use super::plan::restore_points;
-use super::{open_existing, ChildProcess, Config, Outcome, Summary, Target, CHILD_TIMEOUT};
+use super::{CHILD_TIMEOUT, ChildProcess, Config, Outcome, Summary, Target, open_existing};
 use crate::child::RestoreArgs;
 use crate::model::{self};
 use crate::rng::Rng;
@@ -106,7 +106,7 @@ pub fn check_archive(target: &Target, summary: &mut Summary) -> Result<(), Strin
             }
         }
         _ if wal_first > 1 && wal_first != u64::MAX => {
-            return Err(format!("the WAL starts at {} but the archive holds nothing", wal_first))
+            return Err(format!("the WAL starts at {} but the archive holds nothing", wal_first));
         }
         _ => {}
     }

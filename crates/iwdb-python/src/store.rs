@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use iwdb::{
     AttrPath, CatalogChange, CheckpointOptions, CommitOptions, CommitResult, Constraint, ConstraintKind, EdgeId,
-    Embedded, Error, FsyncPolicy, IdempotencyKey, IndexDef, Label, NamespaceResult, QueryConfig, Store, StoreOptions,
-    Target, WalOptions, NAMESPACE,
+    Embedded, Error, FsyncPolicy, IdempotencyKey, IndexDef, Label, NAMESPACE, NamespaceResult, QueryConfig, Store,
+    StoreOptions, Target, WalOptions,
 };
 use iwdb_query::exec::block_on;
 use iwdb_query::{Database, LimitConfig, QueryOptions};

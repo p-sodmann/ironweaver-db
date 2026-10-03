@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use common::{Action, Call, Rule, TestFs, When};
 use iwdb::{FsyncPolicy, Namespace, Store, StoreOptions};
-use support::{options, reference, state, store_state, workload, Step};
+use support::{Step, options, reference, state, store_state, workload};
 
 const CHILD: &str = "IWDB_PANIC_CHILD";
 

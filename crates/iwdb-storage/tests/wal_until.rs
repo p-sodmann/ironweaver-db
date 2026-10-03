@@ -14,8 +14,8 @@ use std::thread;
 
 use common::{namespace, segments, upsert};
 use ironweaver_core::Value;
-use iwdb_storage::format::{FrameHeader, FORMAT_VERSION};
-use iwdb_storage::{Error, FsyncPolicy, LoggedNamespace, Wal, WalOptions, WalReader, MIN_SEGMENT_SIZE};
+use iwdb_storage::format::{FORMAT_VERSION, FrameHeader};
+use iwdb_storage::{Error, FsyncPolicy, LoggedNamespace, MIN_SEGMENT_SIZE, Wal, WalOptions, WalReader};
 
 /// A log with records 1..=n in small segments.
 fn log(n: i64) -> (tempfile::TempDir, LoggedNamespace) {

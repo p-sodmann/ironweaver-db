@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iwdb::{Embedded, Store};
-use iwdb_server::config::Config;
 use iwdb_server::Server;
+use iwdb_server::config::Config;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 

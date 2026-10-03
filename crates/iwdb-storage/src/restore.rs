@@ -7,20 +7,20 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use iwdb_engine::catalog::NamespaceName;
 use iwdb_engine::Namespace;
+use iwdb_engine::catalog::NamespaceName;
 
 use crate::archive::{archive_segments, read_archive_marker_info};
-use crate::backup::{self, read_manifest, Manifest};
-use crate::checkpoint::{list_checkpoints, load_checkpoint, write_checkpoint, SkippedCheckpoint};
+use crate::backup::{self, Manifest, read_manifest};
+use crate::checkpoint::{SkippedCheckpoint, list_checkpoints, load_checkpoint, write_checkpoint};
 use crate::history::HistoryId;
 use crate::io::{LogFile, LogFs};
-use crate::layout::{self, encode_marker, NsPaths, BACKUP_NAME, LOCK_NAME, MARKER_NAME, RESTORING_NAME};
+use crate::layout::{self, BACKUP_NAME, LOCK_NAME, MARKER_NAME, NsPaths, RESTORING_NAME, encode_marker};
 use crate::namespaces::{
-    read_log, write_whole, Event, EventKind, NamespaceInfo, NamespaceTable, DEFAULT_ID, DEFAULT_NAME, NAMESPACES_NAME,
-    NS_DIR,
+    DEFAULT_ID, DEFAULT_NAME, Event, EventKind, NAMESPACES_NAME, NS_DIR, NamespaceInfo, NamespaceTable, read_log,
+    write_whole,
 };
-use crate::{reader, Error, WalReader};
+use crate::{Error, WalReader, reader};
 use iwdb_engine::CommitTime;
 
 /// Where a restore reads from: a backup (or any data directory that no

@@ -19,10 +19,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{Action, Call, Rule, TestFs, When};
-use iwdb::{restore, restore_with, verify, CheckpointOptions, CommitTime, Error, FsyncPolicy, Store, StoreOptions};
+use iwdb::{CheckpointOptions, CommitTime, Error, FsyncPolicy, Store, StoreOptions, restore, restore_with, verify};
 use iwdb::{RestoreSources, RestoreTarget};
 use iwdb_engine::testutil::workload::Stream;
-use support::{options, pad, segment_seqs, snapshot, store_state, workload, History, Step};
+use support::{History, Step, options, pad, segment_seqs, snapshot, store_state, workload};
 
 /// A small deterministic random number generator (SplitMix64).
 struct Rng(u64);

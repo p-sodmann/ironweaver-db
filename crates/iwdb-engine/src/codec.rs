@@ -34,7 +34,7 @@ use serde::{Serialize, Serializer};
 
 use crate::catalog::{CatalogError, IndexChanges, NamespaceCatalog, NamespaceName};
 use crate::idempotency::KeyTable;
-use crate::reserved::{is_reserved, CATALOG_KEY, KEYS_KEY, SEQ_KEY, VERSION_KEY};
+use crate::reserved::{CATALOG_KEY, KEYS_KEY, SEQ_KEY, VERSION_KEY, is_reserved};
 use crate::{DbGraph, DbRecord, Entity, Error};
 
 /// The graph-level data a database file carries.

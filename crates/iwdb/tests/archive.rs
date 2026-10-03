@@ -16,11 +16,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::{Action, Call, Rule, TestFs, When};
-use iwdb::{verify, Error, FsyncPolicy, Kind, Namespace, Store, StoreOptions};
-use iwdb_storage::archive::{Archive, ARCHIVE_MARKER_NAME};
+use iwdb::{Error, FsyncPolicy, Kind, Namespace, Store, StoreOptions, verify};
+use iwdb_storage::archive::{ARCHIVE_MARKER_NAME, Archive};
 use iwdb_storage::io::StdFs;
 use iwdb_storage::{HistoryId, WalReader};
-use support::{options, pad, reference, run, segment_seqs, state, store_state, workload, Step};
+use support::{Step, options, pad, reference, run, segment_seqs, state, store_state, workload};
 use tempfile::TempDir;
 
 /// Options with an archive in `dir/archive`, one checkpoint kept.

@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use iwdb_crash::child::RestoreArgs;
-use iwdb_crash::{run, ChildArgs, Config, Policy};
+use iwdb_crash::{ChildArgs, Config, Policy, run};
 
 struct Options {
     policies: Vec<Policy>,

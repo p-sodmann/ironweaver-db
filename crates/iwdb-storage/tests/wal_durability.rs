@@ -10,13 +10,13 @@ mod common;
 use std::fs;
 use std::time::Duration;
 
-use common::{namespace, replay, segments, state, upsert, Call, TestFs};
+use common::{Call, TestFs, namespace, replay, segments, state, upsert};
 use ironweaver_core::Value;
-use iwdb_engine::testutil::workload::{seed, step, Step};
+use iwdb_engine::testutil::workload::{Step, seed, step};
 use iwdb_engine::{CommitRecord, CommitResult, Namespace};
 use iwdb_storage::format::{MAX_RECORD_LEN, SEGMENT_HEADER_LEN};
 use iwdb_storage::{
-    read_log, Error, FsyncPolicy, LoggedNamespace, Wal, WalOptions, WalReader, DEFAULT_SEGMENT_SIZE, MIN_SEGMENT_SIZE,
+    DEFAULT_SEGMENT_SIZE, Error, FsyncPolicy, LoggedNamespace, MIN_SEGMENT_SIZE, Wal, WalOptions, WalReader, read_log,
 };
 use proptest::collection::vec;
 use proptest::prelude::*;

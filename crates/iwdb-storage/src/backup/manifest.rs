@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::history::HistoryId;
 use crate::io::CHUNK;
 use crate::layout::{CHECKPOINT_DIR, WAL_DIR};
-use crate::namespaces::{ns_dir_name, parse_ns_dir_name, DEFAULT_ID, DEFAULT_NAME, NAMESPACES_NAME, NS_DIR};
+use crate::namespaces::{DEFAULT_ID, DEFAULT_NAME, NAMESPACES_NAME, NS_DIR, ns_dir_name, parse_ns_dir_name};
 use crate::verify::Finding;
-use crate::{format, Error};
+use crate::{Error, format};
 use iwdb_engine::CommitTime;
 
 /// The first 8 bytes of a manifest.

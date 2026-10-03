@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use common::{Action, Call, Rule, TestFs, When};
-use iwdb::{verify, Error, FsyncPolicy, Kind, Store, StoreOptions};
+use iwdb::{Error, FsyncPolicy, Kind, Store, StoreOptions, verify};
 use iwdb_storage::backup::read_manifest;
 use iwdb_storage::layout::{BACKUP_NAME, MARKER_NAME};
 use support::{checkpoints, options, pad, reference, run, segment_seqs, snapshot, workload};

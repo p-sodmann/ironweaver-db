@@ -5,8 +5,8 @@ use std::io;
 use std::path::Path;
 
 use super::{LAYOUT_VERSION, MARKER_LEN, MARKER_LEN_V1, MARKER_MAGIC, MARKER_NAME};
-use crate::history::HistoryId;
 use crate::Error;
+use crate::history::HistoryId;
 
 /// A marker of layout `version`: magic, version (u32 LE), `body`, and the
 /// CRC32C of everything before it. Every layout keeps this frame, so that a

@@ -1,8 +1,8 @@
 //! [`Ns`]: a handle on one namespace of a [`Store`].
 
 use std::collections::BTreeMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use ironweaver_core::cancel::{self, Token};
 use ironweaver_core::{EdgeId, GraphError, Projection};
@@ -13,7 +13,7 @@ use iwdb_storage::io::LogFs;
 use iwdb_storage::{CheckpointOutcome, Error, FsyncPolicy, LockStats, LoggedNamespace, Wait};
 
 use super::background::{abort_if_inconsistent, or_abort, run_checkpoint, target};
-use super::{lock, Analysis, NsState, Store};
+use super::{Analysis, NsState, Store, lock};
 use crate::request::{Deadline, ReadOptions, Scheduled};
 
 /// A handle on one namespace of a [`Store`]: its commits, reads, catalog

@@ -162,7 +162,10 @@ pub enum Error {
     /// from seq `from`, but the WAL starts at `first_seq`. The segments it
     /// would need were deleted after newer checkpoints covered them.
     /// Nothing was changed.
-    #[error("no usable checkpoint: recovery needs the WAL from seq {from}, but it starts at {first_seq} (checkpoints skipped: {})", crate::checkpoint::describe(skipped))]
+    #[error(
+        "no usable checkpoint: recovery needs the WAL from seq {from}, but it starts at {first_seq} (checkpoints skipped: {})",
+        crate::checkpoint::describe(skipped)
+    )]
     NoUsableCheckpoint { from: u64, first_seq: u64, skipped: Vec<crate::SkippedCheckpoint> },
     /// Replaying a logged record failed during recovery or in the
     /// checkpointer (`ApplyFailed`, which includes `GraphError::Internal`).

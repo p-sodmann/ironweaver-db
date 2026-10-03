@@ -5,14 +5,14 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use iwdb_engine::catalog::{IndexChanges, NamespaceName};
 use iwdb_engine::Namespace;
+use iwdb_engine::catalog::{IndexChanges, NamespaceName};
 
-use crate::checkpoint::{load_newest, SkippedCheckpoint};
+use crate::checkpoint::{SkippedCheckpoint, load_newest};
 use crate::format::Damage;
 use crate::io::LogFs;
 use crate::layout::{DataDir, NsPaths};
-use crate::namespaces::{read_log, CutLog, NamespaceInfo, NamespaceLog, DEFAULT_NAME, NAMESPACES_NAME};
+use crate::namespaces::{CutLog, DEFAULT_NAME, NAMESPACES_NAME, NamespaceInfo, NamespaceLog, read_log};
 use crate::{Error, LoggedNamespace, Wal, WalOptions, WalReader};
 
 /// What recovery found and did to one namespace. Recovery reports these

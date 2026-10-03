@@ -36,11 +36,7 @@ pub fn lock_file(file: &File, path: &Path, exclusive: bool) -> Result<(), Error>
     // A child being spawned by another thread holds a copy of every open
     // file until its exec, so a just-released flock can look held briefly
     let attempt = || {
-        if exclusive {
-            fs4::FileExt::try_lock(file)
-        } else {
-            fs4::FileExt::try_lock_shared(file)
-        }
+        if exclusive { fs4::FileExt::try_lock(file) } else { fs4::FileExt::try_lock_shared(file) }
     };
     for wait in LOCK_RETRIES_MS.iter().map(|ms| Some(std::time::Duration::from_millis(*ms))).chain([None]) {
         match attempt() {

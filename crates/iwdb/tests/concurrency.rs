@@ -25,12 +25,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{Action, Call, Rule, TestFs, When};
-use ironweaver_core::algo::centrality::{pagerank, PageRank};
+use ironweaver_core::algo::centrality::{PageRank, pagerank};
 use iwdb::{
     CancelToken, Direction, EdgeCost, Error, FsyncPolicy, HistoryId, Mutation, ProjectionSpec, ReadOptions, Store,
     StoreOptions, Value, WalOptions,
 };
-use support::{options, reference, state, workload, State, Step};
+use support::{State, Step, options, reference, state, workload};
 
 fn fast_options() -> StoreOptions {
     StoreOptions { wal: WalOptions { fsync: FsyncPolicy::Off, ..options(2).wal }, ..options(2) }

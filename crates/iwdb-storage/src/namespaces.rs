@@ -33,8 +33,8 @@ use iwdb_engine::catalog::NamespaceName;
 use iwdb_engine::{CommitTime, IdempotencyKey};
 use serde::{Deserialize, Serialize};
 
-use crate::io::{LogFile, LogFs};
 use crate::Error;
+use crate::io::{LogFile, LogFs};
 
 /// The namespace log's file name.
 pub const NAMESPACES_NAME: &str = "NAMESPACES";
@@ -608,12 +608,14 @@ mod tests {
         assert!(bad(vec![event(2, EventKind::Create, 1, "a")]).contains("expected 1"));
         assert!(bad(vec![event(1, EventKind::Drop, 1, "a")]).contains("doesn't exist"));
         assert!(bad(vec![event(1, EventKind::Create, 1, "a"), event(2, EventKind::Create, 2, "a")]).contains("exists"));
-        assert!(bad(vec![
-            event(1, EventKind::Create, 2, "a"),
-            event(2, EventKind::Drop, 2, "a"),
-            event(3, EventKind::Create, 2, "a")
-        ])
-        .contains("not above"));
+        assert!(
+            bad(vec![
+                event(1, EventKind::Create, 2, "a"),
+                event(2, EventKind::Drop, 2, "a"),
+                event(3, EventKind::Create, 2, "a")
+            ])
+            .contains("not above")
+        );
         assert!(
             bad(vec![event(1, EventKind::Create, 1, "a"), event(2, EventKind::Drop, 1, "b")]).contains("doesn't exist")
         );

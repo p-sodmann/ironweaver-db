@@ -16,7 +16,7 @@ use ironweaver_core::{Attrs, Value};
 use iwdb_engine::catalog::{AttrPath, IndexDef};
 use iwdb_engine::{CatalogChange, CommitRecord, Mutation};
 use iwdb_storage::format::{Damage, SEGMENT_HEADER_LEN};
-use iwdb_storage::{read_log, read_segment, Error, FsyncPolicy, LoggedNamespace, Wal, WalOptions, MIN_SEGMENT_SIZE};
+use iwdb_storage::{Error, FsyncPolicy, LoggedNamespace, MIN_SEGMENT_SIZE, Wal, WalOptions, read_log, read_segment};
 use proptest::prelude::*;
 
 /// Write `n` commits (data and catalog) with `fsync` and return the

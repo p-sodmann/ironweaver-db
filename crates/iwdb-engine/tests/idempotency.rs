@@ -9,7 +9,7 @@ use iwdb_engine::catalog::{AttrPath, IndexDef, NamespaceName};
 use iwdb_engine::codec;
 use iwdb_engine::idempotency::KEY_TABLE_CAPACITY;
 use iwdb_engine::invariants;
-use iwdb_engine::testutil::workload::{seeded, Step};
+use iwdb_engine::testutil::workload::{Step, seeded};
 use iwdb_engine::{
     CatalogChange, CommitRecord, CommitResult, CommitTime, Error, IdempotencyKey, Mutation, Namespace, Prepare,
 };

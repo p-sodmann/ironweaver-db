@@ -12,7 +12,7 @@ use crate::child::{ChildArgs, SYNC_LOG};
 use crate::model::{self, Model};
 use crate::os_crash::{self, OsCrash};
 use crate::rng::Rng;
-use crate::script::{check_options, Policy};
+use crate::script::{Policy, check_options};
 
 mod check;
 mod plan;

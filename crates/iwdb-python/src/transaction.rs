@@ -1,15 +1,15 @@
 //! `iwdb.Transaction`: mutations collected in Python, committed as one.
 
 use iwdb::{CommitOptions, EdgeId, EdgeKey, Mutation, Target};
-use iwdb_query::exec::block_on;
 use iwdb_query::Database;
+use iwdb_query::exec::block_on;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 
 use crate::convert::{to_attrs, to_value};
 use crate::errors::{guard, invalid, value_error};
-use crate::store::{commit_options, commit_result, PyStore};
+use crate::store::{PyStore, commit_options, commit_result};
 
 /// A transaction: mutations collected in Python, committed as one
 /// `Store::commit`.

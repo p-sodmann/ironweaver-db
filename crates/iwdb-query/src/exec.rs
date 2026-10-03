@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::panic::{self, AssertUnwindSafe};
-use std::pin::{pin, Pin};
+use std::pin::{Pin, pin};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle, Thread};

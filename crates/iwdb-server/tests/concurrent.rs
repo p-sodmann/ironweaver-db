@@ -11,8 +11,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ironweaver_core::EdgeId;
 use iwdb::{Embedded, QueryConfig, Store};

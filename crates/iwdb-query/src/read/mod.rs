@@ -28,7 +28,7 @@ use crate::cursor::State;
 use crate::{Bounds, Code, Cursor, Error, QueryOptions};
 
 pub use analytics::run_job;
-pub use explain::{explain, Explain, Lookup, Plan};
+pub use explain::{Explain, Lookup, Plan, explain};
 pub use graph::{neighbourhood, random_walks, shortest_path, subgraph, traverse};
 pub use lookup::{find, get_edges, get_nodes};
 pub use matching::match_pattern;
@@ -90,11 +90,7 @@ impl ReadContext {
 
     /// A limit was reached: fine with `partial`, an error without.
     pub(crate) fn reached(&self, what: impl std::fmt::Display) -> Result<(), Error> {
-        if self.partial {
-            Ok(())
-        } else {
-            Err(Error::budget(what))
-        }
+        if self.partial { Ok(()) } else { Err(Error::budget(what)) }
     }
 }
 

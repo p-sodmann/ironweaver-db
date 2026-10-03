@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use iwdb_crash::{run, Config, Policy};
+use iwdb_crash::{Config, Policy, run};
 
 fn short_run(policy: Policy, seed: u64) {
     let work = tempfile::tempdir().unwrap();

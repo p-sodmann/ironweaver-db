@@ -16,8 +16,8 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use iwdb::{verify, Kind, Namespace, Store};
-use iwdb_storage::backup::{read_manifest, MANIFEST_VERSION};
+use iwdb::{Kind, Namespace, Store, verify};
+use iwdb_storage::backup::{MANIFEST_VERSION, read_manifest};
 use iwdb_storage::layout::BACKUP_NAME;
 use support::{options, pad, reference, run, snapshot, workload};
 

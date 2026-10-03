@@ -4,9 +4,9 @@
 use ironweaver_core::{GraphError, NodeIx, Op};
 
 use crate::catalog::{AttrPath, ConstraintKind, NamespaceCatalog, NamespaceName};
-use crate::idempotency::{fingerprint_catalog, fingerprint_data, IdempotencyKey, KeyEntry, KeyTable, Keyed};
+use crate::idempotency::{IdempotencyKey, KeyEntry, KeyTable, Keyed, fingerprint_catalog, fingerprint_data};
 use crate::mutation::{CatalogChange, Change, CommitRecord, CommitResult, Mutation};
-use crate::{codec, resolve, CommitTime, DbGraph, DbRecord, Error};
+use crate::{CommitTime, DbGraph, DbRecord, Error, codec, resolve};
 
 /// One namespace in memory: its graph, its catalog, the `seq` of its last
 /// commit and the table of its recent idempotency keys.

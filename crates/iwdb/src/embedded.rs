@@ -9,8 +9,8 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ironweaver_core::cancel::Token;
 use ironweaver_core::EdgeId;
+use ironweaver_core::cancel::Token;
 use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation, Namespace};
 use iwdb_query::exec::{Pending, Pool};

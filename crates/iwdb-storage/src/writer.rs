@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use iwdb_engine::CommitRecord;
 
-use crate::format::{self, FrameHeader, FORMAT_VERSION, FRAME_HEADER_LEN, SEGMENT_HEADER_LEN};
+use crate::format::{self, FORMAT_VERSION, FRAME_HEADER_LEN, FrameHeader, SEGMENT_HEADER_LEN};
 use crate::io::{LogFile, LogFs, StdFs};
-use crate::{reader, Error};
+use crate::{Error, reader};
 use iwdb_engine::CommitTime;
 
 /// Smallest segment size (1 KiB).

@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use ironweaver_core::{Attributes, Attrs, EdgeId, GraphError, Key, Op, Value};
 
 use crate::catalog::{Constraint, ConstraintKind, NamespaceCatalog};
-use crate::mutation::{EdgeKey, Mutation, Target, MAX_VALUE_DEPTH};
+use crate::mutation::{EdgeKey, MAX_VALUE_DEPTH, Mutation, Target};
 use crate::reserved::{self, VERSION_KEY};
 use crate::{DbGraph, DbRecord, Error};
 
@@ -458,7 +458,7 @@ impl Tx<'_> {
                                 to: to.clone(),
                                 ty: ty.clone(),
                                 count: many.len(),
-                            })
+                            });
                         }
                     },
                 };

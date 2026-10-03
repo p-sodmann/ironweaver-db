@@ -1,6 +1,6 @@
 //! Analytics jobs on a projection (ADR 0022).
 
-use ironweaver_core::{algo, GraphError, Projection};
+use ironweaver_core::{GraphError, Projection, algo};
 
 use crate::{Job, JobResult};
 

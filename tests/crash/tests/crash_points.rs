@@ -27,10 +27,10 @@ use std::path::{Path, PathBuf};
 use iwdb::Store;
 use iwdb_crash::harness::newest_checkpoint;
 use iwdb_crash::{
-    check, check_archive, check_backups, crash, restore_in_child, Bounds, Crashed, Outcome, Plan, Policy, RestorePlan,
-    Restored, Summary, Target,
+    Bounds, Crashed, Outcome, Plan, Policy, RestorePlan, Restored, Summary, Target, check, check_archive,
+    check_backups, crash, restore_in_child,
 };
-use iwdb_engine::testutil::workload::{pad, Step};
+use iwdb_engine::testutil::workload::{Step, pad};
 use iwdb_storage::failpoint::{Action, Call, Rule, When};
 use iwdb_storage::layout::{MARKER_NAME, RESTORING_NAME};
 use tempfile::TempDir;

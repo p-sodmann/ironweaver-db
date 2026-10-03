@@ -28,14 +28,14 @@ use iwdb_query::{
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 use tokio::runtime::{Handle, Runtime};
 use tokio::task::JoinHandle;
-use tonic::transport::{Channel, Endpoint};
 use tonic::Streaming;
+use tonic::transport::{Channel, Endpoint};
 
+use crate::DEFAULT_MAX_MESSAGE_BYTES;
 use crate::convert::*;
 use crate::proto as pb;
 use crate::proto::database_service_client::DatabaseServiceClient;
 use crate::status::from_status;
-use crate::DEFAULT_MAX_MESSAGE_BYTES;
 
 type Client = DatabaseServiceClient<Channel>;
 

@@ -21,21 +21,21 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::Error;
 use crate::history::HistoryId;
 use crate::io::LogFs;
 use crate::namespaces::{
-    ns_dir_name, parse_ns_dir_name, read_log, write_whole, Event, EventKind, NamespaceTable, DEFAULT_ID, DEFAULT_NAME,
-    NAMESPACES_NAME, NS_DIR,
+    DEFAULT_ID, DEFAULT_NAME, Event, EventKind, NAMESPACES_NAME, NS_DIR, NamespaceTable, ns_dir_name,
+    parse_ns_dir_name, read_log, write_whole,
 };
-use crate::Error;
 
 mod lock;
 mod marker;
 
-use iwdb_engine::catalog::NamespaceName;
 use iwdb_engine::CommitTime;
+use iwdb_engine::catalog::NamespaceName;
 pub use lock::{lock_file, lock_shared};
-pub use marker::{encode_marker, encode_marker_with, read_marker, MarkerInfo};
+pub use marker::{MarkerInfo, encode_marker, encode_marker_with, read_marker};
 
 /// The layout version this version writes. It reads layouts 1 to 3 and
 /// upgrades them on open ([`DataDir::open`]; versions in
@@ -454,11 +454,7 @@ pub fn legacy_paths_at(root: &Path) -> NsPaths {
     let moved = NsPaths::new(root, DEFAULT_ID);
     let pick = |sub: &str, moved: &Path| {
         let at_root = root.join(sub);
-        if at_root.exists() {
-            at_root
-        } else {
-            moved.to_path_buf()
-        }
+        if at_root.exists() { at_root } else { moved.to_path_buf() }
     };
     NsPaths {
         id: DEFAULT_ID,

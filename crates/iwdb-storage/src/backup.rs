@@ -25,10 +25,10 @@ use iwdb_engine::catalog::NamespaceName;
 
 use crate::checkpoint::{checkpoint_name, list_checkpoints};
 use crate::history::HistoryId;
-use crate::io::{copy_file, create_dir, sync_dir, write_atomic, write_file, LogFs};
-use crate::layout::{encode_marker, NsPaths, BACKUP_NAME, CHECKPOINT_DIR, MARKER_NAME, WAL_DIR};
-use crate::namespaces::{ns_dir_name, NAMESPACES_NAME, NS_DIR};
-use crate::{format, reader, Error};
+use crate::io::{LogFs, copy_file, create_dir, sync_dir, write_atomic, write_file};
+use crate::layout::{BACKUP_NAME, CHECKPOINT_DIR, MARKER_NAME, NsPaths, WAL_DIR, encode_marker};
+use crate::namespaces::{NAMESPACES_NAME, NS_DIR, ns_dir_name};
+use crate::{Error, format, reader};
 use iwdb_engine::CommitTime;
 
 mod manifest;
@@ -243,7 +243,7 @@ pub(crate) fn check_destination(source: &Path, dest: &Path) -> Result<(), Error>
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) if e.kind() == io::ErrorKind::NotADirectory => {
-            return Err(Error::DestinationNotEmpty { path: dest.to_path_buf() })
+            return Err(Error::DestinationNotEmpty { path: dest.to_path_buf() });
         }
         Err(e) => return Err(Error::io("list", dest, e)),
     }

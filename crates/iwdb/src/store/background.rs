@@ -3,8 +3,8 @@
 
 use std::collections::BTreeSet;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::Ordering;
 use std::sync::PoisonError;
+use std::sync::atomic::Ordering;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,7 @@ use iwdb_engine::CommitResult;
 use iwdb_storage::io::LogFs;
 use iwdb_storage::{CheckpointOutcome, Error, FsyncPolicy, LoggedNamespace};
 
-use super::{lock, NsState, Shared, Store};
+use super::{NsState, Shared, Store, lock};
 use crate::StoreOptions;
 
 impl<F: LogFs + Send + Sync + 'static> Store<F>

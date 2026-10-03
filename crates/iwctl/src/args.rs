@@ -214,11 +214,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
             expect(2)?;
             let dir = path(0, "a directory")?;
             let path = dotted(rest.get(1).ok_or_else(|| format!("{} needs an attribute path", name))?);
-            if name == "create-index" {
-                Command::CreateIndex { dir, path }
-            } else {
-                Command::DropIndex { dir, path }
-            }
+            if name == "create-index" { Command::CreateIndex { dir, path } } else { Command::DropIndex { dir, path } }
         }
         "add-constraint" | "drop-constraint" => {
             expect(4)?;

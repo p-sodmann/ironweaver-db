@@ -38,11 +38,7 @@ impl CommitTime {
 
     pub fn to_system_time(self) -> SystemTime {
         let magnitude = Duration::from_micros(self.0.unsigned_abs());
-        if self.0 >= 0 {
-            UNIX_EPOCH + magnitude
-        } else {
-            UNIX_EPOCH - magnitude
-        }
+        if self.0 >= 0 { UNIX_EPOCH + magnitude } else { UNIX_EPOCH - magnitude }
     }
 
     /// Microseconds since 1970-01-01 UTC.
