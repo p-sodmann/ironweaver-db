@@ -1,7 +1,11 @@
 //! Generate the gRPC code from `proto/ironweaver_db/v1` with protox (a
-//! protobuf compiler in Rust), so building needs no `protoc`.
+//! protobuf compiler in Rust), so building needs no `protoc`; the JSON
+//! serde of the messages with pbjson (REST, ADR 0030); and keep the
+//! descriptor set, from which the OpenAPI document is generated.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use prost::Message;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../proto");
@@ -12,11 +16,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|name| format!("ironweaver_db/v1/{}", name))
         .collect();
     files.sort();
+    // With source info: the OpenAPI document takes its descriptions from
+    // the protos' comments
     let descriptors = protox::compile(&files, [&root])?;
+    let encoded = descriptors.encode_to_vec();
+    let out = PathBuf::from(std::env::var("OUT_DIR")?);
+    std::fs::write(out.join("descriptors.bin"), &encoded)?;
     tonic_prost_build::configure()
         // Maps encode in key order, so equal messages encode to equal bytes
         .btree_map(".")
         .compile_fds(descriptors)?;
+    pbjson_build::Builder::new()
+        .register_descriptors(&encoded)?
+        .btree_map(["."])
+        // The core's types: their JSON form is the core's serde form, not
+        // the wrapper messages' (src/rest/json.rs)
+        .exclude([".ironweaver_db.v1.Value", ".ironweaver_db.v1.Expr", ".ironweaver_db.v1.Pattern"])
+        .build(&[".ironweaver_db.v1"])?;
     println!("cargo:rerun-if-changed={}", root.display());
     Ok(())
 }

@@ -46,7 +46,7 @@ Ironweaver DB is a **separate project** that turns `ironweaver-core` into a dura
 | Embedded Rust (`iwdb::Store`) | Rust applications, tests | Opens a data directory; full durability; no network |
 | Embedded Python (`iwdb-python`) | Python apps and tests | Same API shape as the remote client, so code can switch |
 | gRPC | Services, other languages | Canonical contract in `proto/` ([api/grpc.md](api/grpc.md), step 11); values and filters as the core's serde in postcard (ADR 0023); large answers streamed in chunks (ADR 0025); the change stream (step 13) |
-| REST/JSON | Browsers, scripts, curl | Same message shapes as the protos (via `pbjson`); OpenAPI generated; SSE for streams |
+| REST/JSON | Browsers, scripts, curl | Same message shapes as the protos (via `pbjson`), on the gRPC port; OpenAPI generated; streamed answers as one message or NDJSON; SSE for the change stream (step 13) |
 | Change stream | Caches, indexers, replicas | Resume from any retained `seq` |
 | `iwctl` | Operators | Admin commands plus an interactive query shell |
 

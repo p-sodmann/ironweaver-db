@@ -1,0 +1,4119 @@
+{
+  "components": {
+    "schemas": {
+      "AddEdge": {
+        "description": "Add an edge with a new id (in `CommitResult.edge_ids`). Both endpoints\nmust exist.",
+        "properties": {
+          "attr": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Value"
+            },
+            "type": "object"
+          },
+          "from": {
+            "type": "string"
+          },
+          "meta": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Value"
+            },
+            "type": "object"
+          },
+          "to": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "AddLabel": {
+        "properties": {
+          "expectedVersion": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "AnalyzeRequest": {
+        "description": "An analytics job on a projection of a namespace.",
+        "properties": {
+          "job": {
+            "$ref": "#/components/schemas/Job"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/QueryOptions"
+          },
+          "projection": {
+            "$ref": "#/components/schemas/Projection"
+          }
+        },
+        "type": "object"
+      },
+      "AnalyzeResponse": {
+        "description": "One chunk of a job's result: rows of the kind `kind` names (the same in\nevery chunk).",
+        "properties": {
+          "counts": {
+            "items": {
+              "$ref": "#/components/schemas/Count"
+            },
+            "type": "array"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/JobResultKind"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/AnswerMeta"
+          },
+          "scores": {
+            "items": {
+              "$ref": "#/components/schemas/Score"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "AnswerMeta": {
+        "description": "What every answer reports besides its value.",
+        "properties": {
+          "next": {
+            "description": "The cursor of the next page, for paginated reads with more results.\nEmpty: no more pages.",
+            "type": "string"
+          },
+          "seq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The seq of the namespace state the read saw."
+          },
+          "truncated": {
+            "description": "A limit stopped the read and `partial` asked for what was found.",
+            "type": "boolean"
+          },
+          "work": {
+            "$ref": "#/components/schemas/Work"
+          }
+        },
+        "type": "object"
+      },
+      "AppendAttr": {
+        "description": "Append `value` to the list in attribute `key`; a missing or none\nattribute becomes a one-item list, any other value is `invalid_argument`.",
+        "properties": {
+          "expectedVersion": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "key": {
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/Target"
+          },
+          "value": {
+            "$ref": "#/components/schemas/Value"
+          }
+        },
+        "type": "object"
+      },
+      "AttrPath": {
+        "description": "An attribute path: a top-level attribute name, then keys into nested\ndicts.",
+        "properties": {
+          "keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "CatalogChange": {
+        "description": "A change to a namespace's catalog, committed on its own.\n\nAt most one of `createIndex`, `dropIndex`, `addConstraint`, `dropConstraint` (`kind`).",
+        "properties": {
+          "addConstraint": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Constraint"
+              }
+            ],
+            "description": "Add a constraint; fails if the existing data violates it."
+          },
+          "createIndex": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/IndexDef"
+              }
+            ],
+            "description": "Declare an index and build it (online)."
+          },
+          "dropConstraint": {
+            "$ref": "#/components/schemas/Constraint"
+          },
+          "dropIndex": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/IndexDef"
+              }
+            ],
+            "description": "Remove an index declaration."
+          }
+        },
+        "type": "object"
+      },
+      "CommitCatalogRequest": {
+        "properties": {
+          "change": {
+            "$ref": "#/components/schemas/CatalogChange"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/CommitOptions"
+          }
+        },
+        "type": "object"
+      },
+      "CommitCatalogResponse": {
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/CommitResult"
+          }
+        },
+        "type": "object"
+      },
+      "CommitOptions": {
+        "description": "Options of a commit.",
+        "properties": {
+          "idempotencyKey": {
+            "description": "Commit at most once under this key (1 to 255 bytes, for example a\nUUID): a retry with the same key and request returns the original\nresult with `deduplicated` set. Send one with every commit that may be\nretried, in particular after a deadline or a lost connection.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CommitRequest": {
+        "properties": {
+          "mutations": {
+            "items": {
+              "$ref": "#/components/schemas/Mutation"
+            },
+            "type": "array"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/CommitOptions"
+          }
+        },
+        "type": "object"
+      },
+      "CommitResponse": {
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/CommitResult"
+          }
+        },
+        "type": "object"
+      },
+      "CommitResult": {
+        "description": "The outcome of a successful commit.",
+        "properties": {
+          "deduplicated": {
+            "description": "This is the original result of an earlier commit with the same\nidempotency key; nothing was committed now.",
+            "type": "boolean"
+          },
+          "edgeIds": {
+            "description": "One id per `add_edge` and `upsert_edge`, in mutation order.",
+            "items": {
+              "$ref": "#/components/schemas/Uint64"
+            },
+            "type": "array"
+          },
+          "seq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The commit's position in the namespace's history."
+          },
+          "timeMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Int64"
+              }
+            ],
+            "description": "When the WAL appended the commit, in microseconds since 1970 (UTC)."
+          },
+          "versions": {
+            "description": "Nodes by id, then edges by id. Empty for catalog changes.",
+            "items": {
+              "$ref": "#/components/schemas/Version"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "Constraint": {
+        "description": "A constraint on the nodes with `label`, at attribute `path`.",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ConstraintKind"
+          },
+          "label": {
+            "type": "string"
+          },
+          "path": {
+            "$ref": "#/components/schemas/AttrPath"
+          }
+        },
+        "type": "object"
+      },
+      "ConstraintKind": {
+        "description": "What a constraint requires of the nodes with its label.\n\n- `CONSTRAINT_KIND_UNIQUE`: No two nodes with the label have equal values at the path.\n\n- `CONSTRAINT_KIND_REQUIRED`: Every node with the label has a (non-none) value at the path.",
+        "enum": [
+          "CONSTRAINT_KIND_UNSPECIFIED",
+          "CONSTRAINT_KIND_UNIQUE",
+          "CONSTRAINT_KIND_REQUIRED"
+        ],
+        "type": "string"
+      },
+      "Coords": {
+        "description": "Where a node's coordinates live. Without a kind: the core's default.\n\nAt most one of `sequence`, `perDimension` (`kind`).",
+        "properties": {
+          "perDimension": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CoordsPerDimension"
+              }
+            ],
+            "description": "One attribute path per dimension."
+          },
+          "sequence": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AttrPath"
+              }
+            ],
+            "description": "One attribute path to a list of numbers."
+          }
+        },
+        "type": "object"
+      },
+      "CoordsPerDimension": {
+        "properties": {
+          "paths": {
+            "items": {
+              "$ref": "#/components/schemas/AttrPath"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "CoreNumberJob": {
+        "properties": {},
+        "type": "object"
+      },
+      "Count": {
+        "properties": {
+          "count": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CreateNamespaceRequest": {
+        "description": "Create a namespace. With a key, a retry returns the original event.",
+        "properties": {
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CreateNamespaceResponse": {
+        "properties": {
+          "deduplicated": {
+            "description": "This is the original event of an earlier request with the same key.",
+            "type": "boolean"
+          },
+          "event": {
+            "$ref": "#/components/schemas/NamespaceEvent"
+          }
+        },
+        "type": "object"
+      },
+      "CutTail": {
+        "description": "A torn tail cut off the last WAL segment.",
+        "properties": {
+          "damage": {
+            "$ref": "#/components/schemas/Damage"
+          },
+          "discardedFrames": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Complete frames discarded with the tail (never acknowledged as\ndurable)."
+          },
+          "fileLen": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The segment's length before, and after (0: the file was removed)."
+          },
+          "path": {
+            "type": "string"
+          },
+          "removed": {
+            "description": "The segment had no valid header and was removed.",
+            "type": "boolean"
+          },
+          "validLen": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
+      "Damage": {
+        "description": "What was wrong with a torn WAL tail.\n\n- `DAMAGE_TRUNCATED`: The file ends inside a header or record.\n\n- `DAMAGE_BAD_HEADER`: Invalid segment header.\n\n- `DAMAGE_BAD_LENGTH`: A record length above the limit.\n\n- `DAMAGE_CHECKSUM`: A checksum mismatch.",
+        "enum": [
+          "DAMAGE_UNSPECIFIED",
+          "DAMAGE_TRUNCATED",
+          "DAMAGE_BAD_HEADER",
+          "DAMAGE_BAD_LENGTH",
+          "DAMAGE_CHECKSUM"
+        ],
+        "type": "string"
+      },
+      "DegreeJob": {
+        "properties": {
+          "incoming": {
+            "description": "Count incoming instead of outgoing edges.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "DeleteEdge": {
+        "properties": {
+          "expectedVersion": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
+      "DeleteNode": {
+        "description": "Delete the node and its edges.",
+        "properties": {
+          "expectedVersion": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Direction": {
+        "description": "Which edges a search follows.\n\n- `DIRECTION_UNSPECIFIED`: Outgoing edges (the default).",
+        "enum": [
+          "DIRECTION_UNSPECIFIED",
+          "DIRECTION_OUT",
+          "DIRECTION_IN",
+          "DIRECTION_BOTH"
+        ],
+        "type": "string"
+      },
+      "Double": {
+        "description": "A floating-point number; NaN and the infinities as strings.",
+        "oneOf": [
+          {
+            "type": "number"
+          },
+          {
+            "enum": [
+              "NaN",
+              "Infinity",
+              "-Infinity"
+            ],
+            "type": "string"
+          }
+        ]
+      },
+      "DropNamespaceRequest": {
+        "description": "Drop a namespace and its data. `default` can't be dropped.",
+        "properties": {
+          "idempotencyKey": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "DropNamespaceResponse": {
+        "properties": {
+          "deduplicated": {
+            "type": "boolean"
+          },
+          "event": {
+            "$ref": "#/components/schemas/NamespaceEvent"
+          }
+        },
+        "type": "object"
+      },
+      "Edge": {
+        "description": "An edge, as read from the store.",
+        "properties": {
+          "attr": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Value"
+            },
+            "type": "object"
+          },
+          "from": {
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "meta": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Value"
+            },
+            "type": "object"
+          },
+          "to": {
+            "type": "string"
+          },
+          "type": {
+            "description": "Missing for an untyped edge.",
+            "type": "string"
+          },
+          "version": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
+      "EdgeCost": {
+        "description": "What traversing an edge costs. Without a kind: every edge costs 1.\n\nAt most one of `unit`, `weighted` (`kind`).",
+        "properties": {
+          "unit": {
+            "$ref": "#/components/schemas/UnitCost"
+          },
+          "weighted": {
+            "$ref": "#/components/schemas/WeightedCost"
+          }
+        },
+        "type": "object"
+      },
+      "EdgeEndpoints": {
+        "description": "Two nodes and an edge type (missing: an untyped edge).",
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "EdgeKey": {
+        "description": "How an edge upsert finds its edge.\n\nAt most one of `id`, `endpoints` (`kind`).",
+        "properties": {
+          "endpoints": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EdgeEndpoints"
+              }
+            ],
+            "description": "The edge between these nodes with exactly this type; added if there\nis none, `invalid_argument` if there are several."
+          },
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The edge with this id, which must exist."
+          }
+        },
+        "type": "object"
+      },
+      "EdgePath": {
+        "properties": {
+          "ids": {
+            "items": {
+              "$ref": "#/components/schemas/Uint64"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "Error": {
+        "description": "An error as a message, for access methods that carry errors in a body\n(REST, step 12): the same code and message as the gRPC status.",
+        "properties": {
+          "code": {
+            "description": "One of the codes above.",
+            "type": "string"
+          },
+          "message": {
+            "description": "For people.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Explain": {
+        "properties": {
+          "building": {
+            "description": "Attribute paths of the filter whose index is being built.",
+            "items": {
+              "$ref": "#/components/schemas/AttrPath"
+            },
+            "type": "array"
+          },
+          "candidates": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "With `analyze`: the exact number."
+          },
+          "estimatedCandidates": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The estimated number of candidates `Find` checks."
+          },
+          "nodes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The namespace's node count."
+          },
+          "plan": {
+            "$ref": "#/components/schemas/Plan"
+          }
+        },
+        "type": "object"
+      },
+      "ExplainRequest": {
+        "description": "How `Find` would read a filter.",
+        "properties": {
+          "analyze": {
+            "description": "Also run the index lookup and report the exact number of candidates.",
+            "type": "boolean"
+          },
+          "filter": {
+            "$ref": "#/components/schemas/Expr"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/QueryOptions"
+          }
+        },
+        "type": "object"
+      },
+      "ExplainResponse": {
+        "properties": {
+          "explain": {
+            "$ref": "#/components/schemas/Explain"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/AnswerMeta"
+          }
+        },
+        "type": "object"
+      },
+      "Expr": {
+        "description": "A filter over a node or an edge: the core's `Expr` in its serde JSON form, for example `{\"Label\": \"Person\"}` or `{\"Compare\": {\"path\": [\"age\"], \"op\": \"Ge\", \"value\": {\"Int\": 18}}}`. `And`, `Or` and `Not` nest at most 100 levels.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Const": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "Const"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Compare": {
+                "additionalProperties": false,
+                "properties": {
+                  "op": {
+                    "enum": [
+                      "Eq",
+                      "Ne",
+                      "Lt",
+                      "Le",
+                      "Gt",
+                      "Ge"
+                    ],
+                    "type": "string"
+                  },
+                  "path": {
+                    "description": "An attribute name, then keys into nested dicts.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "value": {
+                    "$ref": "#/components/schemas/Value"
+                  }
+                },
+                "required": [
+                  "path",
+                  "op",
+                  "value"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "Compare"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "In": {
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "description": "An attribute name, then keys into nested dicts.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "values": {
+                    "items": {
+                      "$ref": "#/components/schemas/Value"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "path",
+                  "values"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "In"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Exists": {
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "description": "An attribute name, then keys into nested dicts.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "Exists"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Label": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "Label"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "Type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "And": {
+                "items": {
+                  "$ref": "#/components/schemas/Expr"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "And"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Or": {
+                "items": {
+                  "$ref": "#/components/schemas/Expr"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "Or"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Not": {
+                "$ref": "#/components/schemas/Expr"
+              }
+            },
+            "required": [
+              "Not"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "FindRequest": {
+        "description": "Nodes matching a filter, by index or scan; paginated by id.",
+        "properties": {
+          "filter": {
+            "$ref": "#/components/schemas/Expr"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/QueryOptions"
+          }
+        },
+        "type": "object"
+      },
+      "FindResponse": {
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/AnswerMeta"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "GetCatalogResponse": {
+        "properties": {
+          "catalog": {
+            "$ref": "#/components/schemas/NamespaceCatalog"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/AnswerMeta"
+          }
+        },
+        "type": "object"
+      },
+      "GetEdgesRequest": {
+        "description": "The edges `ids`, in the order asked; at most `max_results` ids.",
+        "properties": {
+          "ids": {
+            "items": {
+              "$ref": "#/components/schemas/Uint64"
+            },
+            "type": "array"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/QueryOptions"
+          }
+        },
+        "type": "object"
+      },
+      "GetEdgesResponse": {
+        "properties": {
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/MaybeEdge"
+            },
+            "type": "array"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/AnswerMeta"
+          }
+        },
+        "type": "object"
+      },
+      "GetNamespaceStatusResponse": {
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/NamespaceStatus"
+          }
+        },
+        "type": "object"
+      },
+      "GetNodesRequest": {
+        "description": "The nodes `ids`, in the order asked; at most `max_results` ids.",
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/QueryOptions"
+          }
+        },
+        "type": "object"
+      },
+      "GetNodesResponse": {
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/AnswerMeta"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/MaybeNode"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "Group": {
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "IndexBuilding": {
+        "properties": {
+          "scanned": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "total": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
+      "IndexDef": {
+        "description": "A node property index on an attribute path.",
+        "properties": {
+          "path": {
+            "$ref": "#/components/schemas/AttrPath"
+          }
+        },
+        "type": "object"
+      },
+      "IndexReady": {
+        "properties": {},
+        "type": "object"
+      },
+      "IndexSize": {
+        "properties": {
+          "distinctKeys": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "entries": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Nodes with an indexable (scalar) value at the path."
+          },
+          "memoryBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Approximate bytes the index uses."
+          }
+        },
+        "type": "object"
+      },
+      "IndexStatus": {
+        "description": "One index of a namespace.\n\nAt most one of `ready`, `building` (`state`).",
+        "properties": {
+          "building": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/IndexBuilding"
+              }
+            ],
+            "description": "An online build is reading the nodes; reads don't use it yet."
+          },
+          "declared": {
+            "description": "Declared with `create_index`.",
+            "type": "boolean"
+          },
+          "path": {
+            "$ref": "#/components/schemas/AttrPath"
+          },
+          "ready": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/IndexReady"
+              }
+            ],
+            "description": "Built and kept up to date by every commit."
+          },
+          "size": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/IndexSize"
+              }
+            ],
+            "description": "Missing while the index is being built."
+          },
+          "unique": {
+            "description": "Needed by a unique constraint.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "Int64": {
+        "description": "A 64-bit integer as a decimal string (a JSON number is accepted too).",
+        "pattern": "^-?[0-9]+$",
+        "type": "string"
+      },
+      "Job": {
+        "description": "An analytics job, run by the core's algorithms.\n\nAt most one of `pageRank`, `degree`, `weaklyConnectedComponents`, `stronglyConnectedComponents`, `leiden`, `labelPropagation`, `coreNumber`, `triangles` (`kind`).",
+        "properties": {
+          "coreNumber": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CoreNumberJob"
+              }
+            ],
+            "description": "Counts: each node's core number."
+          },
+          "degree": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DegreeJob"
+              }
+            ],
+            "description": "Scores: the number of edges per node, normalised by n - 1."
+          },
+          "labelPropagation": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelPropagationJob"
+              }
+            ],
+            "description": "Groups (communities)."
+          },
+          "leiden": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LeidenJob"
+              }
+            ],
+            "description": "Groups (communities)."
+          },
+          "pageRank": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PageRankJob"
+              }
+            ],
+            "description": "Scores."
+          },
+          "stronglyConnectedComponents": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/StronglyConnectedComponentsJob"
+              }
+            ],
+            "description": "Groups."
+          },
+          "triangles": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TrianglesJob"
+              }
+            ],
+            "description": "Counts: the triangles through each node."
+          },
+          "weaklyConnectedComponents": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WeaklyConnectedComponentsJob"
+              }
+            ],
+            "description": "Groups."
+          }
+        },
+        "type": "object"
+      },
+      "JobResultKind": {
+        "description": "What kind of rows a job returns.\n\n- `JOB_RESULT_KIND_SCORES`: `scores`: per node, by score (highest first), then id.\n\n- `JOB_RESULT_KIND_GROUPS`: `groups`: node ids (each group sorted), biggest first, then by first id.\n\n- `JOB_RESULT_KIND_COUNTS`: `counts`: per node, by count (highest first), then id.",
+        "enum": [
+          "JOB_RESULT_KIND_UNSPECIFIED",
+          "JOB_RESULT_KIND_SCORES",
+          "JOB_RESULT_KIND_GROUPS",
+          "JOB_RESULT_KIND_COUNTS"
+        ],
+        "type": "string"
+      },
+      "LabelPropagationJob": {
+        "properties": {
+          "maxIter": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
+      "LeidenJob": {
+        "description": "Leiden; missing options take the core's defaults.",
+        "properties": {
+          "maxIter": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "randomness": {
+            "$ref": "#/components/schemas/Double"
+          },
+          "resolution": {
+            "$ref": "#/components/schemas/Double"
+          },
+          "seed": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
+      "Limits": {
+        "description": "Limits a read asks for (see the file comment).",
+        "properties": {
+          "maxEdges": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Most edges the read may examine."
+          },
+          "maxResults": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Most results in the answer: the page size of a paginated read."
+          },
+          "maxVisited": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Most nodes the read may visit."
+          }
+        },
+        "type": "object"
+      },
+      "ListNamespacesResponse": {
+        "properties": {
+          "namespaces": {
+            "description": "By name.",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceInfo"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "Lookup": {
+        "description": "How a property index is read.\n\n- `LOOKUP_POINT`: One value (`Eq`).\n\n- `LOOKUP_IN`: Several values (`In`); see `PlanIndex.in_values`.\n\n- `LOOKUP_RANGE`: A range.",
+        "enum": [
+          "LOOKUP_UNSPECIFIED",
+          "LOOKUP_POINT",
+          "LOOKUP_IN",
+          "LOOKUP_RANGE"
+        ],
+        "type": "string"
+      },
+      "MatchPatternRequest": {
+        "description": "Every match of a pattern; paginated by row.",
+        "properties": {
+          "filters": {
+            "description": "`where`: a filter per named node variable, added to the pattern's own.",
+            "items": {
+              "$ref": "#/components/schemas/VariableFilter"
+            },
+            "type": "array"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/QueryOptions"
+          },
+          "pattern": {
+            "$ref": "#/components/schemas/Pattern"
+          }
+        },
+        "type": "object"
+      },
+      "MatchPatternResponse": {
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/AnswerMeta"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/MatchRow"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "MatchRow": {
+        "description": "One match: a node id per pattern node and the edge ids per pattern\nedge (one for a single edge, the path for a variable-length one), in the\npattern's order.",
+        "properties": {
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/EdgePath"
+            },
+            "type": "array"
+          },
+          "nodes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "MaybeEdge": {
+        "description": "An edge that may not exist (in the order asked for).",
+        "properties": {
+          "edge": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Edge"
+              }
+            ],
+            "description": "Missing if there is no edge with the id."
+          }
+        },
+        "type": "object"
+      },
+      "MaybeNode": {
+        "description": "A node that may not exist (in the order asked for).",
+        "properties": {
+          "node": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Node"
+              }
+            ],
+            "description": "Missing if there is no node with the id."
+          }
+        },
+        "type": "object"
+      },
+      "Metric": {
+        "description": "The distance between two coordinate vectors.\n\n- `METRIC_UNSPECIFIED`: Euclidean (the default).",
+        "enum": [
+          "METRIC_UNSPECIFIED",
+          "METRIC_EUCLIDEAN",
+          "METRIC_MANHATTAN"
+        ],
+        "type": "string"
+      },
+      "Mutation": {
+        "description": "One change in a transaction.\n\nAt most one of `upsertNode`, `deleteNode`, `addEdge`, `upsertEdge`, `deleteEdge`, `setAttr`, `removeAttr`, `appendAttr`, `addLabel`, `removeLabel`, `setEdgeType` (`kind`).",
+        "properties": {
+          "addEdge": {
+            "$ref": "#/components/schemas/AddEdge"
+          },
+          "addLabel": {
+            "$ref": "#/components/schemas/AddLabel"
+          },
+          "appendAttr": {
+            "$ref": "#/components/schemas/AppendAttr"
+          },
+          "deleteEdge": {
+            "$ref": "#/components/schemas/DeleteEdge"
+          },
+          "deleteNode": {
+            "$ref": "#/components/schemas/DeleteNode"
+          },
+          "removeAttr": {
+            "$ref": "#/components/schemas/RemoveAttr"
+          },
+          "removeLabel": {
+            "$ref": "#/components/schemas/RemoveLabel"
+          },
+          "setAttr": {
+            "$ref": "#/components/schemas/SetAttr"
+          },
+          "setEdgeType": {
+            "$ref": "#/components/schemas/SetEdgeType"
+          },
+          "upsertEdge": {
+            "$ref": "#/components/schemas/UpsertEdge"
+          },
+          "upsertNode": {
+            "$ref": "#/components/schemas/UpsertNode"
+          }
+        },
+        "type": "object"
+      },
+      "NamespaceCatalog": {
+        "description": "A namespace's indexes and constraints, sorted.",
+        "properties": {
+          "constraints": {
+            "items": {
+              "$ref": "#/components/schemas/Constraint"
+            },
+            "type": "array"
+          },
+          "indexes": {
+            "items": {
+              "$ref": "#/components/schemas/IndexDef"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "NamespaceEvent": {
+        "description": "An event of the namespace log.",
+        "properties": {
+          "fingerprint": {
+            "description": "The request's fingerprint (with a key).",
+            "format": "int64",
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The namespace's id: assigned at creation, never reused."
+          },
+          "idempotencyKey": {
+            "description": "The idempotency key of the request, if it had one.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/NamespaceEventKind"
+          },
+          "name": {
+            "type": "string"
+          },
+          "seq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The event's number, from 1."
+          },
+          "timeMicros": {
+            "$ref": "#/components/schemas/Int64"
+          }
+        },
+        "type": "object"
+      },
+      "NamespaceEventKind": {
+        "enum": [
+          "NAMESPACE_EVENT_KIND_UNSPECIFIED",
+          "NAMESPACE_EVENT_KIND_CREATE",
+          "NAMESPACE_EVENT_KIND_DROP"
+        ],
+        "type": "string"
+      },
+      "NamespaceInfo": {
+        "description": "A live namespace.",
+        "properties": {
+          "createdMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Int64"
+              }
+            ],
+            "description": "The time of its create event, in microseconds since 1970 (UTC)."
+          },
+          "createdSeq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The number of its create event."
+          },
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "NamespaceStatus": {
+        "description": "What an open namespace reports about itself.",
+        "properties": {
+          "checkpoint": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The newest checkpoint's seq."
+          },
+          "checkpointFailure": {
+            "description": "The last checkpoint error, if the last checkpoint failed.",
+            "type": "string"
+          },
+          "constraints": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "createdMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Int64"
+              }
+            ],
+            "description": "When the namespace was created, in microseconds since 1970 (UTC); 0\nfor one that predates layout 4."
+          },
+          "edges": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "indexes": {
+            "description": "Declared indexes, those unique constraints need, and builds in\nprogress, sorted by path.",
+            "items": {
+              "$ref": "#/components/schemas/IndexStatus"
+            },
+            "type": "array"
+          },
+          "memoryBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Approximate bytes the graph uses, indexes included."
+          },
+          "name": {
+            "type": "string"
+          },
+          "nodes": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "readOnly": {
+            "description": "Why the namespace is read-only, if it is.",
+            "type": "string"
+          },
+          "recovery": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RecoveryReport"
+              }
+            ],
+            "description": "What recovery did to this namespace when the server's store opened."
+          },
+          "seq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The seq of the last applied commit."
+          },
+          "syncedSeq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The highest seq known to be durable; missing under the `off` fsync\npolicy until an explicit sync."
+          }
+        },
+        "type": "object"
+      },
+      "NeighbourhoodRequest": {
+        "description": "The nodes within `depth` edges of the seeds; paginated by id.",
+        "properties": {
+          "depth": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "How many edges away a node may be (0: the seeds only)."
+          },
+          "direction": {
+            "$ref": "#/components/schemas/Direction"
+          },
+          "edgeFilter": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Expr"
+              }
+            ],
+            "description": "Follow only edges matching this filter."
+          },
+          "edgeTypes": {
+            "description": "Follow only edges with one of these types (all if empty).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "nodeFilter": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Expr"
+              }
+            ],
+            "description": "Return only nodes matching this filter (it doesn't prune the search)."
+          },
+          "options": {
+            "$ref": "#/components/schemas/QueryOptions"
+          },
+          "seeds": {
+            "description": "Ids that don't exist are skipped.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "NeighbourhoodResponse": {
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/AnswerMeta"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "Node": {
+        "description": "A node, as read from the store.",
+        "properties": {
+          "attr": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Value"
+            },
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "labels": {
+            "description": "Sorted by name.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "meta": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Value"
+            },
+            "description": "User meta (without the database's `iwdb.*` keys).",
+            "type": "object"
+          },
+          "version": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Starts at 1, one more for every commit that wrote the node."
+          }
+        },
+        "type": "object"
+      },
+      "Order": {
+        "description": "The order of a traversal.\n\n- `ORDER_UNSPECIFIED`: Breadth first (the default).\n\n- `ORDER_BFS`: Breadth first: nodes by distance from the start.\n\n- `ORDER_DFS`: Depth first, pre-order.",
+        "enum": [
+          "ORDER_UNSPECIFIED",
+          "ORDER_BFS",
+          "ORDER_DFS"
+        ],
+        "type": "string"
+      },
+      "PageRankJob": {
+        "description": "PageRank; missing options take the core's defaults (those of networkx).",
+        "properties": {
+          "alpha": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Double"
+              }
+            ],
+            "description": "Damping factor."
+          },
+          "maxIter": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "tol": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Double"
+              }
+            ],
+            "description": "Converged when the L1 change of the ranks is below n * tol; 0 runs\nexactly `max_iter` iterations."
+          }
+        },
+        "type": "object"
+      },
+      "Path": {
+        "properties": {
+          "cost": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Double"
+              }
+            ],
+            "description": "The sum of the edge costs (for BFS: the number of edges)."
+          },
+          "nodes": {
+            "description": "From the start to the end, both included.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "PathAStar": {
+        "properties": {
+          "coords": {
+            "$ref": "#/components/schemas/Coords"
+          },
+          "metric": {
+            "$ref": "#/components/schemas/Metric"
+          }
+        },
+        "type": "object"
+      },
+      "PathBfs": {
+        "properties": {},
+        "type": "object"
+      },
+      "PathDijkstra": {
+        "properties": {},
+        "type": "object"
+      },
+      "PathMethod": {
+        "description": "The algorithm of a shortest path. Without a kind: BFS.\n\nAt most one of `bfs`, `dijkstra`, `aStar` (`kind`).",
+        "properties": {
+          "aStar": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PathAStar"
+              }
+            ],
+            "description": "Cheapest path by `cost`, guided by the distance between node\ncoordinates (which must not overestimate the cost)."
+          },
+          "bfs": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PathBfs"
+              }
+            ],
+            "description": "Fewest edges (bidirectional BFS); `cost` must be unit."
+          },
+          "dijkstra": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PathDijkstra"
+              }
+            ],
+            "description": "Cheapest path by `cost`."
+          }
+        },
+        "type": "object"
+      },
+      "Pattern": {
+        "description": "A graph pattern: the core's Cypher-like text, for example `(a:Person {age: 30})-[:knows*1..3]->(b)`, or, for patterns the text can't express (filters other than property equality, bound ids), the core's `Pattern` in its serde JSON form (an object with `nodes` and `edges`).",
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "properties": {
+              "edges": {
+                "type": "array"
+              },
+              "nodes": {
+                "type": "array"
+              }
+            },
+            "required": [
+              "nodes",
+              "edges"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "Plan": {
+        "description": "Where `Find` gets its candidates from. Unions nest as the filter's `Or`s\ndo.\n\nAt most one of `empty`, `label`, `index`, `union`, `scan`, `other` (`kind`).",
+        "properties": {
+          "empty": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PlanEmpty"
+              }
+            ],
+            "description": "The filter is `Const(false)`: nothing to read."
+          },
+          "index": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PlanIndex"
+              }
+            ],
+            "description": "A property index."
+          },
+          "label": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PlanLabel"
+              }
+            ],
+            "description": "The label index."
+          },
+          "other": {
+            "description": "A plan of a newer core, in its debug form.",
+            "type": "string"
+          },
+          "scan": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PlanScan"
+              }
+            ],
+            "description": "Every node is a candidate."
+          },
+          "union": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PlanUnion"
+              }
+            ],
+            "description": "The union of the plans of an `Or`."
+          }
+        },
+        "type": "object"
+      },
+      "PlanEmpty": {
+        "properties": {},
+        "type": "object"
+      },
+      "PlanIndex": {
+        "properties": {
+          "inValues": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "For `LOOKUP_IN`: how many values."
+          },
+          "lookup": {
+            "$ref": "#/components/schemas/Lookup"
+          },
+          "path": {
+            "$ref": "#/components/schemas/AttrPath"
+          }
+        },
+        "type": "object"
+      },
+      "PlanLabel": {
+        "properties": {
+          "label": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "PlanScan": {
+        "properties": {},
+        "type": "object"
+      },
+      "PlanUnion": {
+        "properties": {
+          "plans": {
+            "items": {
+              "$ref": "#/components/schemas/Plan"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "Projection": {
+        "description": "What a job runs on: every node, and the edges followed in `direction`,\nweighted by `cost`.",
+        "properties": {
+          "cost": {
+            "$ref": "#/components/schemas/EdgeCost"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/Direction"
+          }
+        },
+        "type": "object"
+      },
+      "QueryOptions": {
+        "description": "Options of every read.",
+        "properties": {
+          "cursor": {
+            "description": "Continue a paginated read: the `next` of the previous page, with the\nsame request. Empty: the first page.",
+            "type": "string"
+          },
+          "history": {
+            "description": "The history `min_seq` belongs to (32 hex digits); a seq of another\nhistory is `invalid_argument`. Empty: not checked.",
+            "type": "string"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/Limits"
+          },
+          "minSeq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Read-your-writes: wait until the namespace has applied this seq."
+          },
+          "partial": {
+            "description": "When a limit is reached: false fails with `budget_exceeded`, true\nanswers with what was found and `truncated` set (and no cursor).",
+            "type": "boolean"
+          },
+          "timeoutMs": {
+            "description": "How long the read may take, in milliseconds, counted from when the\nserver starts the request (the `min_seq` wait included). The smaller of\nthis and the `grpc-timeout` header applies (ADR 0026).",
+            "format": "int64",
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "RandomWalksRequest": {
+        "description": "Random walks from a node.",
+        "properties": {
+          "allowRevisit": {
+            "description": "Whether a walk may visit a node twice.",
+            "type": "boolean"
+          },
+          "maxLength": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Most nodes per walk (at least 1)."
+          },
+          "minLength": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Drop walks with fewer nodes."
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/QueryOptions"
+          },
+          "seed": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The same seed gives the same walks for the same graph state in the same\nserver process; random if missing."
+          },
+          "start": {
+            "type": "string"
+          },
+          "walks": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "How many walks to attempt; duplicates are removed."
+          }
+        },
+        "type": "object"
+      },
+      "RandomWalksResponse": {
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/AnswerMeta"
+          },
+          "walks": {
+            "items": {
+              "$ref": "#/components/schemas/Walk"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "RecoveryReport": {
+        "description": "What recovery found and did to one namespace.",
+        "properties": {
+          "checkpoint": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The seq of the checkpoint recovery started from; missing if it started\nfrom an empty namespace."
+          },
+          "createdIndexes": {
+            "description": "Catalog indexes the loaded checkpoint didn't have, now built.",
+            "items": {
+              "$ref": "#/components/schemas/AttrPath"
+            },
+            "type": "array"
+          },
+          "droppedIndexes": {
+            "description": "Indexes the checkpoint had but the catalog doesn't list, now dropped.",
+            "items": {
+              "$ref": "#/components/schemas/AttrPath"
+            },
+            "type": "array"
+          },
+          "replayed": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "WAL records replayed on top of the checkpoint."
+          },
+          "seq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The seq the namespace was recovered to."
+          },
+          "skippedCheckpoints": {
+            "description": "Newer checkpoints that failed to load, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/SkippedCheckpoint"
+            },
+            "type": "array"
+          },
+          "tornTail": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CutTail"
+              }
+            ],
+            "description": "The torn tail cut off the log, if any."
+          }
+        },
+        "type": "object"
+      },
+      "RemoveAttr": {
+        "description": "Remove one top-level attribute (nothing to remove is fine).",
+        "properties": {
+          "expectedVersion": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "key": {
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/Target"
+          }
+        },
+        "type": "object"
+      },
+      "RemoveLabel": {
+        "properties": {
+          "expectedVersion": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Score": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "score": {
+            "$ref": "#/components/schemas/Double"
+          }
+        },
+        "type": "object"
+      },
+      "SetAttr": {
+        "description": "Set one top-level attribute.",
+        "properties": {
+          "expectedVersion": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "key": {
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/Target"
+          },
+          "value": {
+            "$ref": "#/components/schemas/Value"
+          }
+        },
+        "type": "object"
+      },
+      "SetEdgeType": {
+        "description": "Set (present) or clear (missing) an edge's type.",
+        "properties": {
+          "expectedVersion": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ShortestPathRequest": {
+        "description": "A shortest path between two nodes.",
+        "properties": {
+          "cost": {
+            "$ref": "#/components/schemas/EdgeCost"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/Direction"
+          },
+          "from": {
+            "type": "string"
+          },
+          "maxCost": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Double"
+              }
+            ],
+            "description": "Ignore paths that cost more (for BFS: have more edges)."
+          },
+          "maxDepth": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "BFS only: at most this many edges."
+          },
+          "method": {
+            "$ref": "#/components/schemas/PathMethod"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/QueryOptions"
+          },
+          "to": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ShortestPathResponse": {
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/AnswerMeta"
+          },
+          "path": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Path"
+              }
+            ],
+            "description": "Missing if there is no path."
+          }
+        },
+        "type": "object"
+      },
+      "SkippedCheckpoint": {
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why it failed to load.",
+            "type": "string"
+          },
+          "seq": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
+      "StronglyConnectedComponentsJob": {
+        "properties": {},
+        "type": "object"
+      },
+      "SubgraphRequest": {
+        "description": "The nodes within `depth` edges of the seeds and the edges between them.",
+        "properties": {
+          "depth": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/Direction"
+          },
+          "edgeFilter": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Expr"
+              }
+            ],
+            "description": "Follow, and return, only edges matching this filter."
+          },
+          "edgeTypes": {
+            "description": "Follow, and return, only edges with one of these types (all if empty).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/QueryOptions"
+          },
+          "seeds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "SubgraphResponse": {
+        "properties": {
+          "edges": {
+            "description": "Sorted by id over the whole stream.",
+            "items": {
+              "$ref": "#/components/schemas/Edge"
+            },
+            "type": "array"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/AnswerMeta"
+          },
+          "nodes": {
+            "description": "Sorted by id over the whole stream.",
+            "items": {
+              "$ref": "#/components/schemas/Node"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "Target": {
+        "description": "A node (by id) or an edge (by id).\n\nAt most one of `node`, `edge` (`kind`).",
+        "properties": {
+          "edge": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "node": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TraverseRequest": {
+        "description": "A breadth- or depth-first traversal, in traversal order.",
+        "properties": {
+          "depth": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "How many edges away from the start a node may be (missing: any)."
+          },
+          "direction": {
+            "$ref": "#/components/schemas/Direction"
+          },
+          "edgeFilter": {
+            "$ref": "#/components/schemas/Expr"
+          },
+          "edgeTypes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/QueryOptions"
+          },
+          "order": {
+            "$ref": "#/components/schemas/Order"
+          },
+          "start": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TraverseResponse": {
+        "properties": {
+          "ids": {
+            "description": "Node ids, in traversal order.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/AnswerMeta"
+          }
+        },
+        "type": "object"
+      },
+      "TrianglesJob": {
+        "properties": {},
+        "type": "object"
+      },
+      "Uint64": {
+        "description": "An unsigned 64-bit integer as a decimal string (a JSON number is accepted too).",
+        "pattern": "^[0-9]+$",
+        "type": "string"
+      },
+      "UnitCost": {
+        "description": "Every edge costs 1 (hop count).",
+        "properties": {},
+        "type": "object"
+      },
+      "UpsertEdge": {
+        "description": "Replace an edge's attributes and meta, or add the edge (for\n`EdgeKey.endpoints`). Its id is in `CommitResult.edge_ids`.",
+        "properties": {
+          "attr": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Value"
+            },
+            "type": "object"
+          },
+          "expectedVersion": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "key": {
+            "$ref": "#/components/schemas/EdgeKey"
+          },
+          "meta": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Value"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "UpsertNode": {
+        "description": "Create the node, or replace its attributes and meta. The labels are\nadded; labels the node has already are kept.",
+        "properties": {
+          "attr": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Value"
+            },
+            "type": "object"
+          },
+          "expectedVersion": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "meta": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Value"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "Value": {
+        "description": "An attribute or meta value: the core's `Value` in its serde JSON form, for example `{\"Int\": 30}`, `{\"String\": \"ann\"}` or `\"None\"`. Lists and dicts nest at most 100 levels.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "String": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "String"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Int": {
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "Int"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Float": {
+                "$ref": "#/components/schemas/Double"
+              }
+            },
+            "required": [
+              "Float"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Half": {
+                "description": "Stored at half precision.",
+                "type": "number"
+              }
+            },
+            "required": [
+              "Half"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Bool": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "Bool"
+            ],
+            "type": "object"
+          },
+          {
+            "const": "None"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "List": {
+                "items": {
+                  "$ref": "#/components/schemas/Value"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "List"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Dict": {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/Value"
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "Dict"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Bytes": {
+                "contentEncoding": "base64",
+                "type": "string"
+              }
+            },
+            "required": [
+              "Bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Date": {
+                "format": "date",
+                "type": "string"
+              }
+            },
+            "required": [
+              "Date"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "DateTime": {
+                "description": "ISO 8601, with or without a UTC offset.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "DateTime"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "VariableFilter": {
+        "properties": {
+          "filter": {
+            "$ref": "#/components/schemas/Expr"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Version": {
+        "description": "The new version of an entity a commit wrote.",
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/Target"
+          },
+          "version": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
+      "WaitForSeqRequest": {
+        "properties": {
+          "namespace": {
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/QueryOptions"
+          },
+          "seq": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
+      "WaitForSeqResponse": {
+        "properties": {
+          "seq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The namespace's seq once it had applied the seq asked for."
+          }
+        },
+        "type": "object"
+      },
+      "Walk": {
+        "properties": {
+          "nodes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "WeaklyConnectedComponentsJob": {
+        "properties": {},
+        "type": "object"
+      },
+      "WeightedCost": {
+        "description": "The edge attribute `key`, or `default_weight` for edges without it.\nWeights must be non-negative numbers.",
+        "properties": {
+          "defaultWeight": {
+            "$ref": "#/components/schemas/Double"
+          },
+          "key": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Work": {
+        "description": "How much work a read did.",
+        "properties": {
+          "edges": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "visited": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "The `Database` trait over HTTP/JSON, with the messages of the gRPC contract (`proto/ironweaver_db/v1`) in their proto3 JSON form. See documentation/api/rest.md.",
+    "license": {
+      "identifier": "MIT",
+      "name": "MIT"
+    },
+    "title": "Ironweaver DB REST API",
+    "version": "v1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/namespaces": {
+      "get": {
+        "operationId": "listNamespaces",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListNamespacesResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "List the namespaces"
+      }
+    },
+    "/v1/namespaces/{ns}": {
+      "delete": {
+        "description": "Drop a namespace and its data. `default` can't be dropped.",
+        "operationId": "dropNamespace",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DropNamespaceRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DropNamespaceResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Drop a namespace"
+      },
+      "get": {
+        "operationId": "getNamespaceStatus",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetNamespaceStatusResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "A namespace's status"
+      },
+      "put": {
+        "description": "Create a namespace. With a key, a retry returns the original event.",
+        "operationId": "createNamespace",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateNamespaceRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateNamespaceResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Create a namespace"
+      }
+    },
+    "/v1/namespaces/{ns}/analyze": {
+      "post": {
+        "description": "An analytics job on a projection of a namespace.",
+        "operationId": "analyze",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyzeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyzeResponse"
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalyzeResponse"
+                }
+              }
+            },
+            "description": "The answer. With `Accept: application/x-ndjson`, the answer's chunks, one per line, `meta` in the last; otherwise one message."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Run an analytics job"
+      }
+    },
+    "/v1/namespaces/{ns}/catalog": {
+      "get": {
+        "operationId": "getCatalog",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Read-your-writes: wait until the namespace has applied this seq.",
+            "in": "query",
+            "name": "min_seq",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The history `min_seq` belongs to (32 hex digits).",
+            "in": "query",
+            "name": "history",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "How long the read may take, in milliseconds.",
+            "in": "query",
+            "name": "timeout_ms",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Most results in the answer.",
+            "in": "query",
+            "name": "max_results",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Most nodes the read may visit.",
+            "in": "query",
+            "name": "max_visited",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Most edges the read may examine.",
+            "in": "query",
+            "name": "max_edges",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Answer with what was found when a limit is reached.",
+            "in": "query",
+            "name": "partial",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Continue a paginated read: the `next` of the previous page.",
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetCatalogResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "A namespace's catalog"
+      },
+      "post": {
+        "description": "Commit a catalog change (an index is built online).",
+        "operationId": "commitCatalog",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommitCatalogRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitCatalogResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Commit a catalog change"
+      }
+    },
+    "/v1/namespaces/{ns}/commit": {
+      "post": {
+        "description": "Commit a transaction: all mutations or none, durable per the server's\nfsync policy when it returns.",
+        "operationId": "commit",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Commit a transaction"
+      }
+    },
+    "/v1/namespaces/{ns}/edges/{id}": {
+      "get": {
+        "description": "The edges `ids`, in the order asked; at most `max_results` ids.",
+        "operationId": "getEdge",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The edge's id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Read-your-writes: wait until the namespace has applied this seq.",
+            "in": "query",
+            "name": "min_seq",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The history `min_seq` belongs to (32 hex digits).",
+            "in": "query",
+            "name": "history",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "How long the read may take, in milliseconds.",
+            "in": "query",
+            "name": "timeout_ms",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Most results in the answer.",
+            "in": "query",
+            "name": "max_results",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Most nodes the read may visit.",
+            "in": "query",
+            "name": "max_visited",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Most edges the read may examine.",
+            "in": "query",
+            "name": "max_edges",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Answer with what was found when a limit is reached.",
+            "in": "query",
+            "name": "partial",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Continue a paginated read: the `next` of the previous page.",
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetEdgesResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "One edge (404 if missing)"
+      }
+    },
+    "/v1/namespaces/{ns}/explain": {
+      "post": {
+        "description": "How `Find` would read a filter.",
+        "operationId": "explain",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplainResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "How find would read a filter"
+      }
+    },
+    "/v1/namespaces/{ns}/find": {
+      "post": {
+        "description": "Nodes matching a filter, by index or scan; paginated by id.",
+        "operationId": "find",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FindRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindResponse"
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindResponse"
+                }
+              }
+            },
+            "description": "The answer. With `Accept: application/x-ndjson`, the answer's chunks, one per line, `meta` in the last; otherwise one message."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Nodes matching a filter"
+      }
+    },
+    "/v1/namespaces/{ns}/get-edges": {
+      "post": {
+        "description": "The edges `ids`, in the order asked; at most `max_results` ids.",
+        "operationId": "getEdges",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GetEdgesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetEdgesResponse"
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetEdgesResponse"
+                }
+              }
+            },
+            "description": "The answer. With `Accept: application/x-ndjson`, the answer's chunks, one per line, `meta` in the last; otherwise one message."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Edges by id"
+      }
+    },
+    "/v1/namespaces/{ns}/get-nodes": {
+      "post": {
+        "description": "The nodes `ids`, in the order asked; at most `max_results` ids.",
+        "operationId": "getNodes",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GetNodesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetNodesResponse"
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetNodesResponse"
+                }
+              }
+            },
+            "description": "The answer. With `Accept: application/x-ndjson`, the answer's chunks, one per line, `meta` in the last; otherwise one message."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Nodes by id"
+      }
+    },
+    "/v1/namespaces/{ns}/match": {
+      "post": {
+        "description": "Every match of a pattern; paginated by row.",
+        "operationId": "matchPattern",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MatchPatternRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchPatternResponse"
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchPatternResponse"
+                }
+              }
+            },
+            "description": "The answer. With `Accept: application/x-ndjson`, the answer's chunks, one per line, `meta` in the last; otherwise one message."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Match a pattern"
+      }
+    },
+    "/v1/namespaces/{ns}/neighbourhood": {
+      "post": {
+        "description": "The nodes within `depth` edges of the seeds; paginated by id.",
+        "operationId": "neighbourhood",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NeighbourhoodRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NeighbourhoodResponse"
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/NeighbourhoodResponse"
+                }
+              }
+            },
+            "description": "The answer. With `Accept: application/x-ndjson`, the answer's chunks, one per line, `meta` in the last; otherwise one message."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Nodes near seeds"
+      }
+    },
+    "/v1/namespaces/{ns}/nodes/{id}": {
+      "get": {
+        "description": "The nodes `ids`, in the order asked; at most `max_results` ids.",
+        "operationId": "getNode",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The node's id (percent-encoded).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Read-your-writes: wait until the namespace has applied this seq.",
+            "in": "query",
+            "name": "min_seq",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The history `min_seq` belongs to (32 hex digits).",
+            "in": "query",
+            "name": "history",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "How long the read may take, in milliseconds.",
+            "in": "query",
+            "name": "timeout_ms",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Most results in the answer.",
+            "in": "query",
+            "name": "max_results",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Most nodes the read may visit.",
+            "in": "query",
+            "name": "max_visited",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Most edges the read may examine.",
+            "in": "query",
+            "name": "max_edges",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Answer with what was found when a limit is reached.",
+            "in": "query",
+            "name": "partial",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Continue a paginated read: the `next` of the previous page.",
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetNodesResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "One node (404 if missing)"
+      }
+    },
+    "/v1/namespaces/{ns}/random-walks": {
+      "post": {
+        "description": "Random walks from a node.",
+        "operationId": "randomWalks",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RandomWalksRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RandomWalksResponse"
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/RandomWalksResponse"
+                }
+              }
+            },
+            "description": "The answer. With `Accept: application/x-ndjson`, the answer's chunks, one per line, `meta` in the last; otherwise one message."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Random walks"
+      }
+    },
+    "/v1/namespaces/{ns}/shortest-path": {
+      "post": {
+        "description": "A shortest path between two nodes.",
+        "operationId": "shortestPath",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShortestPathRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShortestPathResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "A shortest path"
+      }
+    },
+    "/v1/namespaces/{ns}/subgraph": {
+      "post": {
+        "description": "The nodes within `depth` edges of the seeds and the edges between them.",
+        "operationId": "subgraph",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubgraphRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubgraphResponse"
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubgraphResponse"
+                }
+              }
+            },
+            "description": "The answer. With `Accept: application/x-ndjson`, the answer's chunks, one per line, `meta` in the last; otherwise one message."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "An induced subgraph"
+      }
+    },
+    "/v1/namespaces/{ns}/traverse": {
+      "post": {
+        "description": "A breadth- or depth-first traversal, in traversal order.",
+        "operationId": "traverse",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TraverseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraverseResponse"
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/TraverseResponse"
+                }
+              }
+            },
+            "description": "The answer. With `Accept: application/x-ndjson`, the answer's chunks, one per line, `meta` in the last; otherwise one message."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Breadth or depth first order"
+      }
+    },
+    "/v1/namespaces/{ns}/wait": {
+      "post": {
+        "description": "Wait until the namespace has applied a seq.",
+        "operationId": "waitForSeq",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WaitForSeqRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WaitForSeqResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Wait until a seq is applied"
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "operationId": "openapi",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The OpenAPI document."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "This API's OpenAPI document"
+      }
+    }
+  },
+  "security": [],
+  "servers": [
+    {
+      "url": "http://127.0.0.1:7600"
+    }
+  ]
+}

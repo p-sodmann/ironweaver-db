@@ -64,6 +64,7 @@ documentation/             # design, steps, ADRs
   cargo test --workspace --all-features
   ```
 - Python bindings: `maturin develop -m crates/iwdb-python/Cargo.toml`, then `pytest`.
+- Cargo never deletes old build artifacts, so `target/` grows with every toolchain bump, edition change, feature set and test binary (it can reach tens of GB). Run `cargo clean` after a toolchain or edition bump, and whenever `target/` passes about 20 GB (`du -sh target`). For a partial cleanup, `cargo sweep --toolchains` or `cargo sweep --time 7` (from `cargo-sweep`) removes only stale artifacts.
 - Use `proptest` for property tests, `cargo-fuzz` for fuzz targets, `criterion` for benchmarks, and a failpoint crate for fault injection.
 
 ## Code conventions

@@ -129,6 +129,9 @@ fn the_v1_backup_verifies_and_its_manifest_reads() {
 #[test]
 fn the_v2_backup_verifies_its_manifest_reads_and_it_restores() {
     let dir = fixture(2).join("backup");
+    // Git doesn't keep empty directories, and a placeholder file would be a
+    // file the manifest doesn't list: namespace `b` has no checkpoint yet
+    fs::create_dir_all(dir.join("ns/00000000000000000003/checkpoints")).unwrap();
     let before = snapshot(&dir);
     let report = verify(&dir).unwrap();
     assert!(report.is_ok(), "{:#?}", report.problems);

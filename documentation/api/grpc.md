@@ -1,6 +1,6 @@
 # gRPC API
 
-The `iwdb-server` binary serves a data directory over gRPC (step 11). The contract is `proto/ironweaver_db/v1/*.proto`, package `ironweaver_db.v1`, service `DatabaseService`. Every RPC is one operation of the `Database` trait (`crates/iwdb-query/src/service.rs`) with the same semantics, limits and error codes as the embedded store: the server only translates (design rule 8).
+The `iwdb-server` binary serves a data directory over gRPC (step 11) and, on the same port, over REST/JSON (step 12, [rest.md](rest.md)). The contract is `proto/ironweaver_db/v1/*.proto`, package `ironweaver_db.v1`, service `DatabaseService`. Every RPC is one operation of the `Database` trait (`crates/iwdb-query/src/service.rs`) with the same semantics, limits and error codes as the embedded store: the server only translates (design rule 8).
 
 Decisions: [ADR 0023](../adr/0023-wire-encoding-of-values-filters-and-patterns.md) (encoding), [0024](../adr/0024-the-rust-grpc-client.md) (Rust client), [0025](../adr/0025-server-streaming.md) (streaming), [0026](../adr/0026-deadlines-over-grpc.md) (deadlines), [0027](../adr/0027-graceful-shutdown.md) (shutdown), [0028](../adr/0028-internal-apply-errors-abort.md) (aborts).
 
@@ -14,7 +14,7 @@ Only `data_dir` is required (relative to the config file); everything else has a
 
 ```toml
 data_dir = "/var/lib/iwdb"
-listen = "127.0.0.1:7600"
+listen = "127.0.0.1:7600"           # gRPC and REST
 
 [store]
 fsync = "always"                  # always | group | off (guarantees.md)
@@ -24,7 +24,7 @@ checkpoint_on_shutdown = true
 
 [server]
 drain_timeout_secs = 30
-max_message_bytes = 67108864      # largest request or answer message (64 MiB)
+max_message_bytes = 67108864      # largest request or answer message (64 MiB); REST: request body
 workers = 0                       # threads running requests (0: one per CPU)
 queue = 1024                      # requests waiting for a worker; more fail with `unavailable`
 
@@ -117,7 +117,7 @@ Examples: `{"name": "ann"}`'s value is `00 03 61 6e 6e`; `age >= 18` is `01 01 0
 
 **Patterns** are best sent as the core's text (`(a:Person {age: 30})-[:knows*1..3]->(b)`); `postcard` carries the patterns the text can't express (filters other than property equality, bound ids). The Rust client sends the text whenever `Pattern::to_text` accepts the pattern.
 
-REST (step 12) shows these three messages in the core's JSON form instead (`{"Int": 30}`, `{"Label": "Person"}`, a pattern as its text).
+REST ([rest.md](rest.md)) shows these three messages in the core's JSON form instead (`{"Int": 30}`, `{"Label": "Person"}`, a pattern as its text), with the same depth limits.
 
 ## Options and limits
 
@@ -143,7 +143,7 @@ A failed call ends with the gRPC status of its error code, and the code itself, 
 
 ## Shutdown
 
-On SIGINT or SIGTERM the server stops accepting connections and sends every connection HTTP/2 GOAWAY (new calls fail with `UNAVAILABLE`), lets running calls finish for up to `drain_timeout_secs`, and then closes the connections still open, which cancels their reads. Commits that were accepted are applied. It then flushes every namespace's WAL, writes a checkpoint (if `checkpoint_on_shutdown`) and releases the data directory: every commit acknowledged before shutdown is durable, whatever the fsync policy ([ADR 0027](../adr/0027-graceful-shutdown.md)).
+On SIGINT or SIGTERM the server stops accepting connections and sends every HTTP/2 connection GOAWAY (new calls fail with `UNAVAILABLE`; HTTP/1.1 connections of REST clients close after their current request), lets running calls finish for up to `drain_timeout_secs`, and then closes the connections still open, which cancels their reads. Commits that were accepted are applied. It then flushes every namespace's WAL, writes a checkpoint (if `checkpoint_on_shutdown`) and releases the data directory: every commit acknowledged before shutdown is durable, whatever the fsync policy ([ADR 0027](../adr/0027-graceful-shutdown.md)).
 
 ## The Rust client
 

@@ -13,7 +13,7 @@ repository = "https://github.com/p-sodmann/ironweaver-db"
 
 [workspace.dependencies]
 # Pinned git revision until 0.2.0 is on crates.io; see documentation/adr/0002-ironweaver-core-dependency.md.
-ironweaver-core = { git = "https://github.com/p-sodmann/Ironweaver", rev = "ca308f090b85722c3698c744371350725f140523" }
+ironweaver-core = { git = "https://github.com/p-sodmann/Ironweaver", rev = "7e7b7fa40e3224b512d59d046f28b5bc0ffe7144" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 proptest = "1"
@@ -45,6 +45,21 @@ toml = { version = "1", default-features = false, features = ["parse", "serde"] 
 # Build: generated code from the protos, compiled by protox (pure Rust: no protoc)
 tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }
 protox = "0.9"
+# REST (step 12, iwdb-server only): axum routes the JSON API next to tonic
+# (axum is tonic's own router); pbjson generates the proto3 JSON serde of
+# the messages, so REST and gRPC share one schema (ADR 0030)
+axum = { version = "0.8", default-features = false, features = ["query"] }
+pbjson = "0.9"
+pbjson-build = "0.9"
+# The descriptor set, decoded to generate the OpenAPI document (already in
+# the tree through protox)
+prost-types = "0.14"
+# Request bodies with a size limit, and streamed answers (already in the
+# tree through hyper and tonic)
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+tower-service = "0.3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

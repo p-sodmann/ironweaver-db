@@ -1,0 +1,4 @@
+# Redocly CLI: validates documentation/api/openapi.json (the REST API, step
+# 12) in CI: `npx @redocly/cli lint documentation/api/openapi.json`.
+extends:
+  - recommended

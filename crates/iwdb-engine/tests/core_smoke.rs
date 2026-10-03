@@ -444,25 +444,39 @@ fn value_serde_and_the_file_format_agree_on_depth() {
     }
 }
 
-/// Not fixed upstream (draft 22): the serde form of `Value` and `Expr`
-/// can't be read from JSON with serde_json beyond 64 levels of list, dict
-/// or `And` / `Or` nesting (each is two JSON levels, and serde_json stops at
-/// 128), although the core accepts 100. A reader can't lift serde_json's
-/// limit safely: `Expr`'s struct variants skip unknown fields, and skipping
-/// recurses without the core's depth counters. gRPC is unaffected (postcard,
-/// ADR 0023); REST (step 12) needs the fix. When it lands, the last
-/// assertion fails: drop it, and read JSON with the core's reader.
+/// Fixed upstream (#57): serde_json alone still stops at 64 levels of list,
+/// dict or `And` / `Or` nesting (each is two JSON levels, and serde_json
+/// stops at 128), but `Value`, `Expr` and `Pattern::from_json_str` lift its
+/// limit and rely on the core's counters: 100 levels are read, 101 are
+/// refused with the core's message. That is safe because unknown fields
+/// are refused instead of skipped (skipping recursed past the counters).
+/// REST reads JSON with these (step 12).
 #[test]
-fn value_serde_json_stops_at_64_levels_and_expr_skips_unknown_fields() {
-    let read = |v: &Value| serde_json::from_str::<Value>(&serde_json::to_string(v).expect("write"));
-    assert!(read(&nest(63, Value::Int(1))).is_ok(), "depth 64");
-    let e = read(&nest(64, Value::Int(1))).expect_err("depth 65, valid for the core");
+fn json_is_read_up_to_the_cores_depth_limits_and_unknown_fields_are_refused() {
+    let json = |v: &Value| serde_json::to_string(v).expect("write");
+    let e = serde_json::from_str::<Value>(&json(&nest(64, Value::Int(1)))).expect_err("serde_json's own limit");
     assert!(e.to_string().contains("recursion limit exceeded"), "{}", e);
-    let and = (1..65).fold(Expr::Const(true), |e, _| Expr::And(vec![e]));
-    assert!(serde_json::from_str::<Expr>(&serde_json::to_string(&and).expect("write")).is_err());
-    // Unknown fields are skipped, however deeply they nest
-    let junk = format!(r#"{{"Exists":{{"path":["a"],"junk":{}1{}}}}}"#, "[".repeat(100), "]".repeat(100));
-    assert!(serde_json::from_str::<Expr>(&junk).is_ok_and(|e| e == Expr::Exists { path: path("a") }));
+    let deep = nest(99, Value::Int(1));
+    assert_eq!(Value::from_json_str(&json(&deep)).expect("depth 100"), deep);
+    // Writing refuses a value the core refuses, so wrap one level by hand
+    let e = Value::from_json_str(&format!(r#"{{"List":[{}]}}"#, json(&deep))).expect_err("depth 101");
+    assert!(e.to_string().contains("nested more than 100 levels"), "{}", e);
+
+    let and = |levels: usize| (1..levels).fold(Expr::Const(true), |e, _| Expr::And(vec![e]));
+    let text = |e: &Expr| serde_json::to_string(e).expect("write");
+    assert_eq!(Expr::from_json_str(&text(&and(100))).expect("100 levels"), and(100));
+    let e = Expr::from_json_str(&format!(r#"{{"Not":{}}}"#, text(&and(100)))).expect_err("101 levels");
+    assert!(e.to_string().contains("expression nested more than 100 levels"), "{}", e);
+    // Unknown fields are refused, however deeply they nest
+    let junk = format!(r#"{{"Exists":{{"path":["a"],"junk":{}1{}}}}}"#, "[".repeat(100_000), "]".repeat(100_000));
+    let e = Expr::from_json_str(&junk).expect_err("unknown field");
+    assert!(e.to_string().contains("unknown field"), "{}", e);
+
+    let mut pattern = Pattern::parse("(a:Person)-[:knows]->(b)").expect("parse");
+    pattern.add_filter("b", and(100)).expect("filter");
+    let written = serde_json::to_string(&pattern).expect("write");
+    assert_eq!(Pattern::from_json_str(&written).expect("read"), pattern);
+    assert!(Pattern::from_json_str(r#"{"nodes":[],"edges":[],"junk":1}"#).is_err());
 }
 
 /// Fixed upstream (#48): shortest paths, pattern matching and walk

@@ -60,13 +60,13 @@ fn missing(what: &str) -> Error {
 
 // ---- the core's types in postcard (ADR 0023) ----
 
-fn encode<T: Serialize>(value: &T, what: &str) -> Result<Vec<u8>, Error> {
+pub(crate) fn encode<T: Serialize>(value: &T, what: &str) -> Result<Vec<u8>, Error> {
     take_error();
     postcard::to_stdvec(value)
         .map_err(|e| Error::invalid(format!("invalid {}: {}", what, take_error().unwrap_or_else(|| e.to_string()))))
 }
 
-fn decode<T: DeserializeOwned>(bytes: &[u8], what: &str) -> Result<T, Error> {
+pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8], what: &str) -> Result<T, Error> {
     // A message left by an earlier failure on this thread isn't ours
     take_error();
     match postcard::take_from_bytes::<T>(bytes) {

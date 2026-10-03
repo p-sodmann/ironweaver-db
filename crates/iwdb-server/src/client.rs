@@ -37,6 +37,9 @@ use crate::proto as pb;
 use crate::proto::database_service_client::DatabaseServiceClient;
 use crate::status::from_status;
 
+mod rest;
+pub use rest::RestRemote;
+
 type Client = DatabaseServiceClient<Channel>;
 
 /// A database served by an `iwdb-server`, as a [`Database`].

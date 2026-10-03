@@ -50,3 +50,5 @@ message Pattern { oneof form { string text = 1; bytes postcard = 2; } }
 - Non-Rust gRPC clients need a postcard encoder for `Value` and `Expr`: varint discriminants in declaration order, documented with examples in `documentation/api/grpc.md`. That is the price of the depth guarantee; step 14 decides whether the Python client writes one or asks for a JSON form.
 - `grpcurl` and other reflection tools show values as base64 until a JSON form exists; REST is the human-readable access method.
 - Answers encode each attribute value separately (a few bytes of overhead per value).
+
+*Update, step 12 ([ADR 0030](0030-rest-json-api.md)): #57 was fixed upstream in `7e7b7fa` (`Value` / `Expr` / `Pattern::from_json_str`, unknown fields refused). REST reads these three with the core's readers: values and filters up to 100 levels deep in JSON too, so there is no JSON nesting limit of 64. They are excluded from pbjson's generation (`exclude`) and get a hand-written serde on the prost types; `extern_path` wasn't needed.*
