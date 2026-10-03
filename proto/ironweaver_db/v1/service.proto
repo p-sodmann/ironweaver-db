@@ -1,0 +1,65 @@
+// Ironweaver DB gRPC contract, version 1: the service.
+//
+// One RPC per operation of the `Database` trait (crates/iwdb-query), with
+// the same semantics: the server only translates. Every operation names a
+// namespace (seqs, cursors, idempotency keys and catalogs are per
+// namespace). Errors: see errors.proto. Deadlines: reads honour
+// `grpc-timeout` and `QueryOptions.timeout_ms`; commits run to the end once
+// accepted, so retry them with their idempotency key (ADR 0026).
+
+syntax = "proto3";
+
+package ironweaver_db.v1;
+
+import "ironweaver_db/v1/analytics.proto";
+import "ironweaver_db/v1/catalog.proto";
+import "ironweaver_db/v1/mutations.proto";
+import "ironweaver_db/v1/query.proto";
+
+service DatabaseService {
+  // Commit a transaction: all mutations or none, durable per the server's
+  // fsync policy when it returns.
+  rpc Commit(CommitRequest) returns (CommitResponse);
+  // Commit a catalog change (an index is built online).
+  rpc CommitCatalog(CommitCatalogRequest) returns (CommitCatalogResponse);
+
+  // Wait until the namespace has applied a seq.
+  rpc WaitForSeq(WaitForSeqRequest) returns (WaitForSeqResponse);
+  rpc GetNodes(GetNodesRequest) returns (stream GetNodesResponse);
+  rpc GetEdges(GetEdgesRequest) returns (stream GetEdgesResponse);
+  rpc Find(FindRequest) returns (stream FindResponse);
+  rpc Explain(ExplainRequest) returns (ExplainResponse);
+  rpc Neighbourhood(NeighbourhoodRequest) returns (stream NeighbourhoodResponse);
+  rpc Traverse(TraverseRequest) returns (stream TraverseResponse);
+  rpc ShortestPath(ShortestPathRequest) returns (ShortestPathResponse);
+  rpc RandomWalks(RandomWalksRequest) returns (stream RandomWalksResponse);
+  rpc Subgraph(SubgraphRequest) returns (stream SubgraphResponse);
+  rpc MatchPattern(MatchPatternRequest) returns (stream MatchPatternResponse);
+  rpc Analyze(AnalyzeRequest) returns (stream AnalyzeResponse);
+
+  rpc GetCatalog(GetCatalogRequest) returns (GetCatalogResponse);
+  rpc GetNamespaceStatus(GetNamespaceStatusRequest) returns (GetNamespaceStatusResponse);
+  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
+  rpc CreateNamespace(CreateNamespaceRequest) returns (CreateNamespaceResponse);
+  rpc DropNamespace(DropNamespaceRequest) returns (DropNamespaceResponse);
+}
+
+message CommitRequest {
+  string namespace = 1;
+  repeated Mutation mutations = 2;
+  CommitOptions options = 3;
+}
+
+message CommitResponse {
+  CommitResult result = 1;
+}
+
+message CommitCatalogRequest {
+  string namespace = 1;
+  CatalogChange change = 2;
+  CommitOptions options = 3;
+}
+
+message CommitCatalogResponse {
+  CommitResult result = 1;
+}

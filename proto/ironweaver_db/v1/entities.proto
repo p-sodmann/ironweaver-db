@@ -1,0 +1,43 @@
+// Ironweaver DB gRPC contract, version 1: nodes and edges as read.
+
+syntax = "proto3";
+
+package ironweaver_db.v1;
+
+import "ironweaver_db/v1/values.proto";
+
+// A node, as read from the store.
+message Node {
+  string id = 1;
+  // Sorted by name.
+  repeated string labels = 2;
+  map<string, Value> attr = 3;
+  // User meta (without the database's `iwdb.*` keys).
+  map<string, Value> meta = 4;
+  // Starts at 1, one more for every commit that wrote the node.
+  uint64 version = 5;
+}
+
+// An edge, as read from the store.
+message Edge {
+  uint64 id = 1;
+  string from = 2;
+  string to = 3;
+  // Missing for an untyped edge.
+  optional string type = 4;
+  map<string, Value> attr = 5;
+  map<string, Value> meta = 6;
+  uint64 version = 7;
+}
+
+// A node that may not exist (in the order asked for).
+message MaybeNode {
+  // Missing if there is no node with the id.
+  Node node = 1;
+}
+
+// An edge that may not exist (in the order asked for).
+message MaybeEdge {
+  // Missing if there is no edge with the id.
+  Edge edge = 1;
+}

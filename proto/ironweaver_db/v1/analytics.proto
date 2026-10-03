@@ -1,0 +1,121 @@
+// Ironweaver DB gRPC contract, version 1: analytics jobs on a projection
+// (ADR 0022).
+//
+// Collecting the projection reads the whole graph, so it needs
+// `max_visited` of at least the number of nodes and `max_edges` of at least
+// the number of edges. The job runs until it ends or the timeout.
+// `max_results` keeps the top rows, with `truncated` set if rows were cut.
+
+syntax = "proto3";
+
+package ironweaver_db.v1;
+
+import "ironweaver_db/v1/query.proto";
+import "ironweaver_db/v1/values.proto";
+
+// What a job runs on: every node, and the edges followed in `direction`,
+// weighted by `cost`.
+message Projection {
+  Direction direction = 1;
+  EdgeCost cost = 2;
+}
+
+// An analytics job, run by the core's algorithms.
+message Job {
+  oneof kind {
+    // Scores.
+    PageRankJob page_rank = 1;
+    // Scores: the number of edges per node, normalised by n - 1.
+    DegreeJob degree = 2;
+    // Groups.
+    WeaklyConnectedComponentsJob weakly_connected_components = 3;
+    // Groups.
+    StronglyConnectedComponentsJob strongly_connected_components = 4;
+    // Groups (communities).
+    LeidenJob leiden = 5;
+    // Groups (communities).
+    LabelPropagationJob label_propagation = 6;
+    // Counts: each node's core number.
+    CoreNumberJob core_number = 7;
+    // Counts: the triangles through each node.
+    TrianglesJob triangles = 8;
+  }
+}
+
+// PageRank; missing options take the core's defaults (those of networkx).
+message PageRankJob {
+  // Damping factor.
+  optional double alpha = 1;
+  optional uint64 max_iter = 2;
+  // Converged when the L1 change of the ranks is below n * tol; 0 runs
+  // exactly `max_iter` iterations.
+  optional double tol = 3;
+}
+
+message DegreeJob {
+  // Count incoming instead of outgoing edges.
+  bool incoming = 1;
+}
+
+message WeaklyConnectedComponentsJob {}
+
+message StronglyConnectedComponentsJob {}
+
+// Leiden; missing options take the core's defaults.
+message LeidenJob {
+  optional double resolution = 1;
+  optional double randomness = 2;
+  optional uint64 max_iter = 3;
+  optional uint64 seed = 4;
+}
+
+message LabelPropagationJob {
+  uint64 max_iter = 1;
+}
+
+message CoreNumberJob {}
+
+message TrianglesJob {}
+
+// An analytics job on a projection of a namespace.
+message AnalyzeRequest {
+  string namespace = 1;
+  Projection projection = 2;
+  Job job = 3;
+  QueryOptions options = 4;
+}
+
+// What kind of rows a job returns.
+enum JobResultKind {
+  JOB_RESULT_KIND_UNSPECIFIED = 0;
+  // `scores`: per node, by score (highest first), then id.
+  JOB_RESULT_KIND_SCORES = 1;
+  // `groups`: node ids (each group sorted), biggest first, then by first id.
+  JOB_RESULT_KIND_GROUPS = 2;
+  // `counts`: per node, by count (highest first), then id.
+  JOB_RESULT_KIND_COUNTS = 3;
+}
+
+// One chunk of a job's result: rows of the kind `kind` names (the same in
+// every chunk).
+message AnalyzeResponse {
+  JobResultKind kind = 1;
+  repeated Score scores = 2;
+  repeated Group groups = 3;
+  repeated Count counts = 4;
+  AnswerMeta meta = 5;
+}
+
+message Score {
+  string id = 1;
+  double score = 2;
+}
+
+message Group {
+  repeated string ids = 1;
+}
+
+message Count {
+  string id = 1;
+  uint64 count = 2;
+}

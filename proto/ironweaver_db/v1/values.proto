@@ -1,0 +1,76 @@
+// Ironweaver DB gRPC contract, version 1: values, filters, patterns and
+// the small enums and options the requests share.
+//
+// `Value`, `Expr` and `Pattern` carry the core's own types (ironweaver-core)
+// in their serde form, encoded with postcard (ADR 0023). Postcard goes
+// through the core's depth counters, so values and filters nested up to 100
+// levels are valid and deeper ones are refused with the core's message.
+// documentation/api/grpc.md describes the encoding for clients written in
+// other languages.
+
+syntax = "proto3";
+
+package ironweaver_db.v1;
+
+// An attribute or meta value: the core's `Value` (string, int, float, half,
+// bool, none, list, dict, bytes, date, date-time).
+message Value {
+  oneof form {
+    // postcard of the core's `Value` serde.
+    bytes postcard = 1;
+  }
+}
+
+// A filter over a node or an edge: the core's `Expr` (comparisons, `In`,
+// `Exists`, labels, types, `And` / `Or` / `Not`).
+message Expr {
+  oneof form {
+    // postcard of the core's `Expr` serde.
+    bytes postcard = 1;
+  }
+}
+
+// A graph pattern to match: the core's `Pattern`.
+message Pattern {
+  oneof form {
+    // The core's Cypher-like text, for example
+    // `(a:Person {age: 30})-[:knows*1..3]->(b)`.
+    string text = 1;
+    // postcard of the core's `Pattern` serde, for patterns the text can't
+    // express (filters other than property equality, bound ids).
+    bytes postcard = 2;
+  }
+}
+
+// An attribute path: a top-level attribute name, then keys into nested
+// dicts.
+message AttrPath {
+  repeated string keys = 1;
+}
+
+// Which edges a search follows.
+enum Direction {
+  // Outgoing edges (the default).
+  DIRECTION_UNSPECIFIED = 0;
+  DIRECTION_OUT = 1;
+  DIRECTION_IN = 2;
+  DIRECTION_BOTH = 3;
+}
+
+// What traversing an edge costs. Without a kind: every edge costs 1.
+message EdgeCost {
+  oneof kind {
+    UnitCost unit = 1;
+    WeightedCost weighted = 2;
+  }
+}
+
+// Every edge costs 1 (hop count).
+message UnitCost {}
+
+// The edge attribute `key`, or `default_weight` for edges without it.
+// Weights must be non-negative numbers.
+message WeightedCost {
+  string key = 1;
+  double default_weight = 2;
+}

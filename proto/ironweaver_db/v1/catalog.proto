@@ -1,0 +1,210 @@
+// Ironweaver DB gRPC contract, version 1: catalogs, namespace status and
+// namespaces.
+
+syntax = "proto3";
+
+package ironweaver_db.v1;
+
+import "ironweaver_db/v1/mutations.proto";
+import "ironweaver_db/v1/query.proto";
+import "ironweaver_db/v1/values.proto";
+
+// A namespace's indexes and constraints, sorted.
+message NamespaceCatalog {
+  repeated IndexDef indexes = 1;
+  repeated Constraint constraints = 2;
+}
+
+message GetCatalogRequest {
+  string namespace = 1;
+  QueryOptions options = 2;
+}
+
+message GetCatalogResponse {
+  NamespaceCatalog catalog = 1;
+  AnswerMeta meta = 2;
+}
+
+message GetNamespaceStatusRequest {
+  string namespace = 1;
+}
+
+message GetNamespaceStatusResponse {
+  NamespaceStatus status = 1;
+}
+
+// What an open namespace reports about itself.
+message NamespaceStatus {
+  uint64 id = 1;
+  string name = 2;
+  // When the namespace was created, in microseconds since 1970 (UTC); 0
+  // for one that predates layout 4.
+  int64 created_micros = 3;
+  // The seq of the last applied commit.
+  uint64 seq = 4;
+  // The highest seq known to be durable; missing under the `off` fsync
+  // policy until an explicit sync.
+  optional uint64 synced_seq = 5;
+  // The newest checkpoint's seq.
+  optional uint64 checkpoint = 6;
+  // Why the namespace is read-only, if it is.
+  optional string read_only = 7;
+  // The last checkpoint error, if the last checkpoint failed.
+  optional string checkpoint_failure = 8;
+  uint64 nodes = 9;
+  uint64 edges = 10;
+  // Approximate bytes the graph uses, indexes included.
+  uint64 memory_bytes = 11;
+  // Declared indexes, those unique constraints need, and builds in
+  // progress, sorted by path.
+  repeated IndexStatus indexes = 12;
+  uint64 constraints = 13;
+  // What recovery did to this namespace when the server's store opened.
+  RecoveryReport recovery = 14;
+}
+
+// One index of a namespace.
+message IndexStatus {
+  AttrPath path = 1;
+  oneof state {
+    // Built and kept up to date by every commit.
+    IndexReady ready = 2;
+    // An online build is reading the nodes; reads don't use it yet.
+    IndexBuilding building = 3;
+  }
+  // Declared with `create_index`.
+  bool declared = 4;
+  // Needed by a unique constraint.
+  bool unique = 5;
+  // Missing while the index is being built.
+  IndexSize size = 6;
+}
+
+message IndexReady {}
+
+message IndexBuilding {
+  uint64 scanned = 1;
+  uint64 total = 2;
+}
+
+message IndexSize {
+  // Nodes with an indexable (scalar) value at the path.
+  uint64 entries = 1;
+  uint64 distinct_keys = 2;
+  // Approximate bytes the index uses.
+  uint64 memory_bytes = 3;
+}
+
+// What recovery found and did to one namespace.
+message RecoveryReport {
+  // The seq of the checkpoint recovery started from; missing if it started
+  // from an empty namespace.
+  optional uint64 checkpoint = 1;
+  // Newer checkpoints that failed to load, newest first.
+  repeated SkippedCheckpoint skipped_checkpoints = 2;
+  // Catalog indexes the loaded checkpoint didn't have, now built.
+  repeated AttrPath created_indexes = 3;
+  // Indexes the checkpoint had but the catalog doesn't list, now dropped.
+  repeated AttrPath dropped_indexes = 4;
+  // WAL records replayed on top of the checkpoint.
+  uint64 replayed = 5;
+  // The torn tail cut off the log, if any.
+  CutTail torn_tail = 6;
+  // The seq the namespace was recovered to.
+  uint64 seq = 7;
+}
+
+message SkippedCheckpoint {
+  uint64 seq = 1;
+  string path = 2;
+  // Why it failed to load.
+  string reason = 3;
+}
+
+// What was wrong with a torn WAL tail.
+enum Damage {
+  DAMAGE_UNSPECIFIED = 0;
+  // The file ends inside a header or record.
+  DAMAGE_TRUNCATED = 1;
+  // Invalid segment header.
+  DAMAGE_BAD_HEADER = 2;
+  // A record length above the limit.
+  DAMAGE_BAD_LENGTH = 3;
+  // A checksum mismatch.
+  DAMAGE_CHECKSUM = 4;
+}
+
+// A torn tail cut off the last WAL segment.
+message CutTail {
+  string path = 1;
+  // The segment's length before, and after (0: the file was removed).
+  uint64 file_len = 2;
+  uint64 valid_len = 3;
+  Damage damage = 4;
+  // Complete frames discarded with the tail (never acknowledged as
+  // durable).
+  uint64 discarded_frames = 5;
+  // The segment had no valid header and was removed.
+  bool removed = 6;
+}
+
+message ListNamespacesRequest {}
+
+message ListNamespacesResponse {
+  // By name.
+  repeated NamespaceInfo namespaces = 1;
+}
+
+// A live namespace.
+message NamespaceInfo {
+  uint64 id = 1;
+  string name = 2;
+  // The time of its create event, in microseconds since 1970 (UTC).
+  int64 created_micros = 3;
+  // The number of its create event.
+  uint64 created_seq = 4;
+}
+
+// Create a namespace. With a key, a retry returns the original event.
+message CreateNamespaceRequest {
+  string name = 1;
+  optional string idempotency_key = 2;
+}
+
+message CreateNamespaceResponse {
+  NamespaceEvent event = 1;
+  // This is the original event of an earlier request with the same key.
+  bool deduplicated = 2;
+}
+
+// Drop a namespace and its data. `default` can't be dropped.
+message DropNamespaceRequest {
+  string name = 1;
+  optional string idempotency_key = 2;
+}
+
+message DropNamespaceResponse {
+  NamespaceEvent event = 1;
+  bool deduplicated = 2;
+}
+
+enum NamespaceEventKind {
+  NAMESPACE_EVENT_KIND_UNSPECIFIED = 0;
+  NAMESPACE_EVENT_KIND_CREATE = 1;
+  NAMESPACE_EVENT_KIND_DROP = 2;
+}
+
+// An event of the namespace log.
+message NamespaceEvent {
+  // The event's number, from 1.
+  uint64 seq = 1;
+  int64 time_micros = 2;
+  NamespaceEventKind kind = 3;
+  // The namespace's id: assigned at creation, never reused.
+  uint64 id = 4;
+  string name = 5;
+  // The idempotency key of the request, if it had one.
+  optional string idempotency_key = 6;
+  // The request's fingerprint (with a key).
+  fixed32 fingerprint = 7;
+}

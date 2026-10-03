@@ -1,0 +1,387 @@
+// Ironweaver DB gRPC contract, version 1: read options, answers, and the
+// requests and answers of the reads.
+//
+// Every read is bounded (design rule 5) by its limits and a timeout. A
+// limit or timeout that is missing takes the server's default; one above the
+// server's cap is lowered to the cap; 0 is `invalid_argument`. Streaming
+// reads send one answer in chunks: every chunk has the same item fields, and
+// only the last one has `meta` (ADR 0025).
+
+syntax = "proto3";
+
+package ironweaver_db.v1;
+
+import "ironweaver_db/v1/entities.proto";
+import "ironweaver_db/v1/values.proto";
+
+// Limits a read asks for (see the file comment).
+message Limits {
+  // Most results in the answer: the page size of a paginated read.
+  optional uint64 max_results = 1;
+  // Most nodes the read may visit.
+  optional uint64 max_visited = 2;
+  // Most edges the read may examine.
+  optional uint64 max_edges = 3;
+}
+
+// Options of every read.
+message QueryOptions {
+  // Read-your-writes: wait until the namespace has applied this seq.
+  optional uint64 min_seq = 1;
+  // The history `min_seq` belongs to (32 hex digits); a seq of another
+  // history is `invalid_argument`. Empty: not checked.
+  string history = 2;
+  // How long the read may take, in milliseconds, counted from when the
+  // server starts the request (the `min_seq` wait included). The smaller of
+  // this and the `grpc-timeout` header applies (ADR 0026).
+  optional uint32 timeout_ms = 3;
+  Limits limits = 4;
+  // When a limit is reached: false fails with `budget_exceeded`, true
+  // answers with what was found and `truncated` set (and no cursor).
+  bool partial = 5;
+  // Continue a paginated read: the `next` of the previous page, with the
+  // same request. Empty: the first page.
+  string cursor = 6;
+}
+
+// How much work a read did.
+message Work {
+  uint64 visited = 1;
+  uint64 edges = 2;
+}
+
+// What every answer reports besides its value.
+message AnswerMeta {
+  // The seq of the namespace state the read saw.
+  uint64 seq = 1;
+  // The cursor of the next page, for paginated reads with more results.
+  // Empty: no more pages.
+  string next = 2;
+  // A limit stopped the read and `partial` asked for what was found.
+  bool truncated = 3;
+  Work work = 4;
+}
+
+message WaitForSeqRequest {
+  string namespace = 1;
+  uint64 seq = 2;
+  QueryOptions options = 3;
+}
+
+message WaitForSeqResponse {
+  // The namespace's seq once it had applied the seq asked for.
+  uint64 seq = 1;
+}
+
+// The nodes `ids`, in the order asked; at most `max_results` ids.
+message GetNodesRequest {
+  string namespace = 1;
+  repeated string ids = 2;
+  QueryOptions options = 3;
+}
+
+message GetNodesResponse {
+  repeated MaybeNode nodes = 1;
+  AnswerMeta meta = 2;
+}
+
+// The edges `ids`, in the order asked; at most `max_results` ids.
+message GetEdgesRequest {
+  string namespace = 1;
+  repeated uint64 ids = 2;
+  QueryOptions options = 3;
+}
+
+message GetEdgesResponse {
+  repeated MaybeEdge edges = 1;
+  AnswerMeta meta = 2;
+}
+
+// Nodes matching a filter, by index or scan; paginated by id.
+message FindRequest {
+  string namespace = 1;
+  Expr filter = 2;
+  QueryOptions options = 3;
+}
+
+message FindResponse {
+  repeated Node nodes = 1;
+  AnswerMeta meta = 2;
+}
+
+// How `Find` would read a filter.
+message ExplainRequest {
+  string namespace = 1;
+  Expr filter = 2;
+  // Also run the index lookup and report the exact number of candidates.
+  bool analyze = 3;
+  QueryOptions options = 4;
+}
+
+message ExplainResponse {
+  Explain explain = 1;
+  AnswerMeta meta = 2;
+}
+
+message Explain {
+  Plan plan = 1;
+  // The estimated number of candidates `Find` checks.
+  uint64 estimated_candidates = 2;
+  // With `analyze`: the exact number.
+  optional uint64 candidates = 3;
+  // The namespace's node count.
+  uint64 nodes = 4;
+  // Attribute paths of the filter whose index is being built.
+  repeated AttrPath building = 5;
+}
+
+// Where `Find` gets its candidates from. Unions nest as the filter's `Or`s
+// do.
+message Plan {
+  oneof kind {
+    // The filter is `Const(false)`: nothing to read.
+    PlanEmpty empty = 1;
+    // The label index.
+    PlanLabel label = 2;
+    // A property index.
+    PlanIndex index = 3;
+    // The union of the plans of an `Or`.
+    PlanUnion union = 4;
+    // Every node is a candidate.
+    PlanScan scan = 5;
+    // A plan of a newer core, in its debug form.
+    string other = 6;
+  }
+}
+
+message PlanEmpty {}
+
+message PlanScan {}
+
+message PlanLabel {
+  string label = 1;
+}
+
+// How a property index is read.
+enum Lookup {
+  LOOKUP_UNSPECIFIED = 0;
+  // One value (`Eq`).
+  LOOKUP_POINT = 1;
+  // Several values (`In`); see `PlanIndex.in_values`.
+  LOOKUP_IN = 2;
+  // A range.
+  LOOKUP_RANGE = 3;
+}
+
+message PlanIndex {
+  AttrPath path = 1;
+  Lookup lookup = 2;
+  // For `LOOKUP_IN`: how many values.
+  uint64 in_values = 3;
+}
+
+message PlanUnion {
+  repeated Plan plans = 1;
+}
+
+// The nodes within `depth` edges of the seeds; paginated by id.
+message NeighbourhoodRequest {
+  string namespace = 1;
+  // Ids that don't exist are skipped.
+  repeated string seeds = 2;
+  // How many edges away a node may be (0: the seeds only).
+  uint64 depth = 3;
+  Direction direction = 4;
+  // Follow only edges with one of these types (all if empty).
+  repeated string edge_types = 5;
+  // Follow only edges matching this filter.
+  Expr edge_filter = 6;
+  // Return only nodes matching this filter (it doesn't prune the search).
+  Expr node_filter = 7;
+  QueryOptions options = 8;
+}
+
+message NeighbourhoodResponse {
+  repeated Node nodes = 1;
+  AnswerMeta meta = 2;
+}
+
+// The order of a traversal.
+enum Order {
+  // Breadth first (the default).
+  ORDER_UNSPECIFIED = 0;
+  // Breadth first: nodes by distance from the start.
+  ORDER_BFS = 1;
+  // Depth first, pre-order.
+  ORDER_DFS = 2;
+}
+
+// A breadth- or depth-first traversal, in traversal order.
+message TraverseRequest {
+  string namespace = 1;
+  string start = 2;
+  Order order = 3;
+  // How many edges away from the start a node may be (missing: any).
+  optional uint64 depth = 4;
+  Direction direction = 5;
+  repeated string edge_types = 6;
+  Expr edge_filter = 7;
+  QueryOptions options = 8;
+}
+
+message TraverseResponse {
+  // Node ids, in traversal order.
+  repeated string ids = 1;
+  AnswerMeta meta = 2;
+}
+
+// The algorithm of a shortest path. Without a kind: BFS.
+message PathMethod {
+  oneof kind {
+    // Fewest edges (bidirectional BFS); `cost` must be unit.
+    PathBfs bfs = 1;
+    // Cheapest path by `cost`.
+    PathDijkstra dijkstra = 2;
+    // Cheapest path by `cost`, guided by the distance between node
+    // coordinates (which must not overestimate the cost).
+    PathAStar a_star = 3;
+  }
+}
+
+message PathBfs {}
+
+message PathDijkstra {}
+
+message PathAStar {
+  Coords coords = 1;
+  Metric metric = 2;
+}
+
+// Where a node's coordinates live. Without a kind: the core's default.
+message Coords {
+  oneof kind {
+    // One attribute path to a list of numbers.
+    AttrPath sequence = 1;
+    // One attribute path per dimension.
+    CoordsPerDimension per_dimension = 2;
+  }
+}
+
+message CoordsPerDimension {
+  repeated AttrPath paths = 1;
+}
+
+// The distance between two coordinate vectors.
+enum Metric {
+  // Euclidean (the default).
+  METRIC_UNSPECIFIED = 0;
+  METRIC_EUCLIDEAN = 1;
+  METRIC_MANHATTAN = 2;
+}
+
+// A shortest path between two nodes.
+message ShortestPathRequest {
+  string namespace = 1;
+  string from = 2;
+  string to = 3;
+  PathMethod method = 4;
+  EdgeCost cost = 5;
+  Direction direction = 6;
+  // BFS only: at most this many edges.
+  optional uint64 max_depth = 7;
+  // Ignore paths that cost more (for BFS: have more edges).
+  optional double max_cost = 8;
+  QueryOptions options = 9;
+}
+
+message ShortestPathResponse {
+  // Missing if there is no path.
+  Path path = 1;
+  AnswerMeta meta = 2;
+}
+
+message Path {
+  // From the start to the end, both included.
+  repeated string nodes = 1;
+  // The sum of the edge costs (for BFS: the number of edges).
+  double cost = 2;
+}
+
+// Random walks from a node.
+message RandomWalksRequest {
+  string namespace = 1;
+  string start = 2;
+  // Most nodes per walk (at least 1).
+  uint64 max_length = 3;
+  // How many walks to attempt; duplicates are removed.
+  uint64 walks = 4;
+  // Drop walks with fewer nodes.
+  uint64 min_length = 5;
+  // Whether a walk may visit a node twice.
+  bool allow_revisit = 6;
+  // The same seed gives the same walks for the same graph state in the same
+  // server process; random if missing.
+  optional uint64 seed = 7;
+  QueryOptions options = 8;
+}
+
+message RandomWalksResponse {
+  repeated Walk walks = 1;
+  AnswerMeta meta = 2;
+}
+
+message Walk {
+  repeated string nodes = 1;
+}
+
+// The nodes within `depth` edges of the seeds and the edges between them.
+message SubgraphRequest {
+  string namespace = 1;
+  repeated string seeds = 2;
+  uint64 depth = 3;
+  Direction direction = 4;
+  // Follow, and return, only edges with one of these types (all if empty).
+  repeated string edge_types = 5;
+  // Follow, and return, only edges matching this filter.
+  Expr edge_filter = 6;
+  QueryOptions options = 7;
+}
+
+message SubgraphResponse {
+  // Sorted by id over the whole stream.
+  repeated Node nodes = 1;
+  // Sorted by id over the whole stream.
+  repeated Edge edges = 2;
+  AnswerMeta meta = 3;
+}
+
+// Every match of a pattern; paginated by row.
+message MatchPatternRequest {
+  string namespace = 1;
+  Pattern pattern = 2;
+  // `where`: a filter per named node variable, added to the pattern's own.
+  repeated VariableFilter filters = 3;
+  QueryOptions options = 4;
+}
+
+message VariableFilter {
+  string name = 1;
+  Expr filter = 2;
+}
+
+message MatchPatternResponse {
+  repeated MatchRow rows = 1;
+  AnswerMeta meta = 2;
+}
+
+// One match: a node id per pattern node and the edge ids per pattern
+// edge (one for a single edge, the path for a variable-length one), in the
+// pattern's order.
+message MatchRow {
+  repeated string nodes = 1;
+  repeated EdgePath edges = 2;
+}
+
+message EdgePath {
+  repeated uint64 ids = 1;
+}

@@ -1,0 +1,203 @@
+// Ironweaver DB gRPC contract, version 1: the write vocabulary, catalog
+// changes and what a commit returns.
+//
+// `expected_version` (optimistic concurrency): missing skips the check; a
+// value fails the commit with `conflict` unless the entity's version before
+// the commit is that value (0: it didn't exist). Top-level attribute and
+// meta keys must not start with `iwdb.`.
+
+syntax = "proto3";
+
+package ironweaver_db.v1;
+
+import "ironweaver_db/v1/values.proto";
+
+// One change in a transaction.
+message Mutation {
+  oneof kind {
+    UpsertNode upsert_node = 1;
+    DeleteNode delete_node = 2;
+    AddEdge add_edge = 3;
+    UpsertEdge upsert_edge = 4;
+    DeleteEdge delete_edge = 5;
+    SetAttr set_attr = 6;
+    RemoveAttr remove_attr = 7;
+    AppendAttr append_attr = 8;
+    AddLabel add_label = 9;
+    RemoveLabel remove_label = 10;
+    SetEdgeType set_edge_type = 11;
+  }
+}
+
+// Create the node, or replace its attributes and meta. The labels are
+// added; labels the node has already are kept.
+message UpsertNode {
+  string id = 1;
+  repeated string labels = 2;
+  map<string, Value> attr = 3;
+  map<string, Value> meta = 4;
+  optional uint64 expected_version = 5;
+}
+
+// Delete the node and its edges.
+message DeleteNode {
+  string id = 1;
+  optional uint64 expected_version = 2;
+}
+
+// Add an edge with a new id (in `CommitResult.edge_ids`). Both endpoints
+// must exist.
+message AddEdge {
+  string from = 1;
+  string to = 2;
+  optional string type = 3;
+  map<string, Value> attr = 4;
+  map<string, Value> meta = 5;
+}
+
+// Replace an edge's attributes and meta, or add the edge (for
+// `EdgeKey.endpoints`). Its id is in `CommitResult.edge_ids`.
+message UpsertEdge {
+  EdgeKey key = 1;
+  map<string, Value> attr = 2;
+  map<string, Value> meta = 3;
+  optional uint64 expected_version = 4;
+}
+
+// How an edge upsert finds its edge.
+message EdgeKey {
+  oneof kind {
+    // The edge with this id, which must exist.
+    uint64 id = 1;
+    // The edge between these nodes with exactly this type; added if there
+    // is none, `invalid_argument` if there are several.
+    EdgeEndpoints endpoints = 2;
+  }
+}
+
+// Two nodes and an edge type (missing: an untyped edge).
+message EdgeEndpoints {
+  string from = 1;
+  string to = 2;
+  optional string type = 3;
+}
+
+message DeleteEdge {
+  uint64 id = 1;
+  optional uint64 expected_version = 2;
+}
+
+// A node (by id) or an edge (by id).
+message Target {
+  oneof kind {
+    string node = 1;
+    uint64 edge = 2;
+  }
+}
+
+// Set one top-level attribute.
+message SetAttr {
+  Target target = 1;
+  string key = 2;
+  Value value = 3;
+  optional uint64 expected_version = 4;
+}
+
+// Remove one top-level attribute (nothing to remove is fine).
+message RemoveAttr {
+  Target target = 1;
+  string key = 2;
+  optional uint64 expected_version = 3;
+}
+
+// Append `value` to the list in attribute `key`; a missing or none
+// attribute becomes a one-item list, any other value is `invalid_argument`.
+message AppendAttr {
+  Target target = 1;
+  string key = 2;
+  Value value = 3;
+  optional uint64 expected_version = 4;
+}
+
+message AddLabel {
+  string id = 1;
+  string label = 2;
+  optional uint64 expected_version = 3;
+}
+
+message RemoveLabel {
+  string id = 1;
+  string label = 2;
+  optional uint64 expected_version = 3;
+}
+
+// Set (present) or clear (missing) an edge's type.
+message SetEdgeType {
+  uint64 id = 1;
+  optional string type = 2;
+  optional uint64 expected_version = 3;
+}
+
+// A node property index on an attribute path.
+message IndexDef {
+  AttrPath path = 1;
+}
+
+// What a constraint requires of the nodes with its label.
+enum ConstraintKind {
+  CONSTRAINT_KIND_UNSPECIFIED = 0;
+  // No two nodes with the label have equal values at the path.
+  CONSTRAINT_KIND_UNIQUE = 1;
+  // Every node with the label has a (non-none) value at the path.
+  CONSTRAINT_KIND_REQUIRED = 2;
+}
+
+// A constraint on the nodes with `label`, at attribute `path`.
+message Constraint {
+  ConstraintKind kind = 1;
+  string label = 2;
+  AttrPath path = 3;
+}
+
+// A change to a namespace's catalog, committed on its own.
+message CatalogChange {
+  oneof kind {
+    // Declare an index and build it (online).
+    IndexDef create_index = 1;
+    // Remove an index declaration.
+    IndexDef drop_index = 2;
+    // Add a constraint; fails if the existing data violates it.
+    Constraint add_constraint = 3;
+    Constraint drop_constraint = 4;
+  }
+}
+
+// Options of a commit.
+message CommitOptions {
+  // Commit at most once under this key (1 to 255 bytes, for example a
+  // UUID): a retry with the same key and request returns the original
+  // result with `deduplicated` set. Send one with every commit that may be
+  // retried, in particular after a deadline or a lost connection.
+  optional string idempotency_key = 1;
+}
+
+// The new version of an entity a commit wrote.
+message Version {
+  Target target = 1;
+  uint64 version = 2;
+}
+
+// The outcome of a successful commit.
+message CommitResult {
+  // The commit's position in the namespace's history.
+  uint64 seq = 1;
+  // One id per `add_edge` and `upsert_edge`, in mutation order.
+  repeated uint64 edge_ids = 2;
+  // Nodes by id, then edges by id. Empty for catalog changes.
+  repeated Version versions = 3;
+  // When the WAL appended the commit, in microseconds since 1970 (UTC).
+  optional int64 time_micros = 4;
+  // This is the original result of an earlier commit with the same
+  // idempotency key; nothing was committed now.
+  bool deduplicated = 5;
+}

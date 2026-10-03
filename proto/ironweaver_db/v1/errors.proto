@@ -1,0 +1,38 @@
+// Ironweaver DB gRPC contract, version 1: errors.
+//
+// A failed call ends with the gRPC status of its error code
+// (documentation/api/errors.md) and the code itself, as a string, in the
+// trailing metadata key `iwdb-code`:
+//
+// | `iwdb-code`            | gRPC status           |
+// |------------------------|-----------------------|
+// | `invalid_argument`     | `INVALID_ARGUMENT`    |
+// | `not_found`            | `NOT_FOUND`           |
+// | `conflict`             | `ABORTED`             |
+// | `constraint_violation` | `FAILED_PRECONDITION` |
+// | `budget_exceeded`      | `RESOURCE_EXHAUSTED`  |
+// | `timeout`              | `DEADLINE_EXCEEDED`   |
+// | `cancelled`            | `CANCELLED`           |
+// | `cursor_expired`       | `FAILED_PRECONDITION` |
+// | `read_only`            | `UNAVAILABLE`         |
+// | `unavailable`          | `UNAVAILABLE`         |
+// | `io`                   | `UNAVAILABLE`         |
+// | `corrupt`              | `DATA_LOSS`           |
+// | `internal`             | `INTERNAL`            |
+//
+// Clients branch on `iwdb-code`, never on the message; several codes share
+// a gRPC status. A status without `iwdb-code` comes from the transport (a
+// lost connection, a message over the size limit, a client-side deadline).
+
+syntax = "proto3";
+
+package ironweaver_db.v1;
+
+// An error as a message, for access methods that carry errors in a body
+// (REST, step 12): the same code and message as the gRPC status.
+message Error {
+  // One of the codes above.
+  string code = 1;
+  // For people.
+  string message = 2;
+}
