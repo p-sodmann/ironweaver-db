@@ -9,8 +9,10 @@
 
 mod convert;
 mod errors;
+mod namespace;
 mod reports;
 mod store;
+mod transaction;
 
 use std::path::PathBuf;
 
@@ -86,8 +88,8 @@ fn _panic_for_tests() -> PyResult<()> {
 #[pymodule]
 fn _iwdb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<store::PyStore>()?;
-    m.add_class::<store::PyNamespace>()?;
-    m.add_class::<store::PyTransaction>()?;
+    m.add_class::<namespace::PyNamespace>()?;
+    m.add_class::<transaction::PyTransaction>()?;
     m.add_function(wrap_pyfunction!(verify, m)?)?;
     m.add_function(wrap_pyfunction!(restore, m)?)?;
     m.add_function(wrap_pyfunction!(_panic_for_tests, m)?)?;
