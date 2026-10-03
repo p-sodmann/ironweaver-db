@@ -13,7 +13,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [7](step_7.md) | Backup, PITR, `verify` and Python embedded bindings | M1 | done (PyPI publish of 0.1.0 pending: [releasing.md](../releasing.md)) |
 | [8](step_8.md) | Concurrency, idempotency and read-your-writes | M2 | done |
 | [9](step_9.md) | Catalog operations and namespaces | M2 | done |
-| [10](step_10.md) | Query layer and the `Database` service trait | M2 | todo |
+| [10](step_10.md) | Query layer and the `Database` service trait | M2 | done |
 | [11](step_11.md) | gRPC server | M3 | todo |
 | [12](step_12.md) | REST/JSON API | M3 | todo |
 | [13](step_13.md) | Change stream, projection mode, bulk import/export | M3 | todo |
@@ -33,7 +33,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 |---|---|---|
 | M0 Foundation | 1–3 | done |
 | M1 Embedded durable | 4–7 | done, except the PyPI publish of 0.1.0 (prepared; the owner publishes) |
-| M2 Service | 8–10 | in progress (steps 8 and 9 done) |
+| M2 Service | 8–10 | done |
 | M3 Network access | 11–14 | todo |
 | M4 Production 1.0 | 15–17 | todo |
 | M5 HA | 18 | todo |

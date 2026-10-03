@@ -11,6 +11,7 @@ Complete M3: a typed Python client with the same API as the embedded bindings, a
 ## Tasks
 
 - [ ] `clients/python/`: sync and async client over gRPC, typed wrappers, same API shape as `iwdb-python`; tracks the last commit `seq` and sends `min_seq` for read-your-writes.
+- [ ] Query methods in Python, embedded and remote (moved here from step 10): `find`, `explain`, `neighbourhood`, `traverse`, `shortest_path`, `random_walks`, `subgraph`, `match`, `analyze`, with limits, `partial` and cursors, through the `Database` trait (`iwdb::Embedded` in the bindings). Add exception classes for `budget_exceeded` and `cursor_expired` ([errors.md](../api/errors.md)).
 - [ ] The Python test suite runs unchanged against the embedded store and a remote server.
 - [ ] `iwctl shell` (like `psql` / `redis-cli`): connect to a server, run `match` patterns, lookups and admin commands, table/JSON output.
 - [ ] Benchmarks (criterion + load generator): 100k / 1M / 10M nodes; load, commit throughput per fsync policy, neighbourhood depth 2, shortest path, `match`, PageRank, memory per node/edge. Regression gate on the 100k set; results in `documentation/benchmarks.md`.
