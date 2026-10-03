@@ -2,9 +2,9 @@
 
 Every error of the `Database` trait (`iwdb_query::Error`) has a **code** and a message. The codes below are a contract shared by every access method: the embedded store, Python, gRPC (step 11) and REST (step 12) report the same code for the same failure, and clients branch on the code, never on the message. Adding a code is a minor change; renaming or removing one breaks clients.
 
-The engine's and the storage layer's errors are mapped to codes in one place (`crates/iwdb-query/src/error.rs`). The gRPC and HTTP status columns are the mapping steps 11 and 12 will implement.
+The engine's and the storage layer's errors are mapped to codes in one place (`crates/iwdb-query/src/error.rs`). The **gRPC column is implemented** (step 11) in one place too, `crates/iwdb-server/src/status.rs`, tested for every code; the code itself travels as its string in the trailing metadata key `iwdb-code` ([grpc.md](grpc.md#errors)). The HTTP column is the mapping step 12 will implement.
 
-| Code | Meaning | Retry? | Python exception | gRPC (step 11) | HTTP (step 12) |
+| Code | Meaning | Retry? | Python exception | gRPC (implemented) | HTTP (step 12) |
 |---|---|---|---|---|---|
 | `invalid_argument` | The request is invalid: a bad argument or name, a limit of 0, a filter or pattern the core rejects, an invalid transaction (reserved key, empty, value too deep, ambiguous edge, record too large), a seq of another history, a cursor that isn't one or belongs to another request | no, fix the request | `InvalidError` | `INVALID_ARGUMENT` | 400 |
 | `not_found` | A namespace doesn't exist (or was dropped); in a mutation, a node or edge; an index or constraint to drop; the start or end of a path | no | `NotFoundError` | `NOT_FOUND` | 404 |

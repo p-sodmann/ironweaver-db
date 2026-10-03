@@ -133,6 +133,16 @@ What happens at each failure the storage layer can meet. Each row has a failpoin
 
 The Python bindings ([python-api.md](python-api.md), [ADR 0013](adr/0013-python-bindings.md)) give the same guarantees as the store (since step 8 also idempotency keys and `min_seq`, with the GIL released while waiting): a transaction is one commit, all or nothing; nothing is committed when its `with` block raises. A panic in the commit path aborts the interpreter (a crash, recovered by the next open); any other panic raises `iwdb.InternalError`. A child forked without exec inherits the store's lock and must not use the store.
 
+## The gRPC server (step 11)
+
+The server ([api/grpc.md](api/grpc.md)) gives the guarantees of the store it serves, through the `Database` trait, and adds:
+
+- **Shutdown loses nothing acknowledged.** On SIGINT/SIGTERM the server drains running calls (up to its drain timeout), cancels the rest, lets accepted commits finish, then fsyncs every WAL and checkpoints (if configured) before it exits. Every commit acknowledged before shutdown survives an OS crash after it, under every fsync policy ([ADR 0027](adr/0027-graceful-shutdown.md); `crates/iwdb-server/tests/shutdown.rs` simulates the crash under `off` and `group`).
+- **Every read ends at its deadline**: the smaller of `grpc-timeout` and the request's `timeout_ms`, capped by the server's maximum, including the time it waits for a worker or for `min_seq` ([ADR 0026](adr/0026-deadlines-over-grpc.md)). A read whose client goes away is cancelled.
+- **A commit has no deadline on the server.** Once accepted it runs to the end, even if its client's deadline passes or the client disconnects; that client doesn't learn the outcome and retries with the same idempotency key, which applies the commit at most once.
+- **Errors carry their code** (`iwdb-code`) next to the gRPC status of [errors.md](api/errors.md).
+- A bug in a commit's apply path aborts the whole server (all namespaces), as a crash: run it under a supervisor ([ADR 0028](adr/0028-internal-apply-errors-abort.md)).
+
 ## Platforms (step 7)
 
 Linux and macOS. **Windows is not supported yet**: there the directory fsync is a no-op, so after an OS crash a rotation, a checkpoint, a backup or a restore can lose a directory entry, and none of this is tested on Windows. No Windows wheel is shipped (ADR 0013).
