@@ -83,8 +83,8 @@ Ironweaver DB is a **separate project** that turns `ironweaver-core` into a dura
 
 ### 7. Change data capture and integration
 - Change stream from any retained `seq` (step 13, [ADR 0031](adr/0031-change-stream.md)): a bounded, long-polling `changes` read on the trait over the WAL, followed by gRPC `Watch` and SSE; WAL retention for it.
-- Projection mode: follow an external ordered event log (e.g. a Postgres outbox table), storing the high-water mark in the same transaction.
-- Bulk import/export: ironweaver JSON/binary, LGF, CSV/Parquet edge lists, GraphML.
+- Projection mode (step 13, [ADR 0032](adr/0032-projection-mode.md), [api/projections.md](api/projections.md)): follow an external ordered event log (first a Postgres table, tested against PGlite), mapped by declarative rules; the high-water mark is a namespace's *mark*, moved in the same commit (WAL format 4, data-dir layout 5).
+- Bulk import/export: ironweaver JSON/binary, LGF, CSV edge lists, GraphML (Parquet dropped).
 
 ### 8. Security
 - TLS by default, API tokens and mTLS (OIDC later), roles per namespace, resource limits per client and namespace, audit log, `SECURITY.md`.

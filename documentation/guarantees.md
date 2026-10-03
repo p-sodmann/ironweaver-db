@@ -151,6 +151,14 @@ The change stream ([api/changes.md](api/changes.md), [ADR 0031](adr/0031-change-
 - **In order, without gaps**: a consumer that resumes from the seq after the last one it processed sees every commit once, across restarts (`a_consumer_resumes_after_restarts_without_gaps_or_duplicates`).
 - **As long as the WAL holds it**: older seqs fail with `not_retained`. Retention (`WalRetention`) keeps segments that checkpoints no longer need. Damage in the WAL it reads is `corrupt`, never skipped.
 
+## Projection mode (step 13)
+
+A projection ([api/projections.md](api/projections.md), [ADR 0032](adr/0032-projection-mode.md)) moves its mark in the commit that applies its events (compare-and-set), and resumes from it:
+
+- **Exactly once across crashes**: a failure at each point of the commit path (the WAL write before, halfway and after, the fsync before and after) stops it with the outcome unknown; after a restart it finishes, and every event is applied once, checked with a mapping that isn't idempotent (`a_projection_survives_crashes_without_applying_an_event_twice` in `crates/iwdb/tests/projection.rs`; checked to fail when the mark is committed apart from the events). An OS crash under `group` loses events and their marks together (`an_os_crash_under_group_commit_loses_events_and_their_marks_together`).
+- **One writer per mark**: a commit with a stale mark fails with `conflict` and changes nothing.
+- **Postgres holes**: positions are read as dense; a hole is waited for up to `gap_timeout`, then skipped. An event whose transaction commits later than that is missed: set the timeout above your longest writing transaction.
+
 ## Platforms (step 7)
 
 Linux and macOS. **Windows is not supported yet**: there the directory fsync is a no-op, so after an OS crash a rotation, a checkpoint, a backup or a restore can lose a directory entry, and none of this is tested on Windows. No Windows wheel is shipped (ADR 0013).

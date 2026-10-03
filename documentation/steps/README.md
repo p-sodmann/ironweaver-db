@@ -18,7 +18,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [11a](step_11a.md) | Maintenance round | M3 | done |
 | [11b](step_11b.md) | Rust 1.99 and edition 2024 | M3 | done |
 | [12](step_12.md) | REST/JSON API | M3 | done |
-| [13](step_13.md) | Change stream, projection mode, bulk import/export | M3 | in progress (part 1: change stream) |
+| [13](step_13.md) | Change stream, projection mode, bulk import/export | M3 | in progress (parts 1 and 2 done: change stream, projection mode) |
 | [14](step_14.md) | Clients, query shell and benchmarks | M3 | todo |
 | [15](step_15.md) | Security | M4 | todo |
 | [16](step_16.md) | Operability | M4 | todo |

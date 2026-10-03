@@ -43,6 +43,8 @@ max_edges = 100000000
 timeout_ms = 300000
 ```
 
+`[[projection]]` sections run projections from Postgres tables into namespaces while the server runs ([projections.md](projections.md)). Their marks are in `NamespaceStatus.marks`.
+
 - **SIGINT / SIGTERM** shut down gracefully (below); a second signal cancels the calls still running. Exit codes: 0 after a clean shutdown, 1 if serving or closing the store failed, 2 for a bad command line or config file.
 - **Run it under a supervisor** (systemd, Kubernetes). A bug in a commit's apply path (a panic, or `GraphError::Internal` from the core) aborts the whole process, as a crash, so that no reader ever sees part of a transaction (ADR 0008, ADR 0028). The next start recovers every logged commit.
 - **No TLS and no authentication yet** (step 15): bind to localhost or a private network.
