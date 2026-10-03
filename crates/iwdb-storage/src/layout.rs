@@ -183,10 +183,9 @@ impl DataDir {
         }
         let damaged = |reason: String| Error::InvalidDataDir { path: root.to_path_buf(), reason };
         if dir.upgrade_from.is_none() {
-            for sub in [root.join(NS_DIR)] {
-                if !sub.is_dir() {
-                    return Err(damaged(format!("'{}' is missing", sub.display())));
-                }
+            let ns_dir = root.join(NS_DIR);
+            if !ns_dir.is_dir() {
+                return Err(damaged(format!("'{}' is missing", ns_dir.display())));
             }
             if !root.join(NAMESPACES_NAME).is_file() {
                 return Err(damaged(format!("'{}' is missing", NAMESPACES_NAME)));

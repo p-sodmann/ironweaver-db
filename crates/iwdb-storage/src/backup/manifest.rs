@@ -171,10 +171,10 @@ impl Manifest {
             return Err("the manifest lists a namespace id twice, or id 0".into());
         }
         for file in &files {
-            if let Some(id) = file_namespace(&file.path) {
-                if !ids.contains(&id) {
-                    return Err(format!("the manifest lists '{}', but no namespace {}", file.path, id));
-                }
+            if let Some(id) = file_namespace(&file.path)
+                && !ids.contains(&id)
+            {
+                return Err(format!("the manifest lists '{}', but no namespace {}", file.path, id));
             }
         }
         Ok(Manifest { version, history, namespaces, created: CommitTime(created), source, files })

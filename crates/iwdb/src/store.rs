@@ -273,11 +273,11 @@ where
             let shared = shared.clone();
             threads.push(spawn("iwdb-checkpoint", move || checkpoint_loop(&shared))?);
         }
-        if let FsyncPolicy::Group { max_delay, .. } = shared.options.wal.fsync {
-            if !max_delay.is_zero() {
-                let shared = shared.clone();
-                threads.push(spawn("iwdb-sync", move || sync_loop(&shared, max_delay))?);
-            }
+        if let FsyncPolicy::Group { max_delay, .. } = shared.options.wal.fsync
+            && !max_delay.is_zero()
+        {
+            let shared = shared.clone();
+            threads.push(spawn("iwdb-sync", move || sync_loop(&shared, max_delay))?);
         }
         let store = Store { shared, threads, timer: Timer::default(), report, dir };
         {
@@ -465,10 +465,10 @@ where
     /// is logged, not returned: the next namespace operation or open
     /// retries, and restores only reach as far as the copy.
     fn sync_archive_log(&self, catalog: &CatalogState<F>) {
-        if let Some(archive) = &catalog.archive {
-            if let Err(e) = archive.write_log(catalog.log.table().events()) {
-                log::warn!("{}: the archive's namespace log is stale: {}", self.shared.root.display(), e);
-            }
+        if let Some(archive) = &catalog.archive
+            && let Err(e) = archive.write_log(catalog.log.table().events())
+        {
+            log::warn!("{}: the archive's namespace log is stale: {}", self.shared.root.display(), e);
         }
     }
 

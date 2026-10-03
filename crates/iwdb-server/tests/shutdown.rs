@@ -36,12 +36,12 @@ fn recording_fs() -> (FailFs, Synced) {
     let synced: Synced = Arc::default();
     let log = synced.clone();
     fs.set_hook(Some(Arc::new(move |call, path: &Path| {
-        if call == Call::Sync {
-            if let Ok(meta) = std::fs::metadata(path) {
-                let mut log = log.lock().unwrap();
-                let len = log.entry(path.to_path_buf()).or_default();
-                *len = (*len).max(meta.len());
-            }
+        if call == Call::Sync
+            && let Ok(meta) = std::fs::metadata(path)
+        {
+            let mut log = log.lock().unwrap();
+            let len = log.entry(path.to_path_buf()).or_default();
+            *len = (*len).max(meta.len());
         }
     })));
     (fs, synced)

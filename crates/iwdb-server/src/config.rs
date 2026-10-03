@@ -151,10 +151,10 @@ impl Config {
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read { path: path.into(), source })?;
         let mut config = Config::parse(&text).map_err(|message| ConfigError::Invalid { path: path.into(), message })?;
-        if config.data_dir.is_relative() {
-            if let Some(dir) = path.parent() {
-                config.data_dir = dir.join(&config.data_dir);
-            }
+        if config.data_dir.is_relative()
+            && let Some(dir) = path.parent()
+        {
+            config.data_dir = dir.join(&config.data_dir);
         }
         Ok(config)
     }

@@ -158,7 +158,7 @@ proptest! {
         let mut records = Vec::new();
         for (i, step) in seeded(60, seed).into_iter().enumerate() {
             // Every `keyed`-th step has a key; some keys repeat (retries)
-            let k = (i as u64 % keyed == 0).then(|| format!("k{}", i / 3));
+            let k = (i as u64).is_multiple_of(keyed).then(|| format!("k{}", i / 3));
             let key = k.as_deref().map(key);
             let prepared = match &step {
                 Step::Tx(mutations) => live.prepare_keyed(mutations, key.as_ref()),

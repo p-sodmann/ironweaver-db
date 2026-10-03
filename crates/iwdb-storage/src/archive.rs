@@ -456,16 +456,16 @@ fn verify_namespace_segments(report: &mut VerifyReport, dir: &Path, version: u32
             }
         }
     }
-    if let Some(last) = reader.end().and_then(|end| end.last_segment.clone()) {
-        if let Some(torn) = last.torn {
-            report.problem(
-                Some(&last.path),
-                format!(
-                    "the segment is incomplete at offset {} ({}): archived segments are whole",
-                    last.valid_len, torn.damage
-                ),
-            );
-        }
+    if let Some(last) = reader.end().and_then(|end| end.last_segment.clone())
+        && let Some(torn) = last.torn
+    {
+        report.problem(
+            Some(&last.path),
+            format!(
+                "the segment is incomplete at offset {} ({}): archived segments are whole",
+                last.valid_len, torn.damage
+            ),
+        );
     }
     Ok(())
 }

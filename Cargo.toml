@@ -8,7 +8,7 @@ exclude = ["fuzz"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.99"
 repository = "https://github.com/p-sodmann/ironweaver-db"
 
 [workspace.dependencies]
@@ -25,9 +25,9 @@ serde_json = "1"
 # CRC32C of WAL records, hardware accelerated (SSE 4.2, ARMv8 CRC)
 crc32c = "0.6"
 tempfile = "3"
-# The data directory's exclusive lock (flock / LockFileEx); std's File::try_lock needs Rust 1.89, our MSRV is 1.85
 # Warnings from recovery and the background threads of the embedded store (already in the tree)
 log = "0.4"
+# The data directory's lock (flock / LockFileEx)
 fs4 = { version = "1", default-features = false, features = ["sync"] }
 # The gRPC server and client (step 11, iwdb-server only): tonic and prost, the
 # Rust gRPC stack; no TLS features until step 15

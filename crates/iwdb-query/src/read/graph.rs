@@ -66,10 +66,10 @@ pub fn neighbourhood(
         if after.as_deref().is_some_and(|a| node.id() <= a) {
             continue;
         }
-        if let Some(f) = &request.node_filter {
-            if !f.matches_node(g, ix)? {
-                continue;
-            }
+        if let Some(f) = &request.node_filter
+            && !f.matches_node(g, ix)?
+        {
+            continue;
         }
         top.push(node.id().to_owned(), ix);
     }

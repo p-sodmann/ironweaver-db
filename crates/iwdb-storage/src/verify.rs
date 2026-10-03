@@ -236,12 +236,11 @@ pub fn verify(root: &Path) -> Result<VerifyReport, Error> {
     let _lock = layout::lock_shared(root)?;
     let is_backup = root.join(BACKUP_NAME).exists();
     let mut report = VerifyReport::new(root, if is_backup { Kind::Backup } else { Kind::DataDir });
-    let layout4;
-    match layout::read_marker(root) {
+    let layout4 = match layout::read_marker(root) {
         Ok(Some(info)) => {
             report.version = Some(info.version);
             report.history = info.history;
-            layout4 = info.version >= 4;
+            info.version >= 4
         }
         Ok(None) => {
             let reason = if root.join(layout::RESTORING_NAME).exists() {
@@ -254,10 +253,10 @@ pub fn verify(root: &Path) -> Result<VerifyReport, Error> {
         Err(Error::InvalidDataDir { reason, .. }) => {
             report.problem(Some(&root.join(MARKER_NAME)), reason);
             // A damaged marker: the layout is a guess, from what is there
-            layout4 = root.join(NAMESPACES_NAME).exists();
+            root.join(NAMESPACES_NAME).exists()
         }
         Err(e) => return Err(e),
-    }
+    };
     if root.join(layout::RESTORING_NAME).exists() {
         report.problem(Some(&root.join(layout::RESTORING_NAME)), "an interrupted restore");
     }
@@ -550,15 +549,11 @@ fn replay(
                 if *ckpt > seq {
                     break;
                 }
-                if *ckpt == seq {
-                    if let Some(loaded) = load_and_check(report, name, *ckpt, path) {
-                        if let Err(difference) = invariants::compare(&loaded, &namespace) {
-                            report.problem(
-                                Some(path),
-                                format!("differs from the WAL replayed to seq {}: {}", seq, difference),
-                            );
-                        }
-                    }
+                if *ckpt == seq
+                    && let Some(loaded) = load_and_check(report, name, *ckpt, path)
+                    && let Err(difference) = invariants::compare(&loaded, &namespace)
+                {
+                    report.problem(Some(path), format!("differs from the WAL replayed to seq {}: {}", seq, difference));
                 }
                 pending.next();
             }
@@ -575,16 +570,16 @@ fn replay(
             );
             replaying = false;
         }
-        if let Some(torn) = reader.end().and_then(|end| end.last_segment.clone()) {
-            if let Some(tail) = torn.torn {
-                report.note(
+        if let Some(torn) = reader.end().and_then(|end| end.last_segment.clone())
+            && let Some(tail) = torn.torn
+        {
+            report.note(
                     Some(&torn.path),
                     format!(
                         "a torn tail at offset {} of {} bytes ({}; {} later frames): the end of the log after a crash, which the next open cuts",
                         torn.valid_len, torn.file_len, tail.damage, tail.discarded_frames
                     ),
                 );
-            }
         }
     }
     // Checkpoints the replay didn't reach

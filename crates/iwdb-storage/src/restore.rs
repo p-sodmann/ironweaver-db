@@ -208,16 +208,16 @@ pub fn restore<F: LogFs>(
         }
         chosen.retain(|n| only.contains(&n.name));
     }
-    if let RestoreTarget::Seq(_) = target {
-        if chosen.len() != 1 {
-            return Err(Error::AmbiguousTarget { namespaces: chosen.iter().map(|n| n.name.to_string()).collect() });
-        }
+    if let RestoreTarget::Seq(_) = target
+        && chosen.len() != 1
+    {
+        return Err(Error::AmbiguousTarget { namespaces: chosen.iter().map(|n| n.name.to_string()).collect() });
     }
-    if chosen.is_empty() {
-        if let Some(at) = cut {
-            let first = table.events().first().map(|e| e.time);
-            return Err(Error::NoCommitAtOrBefore { time: at, first });
-        }
+    if chosen.is_empty()
+        && let Some(at) = cut
+    {
+        let first = table.events().first().map(|e| e.time);
+        return Err(Error::NoCommitAtOrBefore { time: at, first });
     }
 
     let mut restored = Vec::new();
@@ -300,12 +300,12 @@ fn input_of(opened: &Opened, info: NamespaceInfo) -> Result<Input, Error> {
         archive_segments: Vec::new(),
         info,
     };
-    if let Some(backup) = &opened.backup {
-        if let Some((_, _, paths)) = backup.namespaces.iter().find(|(id, _, _)| *id == input.info.id) {
-            input.checkpoints = list_checkpoints(&paths.checkpoints)?;
-            input.backup_segments = reader::list_segments(&paths.wal)?;
-            input.manifest_seq = backup.manifest.as_ref().and_then(|m| m.namespace(input.info.id)).map(|n| n.seq);
-        }
+    if let Some(backup) = &opened.backup
+        && let Some((_, _, paths)) = backup.namespaces.iter().find(|(id, _, _)| *id == input.info.id)
+    {
+        input.checkpoints = list_checkpoints(&paths.checkpoints)?;
+        input.backup_segments = reader::list_segments(&paths.wal)?;
+        input.manifest_seq = backup.manifest.as_ref().and_then(|m| m.namespace(input.info.id)).map(|n| n.seq);
     }
     if let Some(archive) = &opened.archive {
         input.archive_segments = archive_segments(&archive.dir, archive.version, input.info.id)?;
@@ -398,13 +398,13 @@ fn open_sources(sources: &RestoreSources) -> Result<Opened, Error> {
         let Some((version, history)) = read_archive_marker_info(dir)? else {
             return Err(Error::NotAnArchive { path: dir.clone(), reason: "it has no marker".into() });
         };
-        if let Some(backup) = backup_history {
-            if backup != Some(history) {
-                return Err(Error::HistoryMismatch {
-                    backup: backup.map_or("unknown (layout 1)".to_owned(), |h| h.to_string()),
-                    archive: history.to_string(),
-                });
-            }
+        if let Some(backup) = backup_history
+            && backup != Some(history)
+        {
+            return Err(Error::HistoryMismatch {
+                backup: backup.map_or("unknown (layout 1)".to_owned(), |h| h.to_string()),
+                archive: history.to_string(),
+            });
         }
         opened.history = Some(history);
         let log_path = dir.join(NAMESPACES_NAME);

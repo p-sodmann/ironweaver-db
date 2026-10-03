@@ -119,10 +119,10 @@ pub fn graph_ops() -> impl Strategy<Value = Vec<Op<DbRecord, DbRecord>>> {
                 data,
             });
         }
-        if let Some(first) = removed.first() {
-            if !edge_ids.is_empty() {
-                ops.push(Op::RemoveEdge { id: EdgeId(*first.get(&edge_ids)) });
-            }
+        if let Some(first) = removed.first()
+            && !edge_ids.is_empty()
+        {
+            ops.push(Op::RemoveEdge { id: EdgeId(*first.get(&edge_ids)) });
         }
         for ix in removed.iter().skip(1) {
             let id = ix.get(&ids).clone();

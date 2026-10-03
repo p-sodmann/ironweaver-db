@@ -318,10 +318,10 @@ impl NamespaceTable {
         if event.seq != self.events.len() as u64 + 1 {
             return Err(format!("it has seq {}, expected {}", event.seq, self.events.len() + 1));
         }
-        if let Some(last) = self.events.last() {
-            if event.time < last.time {
-                return Err(format!("its time {} is before the previous event's {}", event.time, last.time));
-            }
+        if let Some(last) = self.events.last()
+            && event.time < last.time
+        {
+            return Err(format!("its time {} is before the previous event's {}", event.time, last.time));
         }
         match event.kind {
             EventKind::Create => {
@@ -351,10 +351,10 @@ impl NamespaceTable {
                 _ => return Err(format!("it drops namespace {} ('{}'), which doesn't exist", event.id, event.name)),
             },
         }
-        if let Some((key, _)) = &event.keyed {
-            if self.keys.insert(key.clone(), self.events.len()).is_some() {
-                return Err(format!("it reuses the idempotency key {}", key));
-            }
+        if let Some((key, _)) = &event.keyed
+            && self.keys.insert(key.clone(), self.events.len()).is_some()
+        {
+            return Err(format!("it reuses the idempotency key {}", key));
         }
         self.events.push(event);
         Ok(())
@@ -402,14 +402,14 @@ impl NamespaceTable {
     /// ([`Plan::Duplicate`]); an error if the key was used for another
     /// request, or the request can't be done now.
     pub fn plan(&self, kind: EventKind, name: &NamespaceName, key: Option<&IdempotencyKey>) -> Result<Plan, Error> {
-        if let Some(key) = key {
-            if let Some(event) = self.by_key(key) {
-                let (_, found) = event.keyed.clone().unwrap_or((key.clone(), 0));
-                if found == fingerprint(kind, name) {
-                    return Ok(Plan::Duplicate(event.clone()));
-                }
-                return Err(iwdb_engine::Error::IdempotencyKeyReused { key: key.clone(), seq: event.seq }.into());
+        if let Some(key) = key
+            && let Some(event) = self.by_key(key)
+        {
+            let (_, found) = event.keyed.clone().unwrap_or((key.clone(), 0));
+            if found == fingerprint(kind, name) {
+                return Ok(Plan::Duplicate(event.clone()));
             }
+            return Err(iwdb_engine::Error::IdempotencyKeyReused { key: key.clone(), seq: event.seq }.into());
         }
         match (kind, self.get(name)) {
             (EventKind::Create, Some(_)) => Err(Error::NamespaceExists { name: name.to_string() }),

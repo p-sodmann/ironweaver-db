@@ -65,10 +65,10 @@ pub(crate) fn check_existing(graph: &DbGraph, constraint: &Constraint) -> Result
         ConstraintKind::Unique => {
             let mut seen: HashMap<Key, &str> = HashMap::new();
             for (id, data) in nodes {
-                if let Some(key) = value_at(data, path)?.as_ref().and_then(Key::of) {
-                    if let Some(other) = seen.insert(key, id) {
-                        return Err(violation(id, Some(other)));
-                    }
+                if let Some(key) = value_at(data, path)?.as_ref().and_then(Key::of)
+                    && let Some(other) = seen.insert(key, id)
+                {
+                    return Err(violation(id, Some(other)));
                 }
             }
         }
@@ -291,10 +291,11 @@ impl<'g> View<'g> {
         let graph = self.graph;
         if let (Some(a), Some(b)) = (graph.node_ix(from), graph.node_ix(to)) {
             for e in graph.edges_between(a, b, None) {
-                if let Some(edge) = graph.edge(e) {
-                    if !self.edges.contains_key(&edge.id()) && graph.edge_type_name(e) == ty {
-                        found.insert(edge.id());
-                    }
+                if let Some(edge) = graph.edge(e)
+                    && !self.edges.contains_key(&edge.id())
+                    && graph.edge_type_name(e) == ty
+                {
+                    found.insert(edge.id());
                 }
             }
         }
@@ -318,10 +319,10 @@ impl<'g> View<'g> {
             match constraint.kind {
                 ConstraintKind::Required => {
                     for (id, entry) in written {
-                        if let Some(state) = labeled(entry, label) {
-                            if value_at(&state.data, path)?.is_none() {
-                                return Err(violation(constraint, id.clone(), None));
-                            }
+                        if let Some(state) = labeled(entry, label)
+                            && value_at(&state.data, path)?.is_none()
+                        {
+                            return Err(violation(constraint, id.clone(), None));
                         }
                     }
                 }
@@ -329,10 +330,10 @@ impl<'g> View<'g> {
                     // Every overlay node with the label, by key
                     let mut overlay: HashMap<Key, BTreeSet<&str>> = HashMap::new();
                     for (id, entry) in &self.nodes {
-                        if let Some(state) = labeled(entry, label) {
-                            if let Some(key) = value_at(&state.data, path)?.as_ref().and_then(Key::of) {
-                                overlay.entry(key).or_default().insert(id);
-                            }
+                        if let Some(state) = labeled(entry, label)
+                            && let Some(key) = value_at(&state.data, path)?.as_ref().and_then(Key::of)
+                        {
+                            overlay.entry(key).or_default().insert(id);
                         }
                     }
                     for (id, entry) in written {

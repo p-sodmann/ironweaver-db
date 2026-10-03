@@ -200,7 +200,7 @@ fn time_from_pb(micros: i64) -> CommitTime {
 
 /// Whole milliseconds, rounded up so that a positive timeout stays positive.
 fn millis(timeout: Duration) -> u32 {
-    let ms = timeout.as_millis() + u128::from(timeout.subsec_nanos() % 1_000_000 != 0);
+    let ms = timeout.as_millis() + u128::from(!timeout.subsec_nanos().is_multiple_of(1_000_000));
     u32::try_from(ms).unwrap_or(u32::MAX)
 }
 

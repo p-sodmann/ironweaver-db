@@ -336,7 +336,7 @@ mod tests {
                 seq,
                 edge_ids: vec![EdgeId(seq)],
                 versions: vec![(Target::Node(k.into()), 1), (Target::Edge(EdgeId(seq)), 2)],
-                time: (seq % 2 == 0).then_some(CommitTime(seq as i64 * 1000)),
+                time: seq.is_multiple_of(2).then_some(CommitTime(seq as i64 * 1000)),
                 deduplicated: false,
             },
         }

@@ -1,3 +1,5 @@
+# The latest stable release, patch releases included. The workspace's
+# rust-version (1.99) is the oldest toolchain CI checks (ADR 0029).
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]

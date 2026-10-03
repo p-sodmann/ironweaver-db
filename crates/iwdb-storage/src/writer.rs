@@ -358,21 +358,21 @@ impl<F: LogFs> Wal<F> {
     /// were created without a directory sync). Never retried on failure
     /// (see the type docs).
     fn sync_now(&mut self) -> Result<(), Error> {
-        if self.options.fsync == FsyncPolicy::Off {
-            if let Err(e) = self.sync_older_segments() {
-                self.failed = Some(e.to_string());
-                return Err(e);
-            }
+        if self.options.fsync == FsyncPolicy::Off
+            && let Err(e) = self.sync_older_segments()
+        {
+            self.failed = Some(e.to_string());
+            return Err(e);
         }
         if let Err(e) = self.file.sync() {
             return Err(self.fail("fsync", e));
         }
-        if self.options.fsync == FsyncPolicy::Off {
-            if let Err(e) = self.fs.sync_dir(&self.dir) {
-                let error = Error::io("sync directory", &self.dir, e);
-                self.failed = Some(error.to_string());
-                return Err(error);
-            }
+        if self.options.fsync == FsyncPolicy::Off
+            && let Err(e) = self.fs.sync_dir(&self.dir)
+        {
+            let error = Error::io("sync directory", &self.dir, e);
+            self.failed = Some(error.to_string());
+            return Err(error);
         }
         self.synced_seq = self.next_seq - 1;
         self.oldest_unsynced = None;

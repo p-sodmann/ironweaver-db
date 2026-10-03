@@ -220,11 +220,9 @@ fn frames_after(bytes: &[u8], damage: usize, lowest: u64, version: u32) -> impl 
         while pos + header_len <= bytes.len() {
             let rest = &bytes[pos..];
             let in_window = format::peek_seq(rest, version).is_some_and(|seq| (lowest..=highest).contains(&seq));
-            if in_window {
-                if let Ok(frame) = format::read_frame(rest, version) {
-                    pos += frame.len;
-                    return Some(frame);
-                }
+            if in_window && let Ok(frame) = format::read_frame(rest, version) {
+                pos += frame.len;
+                return Some(frame);
             }
             pos += 1;
         }
@@ -471,10 +469,10 @@ impl WalReader {
     fn open_next(&mut self) -> Result<(), Error> {
         let (first_seq, path) = &self.segments[self.next_segment];
         let last = self.next_segment + 1 == self.segments.len();
-        if let Some(expected) = self.next_seq {
-            if *first_seq != expected {
-                return Err(Error::SeqMismatch { path: path.clone(), offset: 0, expected, found: *first_seq });
-            }
+        if let Some(expected) = self.next_seq
+            && *first_seq != expected
+        {
+            return Err(Error::SeqMismatch { path: path.clone(), offset: 0, expected, found: *first_seq });
         }
         let bytes = read_file(path)?;
         let cursor = Cursor::new(path, &bytes, *first_seq, last)?;

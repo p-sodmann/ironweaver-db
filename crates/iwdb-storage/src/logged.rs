@@ -407,11 +407,11 @@ impl<F: LogFs> LoggedNamespace<F> {
 
     /// After a WAL operation: if the log failed, the namespace is read-only.
     fn note_failure<T>(&self, wal: &Wal<F>, result: &Result<T, Error>) {
-        if result.is_err() {
-            if let Some(cause) = wal.failure() {
-                lock(&self.failure).get_or_insert_with(|| cause.to_owned());
-                self.advanced.notify_all();
-            }
+        if result.is_err()
+            && let Some(cause) = wal.failure()
+        {
+            lock(&self.failure).get_or_insert_with(|| cause.to_owned());
+            self.advanced.notify_all();
         }
     }
 }

@@ -369,13 +369,14 @@ impl Namespace {
         build: Option<IndexBuild>,
     ) -> Result<CommitResult, Error> {
         let Prepared { record, result } = prepared;
-        if let Some(IndexBuild { build, .. }) = build {
-            if !self.poisoned && record.seq == self.seq.wrapping_add(1) {
-                // An error (a build from another graph) or false (indexed
-                // meanwhile) leaves the graph as it was; the apply below
-                // then builds the index the plain way if it is missing
-                let _ = self.graph.install_index(build);
-            }
+        if let Some(IndexBuild { build, .. }) = build
+            && !self.poisoned
+            && record.seq == self.seq.wrapping_add(1)
+        {
+            // An error (a build from another graph) or false (indexed
+            // meanwhile) leaves the graph as it was; the apply below
+            // then builds the index the plain way if it is missing
+            let _ = self.graph.install_index(build);
         }
         self.apply_record(record, time)?;
         Ok(CommitResult { time, ..result })
