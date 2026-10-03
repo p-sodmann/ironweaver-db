@@ -1,0 +1,4 @@
+[resolver]
+# Pick dependency versions that support our rust-version (1.85) when newer
+# ones need a newer Rust (tonic-prost 0.14.6 needs 1.88); Cargo 1.84+
+incompatible-rust-versions = "fallback"

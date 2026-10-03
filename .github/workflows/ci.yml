@@ -37,8 +37,8 @@ jobs:
         # Design rule 1: pyo3 only in crates/iwdb-python, which is in the
         # workspace since step 7; every other crate must stay free of it
         run: |
-          if cargo tree -p iwdb-engine -p iwdb-storage -p iwdb -p iwctl -p iwdb-crash -e normal | grep -q pyo3; then
-            echo "pyo3 must not be a dependency of the engine, storage, store or CLI crates" >&2
+          if cargo tree -p iwdb-engine -p iwdb-storage -p iwdb -p iwctl -p iwdb-crash -p iwdb-server -e normal | grep -q pyo3; then
+            echo "pyo3 must not be a dependency of the engine, storage, store, server or CLI crates" >&2
             exit 1
           fi
 
@@ -114,6 +114,41 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  buf:
+    # Step 11: the gRPC contract (proto/ironweaver_db/v1). Lint on every push;
+    # check for breaking changes against what the base had: the pull
+    # request's base, main for pushes to other branches, the previous head
+    # for pushes to main. A base without the protos has nothing to break.
+    name: buf lint and breaking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - run: buf lint
+      - name: buf breaking
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            base="$PR_BASE"
+          elif [ "$REF" = "refs/heads/main" ]; then
+            base="$BEFORE"
+          else
+            base="$(git rev-parse origin/main)"
+          fi
+          if [ -n "$base" ] && git cat-file -e "$base:proto/ironweaver_db/v1" 2>/dev/null; then
+            buf breaking --against ".git#ref=$base"
+          else
+            echo "the base ($base) has no v1 protos: nothing to break"
+          fi
 
   fuzz:
     name: fuzz the WAL reader (nightly, 60 s)

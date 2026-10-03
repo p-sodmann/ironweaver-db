@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/iwdb-engine", "crates/iwdb-storage", "crates/iwdb-query", "crates/iwdb", "crates/iwctl", "crates/iwdb-python", "tests/crash"]
+members = ["crates/iwdb-engine", "crates/iwdb-storage", "crates/iwdb-query", "crates/iwdb", "crates/iwctl", "crates/iwdb-python", "crates/iwdb-server", "tests/crash"]
 # The cargo-fuzz targets need nightly and are a workspace of their own
 exclude = ["fuzz"]
 
@@ -29,6 +29,24 @@ tempfile = "3"
 # Warnings from recovery and the background threads of the embedded store (already in the tree)
 log = "0.4"
 fs4 = { version = "1", default-features = false, features = ["sync"] }
+# The gRPC server and client (step 11, iwdb-server only): tonic and prost, the
+# Rust gRPC stack; no TLS features until step 15
+tonic = { version = "0.14", default-features = false, features = ["transport", "codegen"] }
+tonic-prost = "0.14"
+prost = "0.14"
+# The server's async runtime (ADR 0020: no library crate but iwdb-server has one)
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "signal", "sync", "macros"] }
+# The server's accept loop (iwdb_server::serve): tonic's routes on hyper connections we
+# own, without tonic's grpc-timeout layer (ADR 0026); both already in the tree through tonic
+hyper = { version = "1", default-features = false, features = ["server", "http2"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "server", "http2", "server-graceful", "service"] }
+# Streamed answers as a stream of chunks (already in the tree through tonic)
+tokio-stream = { version = "0.1", default-features = false }
+# The server's config file
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
+# Build: generated code from the protos, compiled by protox (pure Rust: no protoc)
+tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }
+protox = "0.9"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
