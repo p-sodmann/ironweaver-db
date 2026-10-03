@@ -315,8 +315,7 @@ fn calls_of(setup: impl FnOnce(&TestFs, &Path), op: impl FnOnce(&Store<TestFs>))
     let store = Store::open_with(fs.clone(), dir.path(), options(2)).unwrap();
     let before = fs.state().calls.len();
     op(&store);
-    let calls = fs.state().calls[before..].to_vec();
-    calls
+    fs.state().calls[before..].to_vec()
 }
 
 /// How many calls of each kind there are.
@@ -482,8 +481,7 @@ fn every_file_operation_of_the_layout_upgrade_can_fail() {
             copy_dir(&fixture, dir.path());
             let fs = TestFs::default();
             Store::open_with(fs.clone(), dir.path(), options(2)).unwrap();
-            let calls = fs.state().calls.clone();
-            calls
+            fs.state().calls.clone()
         };
         for (call, count) in per_kind(&calls) {
             for skip in 0..count {

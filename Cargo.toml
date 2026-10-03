@@ -1,12 +1,12 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/iwdb-engine", "crates/iwdb-storage", "crates/iwdb-query", "crates/iwdb", "crates/iwctl", "crates/iwdb-python", "crates/iwdb-server", "tests/crash"]
 # The cargo-fuzz targets need nightly and are a workspace of their own
 exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 rust-version = "1.85"
 repository = "https://github.com/p-sodmann/ironweaver-db"

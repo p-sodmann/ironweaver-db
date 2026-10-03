@@ -107,7 +107,7 @@ impl Outcome {
         Outcome { lines: Vec::new(), status, killed: false }
     }
 
-    fn words(&self, prefix: &str) -> impl Iterator<Item = Vec<&str>> {
+    fn words(&self, prefix: &str) -> impl Iterator<Item = Vec<&str>> + use<'_> {
         let prefix = format!("{} ", prefix);
         self.lines.iter().filter_map(move |l| l.strip_prefix(prefix.as_str())).map(|rest| rest.split(' ').collect())
     }
