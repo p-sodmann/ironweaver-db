@@ -29,11 +29,14 @@ pub mod conformance;
 
 pub use cursor::Cursor;
 pub use error::{Code, Error};
-pub use model::{Answer, CommitOptions, Edge, IndexSize, IndexState, IndexStatus, NamespaceStatus, Node, Work};
+pub use model::{
+    Answer, ChangeEvent, Changes, CommitOptions, Edge, IndexSize, IndexState, IndexStatus, NamespaceStatus, Node, Work,
+};
 pub use options::{Bounds, LimitConfig, Limits, QueryOptions};
 pub use read::{Explain, Lookup, Plan, ReadContext};
 pub use request::{
-    AnalyticsRequest, ExplainRequest, FindRequest, Job, JobResult, MatchRequest, MatchRow, NeighbourhoodRequest, Order,
-    Path, PathMethod, PathRequest, ProjectionSpec, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
+    AnalyticsRequest, CHANGES_BATCH_BYTES, ChangesRequest, ExplainRequest, FindRequest, Job, JobResult, MatchRequest,
+    MatchRow, NeighbourhoodRequest, Order, Path, PathMethod, PathRequest, ProjectionSpec, Subgraph, SubgraphRequest,
+    TraverseRequest, WalkRequest,
 };
 pub use service::Database;

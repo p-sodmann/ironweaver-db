@@ -1,0 +1,190 @@
+// Ironweaver DB gRPC contract, version 1: the change stream (ADR 0031).
+//
+// The change stream returns the commits of a namespace from a seq on,
+// exactly as the WAL logged them: the resolved ops of a data commit (with
+// explicit edge ids and new versions), or a catalog change. Only durable
+// commits are returned, so a seq never changes its content: a consumer
+// that stores the seq of the last commit it processed, together with its
+// effect, and resumes from the next one sees every commit exactly once.
+// Seqs older than the WAL retains fail with `not_retained`.
+
+syntax = "proto3";
+
+package ironweaver_db.v1;
+
+import "ironweaver_db/v1/mutations.proto";
+import "ironweaver_db/v1/query.proto";
+import "ironweaver_db/v1/values.proto";
+
+// A node's or edge's payload in an op.
+message RecordData {
+  map<string, Value> attr = 1;
+  // User meta (without the database's `iwdb.*` keys).
+  map<string, Value> meta = 2;
+  uint64 version = 3;
+}
+
+// One resolved op of a data commit: the core's `Op`. Applying a commit's
+// ops in order to the state before it gives the state after it.
+message ChangeOp {
+  oneof kind {
+    // Add a node with labels and a payload (its id is new).
+    AddNodeOp add_node = 1;
+    // Remove a node and all of its edges (there is no op per edge).
+    RemoveNodeOp remove_node = 2;
+    RenameNodeOp rename_node = 3;
+    NodeLabelOp add_label = 4;
+    NodeLabelOp remove_label = 5;
+    // Replace a node's payload.
+    SetNodeOp set_node = 6;
+    // Set or (without `value`) remove one attribute of a node.
+    SetNodeAttrOp set_node_attr = 7;
+    // Set a node's version.
+    SetNodeVersionOp set_node_version = 8;
+    // Add an edge with its id (ids are never reused).
+    AddEdgeOp add_edge = 9;
+    RemoveEdgeOp remove_edge = 10;
+    SetEdgeTypeOp set_edge_type = 11;
+    // Replace an edge's payload.
+    SetEdgeOp set_edge = 12;
+    // Set or (without `value`) remove one attribute of an edge.
+    SetEdgeAttrOp set_edge_attr = 13;
+    // Set an edge's version.
+    SetEdgeVersionOp set_edge_version = 14;
+  }
+}
+
+message AddNodeOp {
+  string id = 1;
+  repeated string labels = 2;
+  RecordData data = 3;
+}
+
+message RemoveNodeOp {
+  string id = 1;
+}
+
+message RenameNodeOp {
+  string id = 1;
+  string new_id = 2;
+}
+
+message NodeLabelOp {
+  string id = 1;
+  string label = 2;
+}
+
+message SetNodeOp {
+  string id = 1;
+  RecordData data = 2;
+}
+
+message SetNodeAttrOp {
+  string id = 1;
+  string key = 2;
+  // Missing: remove the attribute.
+  Value value = 3;
+}
+
+message SetNodeVersionOp {
+  string id = 1;
+  uint64 version = 2;
+}
+
+message AddEdgeOp {
+  uint64 id = 1;
+  string from = 2;
+  string to = 3;
+  // Missing for an untyped edge.
+  optional string type = 4;
+  RecordData data = 5;
+}
+
+message RemoveEdgeOp {
+  uint64 id = 1;
+}
+
+message SetEdgeTypeOp {
+  uint64 id = 1;
+  // Missing: untyped.
+  optional string type = 2;
+}
+
+message SetEdgeOp {
+  uint64 id = 1;
+  RecordData data = 2;
+}
+
+message SetEdgeAttrOp {
+  uint64 id = 1;
+  string key = 2;
+  // Missing: remove the attribute.
+  Value value = 3;
+}
+
+message SetEdgeVersionOp {
+  uint64 id = 1;
+  uint64 version = 2;
+}
+
+// The ops of a data commit.
+message DataChange {
+  repeated ChangeOp ops = 1;
+}
+
+// One commit.
+message ChangeEvent {
+  uint64 seq = 1;
+  // When the WAL appended the commit, in microseconds since 1970 (UTC).
+  // Missing for commits logged in WAL format 1.
+  optional int64 time_micros = 2;
+  // The idempotency key the commit was made with, if any.
+  optional string idempotency_key = 3;
+  oneof change {
+    DataChange data = 4;
+    CatalogChange catalog = 5;
+  }
+}
+
+// One batch of the change stream: the commits from `from_seq` on, at most
+// `options.limits.max_results` of them and about 4 MiB of WAL payload (at
+// least one commit if there is one). Without `wait`, an empty batch if
+// there is none yet; with it, the call waits for one for about the
+// timeout, and then answers with an empty batch. `options.history`
+// should be the history of `from_seq`; `min_seq` is waited for first.
+message GetChangesRequest {
+  string namespace = 1;
+  // 0 is read as 1. To resume, pass the `next_seq` of the last batch.
+  uint64 from_seq = 2;
+  bool wait = 3;
+  QueryOptions options = 4;
+}
+
+message GetChangesResponse {
+  repeated ChangeEvent events = 1;
+  // Where the next batch starts.
+  uint64 next_seq = 2;
+  // The oldest seq still retained.
+  uint64 first_seq = 3;
+  // `seq` is the streamable seq when the batch was read.
+  AnswerMeta meta = 4;
+}
+
+// Follow the change stream: the server answers `GetChanges` with `wait`
+// in a loop and sends each batch as a message, from `from_seq` on, until
+// the client cancels, an error ends the stream, or the server shuts down
+// (`unavailable`). Each round waits for about `options.timeout_ms`
+// (default and cap: the server's); a round that finds nothing sends a
+// message without events (a heartbeat with `next_seq`).
+message WatchRequest {
+  string namespace = 1;
+  uint64 from_seq = 2;
+  QueryOptions options = 3;
+}
+
+message WatchResponse {
+  repeated ChangeEvent events = 1;
+  uint64 next_seq = 2;
+  uint64 first_seq = 3;
+  AnswerMeta meta = 4;
+}

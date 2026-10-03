@@ -16,12 +16,14 @@ use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation, Namespa
 use iwdb_query::exec::{Pending, Pool};
 use iwdb_query::read::{self, ReadContext};
 use iwdb_query::{
-    AnalyticsRequest, Answer, Code, CommitOptions, Database, Edge, Error, Explain, ExplainRequest, FindRequest,
-    JobResult, LimitConfig, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
-    QueryOptions, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest, Work,
+    AnalyticsRequest, Answer, CHANGES_BATCH_BYTES, ChangeEvent, Changes, ChangesRequest, Code, CommitOptions, Database,
+    Edge, Error, Explain, ExplainRequest, FindRequest, JobResult, LimitConfig, MatchRequest, MatchRow, NamespaceStatus,
+    NeighbourhoodRequest, Node, Path, PathRequest, QueryOptions, Subgraph, SubgraphRequest, TraverseRequest,
+    WalkRequest, Work,
 };
 use iwdb_storage::io::{LogFs, StdFs};
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
+use iwdb_storage::{BatchLimits, Wait};
 
 use crate::{Ns, ReadOptions, Store};
 
@@ -371,6 +373,55 @@ where
             let (value, truncated) = analysis.value;
             Ok(Answer { value, seq: analysis.seq, next: None, truncated, work: Work { visited: nodes, edges } })
         })
+    }
+
+    fn changes(
+        &self,
+        namespace: &str,
+        request: ChangesRequest,
+        options: QueryOptions,
+    ) -> impl Future<Output = Result<Answer<Changes>, Error>> + Send {
+        let name = namespace.to_owned();
+        let from = request.from_seq.max(1);
+        async move {
+            let request_ = Request::new(&self.config, options)?;
+            let history = self.store.history();
+            if let Some(given) = request_.options.history.filter(|h| *h != history) {
+                return Err(crate::Error::OtherHistory { given, store: history }.into());
+            }
+            // The long poll waits here, without a worker, and leaves part of
+            // the timeout for the read
+            if request.wait {
+                let ns = self.store.namespace(&name)?;
+                if ns.streamable_seq() < from {
+                    let margin = (request_.timeout / 10).min(Duration::from_secs(1));
+                    let until = request_.deadline.map(|d| d.checked_sub(margin).unwrap_or(d));
+                    if let Wait::Dropped = ns.streamable_wait(from, until)?.await {
+                        return Err(crate::Error::NamespaceDropped { name }.into());
+                    }
+                }
+            }
+            let max_records = request_.bounds.max_results;
+            self.run_until(request_.expiry(), move |store, token| {
+                let ns = store.namespace(&name)?;
+                let read = request_.read_options(token)?;
+                let limits = BatchLimits { max_records, max_bytes: CHANGES_BATCH_BYTES };
+                let batch = ns.changes(from, limits, false, &read).map_err(|e| request_.error(e))?;
+                let events = batch
+                    .records
+                    .into_iter()
+                    .map(|r| ChangeEvent {
+                        seq: r.record.seq,
+                        time: r.time,
+                        key: r.record.keyed.map(|k| k.key),
+                        change: r.record.change,
+                    })
+                    .collect();
+                let changes = Changes { events, next_seq: batch.next_seq, first_seq: batch.first_seq };
+                Ok(Answer::at(ns.streamable_seq(), changes))
+            })
+            .await
+        }
     }
 
     fn catalog(

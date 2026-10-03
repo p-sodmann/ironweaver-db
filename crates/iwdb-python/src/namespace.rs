@@ -82,6 +82,20 @@ impl PyNamespace {
         })
     }
 
+    /// A batch of the change stream (ADR 0031); see `Store.changes`.
+    #[pyo3(signature = (from_seq = 0, *, wait = false, max_results = None, history = None, timeout = None))]
+    fn changes(
+        &self,
+        py: Python<'_>,
+        from_seq: u64,
+        wait: bool,
+        max_results: Option<usize>,
+        history: Option<&str>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.store.get().changes_in(py, &self.name, from_seq, wait, max_results, history, timeout)
+    }
+
     #[pyo3(signature = (*, min_seq = None, timeout = None))]
     fn catalog(&self, py: Python<'_>, min_seq: Option<u64>, timeout: Option<f64>) -> PyResult<Py<PyAny>> {
         self.store.get().catalog_in(py, &self.name, min_seq, timeout)

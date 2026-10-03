@@ -9,6 +9,8 @@
 //! group_max_delay_ms = 10           # group commit: fsync at least this often
 //! group_max_batch = 64              # ... or after this many commits
 //! checkpoint_on_shutdown = true
+//! retain_records = 0                # keep the WAL of the last N commits for the change stream
+//! retain_age_secs = 0               # ... and of commits younger than this (0: none)
 //!
 //! [server]
 //! drain_timeout_secs = 30           # how long running calls may finish on shutdown
@@ -37,7 +39,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use iwdb::{CheckpointOptions, FsyncPolicy, QueryConfig, StoreOptions};
+use iwdb::{CheckpointOptions, FsyncPolicy, QueryConfig, StoreOptions, WalRetention};
 use iwdb_query::{Bounds, LimitConfig};
 use serde::Deserialize;
 
@@ -78,11 +80,23 @@ pub struct StoreSection {
     pub group_max_delay_ms: u64,
     pub group_max_batch: u32,
     pub checkpoint_on_shutdown: bool,
+    /// WAL retention for the change stream (ADR 0031): the last this many
+    /// commits ...
+    pub retain_records: u64,
+    /// ... and commits younger than this many seconds (0: none).
+    pub retain_age_secs: u64,
 }
 
 impl Default for StoreSection {
     fn default() -> Self {
-        StoreSection { fsync: Fsync::Always, group_max_delay_ms: 10, group_max_batch: 64, checkpoint_on_shutdown: true }
+        StoreSection {
+            fsync: Fsync::Always,
+            group_max_delay_ms: 10,
+            group_max_batch: 64,
+            checkpoint_on_shutdown: true,
+            retain_records: 0,
+            retain_age_secs: 0,
+        }
     }
 }
 
@@ -172,8 +186,8 @@ impl Config {
         Ok(config)
     }
 
-    /// The store's options: the defaults, with the fsync policy and
-    /// checkpoint on shutdown from the file.
+    /// The store's options: the defaults, with the fsync policy, checkpoint
+    /// on shutdown and WAL retention from the file.
     pub fn store_options(&self) -> StoreOptions {
         let mut options = StoreOptions::default();
         options.wal.fsync = match self.store.fsync {
@@ -185,6 +199,10 @@ impl Config {
             Fsync::Off => FsyncPolicy::Off,
         };
         options.checkpoint = CheckpointOptions { on_close: self.store.checkpoint_on_shutdown, ..options.checkpoint };
+        options.retention = WalRetention {
+            records: self.store.retain_records,
+            age: (self.store.retain_age_secs > 0).then(|| Duration::from_secs(self.store.retain_age_secs)),
+        };
         options
     }
 
@@ -267,6 +285,9 @@ mod tests {
         let options = config.store_options();
         assert_matches!(options.wal.fsync, FsyncPolicy::Group { max_batch: 64, .. });
         assert!(!options.checkpoint.on_close);
+        let config = Config::parse("data_dir = \"d\"\n[store]\nretain_records = 500\nretain_age_secs = 3600").unwrap();
+        let retention = WalRetention { records: 500, age: Some(Duration::from_secs(3600)) };
+        assert_eq!(config.store_options().retention, retention);
     }
 
     #[test]

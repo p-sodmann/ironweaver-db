@@ -9,11 +9,11 @@ use std::time::Duration;
 
 use iwdb::{
     AttrPath, CatalogChange, CheckpointOptions, CommitOptions, CommitResult, Constraint, ConstraintKind, EdgeId,
-    Embedded, Error, FsyncPolicy, IdempotencyKey, IndexDef, Label, NAMESPACE, NamespaceResult, QueryConfig, Store,
-    StoreOptions, Target, WalOptions,
+    Embedded, Error, FsyncPolicy, HistoryId, IdempotencyKey, IndexDef, Label, NAMESPACE, NamespaceResult, QueryConfig,
+    Store, StoreOptions, Target, WalOptions, WalRetention,
 };
 use iwdb_query::exec::block_on;
-use iwdb_query::{Database, LimitConfig, QueryOptions};
+use iwdb_query::{ChangesRequest, Database, LimitConfig, QueryOptions};
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
@@ -163,7 +163,8 @@ impl PyStore {
     #[pyo3(signature = (
         path, *, create_if_missing = true, fsync = "always", group_max_delay = 0.01, group_max_batch = 64,
         segment_size = 64 << 20, checkpoint_wal_size = Some(256 << 20), checkpoint_interval = Some(300.0),
-        checkpoint_on_close = true, checkpoint_keep = 2, checkpoint_background = true, archive = None
+        checkpoint_on_close = true, checkpoint_keep = 2, checkpoint_background = true, archive = None,
+        retain_records = 0, retain_age = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn open(
@@ -180,6 +181,8 @@ impl PyStore {
         checkpoint_keep: usize,
         checkpoint_background: bool,
         archive: Option<PathBuf>,
+        retain_records: u64,
+        retain_age: Option<f64>,
     ) -> PyResult<Self> {
         guard(|| {
             let options = StoreOptions {
@@ -193,6 +196,10 @@ impl PyStore {
                 },
                 create_if_missing,
                 archive,
+                retention: WalRetention {
+                    records: retain_records,
+                    age: retain_age.map(|s| seconds(s, "retain_age")).transpose()?,
+                },
             };
             let store = py.detach(|| Store::open(&path, options)).map_err(to_py)?;
             let db = Embedded::new(store, query_config()).map_err(query_to_py)?;
@@ -364,6 +371,24 @@ impl PyStore {
         self.catalog_in(py, NAMESPACE, min_seq, timeout)
     }
 
+    /// A batch of the change stream of `"default"` (ADR 0031): the commits
+    /// from `from_seq` on, as logged, only durable ones. With `wait`, waits
+    /// for one for about `timeout` if there is none yet. Resume with the
+    /// batch's `next_seq`; `history` is the store's history id of that seq
+    /// (a restored store refuses it).
+    #[pyo3(signature = (from_seq = 0, *, wait = false, max_results = None, history = None, timeout = None))]
+    fn changes(
+        &self,
+        py: Python<'_>,
+        from_seq: u64,
+        wait: bool,
+        max_results: Option<usize>,
+        history: Option<&str>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.changes_in(py, NAMESPACE, from_seq, wait, max_results, history, timeout)
+    }
+
     /// Every index of `"default"` with its state.
     fn indexes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.indexes_in(py, NAMESPACE)
@@ -519,6 +544,29 @@ impl PyStore {
             let ns = ns.to_owned();
             let options = read_options(None, timeout)?;
             self.query(py, move |db| block_on(db.wait_for_seq(&ns, seq, options)))
+        })
+    }
+
+    /// A batch of the change stream (ADR 0031); see `crate::changes`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn changes_in(
+        &self,
+        py: Python<'_>,
+        ns: &str,
+        from_seq: u64,
+        wait: bool,
+        max_results: Option<usize>,
+        history: Option<&str>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        guard(|| {
+            let ns = ns.to_owned();
+            let mut options = read_options(None, timeout)?;
+            options.limits.max_results = max_results;
+            options.history = history.map(|h| h.parse::<HistoryId>().map_err(invalid)).transpose()?;
+            let request = ChangesRequest { from_seq, wait };
+            let answer = self.query(py, move |db| block_on(db.changes(&ns, request, options)))?;
+            crate::changes::batch(py, &answer)
         })
     }
 

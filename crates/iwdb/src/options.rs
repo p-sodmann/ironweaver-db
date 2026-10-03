@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use iwdb_storage::WalOptions;
+use iwdb_storage::{WalOptions, WalRetention};
 
 /// Options of [`Store::open`](crate::Store::open).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,6 +21,11 @@ pub struct StoreOptions {
     /// one (`Error::ArchiveMismatch`). With a backup, it allows restoring
     /// to any later seq it holds.
     pub archive: Option<PathBuf>,
+    /// How long WAL segments stay for the change stream after checkpoints
+    /// no longer need them (ADR 0031; default: nothing extra). The change
+    /// stream ([`Ns::changes`](crate::Ns::changes)) serves the seqs still
+    /// in the WAL; older ones fail with `NotRetained`.
+    pub retention: WalRetention,
 }
 
 impl Default for StoreOptions {
@@ -30,6 +35,7 @@ impl Default for StoreOptions {
             checkpoint: CheckpointOptions::default(),
             create_if_missing: true,
             archive: None,
+            retention: WalRetention::default(),
         }
     }
 }

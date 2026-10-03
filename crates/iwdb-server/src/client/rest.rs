@@ -22,9 +22,9 @@ use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation};
 use iwdb_query::read::Explain;
 use iwdb_query::{
-    AnalyticsRequest, Answer, CommitOptions, Database, Edge, Error, ExplainRequest, FindRequest, JobResult,
-    MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest, QueryOptions, Subgraph,
-    SubgraphRequest, TraverseRequest, WalkRequest,
+    AnalyticsRequest, Answer, Changes, ChangesRequest, CommitOptions, Database, Edge, Error, ExplainRequest,
+    FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
+    QueryOptions, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 use serde::Serialize;
@@ -242,6 +242,17 @@ fn query(o: &QueryOptions) -> String {
     if pairs.is_empty() { String::new() } else { format!("?{}", pairs.join("&")) }
 }
 
+/// The query of the change stream's route: the options it takes.
+fn changes_query(request: &ChangesRequest, o: &QueryOptions) -> String {
+    let o = options_to_pb(o);
+    let mut pairs = vec![format!("from_seq={}", request.from_seq), format!("wait={}", request.wait)];
+    pairs.extend(o.min_seq.map(|v| format!("min_seq={}", v)));
+    pairs.extend((!o.history.is_empty()).then(|| format!("history={}", segment(&o.history))));
+    pairs.extend(o.timeout_ms.map(|v| format!("timeout_ms={}", v)));
+    pairs.extend(o.limits.and_then(|l| l.max_results).map(|v| format!("max_results={}", v)));
+    format!("?{}", pairs.join("&"))
+}
+
 fn options(o: &QueryOptions) -> Option<pb::QueryOptions> {
     Some(options_to_pb(o))
 }
@@ -344,6 +355,20 @@ impl Database for RestRemote {
             let (chunks, meta) = c.stream(url, &request, |r: &mut pb::FindResponse| r.meta.take()).await?;
             let nodes = chunks.into_iter().flat_map(|r| r.nodes).collect();
             Ok(answer_from_pb(nodes_from_pb(nodes).map_err(bad_answer)?, meta))
+        })
+    }
+
+    fn changes(
+        &self,
+        namespace: &str,
+        request: ChangesRequest,
+        o: QueryOptions,
+    ) -> impl Future<Output = Result<Answer<Changes>, Error>> + Send {
+        let namespace = namespace.to_owned();
+        self.call(move |c| async move {
+            let url = c.url(&namespace, &format!("/changes{}", changes_query(&request, &o)));
+            let response: pb::GetChangesResponse = c.get(url).await?;
+            changes_from_pb(response).map_err(bad_answer)
         })
     }
 

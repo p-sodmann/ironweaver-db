@@ -37,6 +37,9 @@ use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use iwdb_query::{Code, Database, Error};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use tokio::sync::watch;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::ops;
 use crate::proto as pb;
@@ -49,6 +52,8 @@ pub mod openapi;
 pub const JSON: &str = "application/json";
 /// The media type of streamed answers: one JSON message per line.
 pub const NDJSON: &str = "application/x-ndjson";
+/// The media type of the change stream's Server-Sent Events.
+pub const EVENT_STREAM: &str = "text/event-stream";
 
 /// What a route takes besides its path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +63,9 @@ pub enum Input {
     Body { required: bool },
     /// `QueryOptions` as query parameters.
     Options,
+    /// The change stream's query parameters (`from_seq`, `wait`, options); with
+    /// `stream`, as Server-Sent Events (and without `wait`).
+    Changes { stream: bool },
     /// Nothing.
     Nothing,
 }
@@ -167,6 +175,22 @@ pub const ROUTES: &[Route] = &[
     route(Method::POST, "/v1/namespaces/{ns}/subgraph", "Subgraph", BODY, "subgraph", "An induced subgraph"),
     route(Method::POST, "/v1/namespaces/{ns}/match", "MatchPattern", BODY, "matchPattern", "Match a pattern"),
     route(Method::POST, "/v1/namespaces/{ns}/analyze", "Analyze", BODY, "analyze", "Run an analytics job"),
+    route(
+        Method::GET,
+        "/v1/namespaces/{ns}/changes",
+        "GetChanges",
+        Input::Changes { stream: false },
+        "getChanges",
+        "A batch of the change stream",
+    ),
+    route(
+        Method::GET,
+        "/v1/namespaces/{ns}/changes/stream",
+        "Watch",
+        Input::Changes { stream: true },
+        "watchChanges",
+        "Follow the change stream (Server-Sent Events)",
+    ),
     Route {
         method: Method::GET,
         path: "/v1/openapi.json",
@@ -181,13 +205,16 @@ pub const ROUTES: &[Route] = &[
 struct Shared<D> {
     db: Arc<D>,
     max_body: usize,
+    /// Turns true when the server shuts down: change streams end.
+    stopping: watch::Receiver<bool>,
 }
 
 type St<D> = State<Arc<Shared<D>>>;
 
 /// The REST routes over `db`, with request bodies of at most `max_body`
-/// bytes. Requests that match no route are answered here too (404).
-pub fn router<D: Database + 'static>(db: Arc<D>, max_body: usize) -> Router {
+/// bytes. Requests that match no route are answered here too (404). The
+/// change streams end when `stopping` turns true.
+pub fn router<D: Database + 'static>(db: Arc<D>, max_body: usize, stopping: watch::Receiver<bool>) -> Router {
     let mut router = Router::new();
     for r in ROUTES {
         router = router.route(r.path, handler::<D>(r));
@@ -197,7 +224,7 @@ pub fn router<D: Database + 'static>(db: Arc<D>, max_body: usize) -> Router {
         .method_not_allowed_fallback(|| async {
             Failure::http(StatusCode::METHOD_NOT_ALLOWED, "the route doesn't take this method")
         })
-        .with_state(Arc::new(Shared { db, max_body }))
+        .with_state(Arc::new(Shared { db, max_body, stopping }))
 }
 
 /// The handler of `r`.
@@ -224,6 +251,8 @@ fn handler<D: Database + 'static>(r: &Route) -> MethodRouter<Arc<Shared<D>>> {
         "subgraph" => post(subgraph::<D>),
         "matchPattern" => post(match_pattern::<D>),
         "analyze" => post(analyze::<D>),
+        "getChanges" => get(get_changes::<D>),
+        "watchChanges" => get(watch_changes::<D>),
         "openapi" => get(openapi_document),
         other => get(move || async move { Failure::from(Error::internal(format!("route {} has no handler", other))) }),
     }
@@ -337,6 +366,48 @@ fn options(q: Result<Query<OptionsQuery>, QueryRejection>) -> Result<Option<pb::
         partial: q.partial.unwrap_or_default(),
         cursor: q.cursor.unwrap_or_default(),
     }))
+}
+
+/// The query parameters of the change stream's routes.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangesQuery {
+    from_seq: Option<u64>,
+    wait: Option<bool>,
+    min_seq: Option<u64>,
+    history: Option<String>,
+    timeout_ms: Option<u32>,
+    max_results: Option<u64>,
+}
+
+/// The query parameters of [`Input::Changes`] routes, for the OpenAPI
+/// document: name, type, description (`wait` only without `stream`).
+pub(crate) const CHANGES_PARAMETERS: &[(&str, &str, &str)] = &[
+    ("from_seq", "integer", "The first seq to return; resume with the `nextSeq` of the last batch."),
+    ("wait", "boolean", "If there is no commit yet, wait for one for about the timeout (a long poll)."),
+    ("min_seq", "integer", "Wait until the namespace has applied this seq first."),
+    ("history", "string", "The history `from_seq` belongs to (32 hex digits); another one is refused."),
+    ("timeout_ms", "integer", "How long the request may take (for a stream: each round), in milliseconds."),
+    ("max_results", "integer", "Most commits in a batch."),
+];
+
+/// `from_seq`, `wait` and the options of a change stream route.
+fn changes_query(
+    q: Result<Query<ChangesQuery>, QueryRejection>,
+    stream: bool,
+) -> Result<(u64, bool, Option<pb::QueryOptions>), Failure> {
+    let Query(q) = q.map_err(|e| Failure::from(Error::invalid(format!("invalid query: {}", e))))?;
+    if stream && q.wait.is_some() {
+        return Err(Error::invalid("the change stream always waits: leave `wait` out").into());
+    }
+    let options = pb::QueryOptions {
+        min_seq: q.min_seq,
+        history: q.history.unwrap_or_default(),
+        timeout_ms: q.timeout_ms,
+        limits: Some(pb::Limits { max_results: q.max_results, ..pb::Limits::default() }),
+        ..pb::QueryOptions::default()
+    };
+    Ok((q.from_seq.unwrap_or_default(), q.wait.unwrap_or_default(), Some(options)))
 }
 
 // ---- answers ----
@@ -501,6 +572,87 @@ async fn get_edge<D: Database + 'static>(
         return Err(Error::new(Code::NotFound, format!("no edge {} in namespace '{}'", edge, ns)).into());
     }
     unary(Ok(answer))
+}
+
+async fn get_changes<D: Database + 'static>(
+    State(s): St<D>,
+    p: Result<Path<String>, PathRejection>,
+    q: Result<Query<ChangesQuery>, QueryRejection>,
+) -> Answer {
+    let (from_seq, wait, options) = changes_query(q, false)?;
+    let r = pb::GetChangesRequest { namespace: path(p)?, from_seq, wait, options };
+    unary(ops::get_changes(&*s.db, r, None).await)
+}
+
+/// The change stream as Server-Sent Events (ADR 0031): a `change` event per
+/// commit, with the seq as its `id` and the `ChangeEvent` as its data; a
+/// comment line as heartbeat after a round without commits; an `error`
+/// event with an `Error` before the stream ends on an error (`unavailable`
+/// at shutdown). A `Last-Event-ID` header (what `EventSource` sends when it
+/// reconnects) resumes after that seq, instead of `from_seq`. An error in
+/// the first batch (no namespace, `not_retained`, ...) is the answer's
+/// status instead.
+async fn watch_changes<D: Database + 'static>(
+    State(s): St<D>,
+    p: Result<Path<String>, PathRejection>,
+    q: Result<Query<ChangesQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Answer {
+    let (mut from_seq, _, options) = changes_query(q, true)?;
+    if let Some(id) = headers.get("last-event-id") {
+        let seq = id.to_str().ok().and_then(|id| id.trim().parse::<u64>().ok());
+        let seq = seq.ok_or_else(|| Error::invalid("Last-Event-ID must be the seq of an event"))?;
+        from_seq = seq.saturating_add(1);
+    }
+    let r = pb::WatchRequest { namespace: path(p)?, from_seq, options };
+    let mut batches = ops::follow(s.db.clone(), r, None, s.stopping.clone());
+    let first = match batches.recv().await {
+        Some(first) => first?,
+        None => return Err(Error::unavailable("the server is shutting down").into()),
+    };
+    let events = tokio_stream::once(Ok(first)).chain(ReceiverStream::new(batches)).map(|batch| {
+        Ok::<_, std::convert::Infallible>(Bytes::from(match batch {
+            Ok(batch) => sse_events(&batch),
+            Err(e) => sse_error(&e),
+        }))
+    });
+    let headers = [
+        (header::CONTENT_TYPE, HeaderValue::from_static(EVENT_STREAM)),
+        (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+    ];
+    Ok((headers, Body::from_stream(events)).into_response())
+}
+
+/// A batch as SSE events, or a heartbeat comment if it has none.
+fn sse_events(batch: &pb::GetChangesResponse) -> Vec<u8> {
+    if batch.events.is_empty() {
+        return format!(": next seq {}\n\n", batch.next_seq).into_bytes();
+    }
+    let mut out = Vec::new();
+    for event in &batch.events {
+        match serde_json::to_vec(event) {
+            Ok(json) => {
+                out.extend_from_slice(format!("id: {}\nevent: change\ndata: ", event.seq).as_bytes());
+                // JSON has no raw newlines: one data line
+                out.extend_from_slice(&json);
+                out.extend_from_slice(b"\n\n");
+            }
+            Err(e) => {
+                out.extend(sse_error(&Error::internal(format!("can't write change {}: {}", event.seq, e))));
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn sse_error(e: &Error) -> Vec<u8> {
+    let body = pb::Error { code: e.code().as_str().to_owned(), message: e.message().to_owned() };
+    let json = serde_json::to_vec(&body).unwrap_or_default();
+    let mut out = b"event: error\ndata: ".to_vec();
+    out.extend_from_slice(&json);
+    out.extend_from_slice(b"\n\n");
+    out
 }
 
 /// The chunks of an answer of one item: there is one.

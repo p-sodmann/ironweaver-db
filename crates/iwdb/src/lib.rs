@@ -57,9 +57,10 @@ pub use iwdb_query::{CommitOptions, Edge, IndexSize, IndexState, IndexStatus, Na
 pub use iwdb_storage::io::{LogFs, StdFs};
 pub use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 pub use iwdb_storage::{
-    BackupReport, CheckpointOutcome, CutTail, DirStatus, Error, Finding, FsyncPolicy, HistoryId, Kind, LockStats,
-    NamespaceBackup, NamespaceFiles, NamespaceRestore, NamespaceVerify, RecoveryReport, RestoreReport, RestoreSources,
-    RestoreTarget, SkippedCheckpoint, StoreRecovery, VerifyReport, WalOptions,
+    BackupReport, BatchLimits, ChangeBatch, ChangeRecord, CheckpointOutcome, CutTail, DirStatus, Error, Finding,
+    FsyncPolicy, HistoryId, Kind, LockStats, NamespaceBackup, NamespaceFiles, NamespaceRestore, NamespaceVerify,
+    RecoveryReport, RestoreReport, RestoreSources, RestoreTarget, SkippedCheckpoint, StoreRecovery, VerifyReport,
+    WalOptions, WalRetention,
 };
 pub use ops::{Status, restore, restore_namespaces, restore_with, restore_with_only, status, verify};
 pub use options::{CheckpointOptions, StoreOptions};

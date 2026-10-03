@@ -42,6 +42,10 @@ pub enum Code {
     /// read is served only at the seq of its first page. Start again
     /// without the cursor.
     CursorExpired,
+    /// The change stream was asked for a seq that is no longer in the WAL
+    /// (ADR 0031): start again from a snapshot. The message names the
+    /// oldest retained seq.
+    NotRetained,
     /// The namespace is read-only after a failed WAL write or fsync, or a
     /// failed apply, until the store is reopened.
     ReadOnly,
@@ -59,7 +63,7 @@ pub enum Code {
 
 impl Code {
     /// Every code, in the order of `documentation/api/errors.md`.
-    pub const ALL: [Code; 13] = [
+    pub const ALL: [Code; 14] = [
         Code::InvalidArgument,
         Code::NotFound,
         Code::Conflict,
@@ -68,6 +72,7 @@ impl Code {
         Code::Timeout,
         Code::Cancelled,
         Code::CursorExpired,
+        Code::NotRetained,
         Code::ReadOnly,
         Code::Unavailable,
         Code::Io,
@@ -86,6 +91,7 @@ impl Code {
             Code::Timeout => "timeout",
             Code::Cancelled => "cancelled",
             Code::CursorExpired => "cursor_expired",
+            Code::NotRetained => "not_retained",
             Code::ReadOnly => "read_only",
             Code::Unavailable => "unavailable",
             Code::Io => "io",
@@ -221,6 +227,7 @@ impl From<iwdb_storage::Error> for Error {
             E::Cancelled => Code::Cancelled,
             E::NoSuchNamespace { .. } | E::NamespaceDropped { .. } => Code::NotFound,
             E::NamespaceExists { .. } => Code::Conflict,
+            E::NotRetained { .. } => Code::NotRetained,
             E::Corrupt { .. }
             | E::InvalidRecord { .. }
             | E::SeqMismatch { .. }

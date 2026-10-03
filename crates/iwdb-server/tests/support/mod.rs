@@ -24,6 +24,7 @@ pub fn options() -> StoreOptions {
         checkpoint: CheckpointOptions { wal_size: None, interval: None, on_close: true, keep: 2, background: false },
         create_if_missing: true,
         archive: None,
+        retention: Default::default(),
     }
 }
 

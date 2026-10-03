@@ -1,9 +1,11 @@
 //! [`LoggedNamespace`]: a namespace whose commits go through its log, shared
 //! by one writer and many readers.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
+use std::task::Waker;
 use std::time::{Duration, Instant};
 
 use iwdb_engine::catalog::AttrPath;
@@ -53,12 +55,17 @@ pub struct LoggedNamespace<F: LogFs = StdFs> {
     wal: Mutex<Wal<F>>,
     /// The seq of the last applied commit, published after each apply.
     seq: AtomicU64,
+    /// The streamable seq (ADR 0031): applied and synced (applied under
+    /// `off`), published after each apply and fsync.
+    streamable: AtomicU64,
     /// Why the namespace is read-only (mirrors the WAL's failure and the
     /// namespace's poison, so that asking doesn't wait for an fsync).
     failure: Mutex<Option<String>>,
     /// Waiters for a seq ([`wait_for_seq`](Self::wait_for_seq)).
     progress: Mutex<()>,
     advanced: Condvar,
+    /// Futures waiting for the streamable seq ([`wake_when_streamable`](Self::wake_when_streamable)).
+    wakers: Mutex<Wakers>,
     stats: Stats,
     /// The namespace was dropped: commits and waits fail.
     dropped: AtomicBool,
@@ -121,6 +128,13 @@ pub enum Wait {
     ReadOnly(String),
 }
 
+/// Registered wakers: id -> (the streamable seq waited for, waker).
+#[derive(Debug, Default)]
+struct Wakers {
+    next_id: u64,
+    waiting: BTreeMap<u64, (u64, Waker)>,
+}
+
 /// How often a waiter checks for cancellation.
 const CANCEL_CHECK: Duration = Duration::from_millis(10);
 
@@ -136,11 +150,13 @@ impl<F: LogFs> LoggedNamespace<F> {
         let failure = wal.failure().map(str::to_owned).or(poisoned);
         Ok(LoggedNamespace {
             seq: AtomicU64::new(namespace.seq()),
+            streamable: AtomicU64::new(streamable(&wal, namespace.seq())),
             namespace: RwLock::new(namespace),
             wal: Mutex::new(wal),
             failure: Mutex::new(failure),
             progress: Mutex::new(()),
             advanced: Condvar::new(),
+            wakers: Mutex::new(Wakers::default()),
             stats: Stats::default(),
             dropped: AtomicBool::new(false),
             builds: Mutex::new(Vec::new()),
@@ -234,9 +250,11 @@ impl<F: LogFs> LoggedNamespace<F> {
     /// [`Error::NamespaceDropped`], and waiters wake with [`Wait::Dropped`].
     /// Reads in progress finish on the state they started with.
     pub fn mark_dropped(&self) {
-        let _guard = lock(&self.progress);
+        let guard = lock(&self.progress);
         self.dropped.store(true, Ordering::Release);
         self.advanced.notify_all();
+        drop(guard);
+        self.wake(u64::MAX);
     }
 
     pub fn is_dropped(&self) -> bool {
@@ -248,6 +266,7 @@ impl<F: LogFs> LoggedNamespace<F> {
         let mut wal = lock(&self.wal);
         let result = wal.sync();
         self.note_failure(&wal, &result);
+        self.publish(&wal, self.seq());
         result
     }
 
@@ -256,6 +275,9 @@ impl<F: LogFs> LoggedNamespace<F> {
         let mut wal = lock(&self.wal);
         let result = wal.sync_due();
         self.note_failure(&wal, &result);
+        if matches!(result, Ok(true)) {
+            self.publish(&wal, self.seq());
+        }
         result
     }
 
@@ -286,6 +308,14 @@ impl<F: LogFs> LoggedNamespace<F> {
         self.seq.load(Ordering::Acquire)
     }
 
+    /// The streamable seq (ADR 0031): every commit up to it is applied and
+    /// synced, so no crash can lose it or give its seq to another commit.
+    /// Under [`FsyncPolicy::Off`](crate::FsyncPolicy::Off), which promises
+    /// nothing, the applied seq. Doesn't wait for any lock.
+    pub fn streamable_seq(&self) -> u64 {
+        self.streamable.load(Ordering::Acquire)
+    }
+
     /// Why the namespace is read-only, if it is. Doesn't wait for a commit.
     pub fn read_only(&self) -> Option<String> {
         lock(&self.failure).clone()
@@ -296,16 +326,35 @@ impl<F: LogFs> LoggedNamespace<F> {
     /// milliseconds. Returns at once if it is applied already, and if the
     /// namespace is read-only below `seq` (it can't get there).
     pub fn wait_for_seq(&self, seq: u64, deadline: Option<Instant>, cancelled: &dyn Fn() -> bool) -> Wait {
+        self.wait_until(seq, &self.seq, true, deadline, cancelled)
+    }
+
+    /// Wait until the streamable seq ([`streamable_seq`](Self::streamable_seq))
+    /// reaches `seq`, like [`wait_for_seq`](Self::wait_for_seq). A
+    /// read-only namespace waits until the deadline: nothing more becomes
+    /// streamable, but that isn't an error for a reader of changes.
+    pub fn wait_for_streamable(&self, seq: u64, deadline: Option<Instant>, cancelled: &dyn Fn() -> bool) -> Wait {
+        self.wait_until(seq, &self.streamable, false, deadline, cancelled)
+    }
+
+    fn wait_until(
+        &self,
+        seq: u64,
+        current: &AtomicU64,
+        read_only_ends: bool,
+        deadline: Option<Instant>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Wait {
         let mut guard = lock(&self.progress);
         loop {
             if self.is_dropped() {
                 return Wait::Dropped;
             }
-            let now = self.seq();
+            let now = current.load(Ordering::Acquire);
             if now >= seq {
                 return Wait::Reached(now);
             }
-            if let Some(cause) = self.read_only() {
+            if read_only_ends && let Some(cause) = self.read_only() {
                 return Wait::ReadOnly(cause);
             }
             if cancelled() {
@@ -320,6 +369,42 @@ impl<F: LogFs> LoggedNamespace<F> {
             };
             guard = self.advanced.wait_timeout(guard, left.min(CANCEL_CHECK)).unwrap_or_else(PoisonError::into_inner).0;
         }
+    }
+
+    /// Wake `waker` once the streamable seq reaches `seq` or the namespace
+    /// is dropped, once: for futures that wait without a thread (the change
+    /// stream's long poll). `id` (from an earlier call) replaces that
+    /// registration. Returns the registration's id; [`forget_waker`](Self::forget_waker)
+    /// removes it.
+    ///
+    /// Check the streamable seq (and [`is_dropped`](Self::is_dropped))
+    /// **after** registering: a change published before the registration
+    /// wakes nobody.
+    pub fn wake_when_streamable(&self, id: Option<u64>, seq: u64, waker: &Waker) -> u64 {
+        let mut wakers = lock(&self.wakers);
+        let id = id.unwrap_or_else(|| {
+            wakers.next_id += 1;
+            wakers.next_id
+        });
+        wakers.waiting.insert(id, (seq, waker.clone()));
+        id
+    }
+
+    /// Remove a registration of [`wake_when_streamable`](Self::wake_when_streamable)
+    /// (gone already if it was woken).
+    pub fn forget_waker(&self, id: u64) {
+        lock(&self.wakers).waiting.remove(&id);
+    }
+
+    /// Wake (and remove) the wakers waiting for a seq up to `streamable`.
+    fn wake(&self, streamable: u64) {
+        let woken: Vec<Waker> = {
+            let mut wakers = lock(&self.wakers);
+            let ids: Vec<u64> =
+                wakers.waiting.iter().filter(|(_, (seq, _))| *seq <= streamable).map(|(id, _)| *id).collect();
+            ids.iter().filter_map(|id| wakers.waiting.remove(id)).map(|(_, waker)| waker).collect()
+        };
+        woken.into_iter().for_each(Waker::wake);
     }
 
     /// How long commits held the write lock so far.
@@ -387,7 +472,7 @@ impl<F: LogFs> LoggedNamespace<F> {
         self.stats.record(start.elapsed());
         match applied {
             Ok(result) => {
-                self.publish(seq);
+                self.publish(&wal, seq);
                 Ok(result)
             }
             Err(e) => {
@@ -398,11 +483,16 @@ impl<F: LogFs> LoggedNamespace<F> {
         }
     }
 
-    /// Make `seq` the applied seq and wake its waiters.
-    fn publish(&self, seq: u64) {
-        let _guard = lock(&self.progress);
+    /// Make `seq` the applied seq, update the streamable seq from `wal`,
+    /// and wake their waiters. Called under the writer's lock.
+    fn publish(&self, wal: &Wal<F>, seq: u64) {
+        let guard = lock(&self.progress);
+        let streamable = streamable(wal, seq);
         self.seq.store(seq, Ordering::Release);
+        self.streamable.store(streamable, Ordering::Release);
         self.advanced.notify_all();
+        drop(guard);
+        self.wake(streamable);
     }
 
     /// After a WAL operation: if the log failed, the namespace is read-only.
@@ -413,6 +503,14 @@ impl<F: LogFs> LoggedNamespace<F> {
             lock(&self.failure).get_or_insert_with(|| cause.to_owned());
             self.advanced.notify_all();
         }
+    }
+}
+
+/// The streamable seq of a namespace at `applied` logging to `wal`.
+fn streamable<F: LogFs>(wal: &Wal<F>, applied: u64) -> u64 {
+    match wal.options().fsync {
+        crate::FsyncPolicy::Off => applied,
+        _ => applied.min(wal.synced_seq()),
     }
 }
 

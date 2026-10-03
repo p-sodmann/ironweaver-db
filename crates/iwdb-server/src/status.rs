@@ -24,6 +24,7 @@ pub fn grpc_code(code: Code) -> tonic::Code {
         Code::Timeout => tonic::Code::DeadlineExceeded,
         Code::Cancelled => tonic::Code::Cancelled,
         Code::CursorExpired => tonic::Code::FailedPrecondition,
+        Code::NotRetained => tonic::Code::OutOfRange,
         Code::ReadOnly | Code::Unavailable | Code::Io => tonic::Code::Unavailable,
         Code::Corrupt => tonic::Code::DataLoss,
         Code::Internal => tonic::Code::Internal,
@@ -43,7 +44,7 @@ pub fn http_status(code: Code) -> http::StatusCode {
         Code::BudgetExceeded => S::UNPROCESSABLE_ENTITY,
         Code::Timeout => S::GATEWAY_TIMEOUT,
         Code::Cancelled => S::from_u16(499).unwrap_or(S::BAD_REQUEST),
-        Code::CursorExpired => S::GONE,
+        Code::CursorExpired | Code::NotRetained => S::GONE,
         Code::ReadOnly | Code::Unavailable | Code::Io => S::SERVICE_UNAVAILABLE,
         Code::Corrupt | Code::Internal => S::INTERNAL_SERVER_ERROR,
         // A code added later: its own string still travels in the body
@@ -83,7 +84,8 @@ pub fn to_status(e: &Error) -> tonic::Status {
 pub fn from_status(status: &tonic::Status) -> Error {
     let sent = status.metadata().get(CODE_KEY).and_then(|v| v.to_str().ok()).and_then(Code::parse);
     let code = sent.unwrap_or(match status.code() {
-        tonic::Code::InvalidArgument | tonic::Code::OutOfRange => Code::InvalidArgument,
+        tonic::Code::InvalidArgument => Code::InvalidArgument,
+        tonic::Code::OutOfRange => Code::NotRetained,
         tonic::Code::NotFound => Code::NotFound,
         tonic::Code::Aborted | tonic::Code::AlreadyExists => Code::Conflict,
         tonic::Code::DeadlineExceeded => Code::Timeout,
@@ -101,7 +103,7 @@ mod tests {
 
     /// The table of `documentation/api/errors.md`, written out again: a
     /// change to either must change this test.
-    const TABLE: [(Code, tonic::Code); 13] = [
+    const TABLE: [(Code, tonic::Code); 14] = [
         (Code::InvalidArgument, tonic::Code::InvalidArgument),
         (Code::NotFound, tonic::Code::NotFound),
         (Code::Conflict, tonic::Code::Aborted),
@@ -110,6 +112,7 @@ mod tests {
         (Code::Timeout, tonic::Code::DeadlineExceeded),
         (Code::Cancelled, tonic::Code::Cancelled),
         (Code::CursorExpired, tonic::Code::FailedPrecondition),
+        (Code::NotRetained, tonic::Code::OutOfRange),
         (Code::ReadOnly, tonic::Code::Unavailable),
         (Code::Unavailable, tonic::Code::Unavailable),
         (Code::Io, tonic::Code::Unavailable),
@@ -130,7 +133,7 @@ mod tests {
     }
 
     /// The HTTP column of errors.md.
-    const HTTP: [(Code, u16); 13] = [
+    const HTTP: [(Code, u16); 14] = [
         (Code::InvalidArgument, 400),
         (Code::NotFound, 404),
         (Code::Conflict, 409),
@@ -139,6 +142,7 @@ mod tests {
         (Code::Timeout, 504),
         (Code::Cancelled, 499),
         (Code::CursorExpired, 410),
+        (Code::NotRetained, 410),
         (Code::ReadOnly, 503),
         (Code::Unavailable, 503),
         (Code::Io, 503),

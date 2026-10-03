@@ -3,7 +3,7 @@
 
 use ironweaver_core::{Attrs, EdgeId, EdgeIx, NodeIx};
 use iwdb_engine::catalog::AttrPath;
-use iwdb_engine::{CommitTime, DbGraph, IdempotencyKey};
+use iwdb_engine::{Change, CommitTime, DbGraph, IdempotencyKey};
 use iwdb_storage::RecoveryReport;
 
 use crate::Cursor;
@@ -64,6 +64,32 @@ impl Edge {
             version: data.version,
         })
     }
+}
+
+/// One commit in the change stream (ADR 0031): the WAL record as logged.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChangeEvent {
+    pub seq: u64,
+    /// The commit time (`None` for commits logged in WAL format 1).
+    pub time: Option<CommitTime>,
+    /// The idempotency key the commit was made with, if any.
+    pub key: Option<IdempotencyKey>,
+    /// The resolved data ops (with explicit edge ids and the version ops of
+    /// ADR 0004), or the catalog change.
+    pub change: Change,
+}
+
+/// A batch of the change stream ([`Database::changes`](crate::Database::changes)).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Changes {
+    /// Commits in seq order, without gaps, from the seq asked for.
+    pub events: Vec<ChangeEvent>,
+    /// Where the next batch starts: the seq after the last event (the seq
+    /// asked for if there is none).
+    pub next_seq: u64,
+    /// The oldest seq still retained: asking for an older one fails with
+    /// `not_retained`.
+    pub first_seq: u64,
 }
 
 /// How much work a read did.

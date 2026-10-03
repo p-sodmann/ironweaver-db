@@ -89,6 +89,10 @@ pub enum Error {
     /// The log ends before the requested seq: records are missing.
     #[error("the WAL ends before seq {from} (its next seq is {next_seq})")]
     LogEndsBefore { from: u64, next_seq: u64 },
+    /// The change stream was asked for a seq whose WAL segment is no
+    /// longer retained (ADR 0031): the oldest retained seq is `first_seq`.
+    #[error("seq {from} is no longer retained; the oldest retained seq is {first_seq}")]
+    NotRetained { from: u64, first_seq: u64 },
 
     // Data directory (step 5, `documentation/formats/data-dir.md`)
     /// Another store, in this process or another one, has the data

@@ -123,6 +123,9 @@ fn every_route_is_served_and_other_methods_are_not_allowed() {
         // Create and drop on a namespace of their own
         let path = if route.operation.ends_with("Namespace") && route.method != Method::GET {
             route.path.replace("{ns}", "other")
+        } else if route.input == (Input::Changes { stream: true }) {
+            // The stream never ends: a request its handler refuses
+            format!("{}?wait=true", fill(route.path))
         } else {
             fill(route.path)
         };

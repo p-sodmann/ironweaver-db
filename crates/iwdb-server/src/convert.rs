@@ -30,12 +30,14 @@ use crate::proto as pb;
 
 mod answers;
 mod catalog;
+mod changes;
 mod entities;
 mod mutations;
 mod requests;
 
 pub(crate) use answers::*;
 pub(crate) use catalog::*;
+pub(crate) use changes::*;
 pub(crate) use entities::*;
 pub(crate) use mutations::*;
 pub(crate) use requests::*;

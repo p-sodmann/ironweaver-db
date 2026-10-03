@@ -20,9 +20,9 @@ use iwdb_engine::catalog::{NamespaceCatalog, NamespaceName};
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation};
 use iwdb_query::read::Explain;
 use iwdb_query::{
-    AnalyticsRequest, Answer, CommitOptions, Database, Edge, Error, ExplainRequest, FindRequest, JobResult,
-    MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest, QueryOptions, Subgraph,
-    SubgraphRequest, TraverseRequest, WalkRequest,
+    AnalyticsRequest, Answer, Changes, ChangesRequest, CommitOptions, Database, Edge, Error, ExplainRequest,
+    FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
+    QueryOptions, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
 use iwdb_server::client::Remote;
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
@@ -105,6 +105,16 @@ impl Database for Prefixed {
     ) -> impl Future<Output = Result<u64, Error>> + Send {
         let name = self.name(namespace);
         async move { self.remote.wait_for_seq(&name, seq, options).await }
+    }
+
+    fn changes(
+        &self,
+        namespace: &str,
+        request: ChangesRequest,
+        options: QueryOptions,
+    ) -> impl Future<Output = Result<Answer<Changes>, Error>> + Send {
+        let name = self.name(namespace);
+        async move { self.remote.changes(&name, request, options).await }
     }
 
     fn get_nodes(

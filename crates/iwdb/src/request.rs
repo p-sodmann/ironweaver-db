@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::task::Waker;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -74,9 +75,24 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// What the timer does at a deadline.
+enum Action {
+    Cancel(Token),
+    Wake(Waker),
+}
+
+impl Action {
+    fn run(self) {
+        match self {
+            Action::Cancel(token) => token.cancel(),
+            Action::Wake(waker) => waker.wake(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct TimerState {
-    deadlines: BTreeMap<(Instant, u64), Token>,
+    deadlines: BTreeMap<(Instant, u64), Action>,
     next_id: u64,
     shutdown: bool,
 }
@@ -87,8 +103,8 @@ struct TimerShared {
     wake: Condvar,
 }
 
-/// Cancels tokens at their deadlines, in one background thread started on
-/// first use. Each scheduled deadline is removed when its guard drops, so
+/// Cancels tokens (and wakes futures) at their deadlines, in one background
+/// thread started on first use. Each scheduled deadline is removed when its guard drops, so
 /// finished requests leave nothing behind.
 #[derive(Default)]
 pub(crate) struct Timer {
@@ -108,17 +124,59 @@ impl Drop for Scheduled<'_> {
     }
 }
 
+/// Schedules wake-ups on a running [`Timer`] ([`Timer::handle`]).
+#[derive(Clone)]
+pub(crate) struct TimerHandle(Arc<TimerShared>);
+
+impl TimerHandle {
+    /// Wake `waker` at `at`, unless the guard is dropped first. (After
+    /// [`Timer::stop`], nothing wakes it.)
+    pub fn schedule_wake(&self, at: Instant, waker: Waker) -> ScheduledWake {
+        let entry = add(&self.0, at, Action::Wake(waker));
+        ScheduledWake { shared: self.0.clone(), entry }
+    }
+}
+
+fn add(shared: &TimerShared, at: Instant, action: Action) -> (Instant, u64) {
+    let mut state = lock(&shared.state);
+    let entry = (at, state.next_id);
+    state.next_id += 1;
+    state.deadlines.insert(entry, action);
+    drop(state);
+    shared.wake.notify_all();
+    entry
+}
+
+/// A scheduled wake-up ([`TimerHandle::schedule_wake`]), owned (for
+/// futures); dropping it unschedules it.
+pub(crate) struct ScheduledWake {
+    shared: Arc<TimerShared>,
+    entry: (Instant, u64),
+}
+
+impl Drop for ScheduledWake {
+    fn drop(&mut self) {
+        lock(&self.shared.state).deadlines.remove(&self.entry);
+    }
+}
+
 impl Timer {
     /// Cancel `token` at `at`, unless the guard is dropped first.
     pub fn schedule(&self, at: Instant, token: Token) -> Result<Scheduled<'_>, Error> {
-        self.start()?;
-        let mut state = lock(&self.shared.state);
-        let entry = (at, state.next_id);
-        state.next_id += 1;
-        state.deadlines.insert(entry, token);
-        drop(state);
-        self.shared.wake.notify_all();
+        let entry = self.add(at, Action::Cancel(token))?;
         Ok(Scheduled { timer: self, entry })
+    }
+
+    /// A handle that schedules wake-ups (for futures, which can't borrow
+    /// the timer); starts the thread.
+    pub fn handle(&self) -> Result<TimerHandle, Error> {
+        self.start()?;
+        Ok(TimerHandle(self.shared.clone()))
+    }
+
+    fn add(&self, at: Instant, action: Action) -> Result<(Instant, u64), Error> {
+        self.start()?;
+        Ok(add(&self.shared, at, action))
     }
 
     fn start(&self) -> Result<(), Error> {
@@ -157,7 +215,7 @@ fn run_timer(shared: &TimerShared) {
             if entry.key().0 > now {
                 break;
             }
-            entry.remove().cancel();
+            entry.remove().run();
         }
         state = match state.deadlines.keys().next().map(|(at, _)| *at) {
             Some(at) => {

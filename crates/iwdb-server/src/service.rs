@@ -3,13 +3,18 @@
 //! call, design rule 8) with the `grpc-timeout` header as its deadline; a
 //! failure is the error's status ([`crate::status`]).
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use iwdb_query::{Database, Error};
+use tokio::sync::watch;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{Stream, StreamExt};
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
+use crate::convert::watch_response;
 use crate::ops;
 use crate::proto as pb;
 use crate::proto::database_service_server::{DatabaseService, DatabaseServiceServer};
@@ -31,11 +36,14 @@ pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 64 << 20;
 pub struct Server<D> {
     pub(crate) db: Arc<D>,
     max_message_bytes: usize,
+    /// Turns true when [`serve`](Self::serve) starts shutting down: the
+    /// change streams end then (ADR 0031).
+    pub(crate) stopping: watch::Sender<bool>,
 }
 
 impl<D: Database + 'static> Server<D> {
     pub fn new(db: Arc<D>) -> Self {
-        Server { db, max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES }
+        Server { db, max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES, stopping: watch::Sender::new(false) }
     }
 
     /// Requests and answer messages above this size fail (default
@@ -54,7 +62,7 @@ impl<D: Database + 'static> Server<D> {
     /// The tonic service (a tower `Service` of HTTP requests), to serve
     /// together with other services.
     pub fn service(&self) -> DatabaseServiceServer<Adapter<D>> {
-        DatabaseServiceServer::from_arc(Arc::new(Adapter { db: self.db.clone() }))
+        DatabaseServiceServer::from_arc(Arc::new(Adapter { db: self.db.clone(), stopping: self.stopping.subscribe() }))
             .max_decoding_message_size(self.max_message_bytes)
             .max_encoding_message_size(self.max_message_bytes)
     }
@@ -62,7 +70,7 @@ impl<D: Database + 'static> Server<D> {
     /// The REST routes (ADR 0030), with request bodies up to the message
     /// size limit.
     pub fn rest_router(&self) -> axum::Router {
-        crate::rest::router(self.db.clone(), self.max_message_bytes)
+        crate::rest::router(self.db.clone(), self.max_message_bytes, self.stopping.subscribe())
     }
 
     /// gRPC and REST as one service, as [`serve`](Self::serve) serves them.
@@ -74,6 +82,7 @@ impl<D: Database + 'static> Server<D> {
 /// The handlers of `DatabaseService` over a database ([`Server::service`]).
 pub struct Adapter<D> {
     db: Arc<D>,
+    stopping: watch::Receiver<bool>,
 }
 
 type Res<T> = Result<Response<T>, Status>;
@@ -192,6 +201,22 @@ impl<D: Database + 'static> DatabaseService for Adapter<D> {
         let deadline = grpc_timeout(request.metadata());
         let chunks = ops::match_pattern(&*self.db, request.into_inner(), deadline).await.map_err(fail)?;
         Ok(Response::new(stream(chunks)))
+    }
+
+    async fn get_changes(&self, request: Request<pb::GetChangesRequest>) -> Res<pb::GetChangesResponse> {
+        let deadline = grpc_timeout(request.metadata());
+        Ok(Response::new(ops::get_changes(&*self.db, request.into_inner(), deadline).await.map_err(fail)?))
+    }
+
+    type WatchStream = Pin<Box<dyn Stream<Item = Result<pb::WatchResponse, Status>> + Send>>;
+
+    /// The change stream, followed until the client cancels, an error, or
+    /// shutdown (ADR 0031).
+    async fn watch(&self, request: Request<pb::WatchRequest>) -> Res<Self::WatchStream> {
+        let deadline = grpc_timeout(request.metadata());
+        let batches = ops::follow(self.db.clone(), request.into_inner(), deadline, self.stopping.clone());
+        let stream = ReceiverStream::new(batches).map(|batch| batch.map(watch_response).map_err(fail));
+        Ok(Response::new(Box::pin(stream)))
     }
 
     type AnalyzeStream = Chunks<pb::AnalyzeResponse>;

@@ -17,7 +17,7 @@ use iwdb_storage::layout::{DataDir, NsPaths, create_ns_dir, remove_ns_dir};
 use iwdb_storage::namespaces::{DEFAULT_NAME, EventKind, NamespaceInfo, NamespaceLog, NamespaceResult, Plan};
 use iwdb_storage::{
     BackupReport, CheckpointOutcome, Checkpointer, Error, FsyncPolicy, HistoryId, LockStats, LoggedNamespace,
-    Recovered, RecoveryReport, StoreRecovery, read_namespace, recover, start_namespace,
+    OffsetIndex, Recovered, RecoveryReport, StoreRecovery, read_namespace, recover, start_namespace,
 };
 
 use crate::StoreOptions;
@@ -25,9 +25,11 @@ use crate::request::{ReadOptions, Timer};
 
 mod background;
 mod ns;
+mod wait;
 
 use background::{checkpoint_loop, or_abort, run_checkpoint, spawn, sync_loop};
 pub use ns::Ns;
+pub(crate) use wait::StreamableWait;
 
 /// The name of the namespace every store has. It is created with the store
 /// (or by the first open of a store restored without it), and can't be
@@ -89,6 +91,8 @@ struct NsState<F: LogFs> {
     /// The namespace and its WAL: one writer, many readers (ADR 0014).
     live: LoggedNamespace<F>,
     checkpointer: Mutex<Checkpointer<F>>,
+    /// Frame offsets in the WAL, for the change stream (ADR 0031).
+    offsets: OffsetIndex,
     /// The WAL's appended bytes at which the size trigger fires.
     size_trigger: AtomicU64,
     /// The last checkpoint error, cleared by a successful checkpoint.
@@ -757,11 +761,13 @@ fn new_state<F: LogFs + Clone>(
     if let Some(archive) = archive {
         checkpointer.set_archive(ArchiveHandle::new(archive.clone(), info.id));
     }
+    checkpointer.set_retention(options.retention);
     NsState {
         info,
         paths,
         live,
         checkpointer: Mutex::new(checkpointer),
+        offsets: OffsetIndex::new(),
         size_trigger: AtomicU64::new(size_trigger),
         checkpoint_error: Mutex::new(None),
         recovery,

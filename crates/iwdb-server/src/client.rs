@@ -21,9 +21,9 @@ use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation};
 use iwdb_query::read::Explain;
 use iwdb_query::{
-    AnalyticsRequest, Answer, CommitOptions, Database, Edge, Error, ExplainRequest, FindRequest, JobResult,
-    MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest, QueryOptions, Subgraph,
-    SubgraphRequest, TraverseRequest, WalkRequest,
+    AnalyticsRequest, Answer, Changes, ChangesRequest, CommitOptions, Database, Edge, Error, ExplainRequest,
+    FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
+    QueryOptions, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 use tokio::runtime::{Handle, Runtime};
@@ -267,6 +267,25 @@ impl Database for Remote {
             })
             .await?;
             Ok(answer_from_pb(nodes, meta))
+        })
+    }
+
+    fn changes(
+        &self,
+        namespace: &str,
+        request: ChangesRequest,
+        o: QueryOptions,
+    ) -> impl Future<Output = Result<Answer<Changes>, Error>> + Send {
+        let namespace = namespace.to_owned();
+        self.call(move |mut client| async move {
+            let request = pb::GetChangesRequest {
+                namespace,
+                from_seq: request.from_seq,
+                wait: request.wait,
+                options: options(&o),
+            };
+            let response = client.get_changes(request).await.map_err(status)?.into_inner();
+            changes_from_pb(response).map_err(bad_answer)
         })
     }
 

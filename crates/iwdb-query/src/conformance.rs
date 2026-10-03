@@ -21,14 +21,16 @@ use std::time::Duration;
 
 use ironweaver_core::algo::PageRank;
 use ironweaver_core::pathfinding::{Coords, EdgeCost, Metric};
-use ironweaver_core::{CmpOp, Direction, EdgeId, Expr, Value};
+use ironweaver_core::{CmpOp, Direction, EdgeId, Expr, Op, Value};
 use iwdb_engine::catalog::{AttrPath, Constraint, ConstraintKind, IndexDef, Label};
-use iwdb_engine::{CatalogChange, IdempotencyKey, Mutation};
+use iwdb_engine::reserved::VERSION_KEY;
+use iwdb_engine::{CatalogChange, Change, DbRecord, IdempotencyKey, Mutation, Target};
+use iwdb_storage::HistoryId;
 
 use crate::{
-    AnalyticsRequest, Answer, Code, CommitOptions, Database, Error, ExplainRequest, FindRequest, Job, JobResult,
-    MatchRequest, NeighbourhoodRequest, Order, PathMethod, PathRequest, Plan, ProjectionSpec, QueryOptions,
-    SubgraphRequest, TraverseRequest, WalkRequest,
+    AnalyticsRequest, Answer, ChangeEvent, ChangesRequest, Code, CommitOptions, Database, Error, ExplainRequest,
+    FindRequest, Job, JobResult, MatchRequest, NeighbourhoodRequest, Order, PathMethod, PathRequest, Plan,
+    ProjectionSpec, QueryOptions, SubgraphRequest, TraverseRequest, WalkRequest,
 };
 
 pub use crate::exec::block_on;
@@ -66,6 +68,10 @@ macro_rules! conformance_tests {
             analytics_are_bounded,
             catalog_changes_show_in_catalog_and_status,
             namespaces_are_created_and_dropped_once,
+            changes_return_every_commit_as_logged,
+            changes_resume_in_batches_without_gaps,
+            changes_wait_for_a_commit_or_answer_empty,
+            changes_report_their_errors,
         );
     };
     (@cases $fixture:expr; $($case:ident),* $(,)?) => {
@@ -266,6 +272,7 @@ pub async fn every_read_times_out<D: Database>(db: &D) {
         ),
         code(db.catalog(NS, o()).await),
         code(db.wait_for_seq(NS, 1, o()).await),
+        code(db.changes(NS, ChangesRequest { from_seq: 1, wait: false }, o()).await),
     ];
     assert!(results.iter().all(|c| *c == Code::Timeout), "{:?}", results);
 }
@@ -666,4 +673,120 @@ pub async fn namespaces_are_created_and_dropped_once<D: Database>(db: &D) {
     assert_eq!(code(db.get_nodes("other", vec!["x".into()], options()).await), Code::NotFound);
     assert_eq!(code(db.drop_namespace("other", None).await), Code::NotFound);
     assert_eq!(code(db.drop_namespace(NS, None).await), Code::InvalidArgument);
+}
+
+// ---- the change stream (ADR 0031) ----
+
+fn changes_from(from_seq: u64) -> ChangesRequest {
+    ChangesRequest { from_seq, wait: false }
+}
+
+/// Every event of the namespace from `from_seq` on, in batches of `batch`.
+async fn all_changes<D: Database>(db: &D, from_seq: u64, batch: usize) -> Vec<ChangeEvent> {
+    let mut events = Vec::new();
+    let mut next = from_seq.max(1);
+    loop {
+        let answer = db.changes(NS, changes_from(next), limits(Some(batch), None, None)).await.expect("changes");
+        let got = &answer.value;
+        assert!(got.events.len() <= batch);
+        if got.events.is_empty() {
+            assert_eq!(got.next_seq, next);
+            return events;
+        }
+        let seqs: Vec<u64> = got.events.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, (next..next + seqs.len() as u64).collect::<Vec<_>>(), "no gaps");
+        assert_eq!(got.next_seq, next + seqs.len() as u64);
+        assert!(answer.seq >= got.next_seq - 1);
+        next = got.next_seq;
+        events.extend(answer.value.events);
+    }
+}
+
+pub async fn changes_return_every_commit_as_logged<D: Database>(db: &D) {
+    people(db).await;
+    let key = IdempotencyKey::new("change-1").expect("key");
+    let keyed = CommitOptions { idempotency_key: Some(key.clone()) };
+    let set = Mutation::SetAttr {
+        target: Target::Node("ann".into()),
+        key: "age".into(),
+        value: Value::Int(31),
+        expected_version: None,
+    };
+    db.commit(NS, vec![set], keyed).await.expect("set");
+    let index = CatalogChange::CreateIndex(IndexDef { path: AttrPath::new(["age"]).expect("path") });
+    db.commit_catalog(NS, index.clone(), CommitOptions::default()).await.expect("index");
+    let remove = Mutation::RemoveAttr { target: Target::Node("bob".into()), key: "age".into(), expected_version: None };
+    commit(db, vec![remove, Mutation::DeleteNode { id: "dan".into(), expected_version: None }]).await;
+
+    let events = all_changes(db, 0, 100).await;
+    assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2, 3, 4]);
+    assert!(events.iter().all(|e| e.time.is_some()));
+    assert_eq!(events.iter().map(|e| e.key.clone()).collect::<Vec<_>>(), [None, Some(key), None, None]);
+
+    let Change::Data(first) = &events[0].change else { panic!("a data change: {:?}", events[0].change) };
+    let ann = DbRecord { version: 1, ..DbRecord::with_attr([("age", Value::Int(30))]) };
+    assert!(first.contains(&Op::AddNode { id: "ann".into(), labels: vec!["Person".into()], data: ann }));
+    assert_eq!(first.iter().filter(|op| matches!(op, Op::AddEdge { .. })).count(), 6);
+    // The attribute op, then the version op (ADR 0004)
+    let version = |v| Some(Value::Int(v));
+    assert_eq!(
+        events[1].change,
+        Change::Data(vec![
+            Op::SetNodeAttr { id: "ann".into(), key: "age".into(), value: Some(Value::Int(31)) },
+            Op::SetNodeAttr { id: "ann".into(), key: VERSION_KEY.into(), value: version(2) },
+        ])
+    );
+    assert_eq!(events[2].change, Change::Catalog(index));
+    let Change::Data(last) = &events[3].change else { panic!("a data change") };
+    assert!(last.contains(&Op::SetNodeAttr { id: "bob".into(), key: "age".into(), value: None }));
+    assert!(last.contains(&Op::RemoveNode { id: "dan".into() }));
+}
+
+pub async fn changes_resume_in_batches_without_gaps<D: Database>(db: &D) {
+    for i in 0..10 {
+        commit(db, vec![node(&format!("n{}", i), &[], &[("i", Value::Int(i))])]).await;
+    }
+    let whole = all_changes(db, 0, 100).await;
+    assert_eq!(whole.len(), 10);
+    for batch in [1, 3, 7] {
+        assert_eq!(all_changes(db, 0, batch).await, whole, "batches of {}", batch);
+    }
+    assert_eq!(all_changes(db, 6, 2).await, whole[5..]);
+    let answer = db.changes(NS, changes_from(4), limits(Some(2), None, None)).await.expect("changes");
+    assert_eq!((answer.value.next_seq, answer.value.first_seq), (6, 1));
+    // Past the end: nothing, and where to go on from
+    let answer = db.changes(NS, changes_from(50), options()).await.expect("changes");
+    assert_eq!((answer.value.events.len(), answer.value.next_seq), (0, 50));
+}
+
+pub async fn changes_wait_for_a_commit_or_answer_empty<D: Database>(db: &D) {
+    let seq = people(db).await;
+    let wait = ChangesRequest { from_seq: seq + 1, wait: true };
+    let soon = QueryOptions { timeout: Some(Duration::from_millis(200)), ..QueryOptions::default() };
+    let start = std::time::Instant::now();
+    let answer = db.changes(NS, wait, soon).await.expect("an empty batch, not a timeout");
+    assert!(answer.value.events.is_empty() && answer.value.next_seq == seq + 1);
+    assert!(start.elapsed() >= Duration::from_millis(100), "it waited: {:?}", start.elapsed());
+
+    // A commit made while it waits ends the wait
+    let long = QueryOptions { timeout: Some(Duration::from_secs(60)), ..QueryOptions::default() };
+    let start = std::time::Instant::now();
+    let answer = std::thread::scope(|s| {
+        s.spawn(|| {
+            std::thread::sleep(Duration::from_millis(100));
+            block_on(commit(db, vec![node("eve", &[], &[])]));
+        });
+        block_on(db.changes(NS, wait, long))
+    })
+    .expect("changes");
+    assert!(start.elapsed() < Duration::from_secs(30), "woken by the commit: {:?}", start.elapsed());
+    assert_eq!(answer.value.events.iter().map(|e| e.seq).collect::<Vec<_>>(), [seq + 1]);
+}
+
+pub async fn changes_report_their_errors<D: Database>(db: &D) {
+    people(db).await;
+    assert_eq!(code(db.changes("nope", changes_from(1), options()).await), Code::NotFound);
+    let other = QueryOptions { history: Some(HistoryId::random()), ..QueryOptions::default() };
+    assert_eq!(code(db.changes(NS, changes_from(1), other).await), Code::InvalidArgument);
+    assert_eq!(code(db.changes(NS, changes_from(1), limits(Some(0), None, None)).await), Code::InvalidArgument);
 }
