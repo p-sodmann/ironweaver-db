@@ -1,5 +1,5 @@
 //! The bounded reader (`WalReader::open_until`), which the checkpointer
-//! (step 5) uses on a log that the writer is still appending to: it stops
+//! uses on a log that the writer is still appending to: it stops
 //! after its last record and never looks at the bytes after it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

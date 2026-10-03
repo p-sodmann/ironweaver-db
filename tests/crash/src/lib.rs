@@ -1,4 +1,4 @@
-//! The crash and fault-injection harness (step 6, ADR 0007).
+//! The crash and fault-injection harness (ADR 0007).
 //!
 //! One binary, `iwdb-crash`, is both sides. The **parent** runs cycles:
 //!
@@ -35,7 +35,7 @@
 //! - in every case the canonical graph, catalog and seq equal the model's
 //!   at the recovered seq: no partial transaction, nothing out of order.
 //!
-//! **Step 7 adds:**
+//! **Also checked:**
 //!
 //! - `verify` before every recovery the parent checks, on the directory as
 //!   the crash left it: no problem when recovery succeeds, and the same

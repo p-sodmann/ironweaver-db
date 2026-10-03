@@ -1,4 +1,4 @@
-//! Step 8 acceptance: a retried commit with the same idempotency key
+//! A retried commit with the same idempotency key
 //! returns the original result and applies once, across restarts,
 //! checkpoints, a backup and restore, and a commit whose outcome is
 //! unknown (a failed WAL write or fsync). The kill -9 harness checks the

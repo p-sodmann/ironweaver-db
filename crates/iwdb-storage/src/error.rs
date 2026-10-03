@@ -31,7 +31,7 @@ pub enum Error {
         source: io::Error,
     },
     /// The log (or the namespace using it) failed earlier and accepts no
-    /// more writes until it is reopened (step 5 recovers it).
+    /// more writes until it is reopened.
     #[error("read-only until reopened, after an earlier failure: {cause}")]
     ReadOnly { cause: String },
     /// The commit's record is larger than [`MAX_RECORD_LEN`](crate::format::MAX_RECORD_LEN).

@@ -1,6 +1,5 @@
-//! Ironweaver DB storage: the write-ahead log (step 4), the data
-//! directory, checkpoints and recovery (step 5), backups, WAL archiving,
-//! restore and verify (step 7).
+//! Ironweaver DB storage: the write-ahead log, the data directory,
+//! checkpoints and recovery, backups, WAL archiving, restore and verify.
 //!
 //! - [`Wal`]: appends [`CommitRecord`](iwdb_engine::CommitRecord)s to
 //!   segment files, fsynced per [`FsyncPolicy`], and fails into a read-only

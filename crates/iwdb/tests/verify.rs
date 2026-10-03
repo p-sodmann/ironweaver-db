@@ -1,4 +1,4 @@
-//! `verify` (step 7, ADR 0011): a clean directory verifies without
+//! `verify` (ADR 0011): a clean directory verifies without
 //! problems and reports the seq recovery reaches; what a crash leaves (a
 //! torn tail, temporary files, an interrupted cleanup) is a note; damage
 //! in any file, and invariants broken behind the store's back, are
@@ -326,7 +326,7 @@ fn a_wal_that_ends_before_the_only_checkpoint_is_a_problem() {
     assert!(report.problems.iter().any(|p| p.message.contains("before the checkpoint")), "{:#?}", report);
 }
 
-/// Rewrite the key table of the checkpoint at `seq` in `dir` (step 8).
+/// Rewrite the key table of the checkpoint at `seq` in `dir`.
 fn rewrite_keys(dir: &Path, seq: u64, keys: iwdb::KeyTable) {
     let name = NamespaceName::new(iwdb::NAMESPACE).unwrap();
     let path = checkpoint_path(dir, seq);

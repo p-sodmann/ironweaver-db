@@ -1,4 +1,4 @@
-//! Restore and point-in-time recovery (step 7, ADR 0009): restoring to a
+//! Restore and point-in-time recovery (ADR 0009): restoring to a
 //! random mid-history seq from a backup alone, from an archive alone and
 //! from both gives the reference state at that seq (canonical graph,
 //! catalog, seq), and the restored store goes on at seq + 1; restoring to

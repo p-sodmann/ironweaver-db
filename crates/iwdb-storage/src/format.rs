@@ -28,7 +28,7 @@
 //!   0 len, 4 seq, 12 synced_seq, 20 kind, 21 crc (of bytes 0..21 and the payload), 25 payload
 //! ```
 //!
-//! Version 3 (step 8, ADR 0015) prefixes the payload with the record's
+//! Version 3 (ADR 0015) prefixes the payload with the record's
 //! idempotency key and result ([`Keyed`](iwdb_engine::Keyed)), `None` (one
 //! zero byte) for a commit without a key.
 

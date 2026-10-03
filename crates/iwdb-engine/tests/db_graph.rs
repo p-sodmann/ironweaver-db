@@ -1,4 +1,4 @@
-//! Step 2 acceptance: `Graph<DbRecord, DbRecord>` saves and loads through
+//! `Graph<DbRecord, DbRecord>` saves and loads through
 //! the core's binary and JSON formats with versions and catalog, and the
 //! core's filters, indexes and analytics work on it.
 

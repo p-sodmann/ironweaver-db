@@ -5,7 +5,7 @@
 //! | Line | When |
 //! |---|---|
 //! | `open <seq> <synced_seq> <digest>` | `Store::open` returned (recovery is done) |
-//! | `try <key>` | a commit with this idempotency key starts (step 8) |
+//! | `try <key>` | a commit with this idempotency key starts |
 //! | `ack <seq> <synced_seq>` | a commit returned `Ok` (acknowledged), with `Store::synced_seq` after it |
 //! | `dedup <seq> <key>` | a keyed commit returned the original result of commit `seq`: it committed nothing |
 //! | `backup <seq> <path>` | an online backup into `path` returned `Ok`, at `seq` |
@@ -61,7 +61,7 @@ pub struct ChildArgs {
     /// Where the script's backups go (each into a new directory); without
     /// it the script's backups are skipped.
     pub backups: Option<PathBuf>,
-    /// Keyed commits to retry first (step 8).
+    /// Keyed commits to retry first.
     pub retries: Vec<IdempotencyKey>,
     pub rules: Vec<Rule>,
 }

@@ -1,5 +1,5 @@
 //! The invariants every namespace keeps, checked from scratch: what
-//! `verify` (step 7, ADR 0011) checks on every checkpoint and on the state
+//! `verify` (ADR 0011) checks on every checkpoint and on the state
 //! the WAL replays to. The commit pipeline keeps them on every commit; a
 //! violation means a bug or a file changed behind the database's back.
 
@@ -45,7 +45,7 @@ fn one_of_each_kind() -> Vec<Value> {
 ///   indexable value at the path is found under that value and nowhere
 ///   else, and the index holds no other entry;
 /// - every constraint of the catalog holds;
-/// - the idempotency key table (step 8) has at most
+/// - the idempotency key table has at most
 ///   [`KEY_TABLE_CAPACITY`](crate::idempotency::KEY_TABLE_CAPACITY)
 ///   entries, all at seqs up to the namespace's.
 ///

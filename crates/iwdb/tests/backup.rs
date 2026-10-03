@@ -1,4 +1,4 @@
-//! Online backup (step 7, ADR 0009): what a backup holds and reaches, its
+//! Online backup (ADR 0009): what a backup holds and reaches, its
 //! destination, its manifest, and every write it makes failing. Restoring
 //! backups is tested in `pitr.rs`.
 

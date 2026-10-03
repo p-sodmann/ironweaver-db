@@ -1,4 +1,4 @@
-//! Step 5 acceptance: `Store::open` recovers to the last acknowledged
+//! `Store::open` recovers to the last acknowledged
 //! commit after a clean shutdown, a crash after an append (with and
 //! without a torn last frame), a crash in the middle of a checkpoint, and
 //! with a damaged newest checkpoint. Every case compares the canonical

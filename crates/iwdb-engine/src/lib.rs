@@ -9,7 +9,7 @@
 //! - [`mutation`]: the write vocabulary, commit records and results.
 //! - [`Namespace`]: a graph changed only through the commit pipeline.
 //! - [`idempotency`]: idempotency keys and the table of recent keyed
-//!   commits (step 8).
+//!   commits.
 //! - [`CommitTime`]: when the WAL appended a commit.
 //! - [`invariants`]: the invariants every namespace keeps, checked from
 //!   scratch (for `verify`).

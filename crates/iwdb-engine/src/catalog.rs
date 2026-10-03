@@ -212,7 +212,7 @@ pub enum ConstraintKind {
 }
 
 /// A constraint on the nodes with `label`, at attribute `path`. Checked by
-/// the commit pipeline (step 3).
+/// the commit pipeline.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Constraint {

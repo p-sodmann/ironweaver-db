@@ -43,10 +43,10 @@ pub struct Summary {
     pub refused: u64,
     /// New data directories.
     pub directories: u64,
-    /// `verify` runs before a checked recovery (step 7), and of archives.
+    /// `verify` runs before a checked recovery, and of archives.
     pub verified: u64,
     pub archives_verified: u64,
-    /// Keyed commits the children tried (step 8), and those answered from
+    /// Keyed commits the children tried, and those answered from
     /// the key table (retries of commits the store had).
     pub keyed: u64,
     pub deduplicated: u64,
@@ -60,7 +60,7 @@ pub struct Summary {
     pub restores_complete: u64,
     pub restores_interrupted: u64,
     pub restore_kills: u64,
-    /// The catalog scenario: namespaces, indexes and constraints (step 9).
+    /// The catalog scenario: namespaces, indexes and constraints.
     pub catalog: Option<crate::catalog::CatalogSummary>,
 }
 

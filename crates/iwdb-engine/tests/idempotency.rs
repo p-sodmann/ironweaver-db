@@ -1,4 +1,4 @@
-//! Step 8: idempotency keys in the commit pipeline. A keyed commit applies
+//! Idempotency keys in the commit pipeline. A keyed commit applies
 //! once; a retry returns the original result; another request under the
 //! same key is refused; replaying the records rebuilds the key table.
 

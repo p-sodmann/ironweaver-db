@@ -1,4 +1,4 @@
-//! Namespaces (step 9, ADR 0017): independent graphs, ids, keys, drops
+//! Namespaces (ADR 0017): independent graphs, ids, keys, drops
 //! and their waiters, constraints under concurrent writers, and every file
 //! operation of create, drop and the layout upgrade failing.
 

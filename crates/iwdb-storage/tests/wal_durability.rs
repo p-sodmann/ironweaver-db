@@ -1,4 +1,4 @@
-//! Step 4 acceptance: with `always`, every acknowledged commit is readable
+//! With `always`, every acknowledged commit is readable
 //! after reopening the files, and replaying the log gives the same state.
 //! Also the fsync policies (when fsyncs happen), the record size limit and
 //! the rules for starting a writer.

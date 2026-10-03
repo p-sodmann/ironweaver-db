@@ -2,7 +2,7 @@
 //! trait: the seam for fault injection. With the `failpoints` feature,
 //! `failpoint::FailFs` wraps any [`LogFs`] and makes writes, fsyncs,
 //! renames, directory syncs, checkpoint writes, deletions or truncations
-//! fail, pause, panic or abort (step 6). [`StdFs`] itself has no
+//! fail, pause, panic or abort. [`StdFs`] itself has no
 //! failpoints.
 //!
 //! Reading (the WAL reader, loading checkpoints) uses `std::fs` directly:
@@ -15,7 +15,7 @@ use std::path::Path;
 use crate::Error;
 
 /// The operations that change files: the log writer's, and those of
-/// checkpoints and recovery (step 5).
+/// checkpoints and recovery.
 pub trait LogFs {
     type File: LogFile;
 
@@ -42,11 +42,10 @@ pub trait LogFs {
     /// Cut the file at `path` to `len` bytes and fsync it.
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()>;
     /// Create the directory `path` (not its parents); `AlreadyExists` if
-    /// there is one. Not durable until its parent is synced (step 9:
-    /// namespace directories).
+    /// there is one. Not durable until its parent is synced.
     fn create_dir(&self, path: &Path) -> io::Result<()>;
-    /// Remove the directory `path` and everything in it (step 9: a dropped
-    /// namespace's directory). Not durable until its parent is synced.
+    /// Remove the directory `path` and everything in it. Not durable until
+    /// its parent is synced.
     fn remove_dir_all(&self, path: &Path) -> io::Result<()>;
 }
 

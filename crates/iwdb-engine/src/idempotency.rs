@@ -1,4 +1,4 @@
-//! Idempotency keys (step 8, ADR 0015): a commit made with a key is
+//! Idempotency keys (ADR 0015): a commit made with a key is
 //! applied once; a retry with the same key returns the original
 //! [`CommitResult`] instead of committing again.
 //!
@@ -35,8 +35,7 @@ pub const MAX_KEY_LEN: usize = 255;
 /// How many keyed commits a namespace remembers. When a keyed commit
 /// would make the table larger, the entry with the lowest seq is evicted.
 /// Part of the data-dir layout: changing it changes what replay produces,
-/// so it is a constant, not an option (step 9 may make it a catalog
-/// setting, logged like any catalog change).
+/// so it is a constant, not an option.
 pub const KEY_TABLE_CAPACITY: usize = 10_000;
 
 /// A client's name for one request: 1 to [`MAX_KEY_LEN`] bytes of UTF-8.

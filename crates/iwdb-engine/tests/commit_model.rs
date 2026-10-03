@@ -1,4 +1,4 @@
-//! Step 3 acceptance: random histories of transactions and catalog changes
+//! Random histories of transactions and catalog changes
 //! (many of them failing) against a simple reference model, and the replay
 //! property the WAL relies on: the records of the successful commits,
 //! replayed onto an empty namespace, give the same state.

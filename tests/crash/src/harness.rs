@@ -43,7 +43,7 @@ pub struct Config {
     pub max_delay: Duration,
     /// Print a line every this many cycles (0: never).
     pub progress: u64,
-    /// Cycles of the catalog scenario (step 9) run after the others.
+    /// Cycles of the catalog scenario run after the others.
     pub catalog_cycles: u64,
 }
 
@@ -81,7 +81,7 @@ pub struct Target {
     /// Where the children's online backups go, if they take any.
     pub backups: Option<PathBuf>,
     /// The keyed commits the last child that tried any tried last: the
-    /// next child retries them first (step 8).
+    /// next child retries them first.
     pub retries: Vec<IdempotencyKey>,
 }
 

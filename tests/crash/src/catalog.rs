@@ -1,4 +1,4 @@
-//! The catalog scenario (step 9, ADR 0017): kill -9 a store while it
+//! The catalog scenario (ADR 0017): kill -9 a store while it
 //! creates and drops namespaces, commits into several of them (data,
 //! indexes and constraints) and checkpoints them, then check that what
 //! recovery returns is a state the acts could have produced.

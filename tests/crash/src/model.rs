@@ -7,7 +7,7 @@
 //! here) until the model is at that seq. It keeps every commit record, so
 //! it can also go back to an earlier seq.
 //!
-//! Commits with an idempotency key (step 8) go through the engine's keyed
+//! Commits with an idempotency key go through the engine's keyed
 //! path, so the model applies each key once, as the store must: a retry
 //! whose original is in the model's key table commits nothing.
 

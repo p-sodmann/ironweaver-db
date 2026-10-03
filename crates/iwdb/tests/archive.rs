@@ -1,4 +1,4 @@
-//! Continuous WAL archiving (step 7, ADR 0009): every segment the
+//! Continuous WAL archiving (ADR 0009): every segment the
 //! checkpointer removes is durable in the archive first, so the archive
 //! and the WAL together hold the whole history; archiving is idempotent;
 //! a conflict, an archive of another history and every failing archive

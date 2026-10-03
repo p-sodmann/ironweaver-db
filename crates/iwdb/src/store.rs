@@ -138,7 +138,7 @@ impl<F: LogFs> Shared<F> {
 /// An embedded Ironweaver DB store: namespaces, each a graph with its own
 /// WAL and checkpoints, in a data directory.
 ///
-/// **Namespaces** (step 9, ADR 0017). A store has named namespaces
+/// **Namespaces** (ADR 0017). A store has named namespaces
 /// ([`create_namespace`](Self::create_namespace),
 /// [`drop_namespace`](Self::drop_namespace),
 /// [`namespaces`](Self::namespaces), [`namespace`](Self::namespace) for a
@@ -175,7 +175,7 @@ impl<F: LogFs> Shared<F> {
 /// **A panic while the store changes a namespace or its WAL** (a commit,
 /// an fsync, the group commit timer) **aborts the process** (ADR 0008).
 ///
-/// **Threads** (step 8, ADR 0014). Reads and commits take `&self`; share
+/// **Threads** (ADR 0014). Reads and commits take `&self`; share
 /// the store between threads. Lock order: the namespace log (create, drop,
 /// backup), then a namespace's checkpointer, then its writer (WAL), then
 /// its namespace lock; nothing takes two namespaces' locks except a

@@ -48,7 +48,7 @@ pub struct GraphMeta {
     /// holds exactly the state after the commits up to it, catalog included.
     /// Saved as an `Int`, so at most `i64::MAX`.
     pub seq: u64,
-    /// The namespace's recent idempotency keys (step 8).
+    /// The namespace's recent idempotency keys.
     pub keys: KeyTable,
 }
 

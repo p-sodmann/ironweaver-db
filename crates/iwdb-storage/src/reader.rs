@@ -6,7 +6,7 @@
 //! - **A torn tail**: damage (a truncated or checksum-failing header or
 //!   frame) in the last segment, not followed by a valid frame that proves
 //!   the damaged record had been synced. This is the clean end of the log.
-//!   It is reported in [`SegmentEnd`], so that recovery (step 5) can
+//!   It is reported in [`SegmentEnd`], so that recovery can
 //!   truncate the segment there.
 //! - **Corruption** ([`Error::Corrupt`]): damage in any other segment, or
 //!   damage followed by a valid frame whose `synced_seq` shows that the
@@ -239,7 +239,7 @@ fn frames_after(bytes: &[u8], damage: usize, lowest: u64, version: u32) -> impl 
 /// the records.
 ///
 /// This is the reader [`WalReader`] uses per segment, exposed for fuzzing
-/// and for `verify` (step 7).
+/// and for `verify`.
 pub fn read_segment(
     path: &Path,
     bytes: &[u8],

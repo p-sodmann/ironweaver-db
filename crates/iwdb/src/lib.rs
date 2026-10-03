@@ -18,7 +18,7 @@
 //! # }
 //! ```
 //!
-//! **The `Database` trait** (step 10): [`Embedded`] serves a store
+//! **The `Database` trait**: [`Embedded`] serves a store
 //! through [`iwdb_query::Database`], the service interface every access
 //! method uses: bounded reads, pattern matching, analytics, the catalog
 //! and namespaces, with stable error codes.

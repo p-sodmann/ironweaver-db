@@ -1,7 +1,7 @@
 //! Commit times: when a commit was appended to the WAL (format 2,
 //! `documentation/formats/wal.md`; ADR 0010). The WAL writer sets them;
 //! the engine only carries them in [`CommitResult`](crate::CommitResult)
-//! and the idempotency key table (step 8).
+//! and the idempotency key table.
 
 use std::fmt;
 use std::str::FromStr;
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// appends the record, and makes it non-decreasing in seq order: a record
 /// gets `max(now, time of the previous record)`, so a clock that goes
 /// backwards makes time stand still until it catches up. Records of WAL
-/// format 1 (step 4) have no time.
+/// format 1 have no time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CommitTime(pub i64);

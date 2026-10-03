@@ -1,4 +1,4 @@
-//! Ironweaver DB's gRPC server (step 11): the [`Database`](iwdb_query::Database)
+//! Ironweaver DB's gRPC server: the [`Database`](iwdb_query::Database)
 //! trait over gRPC, with `proto/ironweaver_db/v1` as the contract.
 //!
 //! - [`Server`]: serves any `D: Database`. Each RPC translates its request

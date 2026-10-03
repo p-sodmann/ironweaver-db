@@ -24,15 +24,14 @@ use crate::{codec, resolve, CommitTime, DbGraph, DbRecord, Error};
 ///    namespace's.
 ///
 /// [`commit`](Self::commit) does both. With an idempotency key
-/// ([`prepare_keyed`](Self::prepare_keyed), step 8), preparing first looks
+/// ([`prepare_keyed`](Self::prepare_keyed)), preparing first looks
 /// the key up in the [`KeyTable`]: a known key with the same request gives
 /// the original result ([`Prepare::Duplicate`]) and nothing is applied; a
 /// known key with another request is [`Error::IdempotencyKeyReused`].
 /// Applying a keyed record adds it to the table, so replay rebuilds it.
 ///
-/// The write-ahead log (step 4) goes
-/// between the two: the record is logged after it is validated and before
-/// it is applied. A commit that fails to prepare changes nothing and uses
+/// The write-ahead log goes between the two: the record is logged after it
+/// is validated and before it is applied. A commit that fails to prepare changes nothing and uses
 /// no `seq`.
 ///
 /// Guarantees: a commit is all or nothing; it sees and checks the state
@@ -41,7 +40,7 @@ use crate::{codec, resolve, CommitTime, DbGraph, DbRecord, Error};
 /// gives the same graph (as compared by
 /// [`canonical`](crate::testutil::canonical)), catalog and `seq`. Not
 /// thread-safe by itself (`&mut self`); `iwdb_storage::LoggedNamespace` adds
-/// the locks (step 8).
+/// the locks.
 ///
 /// If applying a validated record fails (a bug, or `GraphError::Internal`
 /// from the core, after which the graph may be inconsistent), the
@@ -65,7 +64,7 @@ pub struct Namespace {
     poisoned: bool,
 }
 
-/// An index being built off the write lock (step 9, ADR 0019), the core's
+/// An index being built off the write lock (ADR 0019), the core's
 /// off-graph build (`ironweaver_core::IndexBuild`): begun on the graph with
 /// [`Namespace::begin_index_build`], filled with
 /// [`Namespace::scan_index_keys`] under the read lock, and installed by
@@ -151,7 +150,7 @@ impl Namespace {
     /// invariant every namespace keeps. Commits and replay continue at
     /// `loaded.meta.seq + 1`.
     ///
-    /// Recovery (step 5) and the checkpointer build their namespace this
+    /// Recovery and the checkpointer build their namespace this
     /// way; [`new`](Self::new) only makes an empty one.
     pub fn from_loaded(loaded: codec::Loaded) -> Self {
         let codec::Loaded { graph, meta, index_changes: _ } = loaded;
@@ -195,7 +194,7 @@ impl Namespace {
         self.seq
     }
 
-    /// The recent keyed commits (step 8).
+    /// The recent keyed commits.
     pub fn keys(&self) -> &KeyTable {
         &self.keys
     }

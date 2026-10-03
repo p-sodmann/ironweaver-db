@@ -1,5 +1,5 @@
 //! `verify` on a layout 4 store and backup with damaged or inconsistent
-//! namespaces (step 9, ADR 0017): each kind of damage is a problem naming
+//! namespaces (ADR 0017): each kind of damage is a problem naming
 //! the namespace, and what a crash leaves is a note.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

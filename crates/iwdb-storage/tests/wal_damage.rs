@@ -1,4 +1,4 @@
-//! Step 4 acceptance: truncated and bit-flipped tails are detected and
+//! Truncated and bit-flipped tails are detected and
 //! treated as the end of the log; damage followed by durable data, damage
 //! in an earlier segment and seq gaps are errors, never skipped.
 

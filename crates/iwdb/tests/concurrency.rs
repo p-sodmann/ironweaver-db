@@ -1,4 +1,4 @@
-//! Step 8: concurrent readers (ADR 0014), read-your-writes and deadlines
+//! Concurrent readers (ADR 0014), read-your-writes and deadlines
 //! (ADR 0016).
 //!
 //! - Many reader threads against a committing writer: every read sees the

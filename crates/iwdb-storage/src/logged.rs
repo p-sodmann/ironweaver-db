@@ -26,7 +26,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// [`FsyncPolicy::Always`](crate::FsyncPolicy::Always), and a commit whose
 /// append fails is never applied.
 ///
-/// **Locks** (step 8, ADR 0014). The WAL sits behind a mutex, which a
+/// **Locks** (ADR 0014). The WAL sits behind a mutex, which a
 /// commit holds from start to end: commits are serialized (the single
 /// writer). The namespace sits behind a reader/writer lock. A commit
 /// prepares under its **read** side (readers go on meanwhile), appends and
@@ -37,7 +37,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// is WAL, then namespace; nothing takes the WAL's lock while holding the
 /// namespace's.
 ///
-/// **Idempotency keys** (step 8, ADR 0015): a commit with a key whose
+/// **Idempotency keys** (ADR 0015): a commit with a key whose
 /// commit is in the namespace's key table returns the original result and
 /// logs nothing, even while the namespace is read-only (that commit was
 /// applied, so its result stands).
@@ -46,9 +46,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// error), or applying a logged record fails and poisons the namespace
 /// ([`iwdb_engine::Error::ApplyFailed`]), every further commit fails with
 /// [`Error::ReadOnly`] until the namespace is reopened from its checkpoint
-/// and log (step 5). Reads still work, and see every applied commit.
-///
-/// One namespace only (step 9 decides how namespaces share logs).
+/// and log. Reads still work, and see every applied commit.
 #[derive(Debug)]
 pub struct LoggedNamespace<F: LogFs = StdFs> {
     namespace: RwLock<Namespace>,
@@ -62,9 +60,9 @@ pub struct LoggedNamespace<F: LogFs = StdFs> {
     progress: Mutex<()>,
     advanced: Condvar,
     stats: Stats,
-    /// The namespace was dropped (step 9): commits and waits fail.
+    /// The namespace was dropped: commits and waits fail.
     dropped: AtomicBool,
-    /// Index builds in progress (step 9).
+    /// Index builds in progress.
     builds: Mutex<Vec<Arc<BuildProgress>>>,
     /// Commits waiting for the namespace's write lock: an index build's
     /// scan lets them in before it takes the read lock again, because

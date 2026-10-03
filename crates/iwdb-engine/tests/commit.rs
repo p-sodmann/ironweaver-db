@@ -1,4 +1,4 @@
-//! Step 3: the commit pipeline. Version semantics, conflicts, constraints,
+//! The commit pipeline. Version semantics, conflicts, constraints,
 //! catalog changes, reserved names and limits, each as a typed error that
 //! leaves the namespace unchanged.
 

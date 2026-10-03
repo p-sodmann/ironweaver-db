@@ -149,7 +149,7 @@ impl<F: LogFs> Wal<F> {
     ///
     /// The log in `dir` must be empty or end right before `next_seq`, with
     /// no torn tail: in a new directory there is nothing; after a restart,
-    /// recovery (step 5) has read the log to its end and truncated a torn
+    /// recovery has read the log to its end and truncated a torn
     /// tail. The last segment is read to check this (O(its size)) and, except
     /// with [`FsyncPolicy::Off`], fsynced: the writer's first record says that
     /// everything before it is synced.

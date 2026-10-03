@@ -1,4 +1,4 @@
-//! Reads with deadlines, cancellation and read-your-writes (step 8): what
+//! Reads with deadlines, cancellation and read-your-writes: what
 //! the `Database` trait of step 10 builds on.
 //!
 //! A request runs on the caller's thread (in a server, a blocking thread).

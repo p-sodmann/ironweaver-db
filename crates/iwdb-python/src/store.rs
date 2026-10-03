@@ -1,5 +1,5 @@
 //! `iwdb.Store`: translations to the `Database`
-//! trait, served by `iwdb::Embedded` (design rule 8; step 10), and to
+//! trait, served by `iwdb::Embedded` (design rule 8), and to
 //! `iwdb::Store` for what the trait doesn't cover (backups, checkpoints,
 //! syncs, the store's status). See `documentation/python-api.md`.
 
@@ -35,7 +35,7 @@ pub struct PyStore {
 }
 
 /// The embedded database's config: the default limits, and no cap on
-/// timeouts (`timeout=inf` means none, as before step 10; ADR 0020).
+/// timeouts (`timeout=inf` means none; ADR 0020).
 fn query_config() -> QueryConfig {
     QueryConfig {
         limits: LimitConfig { max_timeout: Duration::MAX, ..LimitConfig::default() },

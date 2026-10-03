@@ -1,4 +1,4 @@
-//! Step 6: every failpoint of the storage layer, through the store. Each
+//! Every failpoint of the storage layer, through the store. Each
 //! test injects a failure (an I/O error, a full disk, a torn write, an
 //! error after the operation happened) at one call, checks the defined
 //! outcome (documentation/guarantees.md, "Simulated failures"), then
