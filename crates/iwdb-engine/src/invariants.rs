@@ -47,7 +47,10 @@ fn one_of_each_kind() -> Vec<Value> {
 /// - every constraint of the catalog holds;
 /// - the idempotency key table has at most
 ///   [`KEY_TABLE_CAPACITY`](crate::idempotency::KEY_TABLE_CAPACITY)
-///   entries, all at seqs up to the namespace's.
+///   entries, all at seqs up to the namespace's;
+/// - there are at most [`MAX_MARKS`](crate::mark::MAX_MARKS) marks, each
+///   set at a seq up to the namespace's, at a position up to
+///   [`MAX_POSITION`](crate::mark::MAX_POSITION).
 ///
 /// O((n + m) · number of indexes) time, plus a lookup per indexed node.
 pub fn check(ns: &Namespace) -> Vec<String> {
@@ -60,6 +63,13 @@ pub fn check(ns: &Namespace) -> Vec<String> {
     }
     for entry in keys.entries().filter(|e| e.result.seq > ns.seq()) {
         found.push(|| format!("idempotency key {} is at seq {}, after the state's", entry.key, entry.result.seq));
+    }
+    let marks = ns.marks();
+    if marks.len() > crate::mark::MAX_MARKS {
+        found.push(|| format!("there are {} marks, more than a namespace may hold", marks.len()));
+    }
+    for (name, entry) in marks.iter().filter(|(_, e)| e.seq > ns.seq() || e.position > crate::mark::MAX_POSITION) {
+        found.push(|| format!("mark {} is at position {} set at seq {}", name, entry.position, entry.seq));
     }
 
     for (_, edge) in g.edges() {
@@ -181,6 +191,9 @@ pub fn compare(a: &Namespace, b: &Namespace) -> Result<(), String> {
     }
     if let Some(difference) = a.keys().difference(b.keys()) {
         return Err(format!("the idempotency key tables differ: {}", difference));
+    }
+    if let Some(difference) = a.marks().difference(b.marks()) {
+        return Err(format!("the marks differ: {}", difference));
     }
     let (ga, gb) = (a.graph(), b.graph());
     if (ga.node_count(), ga.edge_count()) != (gb.node_count(), gb.edge_count()) {

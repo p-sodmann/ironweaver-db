@@ -30,7 +30,8 @@ pub mod conformance;
 pub use cursor::Cursor;
 pub use error::{Code, Error};
 pub use model::{
-    Answer, ChangeEvent, Changes, CommitOptions, Edge, IndexSize, IndexState, IndexStatus, NamespaceStatus, Node, Work,
+    Answer, ChangeEvent, Changes, CommitOptions, Edge, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus,
+    Node, Work,
 };
 pub use options::{Bounds, LimitConfig, Limits, QueryOptions};
 pub use read::{Explain, Lookup, Plan, ReadContext};

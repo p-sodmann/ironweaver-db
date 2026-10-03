@@ -51,9 +51,12 @@ pub use iwdb_engine::catalog::{
     AttrPath, CatalogError, Constraint, ConstraintKind, IndexDef, Label, NamespaceCatalog, NamespaceName,
 };
 pub use iwdb_engine::{
-    CatalogChange, CommitResult, CommitTime, EdgeKey, IdempotencyKey, KeyTable, Mutation, Namespace, Target,
+    CatalogChange, CommitResult, CommitTime, EdgeKey, IdempotencyKey, KeyTable, MarkName, MarkUpdate, Mutation,
+    Namespace, Target,
 };
-pub use iwdb_query::{CommitOptions, Edge, IndexSize, IndexState, IndexStatus, NamespaceStatus, Node, ProjectionSpec};
+pub use iwdb_query::{
+    CommitOptions, Edge, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus, Node, ProjectionSpec,
+};
 pub use iwdb_storage::io::{LogFs, StdFs};
 pub use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 pub use iwdb_storage::{

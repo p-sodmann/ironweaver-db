@@ -186,7 +186,8 @@ impl From<iwdb_engine::Error> for Error {
             | E::NoMatchingEdge { .. }
             | E::IdempotencyKeyReused { .. }
             | E::IndexExists { .. }
-            | E::ConstraintExists { .. } => Code::Conflict,
+            | E::ConstraintExists { .. }
+            | E::MarkConflict { .. } => Code::Conflict,
             E::NotFound { .. } | E::NoSuchIndex { .. } | E::NoSuchConstraint { .. } => Code::NotFound,
             E::ConstraintViolation { .. } => Code::ConstraintViolation,
             E::ReservedName { .. }
@@ -200,14 +201,17 @@ impl From<iwdb_engine::Error> for Error {
             | E::EdgeIdsExhausted
             | E::SeqExhausted
             | E::InvalidIdempotencyKey { .. }
-            | E::Unencodable { .. } => Code::InvalidArgument,
+            | E::Unencodable { .. }
+            | E::InvalidMark { .. }
+            | E::TooManyMarks { .. } => Code::InvalidArgument,
             E::MissingVersion { .. }
             | E::InvalidVersion { .. }
             | E::UnknownReservedKey { .. }
             | E::UnexpectedGraphMeta { .. }
             | E::MissingSeq
             | E::InvalidSeq { .. }
-            | E::InvalidKeyTable { .. } => Code::Corrupt,
+            | E::InvalidKeyTable { .. }
+            | E::InvalidMarkTable { .. } => Code::Corrupt,
             E::ApplyFailed { .. } | E::Poisoned => Code::ReadOnly,
             _ => Code::Internal,
         };

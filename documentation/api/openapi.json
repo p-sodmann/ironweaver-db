@@ -1436,6 +1436,21 @@
         ],
         "type": "string"
       },
+      "MarkStatus": {
+        "description": "A mark: the position in an external log up to which a projection's\nevents are committed, and the seq of the commit that set it.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "position": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "seq": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
       "MatchPatternRequest": {
         "description": "Every match of a pattern; paginated by row.",
         "properties": {
@@ -1698,6 +1713,13 @@
             "description": "Declared indexes, those unique constraints need, and builds in\nprogress, sorted by path.",
             "items": {
               "$ref": "#/components/schemas/IndexStatus"
+            },
+            "type": "array"
+          },
+          "marks": {
+            "description": "The namespace's marks (ADR 0032), by name: how far each projection\nhas committed its source's events.",
+            "items": {
+              "$ref": "#/components/schemas/MarkStatus"
             },
             "type": "array"
           },

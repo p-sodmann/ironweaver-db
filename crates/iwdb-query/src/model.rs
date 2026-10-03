@@ -209,7 +209,20 @@ pub struct NamespaceStatus {
     /// progress, sorted by path.
     pub indexes: Vec<IndexStatus>,
     pub constraints: usize,
+    /// The namespace's marks (ADR 0032), by name: how far each projection
+    /// has committed its source's events.
+    pub marks: Vec<MarkStatus>,
     /// What recovery did to this namespace when the store opened (for a
     /// namespace created since: nothing).
     pub recovery: RecoveryReport,
+}
+
+/// A mark of a namespace (ADR 0032): the position in an external log up to
+/// which a projection's events are committed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkStatus {
+    pub name: String,
+    pub position: u64,
+    /// The seq of the commit that set it.
+    pub seq: u64,
 }

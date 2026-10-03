@@ -31,6 +31,10 @@ pub const CATALOG_KEY: &str = "iwdb.catalog";
 /// step 8; see [`KeyTable`](crate::KeyTable)).
 pub const KEYS_KEY: &str = "iwdb.keys";
 
+/// Graph meta: the namespace's marks (data-dir layout 5, step 13; see
+/// [`MarkTable`](crate::MarkTable)).
+pub const MARKS_KEY: &str = "iwdb.marks";
+
 /// Whether `key` is owned by the database.
 pub fn is_reserved(key: &str) -> bool {
     key.starts_with(RESERVED_PREFIX)

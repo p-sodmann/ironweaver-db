@@ -89,6 +89,7 @@ pub fn graph_meta() -> impl Strategy<Value = GraphMeta> {
             catalog,
             seq,
             keys: Default::default(),
+            marks: Default::default(),
         },
     )
 }

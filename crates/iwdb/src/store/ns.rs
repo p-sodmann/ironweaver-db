@@ -8,13 +8,15 @@ use std::time::Instant;
 use ironweaver_core::cancel::{self, Token};
 use ironweaver_core::{EdgeId, GraphError, Projection};
 use iwdb_engine::catalog::{AttrPath, NamespaceCatalog};
-use iwdb_engine::{CatalogChange, CommitResult, Mutation, Namespace};
-use iwdb_query::{CommitOptions, Edge, IndexSize, IndexState, IndexStatus, NamespaceStatus, Node, ProjectionSpec};
+use iwdb_engine::{CatalogChange, CommitResult, MarkName, MarkUpdate, Mutation, Namespace};
+use iwdb_query::{
+    CommitOptions, Edge, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus, Node, ProjectionSpec,
+};
 use iwdb_storage::io::LogFs;
 use iwdb_storage::{BatchLimits, ChangeBatch, CheckpointOutcome, Error, FsyncPolicy, LockStats, LoggedNamespace, Wait};
 
 use super::background::{abort_if_inconsistent, or_abort, run_checkpoint, target};
-use super::{Analysis, NsState, Store, StreamableWait, lock};
+use super::{Analysis, NsState, Shared, Store, StreamableWait, lock};
 use crate::request::{Deadline, ReadOptions, Scheduled};
 
 /// A handle on one namespace of a [`Store`]: its commits, reads, catalog
@@ -73,6 +75,40 @@ where
     pub fn commit_with(&self, mutations: &[Mutation], options: &CommitOptions) -> Result<CommitResult, Error> {
         let key = options.idempotency_key.as_ref();
         self.write(|live| live.commit_keyed(mutations, key))
+    }
+
+    /// [`commit_with`](Self::commit_with) that also moves a mark in the
+    /// same commit (ADR 0032): the high-water mark of a projection, stored
+    /// atomically with the effect of the events up to it. The commit
+    /// applies only if the mark is at `mark.expected` (`None`: not set
+    /// yet); otherwise it fails with [`iwdb_engine::Error::MarkConflict`]
+    /// and nothing changes. `mutations` may be empty (events that change
+    /// nothing). Durable like any commit, per the fsync policy.
+    pub fn commit_marked(
+        &self,
+        mutations: &[Mutation],
+        mark: &MarkUpdate,
+        options: &CommitOptions,
+    ) -> Result<CommitResult, Error> {
+        let key = options.idempotency_key.as_ref();
+        self.write(|live| live.commit_marked(mutations, key, Some(mark)))
+    }
+
+    /// The position of the mark `name`, if it is set (ADR 0032).
+    pub fn mark(&self, name: &MarkName) -> Option<u64> {
+        self.read(|ns| ns.mark(name))
+    }
+
+    /// Every mark, by name: its position and the seq of the commit that
+    /// set it.
+    pub fn marks(&self) -> Vec<MarkStatus> {
+        self.read(|ns| {
+            {
+                let marks = ns.marks().iter();
+                marks.map(|(name, e)| MarkStatus { name: name.as_str().to_owned(), position: e.position, seq: e.seq })
+            }
+            .collect()
+        })
     }
 
     /// Commit a catalog change (an index or a constraint), like
@@ -367,6 +403,7 @@ where
             memory_bytes,
             indexes: indexes.into_values().collect(),
             constraints: catalog.constraints().count(),
+            marks: self.marks(),
             recovery: self.state.recovery.clone(),
         }
     }
@@ -389,15 +426,7 @@ where
         &self,
         commit: impl FnOnce(&LoggedNamespace<F>) -> Result<CommitResult, Error>,
     ) -> Result<CommitResult, Error> {
-        let live = self.live();
-        let result = or_abort("a commit", || abort_if_inconsistent(commit(live)))?;
-        let shared = &self.store.shared;
-        let trigger = self.state.size_trigger.load(Ordering::Relaxed);
-        if !result.deduplicated && live.wal().appended_bytes() >= trigger {
-            lock(&shared.signal).checkpoint.insert(self.state.info.id);
-            shared.wake.notify_all();
-        }
-        Ok(result)
+        write_in(&self.store.shared, &self.state, commit)
     }
 
     /// [`wait`](Self::wait), then the cancel token for `what`, which the
@@ -451,4 +480,26 @@ fn stopped(deadline: &Deadline, cancel: Option<&Token>, what: &str) -> Error {
     } else {
         Error::Cancelled
     }
+}
+
+/// Commit to the namespace `state` of the store `shared`: abort on a panic
+/// or an inconsistent namespace (ADR 0008, ADR 0028), and wake the
+/// checkpointer when the WAL has grown past the size trigger. Every commit
+/// goes through here, [`Ns`]'s and the projections'.
+pub(super) fn write_in<F: LogFs + Clone + Send + Sync + 'static>(
+    shared: &Shared<F>,
+    state: &NsState<F>,
+    commit: impl FnOnce(&LoggedNamespace<F>) -> Result<CommitResult, Error>,
+) -> Result<CommitResult, Error>
+where
+    F::File: Send,
+{
+    let live = &state.live;
+    let result = or_abort("a commit", || abort_if_inconsistent(commit(live)))?;
+    let trigger = state.size_trigger.load(Ordering::Relaxed);
+    if !result.deduplicated && live.wal().appended_bytes() >= trigger {
+        lock(&shared.signal).checkpoint.insert(state.info.id);
+        shared.wake.notify_all();
+    }
+    Ok(result)
 }

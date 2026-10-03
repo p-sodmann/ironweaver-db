@@ -447,6 +447,7 @@ fn ns_status_json(n: &NamespaceStatus) -> Value {
             "state": match &i.state { IndexState::Ready => "ready", IndexState::Building { .. } => "building" },
             "declared": i.declared, "unique": i.unique,
         })).collect::<Vec<_>>(),
+        "marks": n.marks.iter().map(|m| json!({"name": m.name, "position": m.position, "seq": m.seq})).collect::<Vec<_>>(),
     })
 }
 
@@ -464,6 +465,9 @@ fn ns_status_text(n: &NamespaceStatus) -> String {
     );
     if let Some(cause) = &n.read_only {
         text += &format!(" (read-only: {})", cause);
+    }
+    for m in &n.marks {
+        text += &format!("\n  mark {:?} at {} (seq {})", m.name, m.position, m.seq);
     }
     text
 }

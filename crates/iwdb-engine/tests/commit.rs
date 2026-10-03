@@ -713,6 +713,7 @@ fn files_with_reserved_attribute_keys_are_rejected() {
         catalog: Default::default(),
         seq: 0,
         keys: Default::default(),
+        marks: Default::default(),
     }
     .to_attrs();
     let bytes = format::to_binary(&g, &meta, false).unwrap();
@@ -729,6 +730,7 @@ fn files_with_reserved_attribute_keys_are_rejected() {
         catalog: Default::default(),
         seq: 0,
         keys: Default::default(),
+        marks: Default::default(),
     };
     let err = codec::to_binary(&g, &meta).unwrap_err().to_string();
     assert!(err.contains("'iwdb.x' is reserved"), "{}", err);

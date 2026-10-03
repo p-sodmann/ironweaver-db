@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use iwdb::{
-    BackupReport, CheckpointOutcome, CommitTime, Finding, FsyncPolicy, IndexState, IndexStatus, Kind, NamespaceStatus,
-    RecoveryReport, RestoreReport, StoreRecovery, StoreStatus, VerifyReport,
+    BackupReport, CheckpointOutcome, CommitTime, Finding, FsyncPolicy, IndexState, IndexStatus, Kind, MarkStatus,
+    NamespaceStatus, RecoveryReport, RestoreReport, StoreRecovery, StoreStatus, VerifyReport,
 };
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
@@ -127,8 +127,19 @@ pub fn namespace_status(py: Python<'_>, n: &NamespaceStatus) -> PyResult<Py<PyAn
             ("constraints", to(py, n.constraints)?),
             ("indexes", indexes(py, &n.indexes)?.into_bound(py)),
             ("recovery", ns_recovery(py, &n.recovery)?.into_bound(py)),
+            ("marks", marks(py, &n.marks)?.into_bound(py)),
         ],
     )
+}
+
+/// The marks as `{name: {"position": int, "seq": int}}`.
+fn marks(py: Python<'_>, marks: &[MarkStatus]) -> PyResult<Py<PyAny>> {
+    let out = PyDict::new(py);
+    for m in marks {
+        let entry = dict(py, vec![("position", to(py, m.position)?), ("seq", to(py, m.seq)?)])?;
+        out.set_item(&m.name, entry)?;
+    }
+    Ok(out.into_any().unbind())
 }
 
 pub fn store_status(py: Python<'_>, s: &StoreStatus) -> PyResult<Py<PyAny>> {

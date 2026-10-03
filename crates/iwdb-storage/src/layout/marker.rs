@@ -28,7 +28,7 @@ pub fn encode_marker(history: HistoryId) -> Vec<u8> {
 /// What a valid marker says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MarkerInfo {
-    /// The layout version (1 to 4).
+    /// The layout version (1 to 5).
     pub version: u32,
     /// The history id (from layout 2; `None` in layout 1).
     pub history: Option<HistoryId>,
@@ -60,7 +60,7 @@ fn decode_marker(bytes: &[u8]) -> Marker {
     let version = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
     match (version, bytes.len()) {
         (1, MARKER_LEN_V1) => Marker::Valid(MarkerInfo { version, history: None }),
-        (2..=4, MARKER_LEN) => {
+        (2..=LAYOUT_VERSION, MARKER_LEN) => {
             let mut id = [0u8; 16];
             id.copy_from_slice(&bytes[12..28]);
             Marker::Valid(MarkerInfo { version, history: Some(HistoryId(id)) })
@@ -104,7 +104,9 @@ mod tests {
         let history = HistoryId([7; 16]);
         let marker = encode_marker(history);
         assert_eq!(marker.len(), MARKER_LEN);
-        assert_eq!(decode_marker(&marker), Marker::Valid(MarkerInfo { version: 4, history: Some(history) }));
+        assert_eq!(decode_marker(&marker), Marker::Valid(MarkerInfo { version: 5, history: Some(history) }));
+        let v4 = encode_marker_with(4, &history.0);
+        assert_eq!(decode_marker(&v4), Marker::Valid(MarkerInfo { version: 4, history: Some(history) }));
         let v3 = encode_marker_with(3, &history.0);
         assert_eq!(decode_marker(&v3), Marker::Valid(MarkerInfo { version: 3, history: Some(history) }));
         let v2 = encode_marker_with(2, &history.0);
@@ -114,7 +116,7 @@ mod tests {
         assert_eq!(decode_marker(&v1), Marker::Valid(MarkerInfo { version: 1, history: None }));
         // A newer layout may have any body
         assert_eq!(decode_marker(&encode_marker_with(7, b"whatever")), Marker::Newer(7));
-        assert_eq!(decode_marker(&encode_marker_with(5, b"whatever")), Marker::Newer(5));
+        assert_eq!(decode_marker(&encode_marker_with(6, b"whatever")), Marker::Newer(6));
         assert_eq!(decode_marker(&encode_marker_with(1, &[0; 16])), Marker::Damaged);
         assert_eq!(decode_marker(&encode_marker_with(0, &[])), Marker::Damaged);
         assert_eq!(decode_marker(b"hello"), Marker::Foreign);

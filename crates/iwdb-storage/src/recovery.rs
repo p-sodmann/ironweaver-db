@@ -205,8 +205,9 @@ impl StoreRecovery {
 ///    files, and remove namespace directories it doesn't list;
 /// 3. recover each namespace ([`read_namespace`]), and start its WAL
 ///    writer ([`start_namespace`]);
-/// 4. in a layout 1 to 3 directory, between reading its one namespace and
-///    starting its writer, upgrade it to layout 4 ([`DataDir::upgrade`]).
+/// 4. in an older layout, between reading its namespaces and starting
+///    their writers, upgrade it to the current one ([`DataDir::upgrade`]:
+///    layouts 1 to 3 move their one namespace, layout 4 gets a new marker).
 ///
 /// The result is the state after every commit in each namespace's log,
 /// which includes every acknowledged commit that the fsync policy made
@@ -231,7 +232,7 @@ pub fn recover<F: LogFs + Clone>(
     let mut report = StoreRecovery { created, ..StoreRecovery::default() };
     let mut namespaces = Vec::new();
     let log;
-    if dir.needs_upgrade().is_some() {
+    if dir.is_legacy() {
         let name = NamespaceName::new(DEFAULT_NAME).map_err(iwdb_engine::Error::from)?;
         let legacy = dir.legacy_paths();
         report.removed_temp_files = dir.remove_temp_files(&fs, std::slice::from_ref(&legacy))?;
@@ -274,6 +275,9 @@ pub fn recover<F: LogFs + Clone>(
             }
             reads.push(read_namespace(&fs, paths, &info.name)?);
         }
+        // Layout 4: every namespace read, nothing written yet in the new
+        // formats (the writers start below)
+        report.upgraded_from = dir.upgrade(&fs)?;
         for ((info, paths), read) in infos.into_iter().zip(paths).zip(reads) {
             let (live, ns_report) = start_namespace(fs.clone(), &paths, read, wal_options.clone())?;
             report.namespaces.insert(info.name.to_string(), ns_report.clone());

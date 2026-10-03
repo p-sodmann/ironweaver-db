@@ -9,7 +9,7 @@ use std::task::Waker;
 use std::time::{Duration, Instant};
 
 use iwdb_engine::catalog::AttrPath;
-use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, IndexBuild, Mutation, Namespace, Prepare};
+use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, IndexBuild, MarkUpdate, Mutation, Namespace, Prepare};
 
 use crate::io::{LogFs, StdFs};
 use crate::{Error, Wal};
@@ -181,6 +181,21 @@ impl<F: LogFs> LoggedNamespace<F> {
     /// with [`iwdb_engine::Error::IdempotencyKeyReused`].
     pub fn commit_keyed(&self, mutations: &[Mutation], key: Option<&IdempotencyKey>) -> Result<CommitResult, Error> {
         self.log_and_apply(|ns| ns.prepare_keyed(mutations, key))
+    }
+
+    /// [`commit_keyed`](Self::commit_keyed) that also moves a mark,
+    /// compare-and-set, in the same record (ADR 0032; see
+    /// [`Namespace::prepare_marked`]): the commit applies only if the mark
+    /// is at `mark.expected`, otherwise
+    /// [`iwdb_engine::Error::MarkConflict`] and nothing changes. With a
+    /// mark, `mutations` may be empty.
+    pub fn commit_marked(
+        &self,
+        mutations: &[Mutation],
+        key: Option<&IdempotencyKey>,
+        mark: Option<&MarkUpdate>,
+    ) -> Result<CommitResult, Error> {
+        self.log_and_apply(|ns| ns.prepare_marked(mutations, key, mark))
     }
 
     /// Commit a catalog change, like [`commit`](Self::commit).

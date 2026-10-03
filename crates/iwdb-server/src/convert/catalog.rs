@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use iwdb_engine::catalog::{IndexChanges, NamespaceCatalog, NamespaceName};
-use iwdb_query::{Error, IndexSize, IndexState, IndexStatus, NamespaceStatus};
+use iwdb_query::{Error, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus};
 use iwdb_storage::format::Damage;
 use iwdb_storage::namespaces::{Event, EventKind, NamespaceInfo, NamespaceResult};
 use iwdb_storage::{CutTail, RecoveryReport, SkippedCheckpoint};
@@ -158,6 +158,11 @@ pub(crate) fn status_to_pb(s: &NamespaceStatus) -> pb::NamespaceStatus {
         indexes: s.indexes.iter().map(index_status_to_pb).collect(),
         constraints: wide(s.constraints),
         recovery: Some(recovery_to_pb(&s.recovery)),
+        marks: s
+            .marks
+            .iter()
+            .map(|m| pb::MarkStatus { name: m.name.clone(), position: m.position, seq: m.seq })
+            .collect(),
     }
 }
 
@@ -178,6 +183,7 @@ pub(crate) fn status_from_pb(s: Option<pb::NamespaceStatus>) -> Result<Namespace
         indexes: s.indexes.into_iter().map(index_status_from_pb).collect::<Result<_, _>>()?,
         constraints: size(s.constraints),
         recovery: recovery_from_pb(s.recovery)?,
+        marks: s.marks.into_iter().map(|m| MarkStatus { name: m.name, position: m.position, seq: m.seq }).collect(),
     })
 }
 

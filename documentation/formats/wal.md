@@ -1,10 +1,10 @@
-# WAL format, version 3
+# WAL format, version 4
 
-Status: stable contract (design rule 4). Implemented in `crates/iwdb-storage` (`format.rs`, `reader.rs`, `writer.rs`) and `iwdb_engine::CommitTime`. Fixtures: `crates/iwdb-storage/tests/fixtures/wal-v3/` (this version), `wal-v2/` and `wal-v1/` (still read).
+Status: stable contract (design rule 4). Implemented in `crates/iwdb-storage` (`format.rs`, `reader.rs`, `writer.rs`) and `iwdb_engine::CommitTime`. Fixtures: `crates/iwdb-storage/tests/fixtures/wal-v4/` (this version), `wal-v3/`, `wal-v2/` and `wal-v1/` (still read).
 
-Version 3 (step 8, [ADR 0015](../adr/0015-idempotency-keys.md)) puts a record's idempotency key and result at the start of its payload. Version 2 (step 7, [ADR 0010](../adr/0010-commit-times.md)) added a commit time to every frame. [Older versions](#older-versions) below lists the differences.
+Version 4 (step 13, [ADR 0032](../adr/0032-projection-mode.md)) puts the mark a commit moved after the idempotency key. Version 3 (step 8, [ADR 0015](../adr/0015-idempotency-keys.md)) put a record's idempotency key and result at the start of its payload. Version 2 (step 7, [ADR 0010](../adr/0010-commit-times.md)) added a commit time to every frame. [Older versions](#older-versions) below lists the differences.
 
-The write-ahead log of a namespace is a directory of **segment files**: `ns/<id>/wal/` in a layout 4 data directory ([data-dir.md](data-dir.md)), one per namespace, each with its own seq space. **Step 9 (namespaces) didn't change this format**: the version stays 3, and a segment doesn't know which namespace it belongs to (its directory says). Each segment holds a header and then a sequence of **record frames**, one per committed transaction (`iwdb_engine::CommitRecord`). Records are numbered by `seq`, without gaps, across segments.
+The write-ahead log of a namespace is a directory of **segment files**: `ns/<id>/wal/` in a layout 4 or 5 data directory ([data-dir.md](data-dir.md)), one per namespace, each with its own seq space. **Step 9 (namespaces) didn't change this format** (it stayed at 3), and a segment doesn't know which namespace it belongs to (its directory says). Each segment holds a header and then a sequence of **record frames**, one per committed transaction (`iwdb_engine::CommitRecord`). Records are numbered by `seq`, without gaps, across segments.
 
 ## Conventions
 
@@ -22,7 +22,7 @@ Name: the `seq` of the segment's first record, as **20 decimal digits, zero-padd
 | Offset | Size | Field | Value |
 |---|---|---|---|
 | 0 | 8 | magic | `IWDBWAL\n` (`49 57 44 42 57 41 4c 0a`) |
-| 8 | 4 | version | `3` (`1` or `2` in an older segment) |
+| 8 | 4 | version | `4` (`1` to `3` in an older segment) |
 | 12 | 8 | first_seq | seq of the segment's first record; equals the file name |
 | 20 | 4 | crc | CRC32C of bytes 0..20 |
 
@@ -44,20 +44,21 @@ The CRC covers every header field (`len`, `seq`, `synced_seq`, `time`, `kind`) a
 
 ### Commit time
 
-The writer sets `time` when it appends the frame, from the system clock of the process that writes the log, made non-decreasing: a record gets the later of the clock and the previous record's time (the last record of the log when a writer starts, if that segment has records in version 2 or 3). So if the clock goes backwards, commit times stand still until it catches up. The time is that of the append, not of the fsync: under `group`, a batch's records have the times they were appended at.
+The writer sets `time` when it appends the frame, from the system clock of the process that writes the log, made non-decreasing: a record gets the later of the clock and the previous record's time (the last record of the log when a writer starts, if that segment has records in version 2 or later). So if the clock goes backwards, commit times stand still until it catches up. The time is that of the append, not of the fsync: under `group`, a batch's records have the times they were appended at.
 
 Readers don't rely on times being ordered (a log can be copied with its original times, or hold version 1 records without times). The time is also the commit's `CommitResult::time` (step 8), and a keyed record's entry in the key table keeps it. Restore to a time ([data-dir.md](data-dir.md), "Restore") picks the **last record in seq order whose time is at or before** the given time, and restores everything up to it.
 
 ### Payload
 
-The payload is postcard (`postcard` 1.x, serde) of the pair `(keyed, body)`, concatenated (a postcard tuple has no length prefix):
+The payload is postcard (`postcard` 1.x, serde) of the triple `(keyed, mark, body)`, concatenated (a postcard tuple has no length prefix):
 
 - `keyed`: `Option<iwdb_engine::Keyed>`. `None` (one byte `0`) for a commit without an idempotency key. `Some` (byte `1`, then the struct) for one with a key: `key` (a string of 1 to 255 bytes), `fingerprint` (`u32`, below), `edge_ids` (`Vec<EdgeId>`) and `versions` (`Vec<(Target, u64)>`), the commit's result apart from its seq (the frame's) and its time (the frame's). Replaying the record adds `key -> (fingerprint, result)` to the namespace's key table ([data-dir.md](data-dir.md), checkpoints);
+- `mark`: `Option<iwdb_engine::Mark>`. `None` (one byte `0`) for a commit that moved no mark. `Some` (byte `1`, then the struct) for one that did: `name` (a string of 1 to 255 bytes) and `position` (`u64`, varint), the mark's new position. Replaying the record sets the mark to it, at the record's seq (the commit checked the old position; replay doesn't). A data record with a mark may have no ops;
 - `body`, without the variant tag, because `kind` carries it:
   - kind 1 (`Change::Data`): `Vec<ironweaver_core::Op<DbRecord, DbRecord>>`, the resolved core ops with explicit edge ids and versions (ADR 0004);
   - kind 2 (`Change::Catalog`): `iwdb_engine::CatalogChange`.
 
-The payload must decode completely, with no bytes left over; an invalid key (empty, too long) is an invalid record. The serde encodings of `Op`, `Value`, `DbRecord`, `Keyed`, `Target` and the catalog types are part of this contract: `DbRecord` and `Value` dicts are written sorted by key, so equal records give equal bytes. The fixture test catches a change to any of them.
+The payload must decode completely, with no bytes left over; an invalid key or mark name (empty, too long) is an invalid record. The serde encodings of `Op`, `Value`, `DbRecord`, `Keyed`, `Mark`, `Target` and the catalog types are part of this contract: `DbRecord` and `Value` dicts are written sorted by key, so equal records give equal bytes. The fixture test catches a change to any of them.
 
 **The fingerprint** of a keyed request is the CRC32C of one byte (`1` for a data transaction, `2` for a catalog change) followed by the postcard encoding of the request: the `Vec<Mutation>` (attribute and meta maps sorted by key) or the `CatalogChange`. It is compared, never recomputed from the log, but a retry computes it again from its request, so the encoding of `Mutation` and `CatalogChange` is part of the contract too.
 
@@ -68,7 +69,7 @@ Every value in a logged record is nested at most `MAX_VALUE_DEPTH` deep, because
 - **Creating a segment**: the header is written to `<name>.tmp`, which is fsynced and renamed to `<name>`, and then the directory is fsynced. So a segment file either exists with a valid header or doesn't exist.
 - **Rotation**: before appending a frame that would make the segment larger than the configured segment size (1 KiB to 1 GiB, 64 MiB by default), the writer fsyncs the current segment and creates the next one, named by the frame's seq. A segment with no records takes any frame, so one frame can exceed the segment size. The largest segment file is therefore `1 GiB + 24 + 33 + 64 MiB` bytes, and the reader rejects larger files before it reads them.
 - **Appending**: one `write` of the whole frame. It is then fsynced per the fsync policy (ADR 0005, [guarantees.md](../guarantees.md)).
-- **Starting a writer** always creates a new segment at the next seq, in the current version. A log can therefore hold version 1 or 2 segments followed by version 3 ones; the reader reads each segment in its own version. The log must end right before it with no torn tail, and its last segment is fsynced first. A header-only segment with the same name is replaced.
+- **Starting a writer** always creates a new segment at the next seq, in the current version. A log can therefore hold version 1, 2 or 3 segments followed by version 4 ones; the reader reads each segment in its own version. The log must end right before it with no torn tail, and its last segment is fsynced first. A header-only segment with the same name is replaced.
 - With the `off` policy, none of these fsyncs happen. A writer then starts with `synced_seq` 0 (it knows of no fsync), and only an explicit sync fsyncs: every segment that may hold records after `synced_seq` (rotations and earlier writers left them unsynced), then the directory.
 
 ## Reading
@@ -101,8 +102,9 @@ A **bounded read** (`WalReader::open_until(dir, s, u)`, step 5) returns the reco
 
 ## Older versions
 
-This version reads them; a writer never appends to them (it starts a new segment in version 3, so a log can hold segments of several versions, each read in its own).
+This version reads them; a writer never appends to them (it starts a new segment in version 4, so a log can hold segments of several versions, each read in its own).
 
+- **Version 3** (steps 8 to 12): the same as version 4, except that the payload is the pair `(keyed, body)`, with no `mark`. Its records move no mark.
 - **Version 2** (step 7): the same as version 3, except that the payload is the body alone, with no `keyed` prefix. Its records have no idempotency key.
 - **Version 1** (steps 4 to 6): version 2 without the frame's `time` field. Its header is 25 bytes (`len` at 0, `seq` at 4, `synced_seq` at 12, `kind` at 20, `crc` of bytes 0..21 and the payload at 21, payload at 25), and its records have no commit time.
 

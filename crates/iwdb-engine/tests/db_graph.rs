@@ -102,7 +102,16 @@ fn social() -> (DbGraph, GraphMeta) {
         label: Label::new("Person").unwrap(),
         path: path(&["name"]),
     });
-    (g, GraphMeta { namespace: NamespaceName::new("social").unwrap(), catalog, seq: 17, keys: Default::default() })
+    (
+        g,
+        GraphMeta {
+            namespace: NamespaceName::new("social").unwrap(),
+            catalog,
+            seq: 17,
+            keys: Default::default(),
+            marks: Default::default(),
+        },
+    )
 }
 
 /// Every way to load `g` saved with `meta`.

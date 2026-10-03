@@ -8,7 +8,9 @@
 //! - `wal-v1/`: format 1 (step 4), frames without a commit time;
 //! - `wal-v2/`: format 2 (step 7), with a commit time per frame;
 //! - `wal-v3/`: format 3 (step 8), whose payloads start with the record's
-//!   idempotency key and result (some records have one).
+//!   idempotency key and result (some records have one);
+//! - `wal-v4/`: format 4 (step 13), whose payloads have the mark the
+//!   commit moved after the key (some records have one).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -18,7 +20,7 @@ use std::path::PathBuf;
 use ironweaver_core::{Attrs, Date, DateTime, EdgeId, Op, Value};
 use iwdb_engine::catalog::{AttrPath, Constraint, ConstraintKind, IndexDef, Label};
 use iwdb_engine::reserved::VERSION_KEY;
-use iwdb_engine::{CatalogChange, Change, CommitRecord, DbRecord, IdempotencyKey, Keyed, Target};
+use iwdb_engine::{CatalogChange, Change, CommitRecord, DbRecord, IdempotencyKey, Keyed, Mark, MarkName, Target};
 use iwdb_storage::format::FORMAT_VERSION;
 use iwdb_storage::{CommitTime, FsyncPolicy, Wal, WalOptions, WalReader, read_log};
 
@@ -111,13 +113,22 @@ fn fixture_records() -> Vec<CommitRecord> {
     });
     records[1].keyed =
         Some(Keyed { key: IdempotencyKey::new("k").unwrap(), fingerprint: 1, edge_ids: vec![], versions: vec![] });
+    // Format 4: a keyed data record with a mark, and a mark alone
+    let mark = |name: &str, position| Some(Mark { name: MarkName::new(name).unwrap(), position });
+    records[0].mark = mark("orders ✓", 41);
+    records[8].mark = mark("orders ✓", i64::MAX as u64);
     records
 }
 
 /// The records as a log of format `version` holds them: formats 1 and 2
-/// have no idempotency keys.
+/// have no idempotency keys, formats 1 to 3 no marks.
 fn records_in(version: u32) -> Vec<CommitRecord> {
-    fixture_records().into_iter().map(|r| CommitRecord { keyed: r.keyed.filter(|_| version >= 3), ..r }).collect()
+    let strip = |r: CommitRecord| CommitRecord {
+        keyed: r.keyed.filter(|_| version >= 3),
+        mark: r.mark.filter(|_| version >= 4),
+        ..r
+    };
+    fixture_records().into_iter().map(strip).collect()
 }
 
 /// The commit times of the fixture records: fixed, and once going
@@ -172,8 +183,15 @@ fn the_v3_fixture_reads_as_its_records_keys_and_times() {
 }
 
 #[test]
+fn the_v4_fixture_reads_as_its_records_keys_marks_and_times() {
+    let expected: Vec<_> = records_in(4).into_iter().map(|r| (r.clone(), Some(fixture_time(r.seq)))).collect();
+    assert!(expected.iter().filter(|(r, _)| r.mark.is_some()).count() == 2);
+    assert_eq!(read_timed(&fixture_dir(4)), expected);
+}
+
+#[test]
 fn writing_the_records_gives_the_current_fixture_bytes() {
-    assert_eq!(FORMAT_VERSION, 3, "a new format version needs its own fixture next to wal-v1 to wal-v3");
+    assert_eq!(FORMAT_VERSION, 4, "a new format version needs its own fixture next to wal-v1 to wal-v4");
     let dir = tempfile::tempdir().unwrap();
     write(dir.path());
     let name = "00000000000000000001.wal";
@@ -231,5 +249,24 @@ fn a_v2_log_continues_with_keyed_records() {
     wal.close().unwrap();
     let read = read_timed(dir.path());
     assert!(read[..read.len() - 1].iter().all(|(r, _)| r.keyed.is_none()));
+    assert_eq!(read.last(), Some(&(record, Some(time))));
+}
+
+/// A log written in format 3 (step 8) continues in format 4: its records
+/// read without marks, the new segment's with them.
+#[test]
+fn a_v3_log_continues_with_marked_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let name = "00000000000000000001.wal";
+    fs::copy(fixture_dir(3).join(name), dir.path().join(name)).unwrap();
+    let next = fixture_records().len() as u64 + 1;
+    let mut wal = Wal::create(dir.path(), WalOptions::default(), next).unwrap();
+    let mut record = CommitRecord::new(next, Change::Data(vec![]));
+    record.mark = Some(Mark { name: MarkName::new("p").unwrap(), position: 3 });
+    let time = wal.append(&record).unwrap();
+    wal.close().unwrap();
+    let read = read_timed(dir.path());
+    assert_eq!(read.iter().filter(|(r, _)| r.keyed.is_some()).count(), 2, "format 3 keeps its keys");
+    assert!(read[..read.len() - 1].iter().all(|(r, _)| r.mark.is_none()));
     assert_eq!(read.last(), Some(&(record, Some(time))));
 }
