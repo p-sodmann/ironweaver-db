@@ -19,7 +19,7 @@ log.workspace = true
 [dev-dependencies]
 iwdb-query = { path = "../iwdb-query", features = ["conformance"] }
 iwdb-storage = { path = "../iwdb-storage", features = ["failpoints"] }
-iwdb-engine = { path = "../iwdb-engine", features = ["testutil"] }
+iwdb-engine = { path = "../iwdb-engine", features = ["testutil", "failpoints"] }
 proptest.workspace = true
 tempfile.workspace = true
 

@@ -1,12 +1,12 @@
 //! [`Namespace`]: a graph with its catalog and commit position, changed
 //! only through the commit pipeline.
 
-use ironweaver_core::{GraphError, NodeIx};
+use ironweaver_core::{GraphError, NodeIx, Op};
 
 use crate::catalog::{AttrPath, ConstraintKind, NamespaceCatalog, NamespaceName};
 use crate::idempotency::{fingerprint_catalog, fingerprint_data, IdempotencyKey, KeyEntry, KeyTable, Keyed};
 use crate::mutation::{CatalogChange, Change, CommitRecord, CommitResult, Mutation};
-use crate::{codec, resolve, CommitTime, DbGraph, Error};
+use crate::{codec, resolve, CommitTime, DbGraph, DbRecord, Error};
 
 /// One namespace in memory: its graph, its catalog, the `seq` of its last
 /// commit and the table of its recent idempotency keys.
@@ -409,10 +409,7 @@ impl Namespace {
             return Err(Error::OutOfOrder { expected, found: record.seq });
         }
         let outcome = match record.change {
-            Change::Data(ops) => match self.graph.apply_all(ops) {
-                Ok(_) => self.graph.flush_indexes(),
-                Err((_, error)) => Err(error),
-            },
+            Change::Data(ops) => self.apply_ops(ops),
             Change::Catalog(change) => {
                 match change {
                     CatalogChange::CreateIndex(index) => self.catalog.add_index(index),
@@ -432,6 +429,22 @@ impl Namespace {
             self.keys.insert(KeyEntry { key, fingerprint, result });
         }
         Ok(())
+    }
+
+    /// Apply a data record's ops, all or nothing (the core's `apply_all`),
+    /// and bring the indexes up to date.
+    fn apply_ops(&mut self, ops: Vec<Op<DbRecord, DbRecord>>) -> Result<(), GraphError> {
+        #[cfg(feature = "failpoints")]
+        if let Some(error) = crate::failpoint::take() {
+            if matches!(error, GraphError::Internal(_)) {
+                let _ = self.graph.apply_all(ops);
+            }
+            return Err(error);
+        }
+        match self.graph.apply_all(ops) {
+            Ok(_) => self.graph.flush_indexes(),
+            Err((_, error)) => Err(error),
+        }
     }
 
     /// Advance `seq`, or poison the namespace if applying failed.

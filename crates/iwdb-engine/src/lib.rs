@@ -19,6 +19,8 @@
 pub mod catalog;
 pub mod codec;
 mod error;
+#[cfg(feature = "failpoints")]
+pub mod failpoint;
 pub mod idempotency;
 pub mod invariants;
 pub mod mutation;

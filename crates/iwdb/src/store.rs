@@ -1082,7 +1082,7 @@ where
         commit: impl FnOnce(&LoggedNamespace<F>) -> Result<CommitResult, Error>,
     ) -> Result<CommitResult, Error> {
         let live = self.live();
-        let result = or_abort("a commit", || commit(live))?;
+        let result = or_abort("a commit", || abort_if_inconsistent(commit(live)))?;
         let shared = &self.store.shared;
         let trigger = self.state.size_trigger.load(Ordering::Relaxed);
         if !result.deduplicated && live.wal().appended_bytes() >= trigger {
@@ -1196,6 +1196,26 @@ fn or_abort<R>(what: &str, f: impl FnOnce() -> R) -> R {
             std::process::abort()
         }
     }
+}
+
+/// Abort the process if applying a commit failed with
+/// `GraphError::Internal` (ADR 0028): the core's rollback failed, or it
+/// found the graph inconsistent, so the graph may hold part of the
+/// transaction, which readers would see. Recovery from the checkpoint and
+/// the WAL (which has the record) restores a consistent state, as after a
+/// panic. Other apply failures were rolled back cleanly: the namespace only
+/// becomes read-only.
+fn abort_if_inconsistent(result: Result<CommitResult, Error>) -> Result<CommitResult, Error> {
+    if let Err(Error::Engine(iwdb_engine::Error::ApplyFailed { seq, error: GraphError::Internal(message) })) = &result {
+        log::error!("applying commit {} failed inside the core ({}), aborting the process", seq, message);
+        eprintln!(
+            "iwdb: applying commit {} failed inside the core ({}); the graph may be inconsistent, aborting the \
+             process. The next open recovers every logged commit.",
+            seq, message
+        );
+        std::process::abort();
+    }
+    result
 }
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<JoinHandle<()>, Error> {

@@ -24,6 +24,9 @@ proptest = { workspace = true, optional = true }
 # Test helpers for other crates' tests and the crash harness: the random
 # workload strategies in `testutil::workload`. Never needed at run time.
 testutil = ["dep:proptest"]
+# `failpoint::fail_next_apply`: make an apply fail as the core does on a bug
+# (ADR 0028). Tests only.
+failpoints = []
 
 [dev-dependencies]
 # Our own tests use the workload strategies
