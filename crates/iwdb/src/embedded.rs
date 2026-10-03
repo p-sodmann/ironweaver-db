@@ -52,8 +52,9 @@ impl Default for QueryConfig {
 /// methods never block their caller's executor. A read waits for its
 /// `min_seq`, then runs under the namespace's read lock and a cancel token
 /// that the store's timer cancels at the deadline (the timeout counts from
-/// the call, queueing included) and that dropping the future cancels too
-/// (ADR 0020). Commits run on the workers as well, without a timeout.
+/// the call, queueing included: a read still waiting for a worker at its
+/// deadline fails then) and that dropping the future cancels too (ADR
+/// 0020). Commits run on the workers as well, without a timeout.
 pub struct Embedded<F: LogFs + Send + Sync + 'static = StdFs>
 where
     F::File: Send,
@@ -117,6 +118,17 @@ where
         self.pool.submit(move |token| f(&store, token))
     }
 
+    /// Run the request `f` on a worker; at the request's deadline it fails
+    /// with `timeout`, even if it is still waiting for a worker.
+    fn run_until<T: Send + 'static>(
+        &self,
+        deadline: Option<(Instant, Error)>,
+        f: impl FnOnce(&Store<F>, &Token) -> Result<T, Error> + Send + 'static,
+    ) -> Pending<Result<T, Error>> {
+        let store = self.store.clone();
+        self.pool.submit_until(deadline, move |token| f(&store, token))
+    }
+
     /// Run the read `f` on namespace `namespace` (see the type docs).
     fn read<T: Send + 'static>(
         &self,
@@ -129,7 +141,7 @@ where
             Err(e) => return Pending::ready(Err(e)),
         };
         let name = namespace.to_owned();
-        self.run(move |store, token| {
+        self.run_until(request.expiry(), move |store, token| {
             let ns = store.namespace(&name)?;
             let cx = ReadContext::new(request.bounds, &request.options, ns.id(), store.history());
             let read = request.read_options(token)?;
@@ -168,6 +180,12 @@ impl Request {
             timeout: Some(left),
             cancel: Some(token.clone()),
         })
+    }
+
+    /// The deadline and the error the request fails with at it, for the
+    /// pool (`None`: no deadline).
+    fn expiry(&self) -> Option<(Instant, Error)> {
+        self.deadline.map(|at| (at, self.timed_out("the request")))
     }
 
     fn timed_out(&self, what: &str) -> Error {
@@ -223,7 +241,7 @@ where
             Err(e) => return Pending::ready(Err(e)),
         };
         let name = namespace.to_owned();
-        self.run(move |store, token| {
+        self.run_until(request.expiry(), move |store, token| {
             let ns = store.namespace(&name)?;
             ns.wait_for_seq(seq, &request.read_options(token)?).map_err(|e| request.error(e))
         })
@@ -334,7 +352,7 @@ where
             Err(e) => return Pending::ready(Err(e)),
         };
         let name = namespace.to_owned();
-        self.run(move |store, token| {
+        self.run_until(resolved.expiry(), move |store, token| {
             let ns = store.namespace(&name)?;
             let bounds = resolved.bounds;
             let (nodes, edges) = ns.read(|n| (n.graph().node_count(), n.graph().edge_count()));

@@ -8,15 +8,17 @@
 //! work on its own threads and hands back a [`Pending`] future, which any
 //! executor can poll (tokio in the server, [`block_on`] in Python and the
 //! tests). Dropping a `Pending` cancels its token, so a read whose caller
-//! went away stops at the core's next check.
+//! went away stops at the core's next check. A job with a deadline
+//! ([`Pool::submit_until`]) ends at it even while it waits in the queue.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::{pin, Pin};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle, Thread};
+use std::time::Instant;
 
 use ironweaver_core::cancel::Token;
 
@@ -33,13 +35,29 @@ struct Queue {
     shutdown: bool,
 }
 
+/// What happens to a job at its deadline: its token is cancelled and its
+/// future resolves with the deadline's error, unless it finished first.
+type Expire = Box<dyn FnOnce() + Send>;
+
+/// The deadlines of the jobs that have one, by time (and a counter, so
+/// that equal times don't collide).
+#[derive(Default)]
+struct Timers {
+    due: BTreeMap<(Instant, u64), Expire>,
+    next: u64,
+    shutdown: bool,
+}
+
 struct Shared {
     queue: Mutex<Queue>,
     ready: Condvar,
     capacity: usize,
+    timers: Mutex<Timers>,
+    timer_changed: Condvar,
 }
 
-/// A fixed set of worker threads with a bounded queue.
+/// A fixed set of worker threads with a bounded queue, and a timer thread
+/// for deadlines.
 pub struct Pool {
     shared: Arc<Shared>,
     threads: Mutex<Vec<JoinHandle<()>>>,
@@ -53,19 +71,24 @@ impl std::fmt::Debug for Pool {
 
 impl Pool {
     /// Start `workers` threads (at least 1) named `name`, taking at most
-    /// `capacity` queued jobs (at least 1) beyond those running.
+    /// `capacity` queued jobs (at least 1) beyond those running, and a timer
+    /// thread.
     pub fn new(name: &str, workers: usize, capacity: usize) -> Result<Pool, Error> {
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue { jobs: VecDeque::new(), shutdown: false }),
             ready: Condvar::new(),
             capacity: capacity.max(1),
+            timers: Mutex::new(Timers::default()),
+            timer_changed: Condvar::new(),
         });
         let pool = Pool { shared, threads: Mutex::new(Vec::new()) };
-        for i in 0..workers.max(1) {
+        let threads =
+            (0..workers.max(1)).map(|i| (format!("{}-{}", name, i), false)).chain([(format!("{}-timer", name), true)]);
+        for (thread_name, timer) in threads {
             let shared = pool.shared.clone();
             let thread = thread::Builder::new()
-                .name(format!("{}-{}", name, i))
-                .spawn(move || work(&shared))
+                .name(thread_name)
+                .spawn(move || if timer { time(&shared) } else { work(&shared) })
                 .map_err(|e| Error::internal(format!("can't start a worker thread: {}", e)));
             match thread {
                 Ok(thread) => lock(&pool.threads).push(thread),
@@ -86,9 +109,41 @@ impl Pool {
         &self,
         job: impl FnOnce(&Token) -> Result<T, Error> + Send + 'static,
     ) -> Pending<Result<T, Error>> {
+        self.submit_until(None, job)
+    }
+
+    /// [`submit`](Self::submit) with a deadline: at `deadline.0`, if the job
+    /// hasn't finished, the future resolves with the error `deadline.1` and
+    /// the job's token is cancelled, whether the job is running (it should
+    /// stop at its next check of the token) or still queued (it then runs
+    /// with a cancelled token, and its result is dropped). So a request
+    /// queued behind slow ones ends at its deadline, not when a worker is
+    /// free.
+    pub fn submit_until<T: Send + 'static>(
+        &self,
+        deadline: Option<(Instant, Error)>,
+        job: impl FnOnce(&Token) -> Result<T, Error> + Send + 'static,
+    ) -> Pending<Result<T, Error>> {
         let token = Token::new();
         let slot = Arc::new(Slot::default());
-        let (job_token, job_slot) = (token.clone(), slot.clone());
+        let timer = deadline.map(|(at, error)| {
+            let (token, slot) = (token.clone(), slot.clone());
+            let expire: Expire = Box::new(move || {
+                token.cancel();
+                slot.fill(Err(error));
+            });
+            let mut timers = lock(&self.shared.timers);
+            let key = (at, timers.next);
+            timers.next += 1;
+            let earliest = timers.due.keys().next().is_none_or(|first| key < *first);
+            timers.due.insert(key, expire);
+            drop(timers);
+            if earliest {
+                self.shared.timer_changed.notify_one();
+            }
+            key
+        });
+        let (job_token, job_slot, shared) = (token.clone(), slot.clone(), self.shared.clone());
         let run: Job = Box::new(move || {
             let result = match panic::catch_unwind(AssertUnwindSafe(|| job(&job_token))) {
                 Ok(result) => result,
@@ -101,17 +156,25 @@ impl Pool {
                     Err(Error::internal(format!("internal error (a panic, please report it): {}", message)))
                 }
             };
+            if let Some(key) = timer {
+                lock(&shared.timers).due.remove(&key);
+            }
             job_slot.fill(result);
         });
         let mut queue = lock(&self.shared.queue);
-        if queue.shutdown {
-            return Pending::ready(Err(Error::unavailable("the store is shutting down")));
-        }
-        if queue.jobs.len() >= self.shared.capacity {
-            return Pending::ready(Err(Error::unavailable(format!(
-                "too many requests: {} are queued already",
-                queue.jobs.len()
-            ))));
+        let refused = if queue.shutdown {
+            Some(Error::unavailable("the store is shutting down"))
+        } else if queue.jobs.len() >= self.shared.capacity {
+            Some(Error::unavailable(format!("too many requests: {} are queued already", queue.jobs.len())))
+        } else {
+            None
+        };
+        if let Some(e) = refused {
+            drop(queue);
+            if let Some(key) = timer {
+                lock(&self.shared.timers).due.remove(&key);
+            }
+            return Pending::ready(Err(e));
         }
         queue.jobs.push_back(run);
         drop(queue);
@@ -124,6 +187,8 @@ impl Pool {
     pub fn shutdown(&self) {
         lock(&self.shared.queue).shutdown = true;
         self.shared.ready.notify_all();
+        lock(&self.shared.timers).shutdown = true;
+        self.shared.timer_changed.notify_all();
         let threads: Vec<JoinHandle<()>> = lock(&self.threads).drain(..).collect();
         for thread in threads {
             // A worker catches its jobs' panics; nothing is left to clean up
@@ -156,22 +221,61 @@ fn work(shared: &Shared) {
     }
 }
 
+/// The timer thread: expire each deadline when it comes. At shutdown the
+/// workers run what is queued, so the remaining deadlines are dropped.
+fn time(shared: &Shared) {
+    let mut timers = lock(&shared.timers);
+    loop {
+        if timers.shutdown {
+            return;
+        }
+        let now = Instant::now();
+        match timers.due.keys().next().copied() {
+            Some(key) if key.0 <= now => {
+                if let Some(expire) = timers.due.remove(&key) {
+                    drop(timers);
+                    expire();
+                    timers = lock(&shared.timers);
+                }
+            }
+            Some((at, _)) => {
+                timers = shared.timer_changed.wait_timeout(timers, at - now).unwrap_or_else(PoisonError::into_inner).0;
+            }
+            None => timers = shared.timer_changed.wait(timers).unwrap_or_else(PoisonError::into_inner),
+        }
+    }
+}
+
+struct SlotState<T> {
+    value: Option<T>,
+    waker: Option<Waker>,
+    /// A value was put in (and may have been taken since): later ones are
+    /// dropped.
+    filled: bool,
+}
+
 struct Slot<T> {
-    state: Mutex<(Option<T>, Option<Waker>)>,
+    state: Mutex<SlotState<T>>,
 }
 
 impl<T> Default for Slot<T> {
     fn default() -> Self {
-        Slot { state: Mutex::new((None, None)) }
+        Slot { state: Mutex::new(SlotState { value: None, waker: None, filled: false }) }
     }
 }
 
 impl<T> Slot<T> {
+    /// Put in the result, unless one was put in before (a job that
+    /// finishes after its deadline, a deadline after its job finished).
     fn fill(&self, value: T) {
         let waker = {
             let mut state = lock(&self.state);
-            state.0 = Some(value);
-            state.1.take()
+            if state.filled {
+                return;
+            }
+            state.filled = true;
+            state.value = Some(value);
+            state.waker.take()
         };
         if let Some(waker) = waker {
             waker.wake();
@@ -203,13 +307,13 @@ impl<T> Future for Pending<T> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
         let this = self.get_mut();
         let mut state = lock(&this.slot.state);
-        match state.0.take() {
+        match state.value.take() {
             Some(value) => {
                 this.token = None;
                 Poll::Ready(value)
             }
             None => {
-                state.1 = Some(cx.waker().clone());
+                state.waker = Some(cx.waker().clone());
                 Poll::Pending
             }
         }
@@ -299,7 +403,7 @@ mod tests {
         let mut queued = Vec::new();
         let full = loop {
             let p = pool.submit(|_| Ok(2));
-            let ready = p.slot.state.lock().unwrap().0.take();
+            let ready = p.slot.state.lock().unwrap().value.take();
             match ready {
                 Some(Err(e)) => break e,
                 _ => queued.push(p),
@@ -314,5 +418,34 @@ mod tests {
         assert!(panicked.message().contains("boom"));
         pool.shutdown();
         assert_eq!(block_on(pool.submit(|_| Ok(()))).unwrap_err().code(), Code::Unavailable);
+    }
+
+    #[test]
+    fn a_queued_job_ends_at_its_deadline() {
+        let pool = Pool::new("test", 1, 4).unwrap();
+        let (release, held) = mpsc::channel::<()>();
+        let busy = pool.submit(move |_| {
+            held.recv().ok();
+            Ok(0)
+        });
+        let (ran, saw) = mpsc::channel();
+        let start = Instant::now();
+        let deadline = Some((start + Duration::from_millis(50), Error::new(Code::Timeout, "too late")));
+        let queued = pool.submit_until(deadline, move |token| {
+            ran.send(token.is_cancelled()).unwrap();
+            Ok(1)
+        });
+        let e = block_on(queued).unwrap_err();
+        assert_eq!((e.code(), e.message()), (Code::Timeout, "too late"));
+        let took = start.elapsed();
+        assert!(took >= Duration::from_millis(50) && took < Duration::from_secs(5), "{:?}", took);
+        // When the worker gets to it, the job sees its cancelled token
+        release.send(()).unwrap();
+        assert_eq!(block_on(busy).unwrap(), 0);
+        assert!(saw.recv_timeout(Duration::from_secs(10)).unwrap());
+        // A job that finishes first keeps its result, and its deadline is gone
+        let soon = Some((Instant::now() + Duration::from_secs(60), Error::new(Code::Timeout, "never")));
+        assert_eq!(block_on(pool.submit_until(soon, |_| Ok(2))).unwrap(), 2);
+        assert!(lock(&pool.shared.timers).due.is_empty());
     }
 }

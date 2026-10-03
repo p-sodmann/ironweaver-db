@@ -36,3 +36,7 @@ Commits run on the same workers, without a timeout (ADR 0016): dropping a commit
 - Every request costs a thread hop (tens of microseconds). The pool is a concurrency limit too; per-client limits come with step 15.
 - One pool serves reads and commits, so a flood of slow reads can delay commits in the queue. If that shows in step 14's benchmarks, give commits their own workers.
 - Python's `timeout=inf` keeps meaning "none": the bindings configure `LimitConfig::max_timeout` to `Duration::MAX`. A server keeps the default cap (5 minutes).
+
+## Update (step 11): deadlines while queued
+
+Testing the gRPC server found that a read waiting in the pool's queue didn't fail at its deadline: the timeout was checked when a worker took the job, so a read queued behind a slow one waited until that one ended (21 s instead of 200 ms in the test), and a remote client without a deadline of its own waited with it. `Pool::submit_until` now takes the deadline: a timer thread per pool cancels the job's token and resolves its future with `timeout` at the deadline, whether the job is running or still queued; a queued job then runs with a cancelled token and does nothing. `Embedded` submits every read, `wait_for_seq` and `analyze` with its deadline; commits have none. `a_read_waiting_for_a_worker_times_out_at_its_deadline` (`iwdb/tests/query.rs`) and `a_queued_job_ends_at_its_deadline` (`exec.rs`) test it.
