@@ -4,9 +4,9 @@
 use std::path::Path;
 
 use iwdb_engine::catalog::NamespaceName;
-use iwdb_storage::archive::{verify_archive, ARCHIVE_MARKER_NAME};
+use iwdb_storage::archive::{ARCHIVE_MARKER_NAME, verify_archive};
 use iwdb_storage::io::{LogFs, StdFs};
-use iwdb_storage::{inspect, DirStatus, Error, Kind, RestoreReport, RestoreSources, RestoreTarget, VerifyReport};
+use iwdb_storage::{DirStatus, Error, Kind, RestoreReport, RestoreSources, RestoreTarget, VerifyReport, inspect};
 
 use crate::{Store, StoreOptions, StoreStatus};
 

@@ -33,8 +33,8 @@ use iwdb_engine::catalog::NamespaceName;
 use iwdb_engine::{CommitTime, IdempotencyKey};
 use serde::{Deserialize, Serialize};
 
-use crate::io::{LogFile, LogFs};
 use crate::Error;
+use crate::io::{LogFile, LogFs};
 
 /// The namespace log's file name.
 pub const NAMESPACES_NAME: &str = "NAMESPACES";
@@ -318,10 +318,10 @@ impl NamespaceTable {
         if event.seq != self.events.len() as u64 + 1 {
             return Err(format!("it has seq {}, expected {}", event.seq, self.events.len() + 1));
         }
-        if let Some(last) = self.events.last() {
-            if event.time < last.time {
-                return Err(format!("its time {} is before the previous event's {}", event.time, last.time));
-            }
+        if let Some(last) = self.events.last()
+            && event.time < last.time
+        {
+            return Err(format!("its time {} is before the previous event's {}", event.time, last.time));
         }
         match event.kind {
             EventKind::Create => {
@@ -351,10 +351,10 @@ impl NamespaceTable {
                 _ => return Err(format!("it drops namespace {} ('{}'), which doesn't exist", event.id, event.name)),
             },
         }
-        if let Some((key, _)) = &event.keyed {
-            if self.keys.insert(key.clone(), self.events.len()).is_some() {
-                return Err(format!("it reuses the idempotency key {}", key));
-            }
+        if let Some((key, _)) = &event.keyed
+            && self.keys.insert(key.clone(), self.events.len()).is_some()
+        {
+            return Err(format!("it reuses the idempotency key {}", key));
         }
         self.events.push(event);
         Ok(())
@@ -402,14 +402,14 @@ impl NamespaceTable {
     /// ([`Plan::Duplicate`]); an error if the key was used for another
     /// request, or the request can't be done now.
     pub fn plan(&self, kind: EventKind, name: &NamespaceName, key: Option<&IdempotencyKey>) -> Result<Plan, Error> {
-        if let Some(key) = key {
-            if let Some(event) = self.by_key(key) {
-                let (_, found) = event.keyed.clone().unwrap_or((key.clone(), 0));
-                if found == fingerprint(kind, name) {
-                    return Ok(Plan::Duplicate(event.clone()));
-                }
-                return Err(iwdb_engine::Error::IdempotencyKeyReused { key: key.clone(), seq: event.seq }.into());
+        if let Some(key) = key
+            && let Some(event) = self.by_key(key)
+        {
+            let (_, found) = event.keyed.clone().unwrap_or((key.clone(), 0));
+            if found == fingerprint(kind, name) {
+                return Ok(Plan::Duplicate(event.clone()));
             }
+            return Err(iwdb_engine::Error::IdempotencyKeyReused { key: key.clone(), seq: event.seq }.into());
         }
         match (kind, self.get(name)) {
             (EventKind::Create, Some(_)) => Err(Error::NamespaceExists { name: name.to_string() }),
@@ -569,6 +569,7 @@ pub fn read_log(path: &Path) -> Result<(ParsedLog, NamespaceTable), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn name(s: &str) -> NamespaceName {
         NamespaceName::new(s).expect("name")
@@ -608,12 +609,14 @@ mod tests {
         assert!(bad(vec![event(2, EventKind::Create, 1, "a")]).contains("expected 1"));
         assert!(bad(vec![event(1, EventKind::Drop, 1, "a")]).contains("doesn't exist"));
         assert!(bad(vec![event(1, EventKind::Create, 1, "a"), event(2, EventKind::Create, 2, "a")]).contains("exists"));
-        assert!(bad(vec![
-            event(1, EventKind::Create, 2, "a"),
-            event(2, EventKind::Drop, 2, "a"),
-            event(3, EventKind::Create, 2, "a")
-        ])
-        .contains("not above"));
+        assert!(
+            bad(vec![
+                event(1, EventKind::Create, 2, "a"),
+                event(2, EventKind::Drop, 2, "a"),
+                event(3, EventKind::Create, 2, "a")
+            ])
+            .contains("not above")
+        );
         assert!(
             bad(vec![event(1, EventKind::Create, 1, "a"), event(2, EventKind::Drop, 1, "b")]).contains("doesn't exist")
         );
@@ -629,12 +632,12 @@ mod tests {
         keyed.keyed = Some((k.clone(), fingerprint(EventKind::Create, &name("a"))));
         let table = NamespaceTable::from_events(vec![keyed.clone()]).expect("table");
         assert_eq!(table.plan(EventKind::Create, &name("a"), Some(&k)).expect("plan"), Plan::Duplicate(keyed));
-        assert!(matches!(table.plan(EventKind::Create, &name("b"), Some(&k)), Err(Error::Engine(_))));
-        assert!(matches!(table.plan(EventKind::Drop, &name("a"), Some(&k)), Err(Error::Engine(_))));
-        assert!(matches!(table.plan(EventKind::Create, &name("a"), None), Err(Error::NamespaceExists { .. })));
+        assert_matches!(table.plan(EventKind::Create, &name("b"), Some(&k)), Err(Error::Engine(_)));
+        assert_matches!(table.plan(EventKind::Drop, &name("a"), Some(&k)), Err(Error::Engine(_)));
+        assert_matches!(table.plan(EventKind::Create, &name("a"), None), Err(Error::NamespaceExists { .. }));
         assert_eq!(table.plan(EventKind::Create, &name("b"), None).expect("plan"), Plan::New { id: 2 });
         assert_eq!(table.plan(EventKind::Drop, &name("a"), None).expect("plan"), Plan::New { id: 1 });
-        assert!(matches!(table.plan(EventKind::Drop, &name("b"), None), Err(Error::NoSuchNamespace { .. })));
+        assert_matches!(table.plan(EventKind::Drop, &name("b"), None), Err(Error::NoSuchNamespace { .. }));
     }
 
     #[test]

@@ -1,0 +1,30 @@
+[package]
+name = "iwdb-query"
+description = "Ironweaver DB query layer: the Database service trait, bounded reads, explain and the error model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+# The conformance suite (`conformance_tests!`) for the crates that implement
+# the `Database` trait (iwdb now, the gRPC and REST clients in steps 11-12)
+conformance = []
+
+[dependencies]
+ironweaver-core.workspace = true
+iwdb-engine = { path = "../iwdb-engine" }
+# Error mapping (`From<iwdb_storage::Error>`), history ids, namespace types
+iwdb-storage = { path = "../iwdb-storage" }
+thiserror.workspace = true
+serde.workspace = true
+# Request fingerprints for cursors: the core's serde encoding of `Expr` and `Pattern`
+serde_json.workspace = true
+
+[dev-dependencies]
+iwdb-engine = { path = "../iwdb-engine", features = ["testutil"] }
+
+[lints]
+workspace = true

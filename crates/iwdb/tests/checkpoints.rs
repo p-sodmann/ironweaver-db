@@ -10,10 +10,11 @@
 mod common;
 mod support;
 
+use std::assert_matches;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use common::{Call, Fault, TestFs};
@@ -94,15 +95,15 @@ fn a_failed_directory_sync_disables_checkpoints_until_reopened() {
     let first_bytes = fs::read(checkpoint_path(dir.path(), first)).unwrap();
 
     fs.inject(Call::SyncDir, Fault::Fail);
-    assert!(matches!(store.checkpoint(), Err(Error::Io { op: "sync directory", .. })));
+    assert_matches!(store.checkpoint(), Err(Error::Io { op: "sync directory", .. }));
     assert_eq!(checkpoints(dir.path()), vec![first, reference.seq()]);
     assert_eq!(fs::read(checkpoint_path(dir.path(), first)).unwrap(), first_bytes);
     assert_eq!(segment_seqs(dir.path()), wal);
     run(&store, &mut reference, &[pad(2)]);
-    assert!(matches!(store.checkpoint(), Err(Error::CheckpointsDisabled { .. })));
-    assert!(matches!(store.checkpoint_failure(), Some(cause) if cause.contains("disabled")));
+    assert_matches!(store.checkpoint(), Err(Error::CheckpointsDisabled { .. }));
+    assert_matches!(store.checkpoint_failure(), Some(cause) if cause.contains("disabled"));
     // Close still syncs the WAL, and reports that it couldn't checkpoint
-    assert!(matches!(store.close(), Err(Error::CheckpointsDisabled { .. })));
+    assert_matches!(store.close(), Err(Error::CheckpointsDisabled { .. }));
 
     let store = Store::open_with(fs, dir.path(), options(1)).unwrap();
     assert_eq!(store_state(&store), state(&reference));
@@ -286,11 +287,11 @@ fn a_wal_failure_makes_the_store_read_only_until_reopened() {
 
     fs.inject(Call::Sync, Fault::Fail);
     // Its outcome is unknown: the record was written, the fsync failed
-    assert!(matches!(store.commit(&support_pad(100)), Err(Error::Io { op: "fsync", .. })));
+    assert_matches!(store.commit(&support_pad(100)), Err(Error::Io { op: "fsync", .. }));
     assert!(store.read_only().is_some());
-    assert!(matches!(store.commit(&support_pad(101)), Err(Error::ReadOnly { .. })));
+    assert_matches!(store.commit(&support_pad(101)), Err(Error::ReadOnly { .. }));
     assert_eq!(store_state(&store), state(&reference), "reads still work");
-    assert!(matches!(store.close(), Err(Error::ReadOnly { .. })));
+    assert_matches!(store.close(), Err(Error::ReadOnly { .. }));
 
     // Reopening recovers; the record whose fsync failed is in the page
     // cache, so it is found in the log
@@ -321,7 +322,7 @@ fn a_failed_truncation_fails_the_open_and_the_next_open_finishes_it() {
 
     let fs = TestFs::default();
     fs.inject(Call::Truncate, Fault::Fail);
-    assert!(matches!(Store::open_with(fs, dir.path(), options(2)), Err(Error::Io { op: "truncate", .. })));
+    assert_matches!(Store::open_with(fs, dir.path(), options(2)), Err(Error::Io { op: "truncate", .. }));
     let store = Store::open(dir.path(), options(2)).unwrap();
     assert!(store.recovery().torn_tail.is_some());
     assert_eq!(store_state(&store), state(&reference));

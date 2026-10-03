@@ -6,7 +6,7 @@
 //! - **A torn tail**: damage (a truncated or checksum-failing header or
 //!   frame) in the last segment, not followed by a valid frame that proves
 //!   the damaged record had been synced. This is the clean end of the log.
-//!   It is reported in [`SegmentEnd`], so that recovery (step 5) can
+//!   It is reported in [`SegmentEnd`], so that recovery can
 //!   truncate the segment there.
 //! - **Corruption** ([`Error::Corrupt`]): damage in any other segment, or
 //!   damage followed by a valid frame whose `synced_seq` shows that the
@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 
 use iwdb_engine::CommitRecord;
 
-use crate::format::{self, Damage, Header, Invalid, FRAME_HEADER_LEN, MAX_RECORD_LEN, SEGMENT_HEADER_LEN};
-use crate::writer::MAX_SEGMENT_SIZE;
 use crate::Error;
+use crate::format::{self, Damage, FRAME_HEADER_LEN, Header, Invalid, MAX_RECORD_LEN, SEGMENT_HEADER_LEN};
+use crate::writer::MAX_SEGMENT_SIZE;
 use iwdb_engine::CommitTime;
 
 /// The largest segment file the writer can produce: a full segment plus one
@@ -115,10 +115,10 @@ impl Cursor {
         match format::decode_segment_header(bytes) {
             Header::Valid { first_seq: found, version } if found == first_seq => cursor.version = Some(version),
             Header::Valid { first_seq: found, .. } => {
-                return Err(Error::HeaderMismatch { path: path.into(), expected: first_seq, found })
+                return Err(Error::HeaderMismatch { path: path.into(), expected: first_seq, found });
             }
             Header::UnsupportedVersion(version) => {
-                return Err(Error::UnsupportedVersion { path: path.into(), version })
+                return Err(Error::UnsupportedVersion { path: path.into(), version });
             }
             // The header is synced before any record is written, so any
             // valid frame after it proves corruption
@@ -220,11 +220,9 @@ fn frames_after(bytes: &[u8], damage: usize, lowest: u64, version: u32) -> impl 
         while pos + header_len <= bytes.len() {
             let rest = &bytes[pos..];
             let in_window = format::peek_seq(rest, version).is_some_and(|seq| (lowest..=highest).contains(&seq));
-            if in_window {
-                if let Ok(frame) = format::read_frame(rest, version) {
-                    pos += frame.len;
-                    return Some(frame);
-                }
+            if in_window && let Ok(frame) = format::read_frame(rest, version) {
+                pos += frame.len;
+                return Some(frame);
             }
             pos += 1;
         }
@@ -239,7 +237,7 @@ fn frames_after(bytes: &[u8], damage: usize, lowest: u64, version: u32) -> impl 
 /// the records.
 ///
 /// This is the reader [`WalReader`] uses per segment, exposed for fuzzing
-/// and for `verify` (step 7).
+/// and for `verify`.
 pub fn read_segment(
     path: &Path,
     bytes: &[u8],
@@ -471,10 +469,10 @@ impl WalReader {
     fn open_next(&mut self) -> Result<(), Error> {
         let (first_seq, path) = &self.segments[self.next_segment];
         let last = self.next_segment + 1 == self.segments.len();
-        if let Some(expected) = self.next_seq {
-            if *first_seq != expected {
-                return Err(Error::SeqMismatch { path: path.clone(), offset: 0, expected, found: *first_seq });
-            }
+        if let Some(expected) = self.next_seq
+            && *first_seq != expected
+        {
+            return Err(Error::SeqMismatch { path: path.clone(), offset: 0, expected, found: *first_seq });
         }
         let bytes = read_file(path)?;
         let cursor = Cursor::new(path, &bytes, *first_seq, last)?;
@@ -530,11 +528,12 @@ pub fn read_log(dir: &Path, from: u64) -> Result<(Vec<CommitRecord>, LogEnd), Er
 mod tests {
     use super::*;
     use crate::format::{
-        encode_frame, encode_segment_header, encode_segment_header_version, FrameHeader, FORMAT_VERSION, KIND_CATALOG,
-        KIND_DATA,
+        FORMAT_VERSION, FrameHeader, KIND_CATALOG, KIND_DATA, encode_frame, encode_segment_header,
+        encode_segment_header_version,
     };
     use iwdb_engine::Change;
     use proptest::prelude::*;
+    use std::assert_matches;
 
     fn path() -> PathBuf {
         PathBuf::from("test.wal")
@@ -585,13 +584,13 @@ mod tests {
     fn a_checked_but_invalid_last_record_is_an_error_not_a_tail() {
         for (kind, payload) in [(9, EMPTY), (KIND_DATA, &[1u8][..]), (KIND_CATALOG, &[0xff, 0xff][..])] {
             let bytes = segment(1, &[(1, 0, KIND_DATA, EMPTY), (2, 1, kind, payload)]);
-            assert!(matches!(read_segment(&path(), &bytes, 1, true), Err(Error::InvalidRecord { .. })));
+            assert_matches!(read_segment(&path(), &bytes, 1, true), Err(Error::InvalidRecord { .. }));
         }
         let bytes = segment(u64::MAX, &[(u64::MAX, 0, KIND_DATA, EMPTY)]);
-        assert!(matches!(
+        assert_matches!(
             read_segment(&path(), &bytes, u64::MAX, true),
             Err(Error::InvalidRecord { invalid: Invalid::SeqOutOfRange, .. })
-        ));
+        );
     }
 
     #[test]
@@ -602,11 +601,11 @@ mod tests {
         assert!(records.is_empty());
         assert_eq!((end.valid_len, end.next_seq), (0, 1));
         assert_eq!(end.torn.map(|t| t.damage), Some(Damage::BadHeader));
-        assert!(matches!(read_segment(&path(), &bytes, 1, false), Err(Error::Corrupt { offset: 0, .. })));
+        assert_matches!(read_segment(&path(), &bytes, 1, false), Err(Error::Corrupt { offset: 0, .. }));
 
         let mut bytes = segment(1, &[(1, 0, KIND_DATA, EMPTY)]);
         bytes[0] ^= 1;
-        assert!(matches!(read_segment(&path(), &bytes, 1, true), Err(Error::Corrupt { offset: 0, .. })));
+        assert_matches!(read_segment(&path(), &bytes, 1, true), Err(Error::Corrupt { offset: 0, .. }));
     }
 
     #[test]
@@ -643,14 +642,14 @@ mod tests {
         assert_eq!(segment_prefix(&file, 5, 6).expect("prefix"), (two.clone(), Some(CommitTime(60))));
         assert_eq!(segment_prefix(&file, 5, 5).expect("prefix"), (one, Some(CommitTime(50))));
         assert_eq!(segment_prefix(&file, 5, 4).expect("prefix"), (encode_segment_header(5).to_vec(), None));
-        assert!(matches!(segment_prefix(&file, 5, 7), Err(Error::Corrupt { .. })));
+        assert_matches!(segment_prefix(&file, 5, 7), Err(Error::Corrupt { .. }));
         fs::write(&file, &two).expect("write");
-        assert!(matches!(segment_prefix(&file, 5, 7), Err(Error::LogEndsBefore { from: 7, next_seq: 7 })));
+        assert_matches!(segment_prefix(&file, 5, 7), Err(Error::LogEndsBefore { from: 7, next_seq: 7 }));
         // Damage before the record is corruption, not a tail
         let mut bad = full;
         bad[30] ^= 1;
         fs::write(&file, &bad).expect("write");
-        assert!(matches!(segment_prefix(&file, 5, 6), Err(Error::Corrupt { .. })));
+        assert_matches!(segment_prefix(&file, 5, 6), Err(Error::Corrupt { .. }));
     }
 
     proptest! {

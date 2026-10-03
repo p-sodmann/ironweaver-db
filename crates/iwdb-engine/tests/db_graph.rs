@@ -1,4 +1,4 @@
-//! Step 2 acceptance: `Graph<DbRecord, DbRecord>` saves and loads through
+//! `Graph<DbRecord, DbRecord>` saves and loads through
 //! the core's binary and JSON formats with versions and catalog, and the
 //! core's filters, indexes and analytics work on it.
 
@@ -6,9 +6,10 @@
 
 mod common;
 
+use std::assert_matches;
 use std::ops::Bound::{Excluded, Included};
 
-use ironweaver_core::algo::{pagerank, PageRank};
+use ironweaver_core::algo::{PageRank, pagerank};
 use ironweaver_core::format::{self, GraphWriter, RecordCodec};
 use ironweaver_core::pathfinding::EdgeCost;
 use ironweaver_core::{
@@ -158,21 +159,11 @@ proptest! {
         // ... and from then on saves are stable
         let third = codec::to_binary(&codec::from_binary(&again).unwrap().graph, &meta).unwrap();
         prop_assert_eq!(third, again);
+        // `GraphWriter::with_timestamp(None)` directly gives the same bytes
+        let mut direct = Vec::new();
+        GraphWriter::new(&a, &codec::DbCodec::new(&meta)).with_timestamp(None).write_binary(&mut direct).unwrap();
+        prop_assert_eq!(direct, bytes);
     }
-}
-
-#[test]
-fn saving_twice_gives_identical_bytes() {
-    let (a, meta) = social();
-    let (b, _) = social();
-    let bytes = codec::to_binary(&a, &meta).unwrap();
-    assert_eq!(bytes, codec::to_binary(&a, &meta).unwrap());
-    assert_eq!(bytes, codec::to_binary(&b, &meta).unwrap());
-    // `GraphWriter::with_timestamp(None)` directly gives the same bytes
-    let mut direct = Vec::new();
-    GraphWriter::new(&a, &codec::DbCodec::new(&meta)).with_timestamp(None).write_binary(&mut direct).unwrap();
-    assert_eq!(direct, bytes);
-    assert_eq!(codec::to_json(&a, &meta, true).unwrap(), codec::to_json(&b, &meta, true).unwrap());
 }
 
 /// `g` rebuilt with payloads `conv(..)`, in the same slot and adjacency
@@ -311,7 +302,7 @@ fn unknown_reserved_keys_and_foreign_graph_meta_are_errors() {
 
     // A plain Record graph (no versions) is not a database file
     let plain = convert(&g, |r| Record { attr: r.attr.clone(), meta: Attrs::new() });
-    assert!(matches!(load_error(&plain, &graph_meta), Error::MissingVersion { .. }));
+    assert_matches!(load_error(&plain, &graph_meta), Error::MissingVersion { .. });
 }
 
 #[test]
@@ -339,22 +330,30 @@ fn the_seq_in_graph_meta_is_required_and_checked() {
     assert!(err.contains("too large to save"), "{}", err);
 }
 
-/// Known core deviation (in the core review, upstream #26): the JSON loader reads `-0.0`
-/// back as `0.0`; the binary format keeps it. When this fails, upstream
-/// has fixed it: allow -0.0 in `common::scalar` again.
+/// Fixed upstream (#26, #46): JSON keeps `-0.0` (the loader read it as
+/// `0.0`), and NaN and the infinities round-trip as `"NaN"`, `"Infinity"`
+/// and `"-Infinity"` through `DbCodec` (they were written as `null`), like
+/// the binary format.
 #[test]
-fn json_loses_the_sign_of_negative_zero() {
+fn json_keeps_negative_zero_nan_and_infinities() {
     let (_, meta) = social();
+    let floats = [-0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
     let mut g = DbGraph::new();
-    g.add_node("z", rec(1, [("x", Value::Float(-0.0))])).unwrap();
-    let x = |loaded: Loaded| match loaded.graph.node(loaded.graph.node_ix("z").unwrap()).unwrap().data.attr["x"] {
-        Value::Float(f) => f.is_sign_negative(),
-        ref other => panic!("{:?}", other),
+    for (i, f) in floats.iter().enumerate() {
+        g.add_node(format!("z{}", i), rec(1, [("x", Value::Float(*f))])).unwrap();
+    }
+    let check = |loaded: Loaded| {
+        for (i, f) in floats.iter().enumerate() {
+            match loaded.graph.node(loaded.graph.node_ix(&format!("z{}", i)).unwrap()).unwrap().data.attr["x"] {
+                Value::Float(x) => assert_eq!(x.to_bits(), f.to_bits(), "{} loaded as {}", f, x),
+                ref other => panic!("{:?}", other),
+            }
+        }
     };
-    assert!(x(codec::from_binary(&codec::to_binary(&g, &meta).unwrap()).unwrap()));
+    check(codec::from_binary(&codec::to_binary(&g, &meta).unwrap()).unwrap());
     let json = codec::to_json(&g, &meta, false).unwrap();
     assert!(String::from_utf8_lossy(&json).contains(r#"{"Float":-0.0}"#));
-    assert!(!x(codec::from_json(&json).unwrap()), "the JSON loader now keeps -0.0");
+    check(codec::from_json(&json).unwrap());
 }
 
 #[test]
@@ -368,8 +367,8 @@ fn damaged_files_are_errors() {
         assert!(matches!(result, Err(Error::Graph(GraphError::Format(_)))), "{:?}", result.map(|l| l.meta));
     }
     let short = &bytes[..bytes.len() - 5];
-    assert!(matches!(codec::from_binary_reader(short), Err(Error::Graph(GraphError::Format(_)))));
-    assert!(matches!(codec::from_json(b"{\"nodes\": 1}"), Err(Error::Graph(GraphError::Format(_)))));
+    assert_matches!(codec::from_binary_reader(short), Err(Error::Graph(GraphError::Format(_))));
+    assert_matches!(codec::from_json(b"{\"nodes\": 1}"), Err(Error::Graph(GraphError::Format(_))));
 }
 
 #[test]
@@ -429,12 +428,14 @@ fn filters_and_indexes_work_on_db_records() {
     ]);
     let scan: Vec<NodeIx> = g.node_indices().filter(|&ix| adults.matches_node(&g, ix).unwrap()).collect();
     assert_eq!(ids(&g, scan), ["alice", "carol"]);
-    assert!(g
-        .index_candidates(&Expr::Compare { path: age.clone(), op: CmpOp::Ge, value: Value::Int(30) })
-        .unwrap()
-        .is_none());
+    assert!(
+        g.index_candidates(&Expr::Compare { path: age.clone(), op: CmpOp::Ge, value: Value::Int(30) })
+            .unwrap()
+            .is_none()
+    );
 
     assert!(g.create_index::<GraphError>(&age).unwrap());
+    assert!(!g.create_index::<GraphError>(&age).unwrap(), "already indexed");
     // Numbers match across int and float
     assert_eq!(ids(&g, g.find_nodes(&age, &Value::Int(41)).unwrap().unwrap()), ["carol"]);
     let candidates = g.index_candidates(&adults).unwrap().expect("narrowed by the index");
@@ -443,6 +444,9 @@ fn filters_and_indexes_work_on_db_records() {
     let range =
         g.find_nodes_in_range::<GraphError>(&age, Included(&Value::Int(20)), Excluded(&Value::Int(35))).unwrap();
     assert_eq!(ids(&g, range.unwrap()), ["alice", "bob"]);
+    // Not-equal can't use the index
+    let ne = Expr::Compare { path: age.clone(), op: CmpOp::Ne, value: Value::Int(1) };
+    assert!(g.index_candidates(&ne).unwrap().is_none());
 
     // Edge filters read the edge's DbRecord
     let heavy = Expr::Compare { path: keys(&["weight"]), op: CmpOp::Gt, value: Value::Float(1.0) };
@@ -450,9 +454,12 @@ fn filters_and_indexes_work_on_db_records() {
         g.edges().filter(|&(e, _)| heavy.matches_edge(&g, e).unwrap()).map(|(_, edge)| edge.id().0).collect();
     assert_eq!(edges, [5]);
 
-    // Ops keep indexes current; versions don't affect lookups
+    // Ops keep indexes current, before and after a flush; versions don't
+    // affect lookups
     g.apply(Op::SetNodeAttr { id: "bob".into(), key: "age".into(), value: Some(Value::Int(41)) }).unwrap();
+    assert_eq!(ids(&g, g.find_nodes(&age, &Value::Int(41)).unwrap().unwrap()), ["bob", "carol"]);
     g.flush_indexes().unwrap();
+    assert!(!g.indexes_dirty());
     assert_eq!(ids(&g, g.find_nodes(&age, &Value::Int(41)).unwrap().unwrap()), ["bob", "carol"]);
 }
 

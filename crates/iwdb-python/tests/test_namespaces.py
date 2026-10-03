@@ -35,7 +35,7 @@ def test_names_and_errors(store):
         with pytest.raises(iwdb.InvalidError):
             store.create_namespace(bad)
     store.create_namespace("ok_1-x")
-    with pytest.raises(iwdb.InvalidError):
+    with pytest.raises(iwdb.ConflictError):
         store.create_namespace("ok_1-x")
     with pytest.raises(iwdb.InvalidError):
         store.drop_namespace("default")
@@ -49,7 +49,7 @@ def test_keys_for_create_and_drop(store):
     first = store.create_namespace("a", idempotency_key="mk-a")
     again = store.create_namespace("a", idempotency_key="mk-a")
     assert again["deduplicated"] is True and again["id"] == first["id"]
-    with pytest.raises(iwdb.InvalidError):
+    with pytest.raises(iwdb.ConflictError):
         store.create_namespace("b", idempotency_key="mk-a")
     dropped = store.drop_namespace("a", idempotency_key="rm-a")
     assert store.drop_namespace("a", idempotency_key="rm-a")["deduplicated"] is True
@@ -91,6 +91,8 @@ def test_unique_constraints_and_indexes_are_per_namespace(store):
     put(b, "p2", email="x@example.org")
     assert [i["path"] for i in a.indexes()] == [["email"]]
     assert a.indexes()[0]["state"] == "ready"
+    assert a.indexes()[0]["entries"] == a.indexes()[0]["distinct_keys"] > 0
+    assert a.indexes()[0]["memory_bytes"] > 0
     assert b.indexes() == [] and b.catalog()["constraints"] == []
     assert a.catalog()["constraints"][0]["kind"] == "unique"
 

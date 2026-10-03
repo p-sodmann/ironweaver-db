@@ -1,4 +1,4 @@
-//! The crash points step 5 left for step 6, each hit exactly: a child
+//! The crash points of the storage layer, each hit exactly: a child
 //! pauses at the failpoint, the parent kills it with SIGKILL, then checks
 //! what is on disk, recovers, and compares with the model (and, where the
 //! point leaves work unfinished, that the next open or checkpoint finishes
@@ -15,7 +15,7 @@
 //! - during recovery's truncation of a torn tail, before and after it;
 //! - during initialization, before the marker is written and after it;
 //! - an abort and a panic in the commit path;
-//! - (step 7) during an online backup, at its manifest and its marker;
+//! - during an online backup, at its manifest and its marker;
 //!   during archiving, before and after a segment is durable in the
 //!   archive; and during a restore, at each of its writes.
 
@@ -27,10 +27,10 @@ use std::path::{Path, PathBuf};
 use iwdb::Store;
 use iwdb_crash::harness::newest_checkpoint;
 use iwdb_crash::{
-    check, check_archive, check_backups, crash, restore_in_child, Bounds, Crashed, Outcome, Plan, Policy, RestorePlan,
-    Restored, Summary, Target,
+    Bounds, Crashed, Outcome, Plan, Policy, RestorePlan, Restored, Summary, Target, check, check_archive,
+    check_backups, crash, restore_in_child,
 };
-use iwdb_engine::testutil::workload::{pad, Step};
+use iwdb_engine::testutil::workload::{Step, pad};
 use iwdb_storage::failpoint::{Action, Call, Rule, When};
 use iwdb_storage::layout::{MARKER_NAME, RESTORING_NAME};
 use tempfile::TempDir;

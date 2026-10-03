@@ -16,8 +16,8 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use iwdb::{verify, Kind, Namespace, Store, StoreOptions};
-use iwdb_storage::archive::{read_archive_marker, ARCHIVE_VERSION};
+use iwdb::{Kind, Namespace, Store, StoreOptions, verify};
+use iwdb_storage::archive::{ARCHIVE_VERSION, read_archive_marker};
 use support::{options, reference, run, snapshot, workload};
 
 fn fixture(version: u32) -> PathBuf {

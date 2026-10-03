@@ -6,10 +6,10 @@ use iwdb::{
     BackupReport, CheckpointOutcome, CommitTime, Finding, FsyncPolicy, IndexState, IndexStatus, Kind, NamespaceStatus,
     RecoveryReport, RestoreReport, StoreRecovery, StoreStatus, VerifyReport,
 };
+use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyList, PyType};
-use pyo3::IntoPyObjectExt;
 
 static DATETIME: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static TIMEDELTA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -100,6 +100,9 @@ pub fn indexes(py: Python<'_>, list: &[IndexStatus]) -> PyResult<Py<PyAny>> {
                 ("unique", to(py, i.unique)?),
                 ("scanned", to(py, scanned)?),
                 ("total", to(py, total)?),
+                ("entries", to(py, i.size.map(|s| s.entries))?),
+                ("distinct_keys", to(py, i.size.map(|s| s.distinct_keys))?),
+                ("memory_bytes", to(py, i.size.map(|s| s.memory_bytes))?),
             ],
         )?)?;
     }

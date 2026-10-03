@@ -56,12 +56,12 @@ documentation/             # design, steps, ADRs
 
 ## Tooling and commands
 
-- Rust stable (pinned in `rust-toolchain.toml`), edition 2021.
+- Rust stable (`rust-toolchain.toml`), at least 1.99 (`rust-version`); edition 2024. Policy in [ADR 0029](documentation/adr/0029-rust-1.99-and-edition-2024.md).
 - Before calling a change done, run:
   ```
   cargo fmt --all -- --check
-  cargo clippy --workspace --all-targets -- -D warnings
-  cargo test --workspace
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
+  cargo test --workspace --all-features
   ```
 - Python bindings: `maturin develop -m crates/iwdb-python/Cargo.toml`, then `pytest`.
 - Use `proptest` for property tests, `cargo-fuzz` for fuzz targets, `criterion` for benchmarks, and a failpoint crate for fault injection.

@@ -9,7 +9,7 @@
 //! - [`mutation`]: the write vocabulary, commit records and results.
 //! - [`Namespace`]: a graph changed only through the commit pipeline.
 //! - [`idempotency`]: idempotency keys and the table of recent keyed
-//!   commits (step 8).
+//!   commits.
 //! - [`CommitTime`]: when the WAL appended a commit.
 //! - [`invariants`]: the invariants every namespace keeps, checked from
 //!   scratch (for `verify`).
@@ -19,6 +19,8 @@
 pub mod catalog;
 pub mod codec;
 mod error;
+#[cfg(feature = "failpoints")]
+pub mod failpoint;
 pub mod idempotency;
 pub mod invariants;
 pub mod mutation;
@@ -29,7 +31,6 @@ mod resolve;
 pub mod testutil;
 mod time;
 
-pub use catalog::Catalog;
 pub use error::{Entity, Error};
 pub use idempotency::{IdempotencyKey, KeyTable, Keyed};
 pub use mutation::{CatalogChange, Change, CommitRecord, CommitResult, EdgeKey, Mutation, Target};

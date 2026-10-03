@@ -7,14 +7,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::archive::{archive_namespace_ids, archive_segments, read_archive_marker_info, ARCHIVE_MARKER_NAME};
-use crate::backup::{read_manifest, Manifest};
+use crate::archive::{ARCHIVE_MARKER_NAME, archive_namespace_ids, archive_segments, read_archive_marker_info};
+use crate::backup::{Manifest, read_manifest};
 use crate::checkpoint::list_checkpoints;
 use crate::history::HistoryId;
-use crate::layout::{self, NsPaths, BACKUP_NAME, TEMP_SUFFIX};
-use crate::namespaces::{ns_dir_name, read_log, DEFAULT_ID, DEFAULT_NAME, NAMESPACES_NAME, NS_DIR};
+use crate::layout::{self, BACKUP_NAME, NsPaths, TEMP_SUFFIX};
+use crate::namespaces::{DEFAULT_ID, DEFAULT_NAME, NAMESPACES_NAME, NS_DIR, ns_dir_name, read_log};
 use crate::verify::Kind;
-use crate::{reader, Error};
+use crate::{Error, reader};
 use iwdb_engine::CommitTime;
 
 /// What the files of a directory say.
@@ -189,4 +189,4 @@ fn archive_names(dir: &Path, version: u32) -> Result<(BTreeMap<u64, String>, Opt
     Ok((names, Some(table.events().len())))
 }
 
-crate::backup::default_deref!(DirStatus, NamespaceFiles, namespaces, |n| n.name.as_deref().unwrap_or(""));
+crate::default_deref!(DirStatus, NamespaceFiles, namespaces, |n| n.name.as_deref().unwrap_or(""));

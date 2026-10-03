@@ -31,146 +31,95 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::io::{LogFile, LogFs, StdFs};
 
-/// A file operation of [`LogFs`] / [`LogFile`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Call {
-    Create,
-    OpenAppend,
-    Rename,
-    SyncDir,
-    /// [`LogFile::write_all`].
-    Write,
-    /// [`LogFile::sync`].
-    Sync,
-    WriteAtomic,
-    RemoveFile,
-    Truncate,
-    /// [`LogFs::create_dir`] (a namespace's directory, step 9).
-    CreateDir,
-    /// [`LogFs::remove_dir_all`] (a dropped namespace's directory).
-    RemoveDirAll,
-}
-
-impl Call {
-    pub const ALL: [Call; 11] = [
-        Call::Create,
-        Call::OpenAppend,
-        Call::Rename,
-        Call::SyncDir,
-        Call::Write,
-        Call::Sync,
-        Call::WriteAtomic,
-        Call::RemoveFile,
-        Call::Truncate,
-        Call::CreateDir,
-        Call::RemoveDirAll,
-    ];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Call::Create => "create",
-            Call::OpenAppend => "open_append",
-            Call::Rename => "rename",
-            Call::SyncDir => "sync_dir",
-            Call::Write => "write",
-            Call::Sync => "sync",
-            Call::WriteAtomic => "write_atomic",
-            Call::RemoveFile => "remove_file",
-            Call::Truncate => "truncate",
-            Call::CreateDir => "create_dir",
-            Call::RemoveDirAll => "remove_dir_all",
+/// An enum of names used on command lines: the enum, `ALL`, `name()` and
+/// `FromStr`, from one list of variants and their names.
+macro_rules! named_enum {
+    ($(#[$meta:meta])* $vis:vis enum $ty:ident ($what:literal) {
+        $($(#[$vmeta:meta])* $variant:ident => $name:literal,)*
+    }) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        $vis enum $ty {
+            $($(#[$vmeta])* $variant,)*
         }
-    }
-}
 
-/// Where in a call a rule acts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum When {
-    /// Before the operation: if the action fails the call, nothing was done.
-    Before,
-    /// Halfway: for [`Call::Write`], after the first half of the bytes is
-    /// written; for [`Call::WriteAtomic`], after the writer wrote half of
-    /// its first write (at most 4 KiB), flushed into the temporary file.
-    /// A failing action leaves a torn frame, or a partial temporary file
-    /// (which `write_atomic` removes).
-    Midway,
-    /// [`Call::WriteAtomic`] only: the writer is done and its output is
-    /// flushed into the temporary file, which is not yet fsynced or
-    /// renamed. A failing action makes `write_atomic` remove the file.
-    WriterDone,
-    /// After the operation succeeded. A failing action reports an error
-    /// although the operation happened (a write or fsync that reached the
-    /// disk and still failed).
-    After,
-}
+        impl $ty {
+            pub const ALL: [$ty; [$($name),*].len()] = [$($ty::$variant),*];
 
-impl When {
-    pub fn name(self) -> &'static str {
-        match self {
-            When::Before => "before",
-            When::Midway => "midway",
-            When::WriterDone => "writer_done",
-            When::After => "after",
+            pub fn name(self) -> &'static str {
+                match self {
+                    $($ty::$variant => $name,)*
+                }
+            }
         }
-    }
-}
 
-/// What a rule does when it fires.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Action {
-    /// Fail the call with an I/O error.
-    Fail,
-    /// Fail the call with `ENOSPC` (a full disk).
-    NoSpace,
-    /// Call the pause handler ([`FailFs::set_pause`]; by default the thread
-    /// blocks forever), then go on. A harness kills the process meanwhile.
-    Pause,
-    /// Panic.
-    Panic,
-    /// Abort the process (`std::process::abort`): no destructor runs, like
-    /// `kill -9`.
-    Abort,
-}
-
-impl Action {
-    pub fn name(self) -> &'static str {
-        match self {
-            Action::Fail => "fail",
-            Action::NoSpace => "nospace",
-            Action::Pause => "pause",
-            Action::Panic => "panic",
-            Action::Abort => "abort",
+        impl FromStr for $ty {
+            type Err = String;
+            fn from_str(s: &str) -> Result<Self, String> {
+                Self::ALL.into_iter().find(|v| v.name() == s).ok_or_else(|| format!("unknown {} '{}'", $what, s))
+            }
         }
+    };
+}
+
+named_enum! {
+    /// A file operation of [`LogFs`] / [`LogFile`].
+    pub enum Call("call") {
+        Create => "create",
+        OpenAppend => "open_append",
+        Rename => "rename",
+        SyncDir => "sync_dir",
+        /// [`LogFile::write_all`].
+        Write => "write",
+        /// [`LogFile::sync`].
+        Sync => "sync",
+        WriteAtomic => "write_atomic",
+        RemoveFile => "remove_file",
+        Truncate => "truncate",
+        /// [`LogFs::create_dir`] (a namespace's directory).
+        CreateDir => "create_dir",
+        /// [`LogFs::remove_dir_all`] (a dropped namespace's directory).
+        RemoveDirAll => "remove_dir_all",
     }
 }
 
-fn parse_name<T: Copy>(all: &[T], name: fn(T) -> &'static str, s: &str, what: &str) -> Result<T, String> {
-    all.iter().copied().find(|v| name(*v) == s).ok_or_else(|| format!("unknown {} '{}'", what, s))
-}
-
-impl FromStr for Call {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, String> {
-        parse_name(&Call::ALL, Call::name, s, "call")
+named_enum! {
+    /// Where in a call a rule acts.
+    pub enum When("point") {
+        /// Before the operation: if the action fails the call, nothing was done.
+        Before => "before",
+        /// Halfway: for [`Call::Write`], after the first half of the bytes is
+        /// written; for [`Call::WriteAtomic`], after the writer wrote half of
+        /// its first write (at most 4 KiB), flushed into the temporary file.
+        /// A failing action leaves a torn frame, or a partial temporary file
+        /// (which `write_atomic` removes).
+        Midway => "midway",
+        /// [`Call::WriteAtomic`] only: the writer is done and its output is
+        /// flushed into the temporary file, which is not yet fsynced or
+        /// renamed. A failing action makes `write_atomic` remove the file.
+        WriterDone => "writer_done",
+        /// After the operation succeeded. A failing action reports an error
+        /// although the operation happened (a write or fsync that reached the
+        /// disk and still failed).
+        After => "after",
     }
 }
 
-impl FromStr for When {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, String> {
-        parse_name(&[When::Before, When::Midway, When::WriterDone, When::After], When::name, s, "point")
-    }
-}
-
-impl FromStr for Action {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, String> {
-        parse_name(
-            &[Action::Fail, Action::NoSpace, Action::Pause, Action::Panic, Action::Abort],
-            Action::name,
-            s,
-            "action",
-        )
+named_enum! {
+    /// What a rule does when it fires.
+    pub enum Action("action") {
+        /// Fail the call with an I/O error.
+        Fail => "fail",
+        /// Fail the call with `ENOSPC` (a full disk).
+        NoSpace => "nospace",
+        /// Call the pause handler ([`FailFs::set_pause`]; by default the thread
+        /// blocks forever), then go on. A harness kills the process meanwhile.
+        Pause => "pause",
+        /// Panic.
+        Panic => "panic",
+        /// Abort the process (`std::process::abort`): no destructor runs, like
+        /// `kill -9`.
+        Abort => "abort",
     }
 }
 

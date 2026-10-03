@@ -19,6 +19,11 @@ jobs:
   rust:
     name: fmt, clippy, test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      # Cargo's build.warnings (Rust 1.97): a warning from rustc or clippy
+      # fails every step below, without changing the compiler flags (and so
+      # the cache key) the way RUSTFLAGS=-Dwarnings would
+      CARGO_BUILD_WARNINGS: deny
     strategy:
       fail-fast: false
       matrix:
@@ -31,14 +36,14 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked
+      - run: cargo test --workspace --all-features --locked
       - name: No Python in the dependency graph
         # Design rule 1: pyo3 only in crates/iwdb-python, which is in the
         # workspace since step 7; every other crate must stay free of it
         run: |
-          if cargo tree -p iwdb-engine -p iwdb-storage -p iwdb -p iwctl -p iwdb-crash -e normal | grep -q pyo3; then
-            echo "pyo3 must not be a dependency of the engine, storage, store or CLI crates" >&2
+          if cargo tree -p iwdb-engine -p iwdb-storage -p iwdb -p iwctl -p iwdb-crash -p iwdb-server -e normal | grep -q pyo3; then
+            echo "pyo3 must not be a dependency of the engine, storage, store, server or CLI crates" >&2
             exit 1
           fi
 
@@ -95,16 +100,17 @@ jobs:
           if-no-files-found: ignore
 
   msrv:
-    name: Rust 1.85 (MSRV)
+    name: Rust 1.99 (MSRV)
     runs-on: ubuntu-latest
     env:
-      # Overrides rust-toolchain.toml; keep in step with rust-version in Cargo.toml
-      RUSTUP_TOOLCHAIN: "1.85"
+      # Overrides rust-toolchain.toml; keep in step with rust-version in Cargo.toml (ADR 0029)
+      RUSTUP_TOOLCHAIN: "1.99.0"
+      CARGO_BUILD_WARNINGS: deny
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets --locked
+      - run: cargo check --workspace --all-targets --all-features --locked
 
   deny:
     name: cargo deny (licenses, advisories, bans, sources)
@@ -114,6 +120,41 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  buf:
+    # Step 11: the gRPC contract (proto/ironweaver_db/v1). Lint on every push;
+    # check for breaking changes against what the base had: the pull
+    # request's base, main for pushes to other branches, the previous head
+    # for pushes to main. A base without the protos has nothing to break.
+    name: buf lint and breaking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - run: buf lint
+      - name: buf breaking
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            base="$PR_BASE"
+          elif [ "$REF" = "refs/heads/main" ]; then
+            base="$BEFORE"
+          else
+            base="$(git rev-parse origin/main)"
+          fi
+          if [ -n "$base" ] && git cat-file -e "$base:proto/ironweaver_db/v1" 2>/dev/null; then
+            buf breaking --against ".git#ref=$base"
+          else
+            echo "the base ($base) has no v1 protos: nothing to break"
+          fi
 
   fuzz:
     name: fuzz the WAL reader (nightly, 60 s)

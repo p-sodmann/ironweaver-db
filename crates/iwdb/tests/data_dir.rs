@@ -6,13 +6,14 @@
 
 mod support;
 
+use std::assert_matches;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
 use iwdb::{Error, Store};
 use iwdb_storage::layout::{
-    encode_marker, encode_marker_with, BACKUP_NAME, LAYOUT_VERSION, LOCK_NAME, MARKER_NAME, RESTORING_NAME,
+    BACKUP_NAME, LAYOUT_VERSION, LOCK_NAME, MARKER_NAME, RESTORING_NAME, encode_marker, encode_marker_with,
 };
 use support::{options, pad, reference, run, snapshot, state, store_state};
 
@@ -56,7 +57,7 @@ fn a_second_open_fails_until_the_first_is_closed_or_dropped() {
 
     let store = Store::open(dir.path(), options(2)).unwrap();
     assert_eq!(store_state(&store), state(&reference));
-    assert!(matches!(Store::open(dir.path(), options(2)), Err(Error::Locked { .. })));
+    assert_matches!(Store::open(dir.path(), options(2)), Err(Error::Locked { .. }));
     drop(store);
     let store = Store::open(dir.path(), options(2)).unwrap();
     assert_eq!(store_state(&store), state(&reference));
@@ -105,7 +106,7 @@ fn the_lock_is_released_when_the_process_dies() {
     let stdout = child.stdout.take().unwrap();
     let locked = BufReader::new(stdout).lines().map_while(Result::ok).any(|line| line.contains("locked"));
     assert!(locked, "the child opened the store");
-    assert!(matches!(Store::open(dir.path(), options(2)), Err(Error::Locked { .. })));
+    assert_matches!(Store::open(dir.path(), options(2)), Err(Error::Locked { .. }));
 
     // SIGKILL on Unix: no destructor runs
     child.kill().unwrap();
@@ -120,26 +121,26 @@ fn directories_that_are_not_ours_are_refused_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("notes.txt"), b"hello").unwrap();
     let before = snapshot(dir.path());
-    assert!(matches!(Store::open(dir.path(), options(2)), Err(Error::NotADataDir { .. })));
+    assert_matches!(Store::open(dir.path(), options(2)), Err(Error::NotADataDir { .. }));
     assert_eq!(snapshot(dir.path()), before, "not even a LOCK file was created");
 
     // A marker that isn't ours
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join(MARKER_NAME), b"something else").unwrap();
-    assert!(matches!(Store::open(dir.path(), options(2)), Err(Error::NotADataDir { .. })));
+    assert_matches!(Store::open(dir.path(), options(2)), Err(Error::NotADataDir { .. }));
 
     // A file, not a directory
     let file = dir.path().join("file");
     fs::write(&file, b"x").unwrap();
-    assert!(matches!(Store::open(&file, options(2)), Err(Error::NotADataDir { .. })));
+    assert_matches!(Store::open(&file, options(2)), Err(Error::NotADataDir { .. }));
 
     // Missing, and not to be created
     let missing = dir.path().join("missing");
     let no_create = iwdb::StoreOptions { create_if_missing: false, ..options(2) };
-    assert!(matches!(Store::open(&missing, no_create.clone()), Err(Error::NotADataDir { .. })));
+    assert_matches!(Store::open(&missing, no_create.clone()), Err(Error::NotADataDir { .. }));
     assert!(!missing.exists());
     let empty = tempfile::tempdir().unwrap();
-    assert!(matches!(Store::open(empty.path(), no_create), Err(Error::NotADataDir { .. })));
+    assert_matches!(Store::open(empty.path(), no_create), Err(Error::NotADataDir { .. }));
 }
 
 #[test]
@@ -160,11 +161,11 @@ fn a_newer_layout_or_a_damaged_marker_is_refused() {
     let mut damaged = good.clone();
     damaged[9] ^= 1;
     fs::write(&marker, damaged).unwrap();
-    assert!(matches!(Store::open(dir.path(), options(2)), Err(Error::InvalidDataDir { .. })));
+    assert_matches!(Store::open(dir.path(), options(2)), Err(Error::InvalidDataDir { .. }));
 
     fs::write(&marker, good).unwrap();
     fs::remove_dir_all(dir.path().join("ns")).unwrap();
-    assert!(matches!(Store::open(dir.path(), options(2)), Err(Error::InvalidDataDir { .. })));
+    assert_matches!(Store::open(dir.path(), options(2)), Err(Error::InvalidDataDir { .. }));
 }
 
 /// An initialization interrupted before the marker was written leaves only
@@ -188,7 +189,7 @@ fn backups_and_interrupted_restores_are_refused() {
     Store::open(dir.path(), options(2)).unwrap().close().unwrap();
     fs::write(dir.path().join(BACKUP_NAME), b"manifest").unwrap();
     let before = snapshot(dir.path());
-    assert!(matches!(Store::open(dir.path(), options(2)), Err(Error::IsBackup { .. })));
+    assert_matches!(Store::open(dir.path(), options(2)), Err(Error::IsBackup { .. }));
     assert_eq!(snapshot(dir.path()), before);
 
     // A restore that stopped before writing the marker
@@ -198,7 +199,7 @@ fn backups_and_interrupted_restores_are_refused() {
     }
     fs::write(dir.path().join(RESTORING_NAME), b"").unwrap();
     let before = snapshot(dir.path());
-    assert!(matches!(Store::open(dir.path(), options(2)), Err(Error::InterruptedRestore { .. })));
+    assert_matches!(Store::open(dir.path(), options(2)), Err(Error::InterruptedRestore { .. }));
     assert_eq!(snapshot(dir.path()), before);
     // and one that stopped after its checkpoint, but before the marker
     fs::remove_file(dir.path().join(RESTORING_NAME)).unwrap();
@@ -217,8 +218,8 @@ fn backups_and_interrupted_restores_are_refused() {
 #[cfg(unix)]
 #[test]
 fn reopening_while_another_thread_spawns_processes() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     let dir = tempfile::tempdir().unwrap();
     let mut opts = options(2);
     opts.wal.fsync = iwdb::FsyncPolicy::Off;

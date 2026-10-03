@@ -1,4 +1,4 @@
-//! Continuous WAL archiving (step 7, ADR 0009): every segment the
+//! Continuous WAL archiving (ADR 0009): every segment the
 //! checkpointer removes is durable in the archive first, so the archive
 //! and the WAL together hold the whole history; archiving is idempotent;
 //! a conflict, an archive of another history and every failing archive
@@ -11,16 +11,17 @@
 mod common;
 mod support;
 
+use std::assert_matches;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::{Action, Call, Rule, TestFs, When};
-use iwdb::{verify, Error, FsyncPolicy, Kind, Namespace, Store, StoreOptions};
-use iwdb_storage::archive::{Archive, ARCHIVE_MARKER_NAME};
+use iwdb::{Error, FsyncPolicy, Kind, Namespace, Store, StoreOptions, verify};
+use iwdb_storage::archive::{ARCHIVE_MARKER_NAME, Archive};
 use iwdb_storage::io::StdFs;
 use iwdb_storage::{HistoryId, WalReader};
-use support::{options, pad, reference, run, segment_seqs, state, store_state, workload, Step};
+use support::{Step, options, pad, reference, run, segment_seqs, state, store_state, workload};
 use tempfile::TempDir;
 
 /// Options with an archive in `dir/archive`, one checkpoint kept.
@@ -104,12 +105,12 @@ fn an_archive_belongs_to_one_history() {
     fs::create_dir(&foreign).unwrap();
     fs::write(foreign.join("notes.txt"), b"x").unwrap();
     let opts = StoreOptions { archive: Some(foreign.clone()), ..options(1) };
-    assert!(matches!(Store::open(&dir.path().join("third"), opts), Err(Error::NotAnArchive { .. })));
+    assert_matches!(Store::open(&dir.path().join("third"), opts), Err(Error::NotAnArchive { .. }));
     assert!(!foreign.join(ARCHIVE_MARKER_NAME).exists());
     // The marker and lock, opened directly
     let id = HistoryId::random();
     let archive = Archive::open(StdFs, &dir.path().join("direct"), id).unwrap();
-    assert!(matches!(Archive::open(StdFs, &dir.path().join("direct"), id), Err(Error::Locked { .. })));
+    assert_matches!(Archive::open(StdFs, &dir.path().join("direct"), id), Err(Error::Locked { .. }));
     drop(archive);
     Archive::open(StdFs, &dir.path().join("direct"), id).unwrap();
 }
@@ -205,7 +206,7 @@ fn every_archive_write_can_fail_without_losing_a_segment() {
         run(&store, &mut reference, &workload(10, 60 + i as u64));
         let next = store.checkpoint();
         if disables {
-            assert!(matches!(next, Err(Error::CheckpointsDisabled { .. })), "{}: {:?}", rule, next);
+            assert_matches!(next, Err(Error::CheckpointsDisabled { .. }), "{}: {:?}", rule, next);
             drop(store);
             let store = Store::open(&dir.path().join("data"), opts).unwrap();
             commit_with_checkpoints(&store, &mut reference, &workload(10, 90 + i as u64));

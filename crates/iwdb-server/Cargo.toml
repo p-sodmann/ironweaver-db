@@ -1,0 +1,55 @@
+[package]
+name = "iwdb-server"
+description = "Ironweaver DB server: the Database trait over gRPC (tonic), and a Rust client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+# The Rust gRPC client (`client::Remote`, ADR 0024); the tests turn it on
+client = []
+
+[[bin]]
+name = "iwdb-server"
+path = "src/main.rs"
+
+[dependencies]
+ironweaver-core.workspace = true
+iwdb-engine = { path = "../iwdb-engine" }
+iwdb-storage = { path = "../iwdb-storage" }
+iwdb-query = { path = "../iwdb-query" }
+# The binary serves an embedded store (`Embedded`) and closes it on shutdown
+iwdb = { path = "../iwdb" }
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+# Values, filters and patterns on the wire: the core's serde in postcard (ADR 0023)
+postcard.workspace = true
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+log.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+protox.workspace = true
+
+[dev-dependencies]
+iwdb-server = { path = ".", features = ["client"] }
+iwdb-query = { path = "../iwdb-query", features = ["conformance"] }
+iwdb-storage = { path = "../iwdb-storage", features = ["failpoints"] }
+iwdb-engine = { path = "../iwdb-engine", features = ["testutil"] }
+tempfile.workspace = true
+# A raw HTTP/2 client for the tests that send headers tonic's channel would
+# act on itself (grpc-timeout) or bytes `Remote` refuses to send
+hyper-util = { workspace = true, features = ["client-legacy", "http2"] }
+
+[lints]
+workspace = true

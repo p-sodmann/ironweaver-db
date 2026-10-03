@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use iwdb::{
-    restore, restore_namespaces, verify, Error, Mutation, NamespaceName, RestoreSources, RestoreTarget, Store,
-    StoreOptions, Value,
+    Error, Mutation, NamespaceName, RestoreSources, RestoreTarget, Store, StoreOptions, Value, restore,
+    restore_namespaces, verify,
 };
 use support::{options, state};
 

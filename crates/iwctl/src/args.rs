@@ -214,11 +214,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
             expect(2)?;
             let dir = path(0, "a directory")?;
             let path = dotted(rest.get(1).ok_or_else(|| format!("{} needs an attribute path", name))?);
-            if name == "create-index" {
-                Command::CreateIndex { dir, path }
-            } else {
-                Command::DropIndex { dir, path }
-            }
+            if name == "create-index" { Command::CreateIndex { dir, path } } else { Command::DropIndex { dir, path } }
         }
         "add-constraint" | "drop-constraint" => {
             expect(4)?;
@@ -257,6 +253,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn parse_words(s: &str) -> Result<Parsed, String> {
         parse(&s.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
@@ -281,7 +278,7 @@ mod tests {
             }
         );
         let p = parse_words("restore r --archive a --time 2026-10-01T12:00:00Z").expect("parse");
-        assert!(matches!(p.command, Command::Restore { target: RestoreTarget::Time(_), .. }));
+        assert_matches!(p.command, Command::Restore { target: RestoreTarget::Time(_), .. });
         for bad in [
             "",
             "frobnicate",

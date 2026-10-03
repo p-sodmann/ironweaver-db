@@ -1,5 +1,5 @@
 //! `verify` on a layout 4 store and backup with damaged or inconsistent
-//! namespaces (step 9, ADR 0017): each kind of damage is a problem naming
+//! namespaces (ADR 0017): each kind of damage is a problem naming
 //! the namespace, and what a crash leaves is a note.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -9,7 +9,7 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use iwdb::{verify, Mutation, Store, Value, VerifyReport};
+use iwdb::{Mutation, Store, Value, VerifyReport, verify};
 use support::options;
 
 const A: &str = "ns/00000000000000000002";

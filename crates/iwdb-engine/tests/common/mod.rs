@@ -20,11 +20,10 @@ pub fn scalar() -> impl Strategy<Value = Value> {
     prop_oneof![
         "[a-z ]{0,6}".prop_map(Value::String),
         any::<i64>().prop_map(Value::Int),
-        // Finite floats: NaN is not equal to itself. No -0.0: the core's JSON
-        // loader reads it back as 0.0 (pinned in db_graph.rs)
-        any::<f64>()
-            .prop_filter("finite, not -0.0", |f| f.is_finite() && !(*f == 0.0 && f.is_sign_negative()))
-            .prop_map(Value::Float),
+        // NaN is not equal to itself, so the generators leave it out
+        // (`json_keeps_negative_zero_nan_and_infinities` covers it)
+        any::<f64>().prop_filter("not NaN", |f| !f.is_nan()).prop_map(Value::Float),
+        prop_oneof![Just(-0.0), Just(f64::INFINITY), Just(f64::NEG_INFINITY)].prop_map(Value::Float),
         (-3i64..3).prop_map(|i| Value::Float(i as f64 * 0.5)),
         any::<bool>().prop_map(Value::Bool),
         Just(Value::None),
@@ -120,10 +119,10 @@ pub fn graph_ops() -> impl Strategy<Value = Vec<Op<DbRecord, DbRecord>>> {
                 data,
             });
         }
-        if let Some(first) = removed.first() {
-            if !edge_ids.is_empty() {
-                ops.push(Op::RemoveEdge { id: EdgeId(*first.get(&edge_ids)) });
-            }
+        if let Some(first) = removed.first()
+            && !edge_ids.is_empty()
+        {
+            ops.push(Op::RemoveEdge { id: EdgeId(*first.get(&edge_ids)) });
         }
         for ix in removed.iter().skip(1) {
             let id = ix.get(&ids).clone();

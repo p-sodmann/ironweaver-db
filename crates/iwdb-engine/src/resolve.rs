@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use ironweaver_core::{Attributes, Attrs, EdgeId, GraphError, Key, Op, Value};
 
 use crate::catalog::{Constraint, ConstraintKind, NamespaceCatalog};
-use crate::mutation::{EdgeKey, Mutation, Target, MAX_VALUE_DEPTH};
+use crate::mutation::{EdgeKey, MAX_VALUE_DEPTH, Mutation, Target};
 use crate::reserved::{self, VERSION_KEY};
 use crate::{DbGraph, DbRecord, Error};
 
@@ -65,10 +65,10 @@ pub(crate) fn check_existing(graph: &DbGraph, constraint: &Constraint) -> Result
         ConstraintKind::Unique => {
             let mut seen: HashMap<Key, &str> = HashMap::new();
             for (id, data) in nodes {
-                if let Some(key) = value_at(data, path)?.as_ref().and_then(Key::of) {
-                    if let Some(other) = seen.insert(key, id) {
-                        return Err(violation(id, Some(other)));
-                    }
+                if let Some(key) = value_at(data, path)?.as_ref().and_then(Key::of)
+                    && let Some(other) = seen.insert(key, id)
+                {
+                    return Err(violation(id, Some(other)));
                 }
             }
         }
@@ -86,15 +86,13 @@ pub(crate) fn value_at(data: &DbRecord, path: &[String]) -> Result<Option<Value>
 }
 
 /// Whether `value` (an attribute's own value, at depth 1) is nested deeper
-/// than [`MAX_VALUE_DEPTH`]. Empty containers count as if they held a
-/// scalar (see there). Recurses at most `MAX_VALUE_DEPTH + 1` levels.
+/// than [`MAX_VALUE_DEPTH`]. Recurses at most `MAX_VALUE_DEPTH + 1`
+/// levels.
 pub(crate) fn too_deep(value: &Value, level: usize) -> bool {
     if level > MAX_VALUE_DEPTH {
         return true;
     }
     match value {
-        Value::List(items) if items.is_empty() => level + 1 > MAX_VALUE_DEPTH,
-        Value::Dict(map) if map.is_empty() => level + 1 > MAX_VALUE_DEPTH,
         Value::List(items) => items.iter().any(|v| too_deep(v, level + 1)),
         Value::Dict(map) => map.values().any(|v| too_deep(v, level + 1)),
         _ => false,
@@ -293,10 +291,11 @@ impl<'g> View<'g> {
         let graph = self.graph;
         if let (Some(a), Some(b)) = (graph.node_ix(from), graph.node_ix(to)) {
             for e in graph.edges_between(a, b, None) {
-                if let Some(edge) = graph.edge(e) {
-                    if !self.edges.contains_key(&edge.id()) && graph.edge_type_name(e) == ty {
-                        found.insert(edge.id());
-                    }
+                if let Some(edge) = graph.edge(e)
+                    && !self.edges.contains_key(&edge.id())
+                    && graph.edge_type_name(e) == ty
+                {
+                    found.insert(edge.id());
                 }
             }
         }
@@ -320,10 +319,10 @@ impl<'g> View<'g> {
             match constraint.kind {
                 ConstraintKind::Required => {
                     for (id, entry) in written {
-                        if let Some(state) = labeled(entry, label) {
-                            if value_at(&state.data, path)?.is_none() {
-                                return Err(violation(constraint, id.clone(), None));
-                            }
+                        if let Some(state) = labeled(entry, label)
+                            && value_at(&state.data, path)?.is_none()
+                        {
+                            return Err(violation(constraint, id.clone(), None));
                         }
                     }
                 }
@@ -331,10 +330,10 @@ impl<'g> View<'g> {
                     // Every overlay node with the label, by key
                     let mut overlay: HashMap<Key, BTreeSet<&str>> = HashMap::new();
                     for (id, entry) in &self.nodes {
-                        if let Some(state) = labeled(entry, label) {
-                            if let Some(key) = value_at(&state.data, path)?.as_ref().and_then(Key::of) {
-                                overlay.entry(key).or_default().insert(id);
-                            }
+                        if let Some(state) = labeled(entry, label)
+                            && let Some(key) = value_at(&state.data, path)?.as_ref().and_then(Key::of)
+                        {
+                            overlay.entry(key).or_default().insert(id);
                         }
                     }
                     for (id, entry) in written {
@@ -460,7 +459,7 @@ impl Tx<'_> {
                                 to: to.clone(),
                                 ty: ty.clone(),
                                 count: many.len(),
-                            })
+                            });
                         }
                     },
                 };
@@ -598,14 +597,16 @@ mod tests {
     }
 
     #[test]
-    fn depth_limit_counts_empty_containers_as_holding_a_scalar() {
+    fn depth_limit_is_the_core_s() {
         // A scalar inside 99 lists is at depth 100: fine
         assert!(!too_deep(&nest(99, Value::Int(1)), 1));
         assert!(too_deep(&nest(100, Value::Int(1)), 1));
-        // 99 containers, the innermost empty: fine; 100: too deep
-        assert!(!too_deep(&nest(98, Value::List(vec![])), 1));
-        assert!(too_deep(&nest(99, Value::List(vec![])), 1));
-        assert!(too_deep(&nest(99, Value::Dict(Attrs::new())), 1));
+        // An empty container is a value like a scalar: at depth 100 fine,
+        // at 101 too deep
+        assert!(!too_deep(&nest(99, Value::List(vec![])), 1));
+        assert!(!too_deep(&nest(99, Value::Dict(Attrs::new())), 1));
+        assert!(too_deep(&nest(100, Value::List(vec![])), 1));
+        assert!(too_deep(&nest(100, Value::Dict(Attrs::new())), 1));
         let dict = |v: Value| Value::Dict([("k".to_owned(), v)].into());
         assert!(!too_deep(&(0..99).fold(Value::Int(1), |v, _| dict(v)), 1));
         assert!(too_deep(&(0..100).fold(Value::Int(1), |v, _| dict(v)), 1));

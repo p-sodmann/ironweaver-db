@@ -7,37 +7,21 @@
 //! here) until the model is at that seq. It keeps every commit record, so
 //! it can also go back to an earlier seq.
 //!
-//! Commits with an idempotency key (step 8) go through the engine's keyed
+//! Commits with an idempotency key go through the engine's keyed
 //! path, so the model applies each key once, as the store must: a retry
 //! whose original is in the model's key table commits nothing.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use iwdb::{IdempotencyKey, Namespace, NamespaceCatalog};
+use iwdb::{IdempotencyKey, Namespace};
 use iwdb_engine::catalog::NamespaceName;
-use iwdb_engine::testutil::canonical;
 use iwdb_engine::testutil::workload::Step;
 use iwdb_engine::{CommitRecord, Prepare};
 
 use crate::script::Script;
 
-/// What is compared after recovery: the canonical graph, the catalog, the
-/// seq, and the idempotency key table without commit times (the model has
-/// no log, so no times).
-pub type State = (Vec<String>, NamespaceCatalog, u64, Vec<String>);
-
-pub fn state(ns: &Namespace) -> State {
-    let keys = ns
-        .keys()
-        .entries()
-        .map(|e| {
-            let r = &e.result;
-            format!("{} {} {:08x} {:?} {:?}", r.seq, e.key, e.fingerprint, r.edge_ids, r.versions)
-        })
-        .collect();
-    (canonical(ns.graph()), ns.catalog().clone(), ns.seq(), keys)
-}
+pub use iwdb_engine::testutil::{State, state};
 
 /// A commit the child may make: its step and idempotency key.
 pub type Commit = (Step, Option<IdempotencyKey>);

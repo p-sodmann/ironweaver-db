@@ -2,18 +2,20 @@
 //! trait: the seam for fault injection. With the `failpoints` feature,
 //! `failpoint::FailFs` wraps any [`LogFs`] and makes writes, fsyncs,
 //! renames, directory syncs, checkpoint writes, deletions or truncations
-//! fail, pause, panic or abort (step 6). [`StdFs`] itself has no
+//! fail, pause, panic or abort. [`StdFs`] itself has no
 //! failpoints.
 //!
 //! Reading (the WAL reader, loading checkpoints) uses `std::fs` directly:
 //! a failed read changes nothing on disk.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
+use crate::Error;
+
 /// The operations that change files: the log writer's, and those of
-/// checkpoints and recovery (step 5).
+/// checkpoints and recovery.
 pub trait LogFs {
     type File: LogFile;
 
@@ -30,20 +32,20 @@ pub trait LogFs {
     /// `format::write_atomic`: into a temporary file next to it (named
     /// `.<name>.<pid>.<n>.tmp`), fsynced, then renamed over `path`. On
     /// error the temporary file is removed when possible and a previous
-    /// file at `path` is untouched. The core syncs the directory only on a
-    /// best-effort basis (upstream #32): callers that need the rename to be
-    /// durable call [`sync_dir`](Self::sync_dir) afterwards.
+    /// file at `path` is untouched. On Unix the core then fsyncs the
+    /// directory and returns its error, so `Ok` means the rename is durable
+    /// (since `3b15149`, upstream #32). An error can still come after the
+    /// rename: the new file may then be in place but not durable.
     fn write_atomic(&self, path: &Path, write: &mut dyn FnMut(&mut dyn Write) -> io::Result<()>) -> io::Result<()>;
     /// Remove a file.
     fn remove_file(&self, path: &Path) -> io::Result<()>;
     /// Cut the file at `path` to `len` bytes and fsync it.
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()>;
     /// Create the directory `path` (not its parents); `AlreadyExists` if
-    /// there is one. Not durable until its parent is synced (step 9:
-    /// namespace directories).
+    /// there is one. Not durable until its parent is synced.
     fn create_dir(&self, path: &Path) -> io::Result<()>;
-    /// Remove the directory `path` and everything in it (step 9: a dropped
-    /// namespace's directory). Not durable until its parent is synced.
+    /// Remove the directory `path` and everything in it. Not durable until
+    /// its parent is synced.
     fn remove_dir_all(&self, path: &Path) -> io::Result<()>;
 }
 
@@ -77,7 +79,7 @@ impl LogFs for StdFs {
     }
 
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
-        sync_dir(dir)
+        fsync_dir(dir)
     }
 
     fn write_atomic(&self, path: &Path, write: &mut dyn FnMut(&mut dyn Write) -> io::Result<()>) -> io::Result<()> {
@@ -118,11 +120,63 @@ impl LogFile for File {
 /// the directory). Windows can't open directories this way; there it does
 /// nothing (Windows is not a supported platform yet).
 #[cfg(unix)]
-fn sync_dir(dir: &Path) -> io::Result<()> {
+fn fsync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> io::Result<()> {
+fn fsync_dir(_dir: &Path) -> io::Result<()> {
     Ok(())
+}
+
+/// The size of the chunks files are written, copied and compared in.
+pub(crate) const CHUNK: usize = 1 << 20;
+
+/// Create `dir` (and its parents) if missing, and sync its parent.
+pub(crate) fn create_dir<F: LogFs>(fs: &F, dir: &Path) -> Result<(), Error> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(dir).map_err(|e| Error::io("create directory", dir, e))?;
+    match dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(parent) => sync_dir(fs, parent),
+        None => Ok(()),
+    }
+}
+
+pub(crate) fn sync_dir<F: LogFs>(fs: &F, dir: &Path) -> Result<(), Error> {
+    fs.sync_dir(dir).map_err(|e| Error::io("sync directory", dir, e))
+}
+
+pub(crate) fn write_atomic<F: LogFs>(fs: &F, path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    fs.write_atomic(path, &mut |out| out.write_all(bytes)).map_err(|e| Error::io("write", path, e))
+}
+
+/// Create `target` with `content`, in chunks, and fsync it.
+pub(crate) fn write_file<F: LogFs>(fs: &F, target: &Path, content: &[u8]) -> Result<(), Error> {
+    let mut file = fs.create(target).map_err(|e| Error::io("create", target, e))?;
+    for chunk in content.chunks(CHUNK) {
+        file.write_all(chunk).map_err(|e| Error::io("write", target, e))?;
+    }
+    file.sync().map_err(|e| Error::io("fsync", target, e))
+}
+
+/// Copy `source` to a new file `target` in chunks, and fsync it. Returns
+/// its length and CRC32C.
+pub(crate) fn copy_file<F: LogFs>(fs: &F, source: &Path, target: &Path) -> Result<(u64, u32), Error> {
+    let mut input = File::open(source).map_err(|e| Error::io("open", source, e))?;
+    let mut file = fs.create(target).map_err(|e| Error::io("create", target, e))?;
+    let mut buf = vec![0u8; CHUNK];
+    let (mut len, mut crc) = (0u64, 0u32);
+    loop {
+        let n = input.read(&mut buf).map_err(|e| Error::io("read", source, e))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buf[..n]).map_err(|e| Error::io("write", target, e))?;
+        crc = crc32c::crc32c_append(crc, &buf[..n]);
+        len += n as u64;
+    }
+    file.sync().map_err(|e| Error::io("fsync", target, e))?;
+    Ok((len, crc))
 }

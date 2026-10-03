@@ -1,12 +1,12 @@
 //! [`Namespace`]: a graph with its catalog and commit position, changed
 //! only through the commit pipeline.
 
-use ironweaver_core::{GraphError, Key, NodeIx};
+use ironweaver_core::{GraphError, NodeIx, Op};
 
 use crate::catalog::{AttrPath, ConstraintKind, NamespaceCatalog, NamespaceName};
-use crate::idempotency::{fingerprint_catalog, fingerprint_data, IdempotencyKey, KeyEntry, KeyTable, Keyed};
+use crate::idempotency::{IdempotencyKey, KeyEntry, KeyTable, Keyed, fingerprint_catalog, fingerprint_data};
 use crate::mutation::{CatalogChange, Change, CommitRecord, CommitResult, Mutation};
-use crate::{codec, resolve, CommitTime, DbGraph, Error};
+use crate::{CommitTime, DbGraph, DbRecord, Error, codec, resolve};
 
 /// One namespace in memory: its graph, its catalog, the `seq` of its last
 /// commit and the table of its recent idempotency keys.
@@ -24,15 +24,14 @@ use crate::{codec, resolve, CommitTime, DbGraph, Error};
 ///    namespace's.
 ///
 /// [`commit`](Self::commit) does both. With an idempotency key
-/// ([`prepare_keyed`](Self::prepare_keyed), step 8), preparing first looks
+/// ([`prepare_keyed`](Self::prepare_keyed)), preparing first looks
 /// the key up in the [`KeyTable`]: a known key with the same request gives
 /// the original result ([`Prepare::Duplicate`]) and nothing is applied; a
 /// known key with another request is [`Error::IdempotencyKeyReused`].
 /// Applying a keyed record adds it to the table, so replay rebuilds it.
 ///
-/// The write-ahead log (step 4) goes
-/// between the two: the record is logged after it is validated and before
-/// it is applied. A commit that fails to prepare changes nothing and uses
+/// The write-ahead log goes between the two: the record is logged after it
+/// is validated and before it is applied. A commit that fails to prepare changes nothing and uses
 /// no `seq`.
 ///
 /// Guarantees: a commit is all or nothing; it sees and checks the state
@@ -41,7 +40,7 @@ use crate::{codec, resolve, CommitTime, DbGraph, Error};
 /// gives the same graph (as compared by
 /// [`canonical`](crate::testutil::canonical)), catalog and `seq`. Not
 /// thread-safe by itself (`&mut self`); `iwdb_storage::LoggedNamespace` adds
-/// the locks (step 8).
+/// the locks.
 ///
 /// If applying a validated record fails (a bug, or `GraphError::Internal`
 /// from the core, after which the graph may be inconsistent), the
@@ -65,32 +64,31 @@ pub struct Namespace {
     poisoned: bool,
 }
 
-/// The keys of an index being built off the write lock (step 9, ADR 0019):
-/// for each node the scan saw, its index key and its version at the time.
-/// [`Namespace::apply_built`] installs it, checking each node's version
-/// again; nodes that changed or appeared meanwhile are re-read then.
+/// An index being built off the write lock (ADR 0019), the core's
+/// off-graph build (`ironweaver_core::IndexBuild`): begun on the graph with
+/// [`Namespace::begin_index_build`], filled with
+/// [`Namespace::scan_index_keys`] under the read lock, and installed by
+/// [`Namespace::apply_built`]. The graph tracks the nodes that change
+/// meanwhile, and the install marks them dirty for the flush that
+/// follows. Dropping a build cancels it.
 #[derive(Debug)]
 pub struct IndexBuild {
     path: AttrPath,
-    keys: Vec<(NodeIx, Option<Key>, u64)>,
+    build: ironweaver_core::IndexBuild,
 }
 
 impl IndexBuild {
-    pub fn new(path: AttrPath) -> Self {
-        IndexBuild { path, keys: Vec::new() }
-    }
-
     pub fn path(&self) -> &AttrPath {
         &self.path
     }
 
     /// Nodes scanned so far.
     pub fn len(&self) -> usize {
-        self.keys.len()
+        self.build.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.build.is_empty()
     }
 }
 
@@ -152,7 +150,7 @@ impl Namespace {
     /// invariant every namespace keeps. Commits and replay continue at
     /// `loaded.meta.seq + 1`.
     ///
-    /// Recovery (step 5) and the checkpointer build their namespace this
+    /// Recovery and the checkpointer build their namespace this
     /// way; [`new`](Self::new) only makes an empty one.
     pub fn from_loaded(loaded: codec::Loaded) -> Self {
         let codec::Loaded { graph, meta, index_changes: _ } = loaded;
@@ -196,7 +194,7 @@ impl Namespace {
         self.seq
     }
 
-    /// The recent keyed commits (step 8).
+    /// The recent keyed commits.
     pub fn keys(&self) -> &KeyTable {
         &self.keys
     }
@@ -207,16 +205,19 @@ impl Namespace {
         self.graph.node_indices().collect()
     }
 
+    /// Begin an online build of the index on `path` ([`IndexBuild`]): O(1),
+    /// but takes `&mut self`, so the write lock for an instant. Fails if
+    /// the path can't be indexed or is indexed already.
+    pub fn begin_index_build(&mut self, path: AttrPath) -> Result<IndexBuild, Error> {
+        let build = self.graph.begin_index_build(path.keys())?;
+        Ok(IndexBuild { path, build })
+    }
+
     /// Read the index keys of the nodes `handles` (handles that are stale
-    /// by now are skipped) into `build`. Reads only: run it under the read
-    /// lock, a chunk at a time.
+    /// by now are skipped) into `build`, begun on this namespace. Reads
+    /// only: run it under the read lock, a chunk at a time.
     pub fn scan_index_keys(&self, handles: &[NodeIx], build: &mut IndexBuild) -> Result<(), Error> {
-        use ironweaver_core::Attributes;
-        for &ix in handles {
-            let Some(node) = self.graph.node(ix) else { continue };
-            let key = node.data.with_value(build.path.keys(), |v| v.and_then(Key::of))?;
-            build.keys.push((ix, key, node.data.version));
-        }
+        build.build.read::<_, _, GraphError>(&self.graph, handles.iter().copied())?;
         Ok(())
     }
 
@@ -354,12 +355,13 @@ impl Namespace {
         self.apply_built(prepared, time, None)
     }
 
-    /// [`apply`](Self::apply) a catalog change with the keys of its index
-    /// already read ([`scan_index_keys`](Self::scan_index_keys)): the index
-    /// is created from them, minus every node whose version changed or
-    /// that is gone, and the nodes the scan didn't see are indexed by the
-    /// flush that follows. So the write lock is held for the insertion of
-    /// the keys, not for reading every node's payload.
+    /// [`apply`](Self::apply) a catalog change with its index already
+    /// built ([`begin_index_build`](Self::begin_index_build),
+    /// [`scan_index_keys`](Self::scan_index_keys)): the build is installed
+    /// in O(nodes changed since it began), and the flush that follows the
+    /// apply re-reads those nodes and any the scan didn't see. So the write
+    /// lock is held for the changes made during the build, not for the
+    /// whole index.
     pub fn apply_built(
         &mut self,
         prepared: Prepared,
@@ -367,19 +369,14 @@ impl Namespace {
         build: Option<IndexBuild>,
     ) -> Result<CommitResult, Error> {
         let Prepared { record, result } = prepared;
-        if let Some(build) = build {
-            if !self.poisoned && record.seq == self.seq.wrapping_add(1) && !self.graph.has_index(build.path.keys()) {
-                let graph = &self.graph;
-                let fresh: Vec<_> = build
-                    .keys
-                    .into_iter()
-                    .filter(|(ix, _, version)| graph.node(*ix).is_some_and(|n| n.data.version == *version))
-                    .map(|(ix, key, _)| (ix, key))
-                    .collect();
-                // An error leaves the graph without the index; the apply
-                // below then builds it the plain way
-                let _ = self.graph.create_index_with_keys(build.path.keys(), fresh);
-            }
+        if let Some(IndexBuild { build, .. }) = build
+            && !self.poisoned
+            && record.seq == self.seq.wrapping_add(1)
+        {
+            // An error (a build from another graph) or false (indexed
+            // meanwhile) leaves the graph as it was; the apply below
+            // then builds the index the plain way if it is missing
+            let _ = self.graph.install_index(build);
         }
         self.apply_record(record, time)?;
         Ok(CommitResult { time, ..result })
@@ -412,10 +409,7 @@ impl Namespace {
             return Err(Error::OutOfOrder { expected, found: record.seq });
         }
         let outcome = match record.change {
-            Change::Data(ops) => match self.graph.apply_all(ops) {
-                Ok(_) => self.graph.flush_indexes(),
-                Err((_, error)) => Err(error),
-            },
+            Change::Data(ops) => self.apply_ops(ops),
             Change::Catalog(change) => {
                 match change {
                     CatalogChange::CreateIndex(index) => self.catalog.add_index(index),
@@ -435,6 +429,22 @@ impl Namespace {
             self.keys.insert(KeyEntry { key, fingerprint, result });
         }
         Ok(())
+    }
+
+    /// Apply a data record's ops, all or nothing (the core's `apply_all`),
+    /// and bring the indexes up to date.
+    fn apply_ops(&mut self, ops: Vec<Op<DbRecord, DbRecord>>) -> Result<(), GraphError> {
+        #[cfg(feature = "failpoints")]
+        if let Some(error) = crate::failpoint::take() {
+            if matches!(error, GraphError::Internal(_)) {
+                let _ = self.graph.apply_all(ops);
+            }
+            return Err(error);
+        }
+        match self.graph.apply_all(ops) {
+            Ok(_) => self.graph.flush_indexes(),
+            Err((_, error)) => Err(error),
+        }
     }
 
     /// Advance `seq`, or poison the namespace if applying failed.

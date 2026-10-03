@@ -1,4 +1,4 @@
-//! Step 3 acceptance: random histories of transactions and catalog changes
+//! Random histories of transactions and catalog changes
 //! (many of them failing) against a simple reference model, and the replay
 //! property the WAL relies on: the records of the successful commits,
 //! replayed onto an empty namespace, give the same state.
@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ironweaver_core::{Attributes, Attrs, EdgeId, Key, Op, Value};
 use iwdb_engine::catalog::{Constraint, ConstraintKind, NamespaceCatalog, NamespaceName};
-use iwdb_engine::testutil::canonical;
+use iwdb_engine::testutil::{canonical, state};
 use iwdb_engine::{
     CatalogChange, Change, CommitRecord, CommitResult, DbGraph, DbRecord, EdgeKey, Error, Mutation, Namespace,
     Prepared, Target,
@@ -17,7 +17,7 @@ use iwdb_engine::{
 use proptest::collection::vec;
 use proptest::prelude::*;
 
-use iwdb_engine::testutil::workload::{seed, step, Step};
+use iwdb_engine::testutil::workload::{Step, seed, step};
 
 // The reference model: plain maps, whole-state copies, checks written
 // independently of the engine's overlay.
@@ -376,11 +376,6 @@ fn index_paths(g: &DbGraph) -> BTreeSet<Vec<String>> {
 
 fn catalog_paths(c: &NamespaceCatalog) -> BTreeSet<Vec<String>> {
     c.index_paths().into_iter().map(|p| p.keys().to_vec()).collect()
-}
-
-/// The namespace's observable state.
-fn state(ns: &Namespace) -> (Vec<String>, NamespaceCatalog, u64) {
-    (canonical(ns.graph()), ns.catalog().clone(), ns.seq())
 }
 
 proptest! {

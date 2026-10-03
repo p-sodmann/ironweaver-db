@@ -1,4 +1,4 @@
-//! The catalog scenario (step 9, ADR 0017): kill -9 a store while it
+//! The catalog scenario (ADR 0017): kill -9 a store while it
 //! creates and drops namespaces, commits into several of them (data,
 //! indexes and constraints) and checkpoints them, then check that what
 //! recovery returns is a state the acts could have produced.
@@ -26,16 +26,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use iwdb::{CommitOptions, Error, IdempotencyKey, Namespace, Store};
+use iwdb_engine::Prepare;
 use iwdb_engine::catalog::NamespaceName;
 use iwdb_engine::testutil::workload::{Step, Stream};
-use iwdb_engine::Prepare;
 use iwdb_storage::failpoint::{Action, Call, Rule, When};
 
 use crate::child::{fail, fail_fs, say, wait_for_kill};
-use crate::harness::{ChildProcess, Plan, CHILD_TIMEOUT};
+use crate::harness::{CHILD_TIMEOUT, ChildProcess, Plan};
 use crate::model::{self, State};
 use crate::rng::Rng;
-use crate::script::{check_options, child_options, Policy};
+use crate::script::{Policy, check_options, child_options};
 
 /// The namespace names the script picks from (`default` can't be dropped,
 /// which the script tries now and then).
@@ -471,7 +471,13 @@ impl std::fmt::Display for CatalogSummary {
         writeln!(
             f,
             "    {} acts acknowledged: {} namespaces created, {} dropped, {} commits; {} keyed acts answered from their key, {} in-flight acts found complete; up to {} namespaces at once",
-            self.acks, self.creates, self.drops, self.commits, self.deduplicated, self.in_flight_found, self.max_namespaces
+            self.acks,
+            self.creates,
+            self.drops,
+            self.commits,
+            self.deduplicated,
+            self.in_flight_found,
+            self.max_namespaces
         )?;
         write!(f, "    failpoints reached:")?;
         for (rule, n) in &self.reached {

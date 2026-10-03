@@ -54,7 +54,7 @@ Catalog scenario in all (six runs): 1998 cycles, 644 recoveries by the parent ch
 
 **Short run** (as CI, `--policy all --cycles 150`): 450 cycles plus 150 catalog cycles; `always` 58 s, `group` 55 s, `off` 41 s. (One run showed 735 s of wall time with the same cycle times; the machine was busy with other jobs and a stuck background process, not reproduced.)
 
-**Online index build** (ADR 0019, `latency.rs`, 500 000 nodes, release): plain build in one lock hold 183 ms; online: build 156 ms, longest commit stall 105 ms (about 40 % shorter); unique constraint: 406 ms, stall 345 ms.
+**Online index build** (ADR 0019, `latency.rs`, 500 000 nodes, release): plain build in one lock hold 183 ms; online: build 156 ms, longest commit stall 105 ms (about 40 % shorter); unique constraint: 406 ms, stall 345 ms. *(Superseded after the `3b15149` core bump: longest commit stall about 5 ms. The 105 ms was mostly writer starvation during the scan; see the update in ADR 0019.)*
 
 **`cargo test --workspace`**: **151 s of test time** (108 s in step 8; the target was about 110 s and this misses it), 245 s of wall time with the build. The growth is new coverage: `namespaces.rs` 13.6 s (every file operation of create, drop and the upgrade failing, in parallel threads, 28 s of CPU), `namespace_points.rs` 19 s (kills at namespace operations and in the upgrade), `crash_points.rs` 28 s, `model.rs` 11 s, `backup.rs` 10 s, `faults.rs` 10 s. Also clean: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo deny check`, the build with Rust 1.85 (`--locked`).
 

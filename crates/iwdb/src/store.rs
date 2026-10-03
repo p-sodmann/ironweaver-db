@@ -1,114 +1,39 @@
 //! [`Store`]: the embedded, durable store, with its namespaces.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::thread::JoinHandle;
 
-use ironweaver_core::cancel::{self, Token};
-use ironweaver_core::pathfinding::EdgeCost;
-use ironweaver_core::{Attrs, Direction, EdgeId, GraphError, Projection};
-use iwdb_engine::catalog::{AttrPath, NamespaceCatalog, NamespaceName};
-use iwdb_engine::{CatalogChange, CommitResult, CommitTime, IdempotencyKey, Mutation, Namespace};
+use ironweaver_core::{EdgeId, GraphError, Projection};
+use iwdb_engine::catalog::{NamespaceCatalog, NamespaceName};
+use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation, Namespace};
+use iwdb_query::{CommitOptions, Edge, NamespaceStatus, Node, ProjectionSpec};
 use iwdb_storage::archive::{Archive, ArchiveHandle};
 use iwdb_storage::backup::{self, NamespaceSource};
 use iwdb_storage::io::{LogFs, StdFs};
-use iwdb_storage::layout::{create_ns_dir, remove_ns_dir, DataDir, NsPaths};
-use iwdb_storage::namespaces::{EventKind, NamespaceInfo, NamespaceLog, NamespaceResult, Plan, DEFAULT_NAME};
+use iwdb_storage::layout::{DataDir, NsPaths, create_ns_dir, remove_ns_dir};
+use iwdb_storage::namespaces::{DEFAULT_NAME, EventKind, NamespaceInfo, NamespaceLog, NamespaceResult, Plan};
 use iwdb_storage::{
-    read_namespace, recover, start_namespace, BackupReport, CheckpointOutcome, Checkpointer, Error, FsyncPolicy,
-    HistoryId, LockStats, LoggedNamespace, Recovered, RecoveryReport, StoreRecovery, Wait,
+    BackupReport, CheckpointOutcome, Checkpointer, Error, FsyncPolicy, HistoryId, LockStats, LoggedNamespace,
+    Recovered, RecoveryReport, StoreRecovery, read_namespace, recover, start_namespace,
 };
 
-use crate::request::{Deadline, ReadOptions, Timer};
 use crate::StoreOptions;
+use crate::request::{ReadOptions, Timer};
+
+mod background;
+mod ns;
+
+use background::{checkpoint_loop, or_abort, run_checkpoint, spawn, sync_loop};
+pub use ns::Ns;
 
 /// The name of the namespace every store has. It is created with the store
 /// (or by the first open of a store restored without it), and can't be
 /// dropped: the store's shorthand methods ([`Store::commit`], ...) act on
 /// it.
 pub const NAMESPACE: &str = DEFAULT_NAME;
-
-/// A node, as read from the store.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Node {
-    pub id: String,
-    /// Sorted by name.
-    pub labels: Vec<String>,
-    pub attr: Attrs,
-    /// User meta (without the database's `iwdb.*` keys).
-    pub meta: Attrs,
-    pub version: u64,
-}
-
-/// An edge, as read from the store.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Edge {
-    pub id: EdgeId,
-    pub from: String,
-    pub to: String,
-    pub ty: Option<String>,
-    pub attr: Attrs,
-    pub meta: Attrs,
-    pub version: u64,
-}
-
-/// The state of an index ([`IndexStatus`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum IndexState {
-    /// Built and kept up to date by every commit.
-    Ready,
-    /// An online build is reading the nodes (ADR 0019); the index isn't in
-    /// the catalog yet.
-    Building { scanned: usize, total: usize },
-}
-
-/// One index of a namespace.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IndexStatus {
-    pub path: AttrPath,
-    pub state: IndexState,
-    /// Declared with `CreateIndex`.
-    pub declared: bool,
-    /// Needed by a unique constraint.
-    pub unique: bool,
-}
-
-/// What an open namespace reports about itself ([`Ns::status`]).
-#[derive(Clone, Debug, PartialEq)]
-pub struct NamespaceStatus {
-    pub id: u64,
-    pub name: String,
-    /// When the namespace was created (0 for one that predates layout 4).
-    pub created: CommitTime,
-    /// The seq of the last applied commit.
-    pub seq: u64,
-    /// The highest seq known to be durable; `None` under
-    /// [`FsyncPolicy::Off`] until an explicit sync.
-    pub synced_seq: Option<u64>,
-    /// The newest checkpoint's seq.
-    pub checkpoint: Option<u64>,
-    /// Why the namespace is read-only, if it is.
-    pub read_only: Option<String>,
-    /// The last checkpoint error, if the last checkpoint failed.
-    pub checkpoint_failure: Option<String>,
-    pub nodes: usize,
-    pub edges: usize,
-    /// Approximate bytes the graph uses, indexes included (the core's
-    /// `Graph::memory_usage`: O(1)). The core has no per-index figure
-    /// (upstream issue, `documentation/upstream-issues.md`).
-    pub memory_bytes: usize,
-    /// Declared indexes and those unique constraints need, and builds in
-    /// progress, sorted by path.
-    pub indexes: Vec<IndexStatus>,
-    pub constraints: usize,
-    /// What recovery did to this namespace when the store opened (for a
-    /// namespace created since: nothing).
-    pub recovery: RecoveryReport,
-}
 
 /// What an open store reports about itself ([`Store::status`]).
 ///
@@ -139,34 +64,6 @@ pub struct StoreStatus {
     pub recovery: StoreRecovery,
     /// Every namespace, by name.
     pub namespaces: Vec<NamespaceStatus>,
-}
-
-/// Options of a commit ([`Store::commit_with`]).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CommitOptions {
-    /// Commit at most once under this key (ADR 0015): if the store has a
-    /// commit with this key and the same request, it returns that commit's
-    /// result (with [`CommitResult::deduplicated`] set) and commits
-    /// nothing; with another request, it fails with
-    /// `IdempotencyKeyReused`. The store remembers the last
-    /// [`KEY_TABLE_CAPACITY`](iwdb_engine::idempotency::KEY_TABLE_CAPACITY)
-    /// keyed commits, across restarts, checkpoints, backups and restores.
-    pub idempotency_key: Option<IdempotencyKey>,
-}
-
-/// What a projection holds ([`Store::analyze`]): every node, and the edges
-/// followed in `direction`, weighted by `cost`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ProjectionSpec {
-    pub direction: Direction,
-    pub cost: EdgeCost,
-}
-
-impl Default for ProjectionSpec {
-    /// Outgoing edges, unweighted.
-    fn default() -> Self {
-        ProjectionSpec { direction: Direction::Out, cost: EdgeCost::Unit }
-    }
 }
 
 /// The result of an analytics job, and the seq of the state it ran on.
@@ -241,7 +138,7 @@ impl<F: LogFs> Shared<F> {
 /// An embedded Ironweaver DB store: namespaces, each a graph with its own
 /// WAL and checkpoints, in a data directory.
 ///
-/// **Namespaces** (step 9, ADR 0017). A store has named namespaces
+/// **Namespaces** (ADR 0017). A store has named namespaces
 /// ([`create_namespace`](Self::create_namespace),
 /// [`drop_namespace`](Self::drop_namespace),
 /// [`namespaces`](Self::namespaces), [`namespace`](Self::namespace) for a
@@ -278,7 +175,7 @@ impl<F: LogFs> Shared<F> {
 /// **A panic while the store changes a namespace or its WAL** (a commit,
 /// an fsync, the group commit timer) **aborts the process** (ADR 0008).
 ///
-/// **Threads** (step 8, ADR 0014). Reads and commits take `&self`; share
+/// **Threads** (ADR 0014). Reads and commits take `&self`; share
 /// the store between threads. Lock order: the namespace log (create, drop,
 /// backup), then a namespace's checkpointer, then its writer (WAL), then
 /// its namespace lock; nothing takes two namespaces' locks except a
@@ -376,11 +273,11 @@ where
             let shared = shared.clone();
             threads.push(spawn("iwdb-checkpoint", move || checkpoint_loop(&shared))?);
         }
-        if let FsyncPolicy::Group { max_delay, .. } = shared.options.wal.fsync {
-            if !max_delay.is_zero() {
-                let shared = shared.clone();
-                threads.push(spawn("iwdb-sync", move || sync_loop(&shared, max_delay))?);
-            }
+        if let FsyncPolicy::Group { max_delay, .. } = shared.options.wal.fsync
+            && !max_delay.is_zero()
+        {
+            let shared = shared.clone();
+            threads.push(spawn("iwdb-sync", move || sync_loop(&shared, max_delay))?);
         }
         let store = Store { shared, threads, timer: Timer::default(), report, dir };
         {
@@ -435,7 +332,7 @@ where
     /// (the log is never truncated).
     ///
     /// Errors: [`Error::NamespaceExists`]; an invalid name or key
-    /// ([`Error::Engine`]); [`Error::IdempotencyKeyReused`] (as
+    /// ([`Error::Engine`]); [`IdempotencyKeyReused`](iwdb_engine::Error::IdempotencyKeyReused) (as
     /// [`Error::Engine`]); [`Error::ReadOnly`] (the namespace log failed);
     /// [`Error::Io`] (nothing is created, or the outcome is unknown: the
     /// namespace log is failed until reopening).
@@ -568,10 +465,10 @@ where
     /// is logged, not returned: the next namespace operation or open
     /// retries, and restores only reach as far as the copy.
     fn sync_archive_log(&self, catalog: &CatalogState<F>) {
-        if let Some(archive) = &catalog.archive {
-            if let Err(e) = archive.write_log(catalog.log.table().events()) {
-                log::warn!("{}: the archive's namespace log is stale: {}", self.shared.root.display(), e);
-            }
+        if let Some(archive) = &catalog.archive
+            && let Err(e) = archive.write_log(catalog.log.table().events())
+        {
+            log::warn!("{}: the archive's namespace log is stale: {}", self.shared.root.display(), e);
         }
     }
 
@@ -868,563 +765,6 @@ fn new_state<F: LogFs + Clone>(
         size_trigger: AtomicU64::new(size_trigger),
         checkpoint_error: Mutex::new(None),
         recovery,
-    }
-}
-
-/// A handle on one namespace of a [`Store`]: its commits, reads, catalog
-/// and checkpoints. Cheap to make; holds the store borrowed, so it can't
-/// outlive it. If the namespace is dropped, its methods fail with
-/// [`Error::NamespaceDropped`] (commits and waits) or finish on the state
-/// they had (reads).
-pub struct Ns<'a, F: LogFs + Send + Sync + 'static>
-where
-    F::File: Send,
-{
-    store: &'a Store<F>,
-    state: Arc<NsState<F>>,
-}
-
-impl<F: LogFs + Clone + Send + Sync + 'static> Ns<'_, F>
-where
-    F::File: Send,
-{
-    pub fn name(&self) -> &str {
-        self.state.info.name.as_str()
-    }
-
-    pub fn id(&self) -> u64 {
-        self.state.info.id
-    }
-
-    fn live(&self) -> &LoggedNamespace<F> {
-        &self.state.live
-    }
-
-    /// Commit a data transaction: all mutations or none, validated against
-    /// the state after all of them. Returns once the commit is logged,
-    /// fsynced per the policy, and applied: then it is visible to reads
-    /// and, with `always`, durable.
-    ///
-    /// Errors: an [`Error::Engine`] for an invalid or conflicting
-    /// transaction (nothing changes, the namespace stays writable);
-    /// [`Error::RecordTooLarge`] (likewise); [`Error::Io`] when the WAL
-    /// fails (not applied, outcome unknown, the namespace is read-only
-    /// now); [`Error::ReadOnly`]; [`Error::NamespaceDropped`].
-    ///
-    /// The result has the commit's seq, edge ids, versions and commit
-    /// time (the WAL's clock, ADR 0010). A panic inside the commit aborts
-    /// the process (see the [`Store`] docs).
-    pub fn commit(&self, mutations: &[Mutation]) -> Result<CommitResult, Error> {
-        self.commit_with(mutations, &CommitOptions::default())
-    }
-
-    /// [`commit`](Self::commit) with options: an idempotency key (see
-    /// [`CommitOptions`]). A retry after an unknown outcome (an `Io`
-    /// error, a timeout, a crash) with the same key applies at most once:
-    /// it returns the original result if the first attempt was applied
-    /// (also if it was recovered from the log after a restart), and
-    /// commits now if it wasn't. Keys are per namespace (ADR 0018).
-    pub fn commit_with(&self, mutations: &[Mutation], options: &CommitOptions) -> Result<CommitResult, Error> {
-        let key = options.idempotency_key.as_ref();
-        self.write(|live| live.commit_keyed(mutations, key))
-    }
-
-    /// Commit a catalog change (an index or a constraint), like
-    /// [`commit`](Self::commit). An index the graph lacks is built online
-    /// (ADR 0019): the nodes are read a chunk at a time under the read lock,
-    /// without the writer's mutex, and only the insertion of the keys and
-    /// the log append happen under it. Adding a constraint validates the
-    /// existing data first, under the writer's mutex (reads go on).
-    pub fn commit_catalog(&self, change: CatalogChange) -> Result<CommitResult, Error> {
-        self.commit_catalog_with(change, &CommitOptions::default())
-    }
-
-    /// [`commit_catalog`](Self::commit_catalog) with options, like
-    /// [`commit_with`](Self::commit_with).
-    pub fn commit_catalog_with(&self, change: CatalogChange, options: &CommitOptions) -> Result<CommitResult, Error> {
-        let key = options.idempotency_key.as_ref();
-        self.write(|live| live.commit_catalog_keyed(change, key))
-    }
-
-    /// Fsync every commit so far, whatever the policy. On error the
-    /// namespace is read-only.
-    pub fn sync(&self) -> Result<(), Error> {
-        or_abort("an fsync of the WAL", || self.live().sync())
-    }
-
-    /// The node `id`, if it exists.
-    pub fn node(&self, id: &str) -> Option<Node> {
-        self.read(|ns| {
-            let g = ns.graph();
-            let ix = g.node_ix(id)?;
-            let node = g.node(ix)?;
-            let mut labels: Vec<String> = g.label_names(ix)?.into_iter().map(str::to_owned).collect();
-            labels.sort_unstable();
-            let data = &node.data;
-            Some(Node {
-                id: node.id().to_owned(),
-                labels,
-                attr: data.attr.clone(),
-                meta: data.meta.clone(),
-                version: data.version,
-            })
-        })
-    }
-
-    /// The edge `id`, if it exists.
-    pub fn edge(&self, id: EdgeId) -> Option<Edge> {
-        self.read(|ns| {
-            let g = ns.graph();
-            let ix = g.edge_ix(id)?;
-            let edge = g.edge(ix)?;
-            let data = &edge.data;
-            Some(Edge {
-                id,
-                from: g.node(edge.source())?.id().to_owned(),
-                to: g.node(edge.target())?.id().to_owned(),
-                ty: g.edge_type_name(ix).map(str::to_owned),
-                attr: data.attr.clone(),
-                meta: data.meta.clone(),
-                version: data.version,
-            })
-        })
-    }
-
-    /// The namespace's catalog.
-    pub fn catalog(&self) -> NamespaceCatalog {
-        self.read(|ns| ns.catalog().clone())
-    }
-
-    /// The seq of the last applied commit (0: none). Doesn't wait.
-    pub fn seq(&self) -> u64 {
-        self.live().seq()
-    }
-
-    /// The highest seq known to be durable in the WAL: every commit up to
-    /// it survives an OS crash. Equal to [`seq`](Self::seq) with `always`;
-    /// may lag behind it with `group` and `off`. Waits for a commit's
-    /// fsync in progress.
-    pub fn synced_seq(&self) -> u64 {
-        self.live().wal().synced_seq()
-    }
-
-    /// Read the namespace directly, under its read lock: `f` sees the state
-    /// after some commit, never part of one. Other reads run meanwhile;
-    /// commits wait to apply until `f` returns, so keep it short and run
-    /// long jobs with [`analyze`](Self::analyze).
-    pub fn read<R>(&self, f: impl FnOnce(&Namespace) -> R) -> R {
-        self.live().read(f)
-    }
-
-    /// [`read`](Self::read) with options: first wait until `min_seq` is
-    /// applied (read-your-writes), at most until the deadline. Errors:
-    /// [`Error::OtherHistory`], [`Error::Timeout`], [`Error::Cancelled`],
-    /// [`Error::ReadOnly`], [`Error::NamespaceDropped`].
-    pub fn read_with<R>(&self, options: &ReadOptions, f: impl FnOnce(&Namespace) -> R) -> Result<R, Error> {
-        self.wait(options, &options.deadline())?;
-        Ok(self.read(f))
-    }
-
-    /// Wait until commit `seq` is applied, at most until the deadline of
-    /// `options` (its `min_seq` is ignored); returns the namespace's seq
-    /// then. Returns at once if `seq` is applied already.
-    pub fn wait_for_seq(&self, seq: u64, options: &ReadOptions) -> Result<u64, Error> {
-        let options = ReadOptions { min_seq: Some(seq), ..options.clone() };
-        self.wait(&options, &options.deadline())
-    }
-
-    /// Run an analytics job on a [`Projection`] of the graph (ADR 0014):
-    /// the projection is collected under a short read lock (O(n + m)), then
-    /// sorted and `job` runs without any lock, so commits and reads go on
-    /// meanwhile. `job` runs on this thread under a cancel token
-    /// ([`cancel::run`]), which the store's timer cancels at the deadline
-    /// of `options` and the caller may cancel through `options.cancel`;
-    /// the core's algorithms check it and stop. Waits for `min_seq` first.
-    ///
-    /// Errors: those of [`read_with`](Self::read_with); [`Error::Timeout`]
-    /// or [`Error::Cancelled`] if the job was stopped; a projection error
-    /// (`GraphError`, for example a negative weight) or the job's own.
-    pub fn analyze<R>(
-        &self,
-        spec: &ProjectionSpec,
-        options: &ReadOptions,
-        job: impl FnOnce(&Projection) -> Result<R, GraphError>,
-    ) -> Result<Analysis<R>, Error> {
-        let deadline = options.deadline();
-        self.wait(options, &deadline)?;
-        let token = options.cancel.clone().unwrap_or_default();
-        let _scheduled = match deadline.at {
-            Some(at) => Some(self.store.timer.schedule(at, token.clone())?),
-            None => None,
-        };
-        let (raw, seq) = self.read(|ns| {
-            let raw = Projection::collect::<_, _, GraphError>(
-                ns.graph(),
-                spec.direction,
-                &spec.cost,
-                |_, _| Ok(true),
-                |_, _| Ok(true),
-            );
-            (raw, ns.seq())
-        });
-        let raw = raw.map_err(iwdb_engine::Error::from)?;
-        let outcome = cancel::run(&token, || {
-            let projection = raw.finish();
-            job(&projection)
-        });
-        match outcome {
-            Ok(Ok(value)) => Ok(Analysis { seq, value }),
-            Ok(Err(GraphError::Interrupted)) | Err(GraphError::Interrupted) => {
-                Err(stopped(&deadline, options.cancel.as_ref()))
-            }
-            Ok(Err(e)) | Err(e) => Err(iwdb_engine::Error::from(e).into()),
-        }
-    }
-
-    /// How long commits held the namespace's write lock (apply and index
-    /// flush) since the store opened.
-    pub fn lock_stats(&self) -> LockStats {
-        self.live().lock_stats()
-    }
-
-    /// Why the namespace is read-only, if it is: its WAL failed, or a
-    /// logged commit failed to apply. Reopen the store to recover.
-    pub fn read_only(&self) -> Option<String> {
-        self.live().read_only()
-    }
-
-    /// The last checkpoint error, if the last checkpoint failed (cleared by
-    /// the next successful one). Includes [`Error::CheckpointsDisabled`]
-    /// once checkpoints are disabled until reopening.
-    pub fn checkpoint_failure(&self) -> Option<String> {
-        lock(&self.state.checkpoint_error).clone()
-    }
-
-    /// The seq of the newest checkpoint, if any.
-    pub fn checkpoint_seq(&self) -> Option<u64> {
-        lock(&self.state.checkpointer).newest()
-    }
-
-    /// Fsync the WAL, then checkpoint every commit so far and cut the WAL.
-    /// Commits keep running meanwhile (they wait only for the fsync).
-    /// Writes nothing if the newest checkpoint is current.
-    ///
-    /// If the namespace is read-only, the synced part of the log is
-    /// checkpointed. Errors: a failed fsync (the namespace becomes
-    /// read-only); a failed checkpoint write (nothing is deleted, the
-    /// previous checkpoints are intact; the next checkpoint retries);
-    /// [`Error::CheckpointsDisabled`].
-    pub fn checkpoint(&self) -> Result<CheckpointOutcome, Error> {
-        let live = self.live();
-        if live.read_only().is_none() {
-            or_abort("an fsync of the WAL", || live.sync())?;
-        }
-        let (target, appended) = target(live, &self.store.shared.options);
-        run_checkpoint(&self.store.shared, &self.state, target, appended)
-    }
-
-    /// The namespace's state at a glance: counts, indexes, memory.
-    /// O(number of indexes) and a read lock for an instant.
-    pub fn status(&self) -> NamespaceStatus {
-        let fsync = self.store.shared.options.wal.fsync;
-        let synced = self.synced_seq();
-        let builds = self.live().builds();
-        let (nodes, edges, memory_bytes, catalog) = self.read(|ns| {
-            let g = ns.graph();
-            (g.node_count(), g.edge_count(), g.memory_usage(), ns.catalog().clone())
-        });
-        let mut indexes: BTreeMap<AttrPath, IndexStatus> = BTreeMap::new();
-        for index in catalog.indexes() {
-            indexes.insert(
-                index.path.clone(),
-                IndexStatus { path: index.path.clone(), state: IndexState::Ready, declared: true, unique: false },
-            );
-        }
-        for constraint in catalog.constraints() {
-            if constraint.kind == iwdb_engine::catalog::ConstraintKind::Unique {
-                indexes.entry(constraint.path.clone()).and_modify(|i| i.unique = true).or_insert(IndexStatus {
-                    path: constraint.path.clone(),
-                    state: IndexState::Ready,
-                    declared: false,
-                    unique: true,
-                });
-            }
-        }
-        for build in builds {
-            indexes.entry(build.path.clone()).or_insert(IndexStatus {
-                path: build.path.clone(),
-                state: IndexState::Building { scanned: build.scanned(), total: build.total },
-                declared: true,
-                unique: false,
-            });
-        }
-        NamespaceStatus {
-            id: self.state.info.id,
-            name: self.name().to_owned(),
-            created: self.state.info.created,
-            seq: self.seq(),
-            synced_seq: (fsync != FsyncPolicy::Off || synced > 0).then_some(synced),
-            checkpoint: self.checkpoint_seq(),
-            read_only: self.read_only(),
-            checkpoint_failure: self.checkpoint_failure(),
-            nodes,
-            edges,
-            memory_bytes,
-            indexes: indexes.into_values().collect(),
-            constraints: catalog.constraints().count(),
-            recovery: self.state.recovery.clone(),
-        }
-    }
-
-    /// The number of nodes with a value the index on `path` holds: an O(n)
-    /// scan under the read lock (the core exposes no per-index count,
-    /// upstream issue). `None` if the graph has no index on `path`.
-    pub fn index_entries(&self, path: &AttrPath) -> Option<usize> {
-        use ironweaver_core::Attributes;
-        self.read(|ns| {
-            let g = ns.graph();
-            if !g.has_index(path.keys()) {
-                return None;
-            }
-            Some(
-                g.nodes()
-                    .filter(|(_, n)| {
-                        n.data
-                            .with_value(path.keys(), |v| v.and_then(ironweaver_core::Key::of))
-                            .ok()
-                            .flatten()
-                            .is_some()
-                    })
-                    .count(),
-            )
-        })
-    }
-
-    fn write(
-        &self,
-        commit: impl FnOnce(&LoggedNamespace<F>) -> Result<CommitResult, Error>,
-    ) -> Result<CommitResult, Error> {
-        let live = self.live();
-        let result = or_abort("a commit", || commit(live))?;
-        let shared = &self.store.shared;
-        let trigger = self.state.size_trigger.load(Ordering::Relaxed);
-        if !result.deduplicated && live.wal().appended_bytes() >= trigger {
-            lock(&shared.signal).checkpoint.insert(self.state.info.id);
-            shared.wake.notify_all();
-        }
-        Ok(result)
-    }
-
-    /// Check `options.history` and wait for `options.min_seq` until the
-    /// deadline. Returns the seq reached.
-    fn wait(&self, options: &ReadOptions, deadline: &Deadline) -> Result<u64, Error> {
-        let history = self.store.history();
-        if let Some(given) = options.history.filter(|h| *h != history) {
-            return Err(Error::OtherHistory { given, store: history });
-        }
-        let Some(min_seq) = options.min_seq else { return Ok(self.seq()) };
-        let cancelled = || options.cancel.as_ref().is_some_and(Token::is_cancelled);
-        match self.live().wait_for_seq(min_seq, deadline.at, &cancelled) {
-            Wait::Reached(seq) => Ok(seq),
-            Wait::TimedOut(seq) => {
-                Err(deadline.timeout(&format!("waiting for seq {} (the namespace is at {})", min_seq, seq)))
-            }
-            Wait::Cancelled => Err(Error::Cancelled),
-            Wait::ReadOnly(cause) => Err(Error::ReadOnly { cause }),
-            Wait::Dropped => Err(Error::NamespaceDropped { name: self.name().to_owned() }),
-        }
-    }
-}
-
-/// Why a job stopped: its deadline passed, or the caller cancelled it.
-fn stopped(deadline: &Deadline, cancel: Option<&Token>) -> Error {
-    if deadline.passed() || !cancel.is_some_and(Token::is_cancelled) {
-        deadline.timeout("the analytics job")
-    } else {
-        Error::Cancelled
-    }
-}
-
-impl<F: LogFs + Send + Sync + 'static> Store<F>
-where
-    F::File: Send,
-{
-    /// Stop and join the background threads.
-    fn stop(&mut self) {
-        self.timer.stop();
-        lock(&self.shared.signal).shutdown = true;
-        self.shared.wake.notify_all();
-        for thread in self.threads.drain(..) {
-            // A panicked thread has nothing left to clean up
-            let _ = thread.join();
-        }
-    }
-}
-
-impl<F: LogFs + Send + Sync + 'static> Drop for Store<F>
-where
-    F::File: Send,
-{
-    /// Stops the background threads (waiting for a running checkpoint) and
-    /// releases the lock. Doesn't sync or checkpoint; see
-    /// [`close`](Store::close).
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-/// Run `f`, which changes the live namespace or its WAL, and abort the
-/// process if it panics (ADR 0008). After such a panic the namespace may
-/// hold part of a transaction, or the WAL writer's position may disagree
-/// with its file; only recovery from the checkpoint and the WAL restores a
-/// consistent state, so the panic is turned into a crash. The panic
-/// message has been printed by the panic hook already.
-fn or_abort<R>(what: &str, f: impl FnOnce() -> R) -> R {
-    match panic::catch_unwind(AssertUnwindSafe(f)) {
-        Ok(result) => result,
-        Err(payload) => {
-            let message = payload
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or("(no message)");
-            log::error!("{} panicked, aborting the process: {}", what, message);
-            eprintln!(
-                "iwdb: {} panicked ({}); aborting the process. The next open recovers every logged commit.",
-                what, message
-            );
-            std::process::abort()
-        }
-    }
-}
-
-fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<JoinHandle<()>, Error> {
-    thread::Builder::new().name(name.to_owned()).spawn(f).map_err(|e| Error::Io {
-        op: "spawn thread",
-        path: name.into(),
-        source: e,
-    })
-}
-
-/// The highest seq a checkpoint may cover: a synced one, so that no OS
-/// crash can leave a checkpoint newer than the log. With `off` nothing is
-/// ever synced, and the policy already accepts that an OS crash can make
-/// the store unrecoverable, so it is the last applied seq.
-/// Also returns the WAL's appended bytes, for the size trigger.
-fn target<F: LogFs>(live: &LoggedNamespace<F>, options: &StoreOptions) -> (u64, u64) {
-    // The seq first: the WAL may be ahead of it (appended, not applied yet)
-    let seq = live.seq();
-    let wal = live.wal();
-    let target = match options.wal.fsync {
-        FsyncPolicy::Off => seq,
-        _ => wal.synced_seq().min(seq),
-    };
-    (target, wal.appended_bytes())
-}
-
-/// Run the namespace's checkpointer to `target`; remember the outcome, and
-/// move the size trigger `wal_size` bytes past `appended` (also after a
-/// failure, so that a failing checkpoint isn't retried on every commit).
-fn run_checkpoint<F: LogFs>(
-    shared: &Shared<F>,
-    state: &NsState<F>,
-    target: u64,
-    appended: u64,
-) -> Result<CheckpointOutcome, Error> {
-    let result = lock(&state.checkpointer).run(target);
-    if let Some(size) = shared.options.checkpoint.wal_size {
-        state.size_trigger.store(appended.saturating_add(size), Ordering::Relaxed);
-    }
-    let mut last_error = lock(&state.checkpoint_error);
-    match &result {
-        Ok(outcome) => {
-            *last_error = None;
-            log::debug!("{}: checkpoint at seq {} ({:?})", state.info.name, outcome.seq, outcome);
-        }
-        Err(e) => {
-            let message = e.to_string();
-            if last_error.as_deref() != Some(message.as_str()) {
-                log::warn!("{}: checkpoint to seq {} failed: {}", state.info.name, target, message);
-            }
-            *last_error = Some(message);
-        }
-    }
-    result
-}
-
-/// The background checkpointer: waits for a size trigger or the interval,
-/// then checkpoints the synced part of the logs of the namespaces that
-/// triggered (all of them, at the interval).
-fn checkpoint_loop<F: LogFs>(shared: &Shared<F>) {
-    let interval = shared.options.checkpoint.interval;
-    let mut last = Instant::now();
-    loop {
-        let requested: Option<BTreeSet<u64>>;
-        {
-            let mut signal = lock(&shared.signal);
-            loop {
-                if signal.shutdown {
-                    return;
-                }
-                if !signal.checkpoint.is_empty() {
-                    requested = Some(std::mem::take(&mut signal.checkpoint));
-                    break;
-                }
-                match interval {
-                    Some(interval) if last.elapsed() >= interval => {
-                        requested = None;
-                        break;
-                    }
-                    Some(interval) => {
-                        let wait = interval.saturating_sub(last.elapsed());
-                        signal = shared.wake.wait_timeout(signal, wait).unwrap_or_else(PoisonError::into_inner).0;
-                    }
-                    None => signal = shared.wake.wait(signal).unwrap_or_else(PoisonError::into_inner),
-                }
-            }
-        }
-        if requested.is_none() {
-            last = Instant::now();
-        }
-        for state in shared.states() {
-            if requested.as_ref().is_some_and(|ids| !ids.contains(&state.info.id)) || state.live.is_dropped() {
-                continue;
-            }
-            let (target, appended) = target(&state.live, &shared.options);
-            // Errors are kept in `checkpoint_error` and logged
-            let _ = run_checkpoint(shared, &state, target, appended);
-        }
-    }
-}
-
-/// The group commit timer: every `period`, fsync the records that have
-/// waited `max_delay` (the period itself), in every namespace.
-fn sync_loop<F: LogFs>(shared: &Shared<F>, period: Duration) {
-    let period = period.max(Duration::from_millis(1));
-    loop {
-        {
-            let signal = lock(&shared.signal);
-            if signal.shutdown {
-                return;
-            }
-            let (signal, _) = shared.wake.wait_timeout(signal, period).unwrap_or_else(PoisonError::into_inner);
-            if signal.shutdown {
-                return;
-            }
-        }
-        for state in shared.states() {
-            let live = &state.live;
-            if live.read_only().is_some() || live.is_dropped() {
-                continue;
-            }
-            if let Err(e) = or_abort("the group commit fsync", || live.sync_due()) {
-                log::error!(
-                    "group commit fsync failed, namespace '{}' is read-only until reopened: {}",
-                    state.info.name,
-                    e
-                );
-            }
-        }
     }
 }
 

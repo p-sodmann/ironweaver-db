@@ -39,14 +39,11 @@ use serde::{Deserialize, Serialize};
 use crate::catalog::{Constraint, IndexDef};
 use crate::{CommitTime, DbRecord, Keyed};
 
-/// Deepest nesting of an attribute or meta value a mutation may carry (a
-/// scalar is depth 1), the core's [`MAX_DEPTH`](ironweaver_core::format::MAX_DEPTH).
-///
-/// The core encodes values with two depth counters that differ by one for
-/// empty containers: the file format accepts an empty list at depth 100,
-/// `Value`'s serde (which the log uses) doesn't. The commit pipeline
-/// therefore counts an empty list or dict as if it held a scalar, which
-/// keeps every accepted value within both limits.
+/// Deepest nesting of an attribute or meta value a mutation may carry, the
+/// core's [`MAX_DEPTH`](ironweaver_core::format::MAX_DEPTH): a value is
+/// depth 1 and a container's items are one deeper, so an empty list at
+/// depth 100 is fine. The file format and `Value`'s serde (which the log
+/// uses) count the same way since `3b15149` (upstream #31).
 pub const MAX_VALUE_DEPTH: usize = ironweaver_core::format::MAX_DEPTH;
 
 /// A node (by id) or an edge (by id).
@@ -201,7 +198,7 @@ pub enum Change {
     Catalog(CatalogChange),
 }
 
-/// One committed transaction, as the write-ahead log stores it (step 4):
+/// One committed transaction, as the write-ahead log stores it:
 /// its sequence number and its resolved change. Applying the records of a
 /// namespace in `seq` order to an empty namespace reproduces its state
 /// ([`Namespace::replay`](crate::Namespace::replay)). Serde (postcard in
@@ -235,10 +232,10 @@ pub struct CommitResult {
     /// after it, sorted (nodes by id, then edges by id). Empty for catalog
     /// changes.
     pub versions: Vec<(Target, u64)>,
-    /// When the WAL appended the commit (step 8; ADR 0010). `None` for a
+    /// When the WAL appended the commit (ADR 0010). `None` for a
     /// commit applied without a log, and for records of WAL format 1.
     pub time: Option<CommitTime>,
     /// True if this commit was not applied now: its idempotency key was
-    /// found, and this is the original commit's result (step 8, ADR 0015).
+    /// found, and this is the original commit's result (ADR 0015).
     pub deduplicated: bool,
 }

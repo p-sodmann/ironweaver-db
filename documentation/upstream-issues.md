@@ -1,8 +1,8 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7; all are filed (links in the table).
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`. Drafts 19–21 are findings from step 10, fixed upstream in `ace9a0d`. Draft 22 is a finding from step 11, filed and open.
 
-Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`. Titles are ready to paste; the text below each title is the issue body.
+Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`, drafts 19–21 against `cd09ea0`, draft 22 against `d15a7ec`. Titles are ready to paste; the text below each title is the issue body.
 
 | # | Title | Status |
 |---|---|---|
@@ -13,16 +13,21 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 5 | [Incremental memory accounting](#5-incremental-memory-accounting) | done upstream (PR #25, `a14149e`) |
 | 6 | [No panic in `apply_all` rollback](#6-no-panic-in-apply_all-rollback) | done upstream (PR #25, `a14149e`) |
 | 7 | [(Optional) Save index definitions in the file format](#7-optional-save-index-definitions-in-the-file-format) | done upstream (PR #25, `a14149e`) |
-| 8 | [Edge budget and per-edge cancellation in `bfs` and `expand`](#8-edge-budget-and-per-edge-cancellation-in-bfs-and-expand) | filed: [#27](https://github.com/p-sodmann/Ironweaver/issues/27) |
-| 9 | [JSON loader reads `-0.0` back as `0.0`](#9-json-loader-reads--00-back-as-00) | filed: [#26](https://github.com/p-sodmann/Ironweaver/issues/26) |
-| 10 | [`expect` on the op apply path in `remove_node` / `rename_node`](#10-expect-on-the-op-apply-path-in-remove_node--rename_node) | filed: [#28](https://github.com/p-sodmann/Ironweaver/issues/28) |
-| 11 | [`Expr` depth-limit errors lose their message under postcard](#11-expr-depth-limit-errors-lose-their-message-under-postcard) | filed: [#29](https://github.com/p-sodmann/Ironweaver/issues/29) |
-| 12 | [Small API and dependency cleanups: public attribute lookup, optional bincode, doc comments](#12-small-api-and-dependency-cleanups-public-attribute-lookup-optional-bincode-doc-comments) | filed: [#30](https://github.com/p-sodmann/Ironweaver/issues/30) |
-| 13 | [`Value` serde rejects empty containers at the depth limit that the file format accepts](#13-value-serde-rejects-empty-containers-at-the-depth-limit-that-the-file-format-accepts) | filed: [#31](https://github.com/p-sodmann/Ironweaver/issues/31) |
-| 14 | [`write_atomic` ignores a failed directory fsync after the rename](#14-write_atomic-ignores-a-failed-directory-fsync-after-the-rename) | filed: [#32](https://github.com/p-sodmann/Ironweaver/issues/32) |
-| 15 | [Binary format: the header's flags and reserved bytes are never checked](#15-binary-format-the-headers-flags-and-reserved-bytes-are-never-checked) | filed: [#33](https://github.com/p-sodmann/Ironweaver/issues/33) |
-| 16 | [No way to build an index off the graph and install it in O(1)](#16-no-way-to-build-an-index-off-the-graph-and-install-it-in-o1) | filed: [#34](https://github.com/p-sodmann/Ironweaver/issues/34) |
-| 17 | [No per-index entry count or memory accessor](#17-no-per-index-entry-count-or-memory-accessor) | filed: [#35](https://github.com/p-sodmann/Ironweaver/issues/35) |
+| 8 | [Edge budget and per-edge cancellation in `bfs` and `expand`](#8-edge-budget-and-per-edge-cancellation-in-bfs-and-expand) | fixed upstream (`3b15149`): [#27](https://github.com/p-sodmann/Ironweaver/issues/27) |
+| 9 | [JSON loader reads `-0.0` back as `0.0`](#9-json-loader-reads--00-back-as-00) | fixed upstream (`3b15149`): [#26](https://github.com/p-sodmann/Ironweaver/issues/26) |
+| 10 | [`expect` on the op apply path in `remove_node` / `rename_node`](#10-expect-on-the-op-apply-path-in-remove_node--rename_node) | fixed upstream (`3b15149`): [#28](https://github.com/p-sodmann/Ironweaver/issues/28) |
+| 11 | [`Expr` depth-limit errors lose their message under postcard](#11-expr-depth-limit-errors-lose-their-message-under-postcard) | fixed upstream (`3b15149`): [#29](https://github.com/p-sodmann/Ironweaver/issues/29) |
+| 12 | [Small API and dependency cleanups: public attribute lookup, optional bincode, doc comments](#12-small-api-and-dependency-cleanups-public-attribute-lookup-optional-bincode-doc-comments) | fixed upstream (`3b15149`): [#30](https://github.com/p-sodmann/Ironweaver/issues/30) |
+| 13 | [`Value` serde rejects empty containers at the depth limit that the file format accepts](#13-value-serde-rejects-empty-containers-at-the-depth-limit-that-the-file-format-accepts) | fixed upstream (`3b15149`): [#31](https://github.com/p-sodmann/Ironweaver/issues/31) |
+| 14 | [`write_atomic` ignores a failed directory fsync after the rename](#14-write_atomic-ignores-a-failed-directory-fsync-after-the-rename) | fixed upstream (`3b15149`): [#32](https://github.com/p-sodmann/Ironweaver/issues/32) |
+| 15 | [Binary format: the header's flags and reserved bytes are never checked](#15-binary-format-the-headers-flags-and-reserved-bytes-are-never-checked) | fixed upstream (`3b15149`): [#33](https://github.com/p-sodmann/Ironweaver/issues/33) |
+| 16 | [No way to build an index off the graph and install it in O(1)](#16-no-way-to-build-an-index-off-the-graph-and-install-it-in-o1) | fixed upstream (`3b15149`): [#34](https://github.com/p-sodmann/Ironweaver/issues/34) |
+| 17 | [No per-index entry count or memory accessor](#17-no-per-index-entry-count-or-memory-accessor) | fixed upstream (`3b15149`): [#35](https://github.com/p-sodmann/Ironweaver/issues/35) |
+| 18 | [`Value` serde writes NaN and infinities to JSON as `null`](#18-value-serde-writes-nan-and-infinities-to-json-as-null) | fixed upstream (`cd09ea0`): [#46](https://github.com/p-sodmann/Ironweaver/issues/46) |
+| 19 | [Budgets for shortest paths, pattern matching and walk planning](#19-budgets-for-shortest-paths-pattern-matching-and-walk-planning) | fixed upstream (`ace9a0d`): [#48](https://github.com/p-sodmann/Ironweaver/issues/48) |
+| 20 | [Traversals: `bfs` / `dfs` follow outgoing edges only, `expand` takes no edge filter](#20-traversals-bfs--dfs-follow-outgoing-edges-only-expand-takes-no-edge-filter) | fixed upstream (`ace9a0d`): [#49](https://github.com/p-sodmann/Ironweaver/issues/49) |
+| 21 | [`index_candidates` doesn't say which index it used](#21-index_candidates-doesnt-say-which-index-it-used) | fixed upstream (`ace9a0d`): [#50](https://github.com/p-sodmann/Ironweaver/issues/50) |
+| 22 | [`Value` / `Expr` serde can't be read from JSON beyond 64 levels, and skips unknown fields](#22-value--expr-serde-cant-be-read-from-json-beyond-64-levels-and-skips-unknown-fields) | filed, open: [#57](https://github.com/p-sodmann/Ironweaver/issues/57) |
 
 ---
 
@@ -395,3 +400,132 @@ Add `Graph::index_stats(path) -> Option<IndexStats { entries, memory_bytes, ... 
 **Why the database needs it**
 
 Status views list each index with its size and memory. We currently count entries with range scans over the index (a range below and one above each key kind enumerate an index completely), which is O(entries) and ignores dirty nodes, and report only whole-graph memory.
+
+## 18. `Value` serde writes NaN and infinities to JSON as `null`
+
+Found in the `3b15149` bump (a gap in the fix for #26; filed as [#46](https://github.com/p-sodmann/Ironweaver/issues/46)), checked against `3b15149`.
+
+**Problem**
+
+#26 made the core's JSON files keep NaN and the infinities: `format::tagged::float` writes them as `"NaN"`, `"Infinity"` and `"-Infinity"`, and the loader reads them back. But only the core's own `RecordCodec` goes through `tagged::float` (via the private `Tagged` / `TaggedMap` wrappers). `Value`'s own `Serialize`, which `value::serialize_sorted` uses, and which the format docs recommend to custom codecs for writing attribute maps, still writes a non-finite `Float` as `{"Float":null}` in JSON. The loader then refuses the file. `Value`'s `Deserialize` doesn't accept the string forms either, so JSON `Op`s and `Value`s can't carry them at all.
+
+Minimal reproduction:
+
+```rust
+use ironweaver_core::Value;
+assert_eq!(serde_json::to_string(&Value::Float(f64::NAN)).unwrap(), r#"{"Float":null}"#);
+assert!(serde_json::from_str::<Value>(r#"{"Float":"NaN"}"#).is_err());
+// A custom Codec that writes attrs with value::serialize_sorted writes
+// {"Float":null}; format::from_json / LoadGraph refuse the file:
+// "invalid Float null: expected a finite number, "NaN", "Infinity" or "-Infinity"".
+```
+
+**Proposal**
+
+Make `Value`'s serde match the file format in human-readable encodings: serialize a non-finite `Float` as `"NaN"` / `"Infinity"` / `"-Infinity"` when `is_human_readable()`, and accept those strings (as well as numbers) when deserializing a `Float`. The binary encodings are unchanged. Alternatively, make `serialize_sorted` (or a new public `format::tagged::attrs`) use `Tagged`, so custom codecs write exactly what `RecordCodec` writes; but fixing `Value` also covers `Op` and `Expr` values in JSON.
+
+**Why the database needs it**
+
+Our codec (`DbCodec`) writes attribute maps with `value::serialize_sorted`, so a JSON export (step 13) of a graph holding a NaN or an infinity writes a file that doesn't load. The binary checkpoints are fine. The REST API (step 12) sends `Value`s and `Op`s as JSON and can't represent these floats either. Pinned in `value_serde_writes_non_finite_floats_to_json_as_null` (`core_smoke.rs`) and `json_export_of_non_finite_floats_does_not_load` (`tests/db_graph.rs`).
+
+## 19. Budgets for shortest paths, pattern matching and walk planning
+
+Found in step 10 while bounding every read of the `Database` trait (filed as [#48](https://github.com/p-sodmann/Ironweaver/issues/48)), checked against `cd09ea0`.
+
+**Problem**
+
+#27 gave the traversals, `expand_paths` and `WalkPlan::run` a `Budget` with per-edge cancellation. Three searches still have neither:
+
+- `pathfinding::find_path` (BFS, Dijkstra, A*) takes no `Budget`. Dijkstra and A* (`best_first::search`) check cancellation once per node they settle; expanding a node with many edges runs its whole edge list, the edge cost and the heuristic for each, without a check.
+- `query::for_each_match` / `find_matches` take a result limit only. The work between two matches has no bound, and a variable-length pattern edge collects every path of `expand_paths` into a `Vec` before binding the next variable, so memory grows with the number of paths until cancellation stops it.
+- `random_walks::plan` builds a `WalkIndex` of the whole graph (O(nodes + edges)) before `run_limited` applies the budget, without a cancellation check.
+
+Minimal reproduction (A*, a hub with 2 000 leaves; pinned in `path_search_checks_cancellation_per_settled_node`, `core_smoke.rs`):
+
+```rust
+let token = Token::new();
+let calls = Cell::new(0);
+let estimate = Box::new(|_: &Node<Record>| { calls.set(calls.get() + 1); if calls.get() == 2 { token.cancel() } Ok(0.0) });
+let mut q = PathQuery::astar(Heuristic::Custom(estimate));
+let r = cancel::run(&token, || find_path::<_, _, GraphError>(&g, hub, end, &mut q));
+assert_eq!(r, Err(GraphError::Interrupted));
+assert_eq!(calls.get(), 2_001); // every neighbour was estimated after the cancel
+```
+
+**Proposal**
+
+- `find_path_limited(g, source, target, query, budget) -> Result<Limited<Option<PathResult>>, X>`: settled nodes as visited, edges relaxed as examined (and for BFS, `bidirectional_bfs` counting both frontiers), cancellation polled per edge.
+- `for_each_match_limited(g, pattern, budget, visit)`: nodes bound and steps taken as visited, edges tried as examined, matches as results; variable-length edges streamed (or expanded with the same meter) instead of collected.
+- `plan_limited(g, start, opts, budget)` (or a lazily built `WalkIndex`), so planning counts against `max_visited` / `max_edges` and checks cancellation.
+
+**Why the database needs it**
+
+Every read the server answers must be bounded by results, nodes visited and edges examined, not only by wall time (design rule 5). Until then `iwdb_query` bounds what it can from outside: BFS paths count edges through `bidirectional_bfs`'s edge filter; Dijkstra and A* count visited nodes through the heuristic (edges examined are reported as 0); `match` counts matches produced against `max_visited`; random walks refuse graphs larger than the limits, because planning reads all of it. A pathological hub or pattern is stopped only by the timeout.
+
+## 20. Traversals: `bfs` / `dfs` follow outgoing edges only, `expand` takes no edge filter
+
+Found in step 10 (filed as [#49](https://github.com/p-sodmann/Ironweaver/issues/49)), checked against `cd09ea0`.
+
+**Problem**
+
+`traversal::{bfs, dfs}_limited` take an edge filter but always follow `out_edges()`: there is no way to traverse incoming edges, or both. `expand_limited` takes a `Direction` but no edge filter, so a multi-source neighbourhood restricted to some edge types (or an `Expr` on edges) has no core function at all.
+
+Pinned in `bfs_follows_outgoing_edges_only` (`core_smoke.rs`): with an edge `a -> b`, `bfs_limited` from `b` returns `[b]`.
+
+**Proposal**
+
+Give `bfs_limited` and `dfs_limited` a `direction: Direction` (as `expand` has; `Both` lists a self-loop once, like `query::steps`), and give `expand_limited` an `edge_ok: FnMut(EdgeIx, &Edge<E>) -> Result<bool, X>` (or add `expand_filtered_limited`), counting examined edges before the filter as now.
+
+**Why the database needs it**
+
+The `Database` trait's `neighbourhood(seeds, depth, direction, edge types, filter)` and `subgraph` need a filtered multi-source BFS in any direction, and `traverse` (BFS/DFS) should take a direction. Until then `iwdb_query::read::expand_filtered` is a small BFS of our own (marked as a workaround), used only when edges are filtered, and `traverse` follows outgoing edges only.
+
+## 21. `index_candidates` doesn't say which index it used
+
+Found in step 10 while adding `explain` (filed as [#50](https://github.com/p-sodmann/Ironweaver/issues/50)), checked against `cd09ea0`.
+
+**Problem**
+
+`Graph::index_candidates(&Expr)` returns the candidate nodes, or `None` for a scan, but not how it found them: which index or label, a point lookup, a range, a combined lower and upper bound, the union of an `Or`. An `EXPLAIN` has to reproduce its choice, and the cost of finding out the candidate count is the lookup itself.
+
+**Proposal**
+
+A planning function that doesn't read the postings, for example `Graph::index_plan(&Expr) -> Option<IndexPlan>` with `IndexPlan::{Label(String), Point { path }, In { path, values }, Range { path, lower, upper }, Union(Vec<IndexPlan>), Empty}` and an estimated size from `index_stats`, which `index_candidates` then executes, so the two can't disagree.
+
+**Why the database needs it**
+
+`explain` must say which index `find` would use and the estimated scan size, in O(size of the filter). `iwdb_query::read::explain::plan` mirrors `index_candidates`' rules at `cd09ea0`; the test `the_plan_agrees_with_index_candidates` (`iwdb-query`) catches drift on a bump, but a mirror of the core's planner is the kind of reimplementation design rule 9 asks us to avoid.
+
+## 22. `Value` / `Expr` serde can't be read from JSON beyond 64 levels, and skips unknown fields
+
+Found in step 11 while choosing the wire encoding of values and filters (filed as [#57](https://github.com/p-sodmann/Ironweaver/issues/57); [ADR 0023](adr/0023-wire-encoding-of-values-filters-and-patterns.md)), checked against `d15a7ec`.
+
+**Problem**
+
+`Value` and `Expr` refuse nesting deeper than `MAX_DEPTH` / `MAX_EXPR_DEPTH` (100) through their serde impls, and the file format accepts values 100 levels deep, so 100 is the documented limit everywhere. But their serde form can't be read from JSON with `serde_json` beyond 64 levels of list, dict, `And` or `Or` nesting: each of those is two JSON levels (`{"List":[...]}`, `{"And":[...]}`), and `serde_json` stops at 128 by default. A value the core stores and saves can't travel as JSON; `format::from_json` is fine (its loader doesn't use `serde_json`'s recursion), only the serde form is affected.
+
+A reader can't simply turn `serde_json`'s limit off (`unbounded_depth` + `disable_recursion_limit`): `Expr`'s struct variants (`Compare`, `In`, `Exists`) skip unknown fields, and skipping (`IgnoredAny`) recurses without the core's depth counters, so a crafted document overflows the stack.
+
+Minimal reproduction:
+
+```rust
+use ironweaver_core::{Expr, Value};
+let nest = |n: usize| (0..n).fold(Value::Int(1), |v, _| Value::List(vec![v]));
+let read = |v: &Value| serde_json::from_str::<Value>(&serde_json::to_string(v).unwrap());
+assert!(read(&nest(63)).is_ok());              // depth 64
+assert!(read(&nest(64)).is_err());             // depth 65: "recursion limit exceeded"
+// Unknown fields are skipped, at any depth (only serde_json's limit stops it):
+let junk = format!(r#"{{"Exists":{{"path":["a"],"junk":{}1{}}}}}"#, "[".repeat(100), "]".repeat(100));
+assert!(serde_json::from_str::<Expr>(&junk).is_ok());
+```
+
+**Proposal**
+
+1. `#[serde(deny_unknown_fields)]` on `Expr`'s struct variants (and on the pattern structs, `NodePattern`, `EdgePattern`, `Hops`), so that every level of recursion in `Value`, `Expr` and `Pattern` deserialization goes through the core's own counters, and nothing is skipped.
+2. A JSON reader in the core that relies on them instead of `serde_json`'s limit, for example `value::from_json_str`, `Expr::from_json_str` and `Pattern::from_json_str` (behind a `json` feature if `serde_json` shouldn't be a dependency), built on `serde_json::Deserializer::disable_recursion_limit` (the `unbounded_depth` feature), with a test that a value 100 levels deep round-trips and 101 is refused with the core's message.
+
+With 1 alone, callers can do 2 themselves; 2 makes the safe way the easy one.
+
+**Why the database needs it**
+
+Step 12 serves the `Database` trait over REST/JSON with the core's serde form for values and filters (ADR 0023): `{"Int": 30}`, `{"Compare": {...}}`. With `serde_json`'s default limit, a node whose attribute is nested 65 to 100 levels deep can be committed over gRPC but not over REST, and REST can't return it in the same JSON form. Lifting the limit ourselves would let a crafted filter overflow the server's stack. Until this is fixed, the REST API documents a JSON nesting limit of 64 for values and filters and refuses deeper ones with `invalid_argument`; gRPC carries postcard and is unaffected. Pinned in `value_serde_json_stops_at_64_levels_and_expr_skips_unknown_fields` (`core_smoke.rs`).

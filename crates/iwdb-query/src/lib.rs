@@ -1,0 +1,39 @@
+//! Ironweaver DB's query layer: the [`Database`] service trait, the
+//! bounded read operations behind it, `explain`, and the error model
+//! shared by every access method.
+//!
+//! - [`Database`]: the trait. `iwdb::Embedded` implements it on the
+//!   embedded store; the servers of steps 11 and 12 serve it.
+//! - [`read`]: the read operations, as functions over a namespace that a
+//!   caller runs under the namespace's read lock and a cancel token.
+//! - [`QueryOptions`], [`LimitConfig`]: limits per request, server defaults
+//!   and hard caps (ADR 0021); [`Cursor`]: pagination.
+//! - [`Error`], [`Code`]: stable error codes (`documentation/api/errors.md`).
+//! - [`exec`]: a worker pool and `block_on`, to run the synchronous engine
+//!   behind async methods without an async runtime (ADR 0020).
+//! - `conformance` (feature): the conformance suite for implementations.
+//!
+//! Pure Rust (design rule 1): no Python, no protocol types.
+
+mod cursor;
+mod error;
+pub mod exec;
+mod model;
+mod options;
+pub mod read;
+mod request;
+mod service;
+
+#[cfg(feature = "conformance")]
+pub mod conformance;
+
+pub use cursor::Cursor;
+pub use error::{Code, Error};
+pub use model::{Answer, CommitOptions, Edge, IndexSize, IndexState, IndexStatus, NamespaceStatus, Node, Work};
+pub use options::{Bounds, LimitConfig, Limits, QueryOptions};
+pub use read::{Explain, Lookup, Plan, ReadContext};
+pub use request::{
+    AnalyticsRequest, ExplainRequest, FindRequest, Job, JobResult, MatchRequest, MatchRow, NeighbourhoodRequest, Order,
+    Path, PathMethod, PathRequest, ProjectionSpec, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
+};
+pub use service::Database;

@@ -7,20 +7,20 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use iwdb_engine::catalog::NamespaceName;
 use iwdb_engine::Namespace;
+use iwdb_engine::catalog::NamespaceName;
 
 use crate::archive::{archive_segments, read_archive_marker_info};
-use crate::backup::{self, read_manifest, Manifest};
-use crate::checkpoint::{list_checkpoints, load_checkpoint, write_checkpoint, SkippedCheckpoint};
+use crate::backup::{self, Manifest, read_manifest};
+use crate::checkpoint::{SkippedCheckpoint, list_checkpoints, load_checkpoint, write_checkpoint};
 use crate::history::HistoryId;
 use crate::io::{LogFile, LogFs};
-use crate::layout::{self, encode_marker, NsPaths, BACKUP_NAME, LOCK_NAME, MARKER_NAME, RESTORING_NAME};
+use crate::layout::{self, BACKUP_NAME, LOCK_NAME, MARKER_NAME, NsPaths, RESTORING_NAME, encode_marker};
 use crate::namespaces::{
-    read_log, write_whole, Event, EventKind, NamespaceInfo, NamespaceTable, DEFAULT_ID, DEFAULT_NAME, NAMESPACES_NAME,
-    NS_DIR,
+    DEFAULT_ID, DEFAULT_NAME, Event, EventKind, NAMESPACES_NAME, NS_DIR, NamespaceInfo, NamespaceTable, read_log,
+    write_whole,
 };
-use crate::{reader, Error, WalReader};
+use crate::{Error, WalReader, reader};
 use iwdb_engine::CommitTime;
 
 /// Where a restore reads from: a backup (or any data directory that no
@@ -208,16 +208,16 @@ pub fn restore<F: LogFs>(
         }
         chosen.retain(|n| only.contains(&n.name));
     }
-    if let RestoreTarget::Seq(_) = target {
-        if chosen.len() != 1 {
-            return Err(Error::AmbiguousTarget { namespaces: chosen.iter().map(|n| n.name.to_string()).collect() });
-        }
+    if let RestoreTarget::Seq(_) = target
+        && chosen.len() != 1
+    {
+        return Err(Error::AmbiguousTarget { namespaces: chosen.iter().map(|n| n.name.to_string()).collect() });
     }
-    if chosen.is_empty() {
-        if let Some(at) = cut {
-            let first = table.events().first().map(|e| e.time);
-            return Err(Error::NoCommitAtOrBefore { time: at, first });
-        }
+    if chosen.is_empty()
+        && let Some(at) = cut
+    {
+        let first = table.events().first().map(|e| e.time);
+        return Err(Error::NoCommitAtOrBefore { time: at, first });
     }
 
     let mut restored = Vec::new();
@@ -300,12 +300,12 @@ fn input_of(opened: &Opened, info: NamespaceInfo) -> Result<Input, Error> {
         archive_segments: Vec::new(),
         info,
     };
-    if let Some(backup) = &opened.backup {
-        if let Some((_, _, paths)) = backup.namespaces.iter().find(|(id, _, _)| *id == input.info.id) {
-            input.checkpoints = list_checkpoints(&paths.checkpoints)?;
-            input.backup_segments = reader::list_segments(&paths.wal)?;
-            input.manifest_seq = backup.manifest.as_ref().and_then(|m| m.namespace(input.info.id)).map(|n| n.seq);
-        }
+    if let Some(backup) = &opened.backup
+        && let Some((_, _, paths)) = backup.namespaces.iter().find(|(id, _, _)| *id == input.info.id)
+    {
+        input.checkpoints = list_checkpoints(&paths.checkpoints)?;
+        input.backup_segments = reader::list_segments(&paths.wal)?;
+        input.manifest_seq = backup.manifest.as_ref().and_then(|m| m.namespace(input.info.id)).map(|n| n.seq);
     }
     if let Some(archive) = &opened.archive {
         input.archive_segments = archive_segments(&archive.dir, archive.version, input.info.id)?;
@@ -398,13 +398,13 @@ fn open_sources(sources: &RestoreSources) -> Result<Opened, Error> {
         let Some((version, history)) = read_archive_marker_info(dir)? else {
             return Err(Error::NotAnArchive { path: dir.clone(), reason: "it has no marker".into() });
         };
-        if let Some(backup) = backup_history {
-            if backup != Some(history) {
-                return Err(Error::HistoryMismatch {
-                    backup: backup.map_or("unknown (layout 1)".to_owned(), |h| h.to_string()),
-                    archive: history.to_string(),
-                });
-            }
+        if let Some(backup) = backup_history
+            && backup != Some(history)
+        {
+            return Err(Error::HistoryMismatch {
+                backup: backup.map_or("unknown (layout 1)".to_owned(), |h| h.to_string()),
+                archive: history.to_string(),
+            });
         }
         opened.history = Some(history);
         let log_path = dir.join(NAMESPACES_NAME);
@@ -555,7 +555,7 @@ fn write_restored<F: LogFs>(
                 return Err(Error::DestinationNotEmpty { path: dest.to_path_buf() });
             }
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => backup::create_dir(fs, dest)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => crate::io::create_dir(fs, dest)?,
         Err(e) => return Err(Error::io("list", dest, e)),
     }
     let restoring = dest.join(RESTORING_NAME);
@@ -575,7 +575,7 @@ fn write_restored<F: LogFs>(
     crate::layout::lock_file(&lock, &lock_path, true)?;
     let ns_root = dest.join(NS_DIR);
     fs.create_dir(&ns_root).map_err(|e| Error::io("create directory", &ns_root, e))?;
-    backup::sync_dir(fs, dest)?;
+    crate::io::sync_dir(fs, dest)?;
     let mut paths = Vec::new();
     for (report, _) in restored {
         paths.push(crate::layout::create_ns_dir(fs, dest, report.id)?);
@@ -583,17 +583,17 @@ fn write_restored<F: LogFs>(
     for ((_, namespace), paths) in restored.iter().zip(&paths) {
         if namespace.seq() > 0 {
             write_checkpoint(fs, &paths.checkpoints, namespace)?;
-            backup::sync_dir(fs, &paths.checkpoints)?;
+            crate::io::sync_dir(fs, &paths.checkpoints)?;
         }
     }
     write_whole(fs, &dest.join(NAMESPACES_NAME), events)?;
-    backup::sync_dir(fs, dest)?;
+    crate::io::sync_dir(fs, dest)?;
     fs.remove_file(&restoring).map_err(|e| Error::io("remove", &restoring, e))?;
-    backup::sync_dir(fs, dest)?;
-    backup::write_atomic(fs, &dest.join(MARKER_NAME), &encode_marker(history))?;
-    backup::sync_dir(fs, dest)?;
+    crate::io::sync_dir(fs, dest)?;
+    crate::io::write_atomic(fs, &dest.join(MARKER_NAME), &encode_marker(history))?;
+    crate::io::sync_dir(fs, dest)?;
     drop(lock);
     Ok(())
 }
 
-crate::backup::default_deref!(RestoreReport, NamespaceRestore, namespaces, |n| n.name.as_str());
+crate::default_deref!(RestoreReport, NamespaceRestore, namespaces, |n| n.name.as_str());

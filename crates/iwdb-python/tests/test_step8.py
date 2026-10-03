@@ -1,5 +1,6 @@
-"""Step 8: idempotency keys, commit times, read-your-writes and concurrent
-readers (documentation/python-api.md)."""
+"""Idempotency keys, commit times, read-your-writes and concurrent readers,
+as the bindings translate them (documentation/python-api.md). Durability of
+keys is tested in Rust (`crates/iwdb/tests/idempotency.rs`)."""
 
 import datetime
 import threading
@@ -36,16 +37,6 @@ def test_a_retry_with_the_same_key_returns_the_original_result(store):
     assert store.node("a")["version"] == 2
 
 
-def test_the_same_key_for_another_request_is_refused(store):
-    with store.transaction(idempotency_key="k") as tx:
-        tx.upsert_node("a", attr={"n": 1})
-    tx = store.transaction(idempotency_key="k")
-    tx.upsert_node("a", attr={"n": 2})
-    with pytest.raises(iwdb.InvalidError, match="different request"):
-        tx.commit()
-    assert store.node("a")["attr"] == {"n": 1}
-
-
 def test_invalid_keys_are_refused(store):
     for key in ["", "x" * 256]:
         with pytest.raises(iwdb.InvalidError):
@@ -57,38 +48,8 @@ def test_catalog_changes_take_keys(store):
     first = store.create_index("email", idempotency_key="ix")
     again = store.create_index("email", idempotency_key="ix")
     assert again["deduplicated"] and again["seq"] == first["seq"]
-    with pytest.raises(iwdb.InvalidError):
+    with pytest.raises(iwdb.ConflictError):
         store.create_index("email")
-
-
-def test_keys_survive_reopening_and_checkpoints(path):
-    with iwdb.Store.open(path) as store:
-        with store.transaction(idempotency_key="once") as tx:
-            tx.upsert_node("a")
-        store.checkpoint()
-    with iwdb.Store.open(path) as store:
-        with store.transaction(idempotency_key="once") as tx:
-            tx.upsert_node("a")
-        assert tx.result["deduplicated"] and store.seq() == 1
-        assert store.node("a")["version"] == 1
-
-
-def test_keys_survive_a_backup_and_restore(tmp_path):
-    with iwdb.Store.open(tmp_path / "data") as store:
-        with store.transaction(idempotency_key="before") as tx:
-            tx.upsert_node("a")
-        store.backup(tmp_path / "backup")
-        with store.transaction(idempotency_key="after") as tx:
-            tx.upsert_node("b")
-    iwdb.restore(tmp_path / "restored", backup=tmp_path / "backup")
-    with iwdb.Store.open(tmp_path / "restored") as restored:
-        with restored.transaction(idempotency_key="before") as tx:
-            tx.upsert_node("a")
-        assert tx.result["deduplicated"]
-        # The commit after the backup isn't in the restored history: it applies
-        with restored.transaction(idempotency_key="after") as tx:
-            tx.upsert_node("b")
-        assert not tx.result["deduplicated"] and restored.seq() == 2
 
 
 def test_min_seq_reads_wait_for_the_commit(store):

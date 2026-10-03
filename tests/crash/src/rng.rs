@@ -20,11 +20,7 @@ impl Rng {
 
     /// Uniform in `0..n` (0 if `n` is 0).
     pub fn below(&mut self, n: u64) -> u64 {
-        if n == 0 {
-            0
-        } else {
-            self.next_u64() % n
-        }
+        if n == 0 { 0 } else { self.next_u64() % n }
     }
 
     /// Uniform in `lo..=hi`.

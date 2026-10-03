@@ -5,7 +5,7 @@
 //! | Line | When |
 //! |---|---|
 //! | `open <seq> <synced_seq> <digest>` | `Store::open` returned (recovery is done) |
-//! | `try <key>` | a commit with this idempotency key starts (step 8) |
+//! | `try <key>` | a commit with this idempotency key starts |
 //! | `ack <seq> <synced_seq>` | a commit returned `Ok` (acknowledged), with `Store::synced_seq` after it |
 //! | `dedup <seq> <key>` | a keyed commit returned the original result of commit `seq`: it committed nothing |
 //! | `backup <seq> <path>` | an online backup into `path` returned `Ok`, at `seq` |
@@ -37,7 +37,7 @@ use iwdb_engine::testutil::workload::Step;
 use iwdb_storage::failpoint::{Call, FailFs, Rule};
 
 use crate::model::digest;
-use crate::script::{child_options, Act, Policy, Script};
+use crate::script::{Act, Policy, Script, child_options};
 
 /// The name of the sync log in the work directory.
 pub const SYNC_LOG: &str = "synclog";
@@ -61,7 +61,7 @@ pub struct ChildArgs {
     /// Where the script's backups go (each into a new directory); without
     /// it the script's backups are skipped.
     pub backups: Option<PathBuf>,
-    /// Keyed commits to retry first (step 8).
+    /// Keyed commits to retry first.
     pub retries: Vec<IdempotencyKey>,
     pub rules: Vec<Rule>,
 }

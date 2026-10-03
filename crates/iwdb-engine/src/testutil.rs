@@ -1,5 +1,6 @@
-//! Helpers for tests: an order-independent, canonical form of a graph, and
-//! (with the `testutil` feature) random workloads ([`workload`]).
+//! Helpers for tests: an order-independent, canonical form of a graph, a
+//! namespace's observable [`state`], and (with the `testutil` feature)
+//! random workloads ([`workload`]).
 //!
 //! The core's iteration order is not part of our contract (slots are reused,
 //! save/load compacts them, rollback can reorder adjacency lists). Tests that
@@ -13,7 +14,8 @@ pub mod workload;
 
 use ironweaver_core::{Attrs, Graph, Record, Value};
 
-use crate::DbRecord;
+use crate::catalog::NamespaceCatalog;
+use crate::{DbRecord, Namespace};
 
 /// A payload that can be rendered in a canonical, order-independent form.
 ///
@@ -94,6 +96,26 @@ pub fn canonical_value(value: &Value) -> String {
         Value::Dict(entries) => canonical_attrs(entries),
         other => format!("{:?}", other),
     }
+}
+
+/// A namespace's observable state: canonical graph, catalog, seq, and the
+/// idempotency key table without commit times (a reference namespace that
+/// has no log doesn't know them).
+pub type State = (Vec<String>, NamespaceCatalog, u64, Vec<String>);
+
+pub fn state(ns: &Namespace) -> State {
+    (canonical(ns.graph()), ns.catalog().clone(), ns.seq(), keys(ns))
+}
+
+/// The key table, one line per entry, without times.
+pub fn keys(ns: &Namespace) -> Vec<String> {
+    let entries = ns.keys().entries();
+    entries
+        .map(|e| {
+            let r = &e.result;
+            format!("{} {} {:08x} {:?} {:?}", r.seq, e.key, e.fingerprint, r.edge_ids, r.versions)
+        })
+        .collect()
 }
 
 #[cfg(test)]

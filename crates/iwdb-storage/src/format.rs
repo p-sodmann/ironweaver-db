@@ -28,8 +28,8 @@
 //!   0 len, 4 seq, 12 synced_seq, 20 kind, 21 crc (of bytes 0..21 and the payload), 25 payload
 //! ```
 //!
-//! Version 3 (step 8, ADR 0015) prefixes the payload with the record's
-//! idempotency key and result ([`Keyed`](iwdb_engine::Keyed)), `None` (one
+//! Version 3 (ADR 0015) prefixes the payload with the record's
+//! idempotency key and result ([`iwdb_engine::Keyed`]), `None` (one
 //! zero byte) for a commit without a key.
 
 use iwdb_engine::{CatalogChange, Change, CommitRecord, DbRecord, Keyed};
@@ -68,11 +68,7 @@ const HEADER_CRC_AT: usize = 20;
 
 /// Length of a frame header in segment format `version` (1, 2 or 3).
 pub fn frame_header_len(version: u32) -> usize {
-    if version == 1 {
-        FRAME_HEADER_LEN_V1
-    } else {
-        FRAME_HEADER_LEN
-    }
+    if version == 1 { FRAME_HEADER_LEN_V1 } else { FRAME_HEADER_LEN }
 }
 
 /// The file name of the segment whose first record is `first_seq`:
@@ -348,6 +344,7 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
 mod tests {
     use super::*;
     use iwdb_engine::catalog::{AttrPath, IndexDef};
+    use std::assert_matches;
 
     #[test]
     fn segment_names_sort_like_seqs() {
@@ -442,11 +439,11 @@ mod tests {
         assert_eq!(frame(1, 0, 0, &[0]), Err(Invalid::UnknownKind(0)));
         assert_eq!(frame(1, 0, 3, &[0]), Err(Invalid::UnknownKind(3)));
         assert_eq!(frame(1, 1, KIND_DATA, &[0]), Err(Invalid::SyncedSeq { seq: 1, synced_seq: 1 }));
-        assert!(matches!(frame(1, 0, KIND_DATA, &[0, 0, 0]), Err(Invalid::Undecodable(_))));
+        assert_matches!(frame(1, 0, KIND_DATA, &[0, 0, 0]), Err(Invalid::Undecodable(_)));
         // Format 3 needs the key's option byte
-        assert!(matches!(frame(1, 0, KIND_DATA, &[0]), Err(Invalid::Undecodable(_))));
-        assert!(matches!(frame(1, 0, KIND_DATA, &[]), Err(Invalid::Undecodable(_))));
-        assert!(matches!(frame(1, 0, KIND_CATALOG, &[9]), Err(Invalid::Undecodable(_))));
+        assert_matches!(frame(1, 0, KIND_DATA, &[0]), Err(Invalid::Undecodable(_)));
+        assert_matches!(frame(1, 0, KIND_DATA, &[]), Err(Invalid::Undecodable(_)));
+        assert_matches!(frame(1, 0, KIND_CATALOG, &[9]), Err(Invalid::Undecodable(_)));
     }
 
     #[test]

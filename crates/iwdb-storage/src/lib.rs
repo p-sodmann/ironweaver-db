@@ -1,13 +1,12 @@
-//! Ironweaver DB storage: the write-ahead log (step 4), the data
-//! directory, checkpoints and recovery (step 5), backups, WAL archiving,
-//! restore and verify (step 7).
+//! Ironweaver DB storage: the write-ahead log, the data directory,
+//! checkpoints and recovery, backups, WAL archiving, restore and verify.
 //!
 //! - [`Wal`]: appends [`CommitRecord`](iwdb_engine::CommitRecord)s to
 //!   segment files, fsynced per [`FsyncPolicy`], and fails into a read-only
 //!   state on any I/O error.
 //! - [`WalReader`] / [`read_log`]: iterate the records from a `seq`,
 //!   telling a torn tail (the clean end of the log) from corruption.
-//! - [`format`]: the on-disk format (`documentation/formats/wal.md`).
+//! - [`format`](mod@format): the on-disk format (`documentation/formats/wal.md`).
 //! - [`io`]: the file operations behind a trait, the seam for fault
 //!   injection; `failpoint` (feature `failpoints`) puts failpoints on it.
 //! - [`LoggedNamespace`]: a namespace whose commits are logged before they
@@ -28,6 +27,24 @@
 //!   when a commit was appended (ADR 0009, ADR 0010).
 //!
 //! The guarantees of each fsync policy are in `documentation/guarantees.md`.
+
+/// Single-namespace convenience: field access to the `default` namespace's
+/// part of a report (an empty one if there is none).
+macro_rules! default_deref {
+    ($report:ty, $part:ty, $field:ident, |$n:ident| $name:expr) => {
+        impl std::ops::Deref for $report {
+            type Target = $part;
+            fn deref(&self) -> &$part {
+                static EMPTY: std::sync::OnceLock<$part> = std::sync::OnceLock::new();
+                self.$field
+                    .iter()
+                    .find(|$n| $name == $crate::namespaces::DEFAULT_NAME)
+                    .unwrap_or_else(|| EMPTY.get_or_init(Default::default))
+            }
+        }
+    };
+}
+pub(crate) use default_deref;
 
 pub mod archive;
 pub mod backup;
@@ -52,17 +69,17 @@ pub use backup::{BackupReport, NamespaceBackup};
 pub use checkpoint::{CheckpointOutcome, Checkpointer, SkippedCheckpoint};
 pub use error::Error;
 pub use history::HistoryId;
-pub use inspect::{inspect, DirStatus, NamespaceFiles};
+pub use inspect::{DirStatus, NamespaceFiles, inspect};
 pub use iwdb_engine::CommitTime;
-pub use logged::{BuildProgress, LockStats, LoggedNamespace, Wait, BUILD_CHUNK};
+pub use logged::{BUILD_CHUNK, BuildProgress, LockStats, LoggedNamespace, Wait};
 pub use reader::{
-    list_segments, read_log, read_segment, segment_prefix, LogEnd, SegmentEnd, TornTail, WalReader,
-    MAX_SEGMENT_FILE_LEN,
+    LogEnd, MAX_SEGMENT_FILE_LEN, SegmentEnd, TornTail, WalReader, list_segments, read_log, read_segment,
+    segment_prefix,
 };
 pub use recovery::{
-    read_namespace, recover, start_namespace, CutTail, ReadNamespace, Recovered, RecoveredNamespace, RecoveryReport,
-    StoreRecovery,
+    CutTail, ReadNamespace, Recovered, RecoveredNamespace, RecoveryReport, StoreRecovery, read_namespace, recover,
+    start_namespace,
 };
-pub use restore::{restore, NamespaceRestore, RestoreReport, RestoreSources, RestoreTarget};
-pub use verify::{verify, Finding, Kind, NamespaceVerify, VerifyReport};
-pub use writer::{FsyncPolicy, Wal, WalOptions, DEFAULT_SEGMENT_SIZE, MAX_SEGMENT_SIZE, MIN_SEGMENT_SIZE};
+pub use restore::{NamespaceRestore, RestoreReport, RestoreSources, RestoreTarget, restore};
+pub use verify::{Finding, Kind, NamespaceVerify, VerifyReport, verify};
+pub use writer::{DEFAULT_SEGMENT_SIZE, FsyncPolicy, MAX_SEGMENT_SIZE, MIN_SEGMENT_SIZE, Wal, WalOptions};

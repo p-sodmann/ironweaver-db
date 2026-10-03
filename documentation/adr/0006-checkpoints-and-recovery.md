@@ -14,13 +14,15 @@ Relevant facts:
 - A failed fsync must not be retried (ADR 0005, fsyncgate). The same holds for directories.
 - `Wal::synced_seq` lags behind the last append under `group`. After an OS crash, unsynced records can be lost, so a checkpoint that includes them would be newer than the log.
 - The WAL reader reads a whole segment and treats damage in the last segment as a torn tail. A frame that the writer is still writing looks like one.
-- Our MSRV is 1.85 and the workspace forbids `unsafe`. `std::fs::File::try_lock` is stable from Rust 1.89.
+- Our MSRV is 1.85 and the workspace forbids `unsafe`. `std::fs::File::try_lock` is stable from Rust 1.89. *(Update, step 11b: the MSRV is 1.99, see below.)*
 
 ## Decision
 
 ### Lock
 
 The exclusive lock is `flock` on `LOCK` through **`fs4`** (MIT/Apache-2.0, MSRV 1.75, built on `rustix`, which is already in our tree through `tempfile`). We don't bump the MSRV to 1.89 for one call: that would drop support for about a year of toolchains, and the swap is local (one function in `layout.rs`) once the MSRV passes 1.89. `fs4`'s trait method names match std's inherent ones (`try_lock`), which take precedence on newer toolchains, so we call it as `fs4::FileExt::try_lock(&file)`. `fs2` is unmaintained, and `fd-lock` ties the lock to a guard's borrow of the file, which fits badly into a long-lived struct.
+
+*Update, step 11b ([ADR 0029](0029-rust-1.99-and-edition-2024.md)): with the MSRV at 1.99 the lock uses std's `File::try_lock` / `try_lock_shared` and `fs4` is gone. std makes the same calls as `fs4`: `flock(LOCK_EX or LOCK_SH | LOCK_NB)` on Linux, macOS and the BSDs, and `LockFileEx` with `LOCKFILE_FAIL_IMMEDIATELY` over the whole file on Windows; a held lock is `TryLockError::WouldBlock`. So the semantics are unchanged: whole file, per open file description, released when the file is closed or the process dies. On a Unix without `flock` (Solaris) std returns an `Unsupported` error and opening fails; we don't ship there.*
 
 `flock` rather than POSIX `fcntl` locks: an `fcntl` lock belongs to the process, so a second open in the same process would succeed, and closing any descriptor of the file would release it.
 
@@ -57,4 +59,4 @@ A 16-byte marker (`IWDBDIR\n`, layout version, CRC32C) is written last during in
 - Commit latency doesn't change while a checkpoint runs. Measured in step 5 (step_5.md): p50 and p99 are the same inside and outside a checkpoint of a 69 MiB graph. The checkpointer costs a second copy of the graph in memory.
 - A checkpoint can lag behind the last commit by up to the group commit window. That doesn't matter: recovery replays the rest from the WAL.
 - A directory fsync failure turns checkpoints off until the next open, so the WAL grows until then. `Store::checkpoint_failure` reports it; step 16 turns it into a health signal.
-- Once upstream #32 is fixed, the extra directory sync after `write_atomic` can go. Once the MSRV reaches 1.89, `fs4` can be replaced by std.
+- Once upstream #32 is fixed, the extra directory sync after `write_atomic` can go. `fs4` was replaced by std in step 11b.

@@ -1,4 +1,4 @@
-//! Step 8: idempotency keys in the commit pipeline. A keyed commit applies
+//! Idempotency keys in the commit pipeline. A keyed commit applies
 //! once; a retry returns the original result; another request under the
 //! same key is refused; replaying the records rebuilds the key table.
 
@@ -9,11 +9,12 @@ use iwdb_engine::catalog::{AttrPath, IndexDef, NamespaceName};
 use iwdb_engine::codec;
 use iwdb_engine::idempotency::KEY_TABLE_CAPACITY;
 use iwdb_engine::invariants;
-use iwdb_engine::testutil::workload::{seeded, Step};
+use iwdb_engine::testutil::workload::{Step, seeded};
 use iwdb_engine::{
     CatalogChange, CommitRecord, CommitResult, CommitTime, Error, IdempotencyKey, Mutation, Namespace, Prepare,
 };
 use proptest::prelude::*;
+use std::assert_matches;
 
 fn ns() -> Namespace {
     Namespace::new(NamespaceName::new("test").unwrap())
@@ -83,7 +84,7 @@ fn another_request_under_the_same_key_is_refused() {
     assert_eq!(ns.seq(), 1);
     // A catalog change is another request too
     let index = CatalogChange::CreateIndex(IndexDef { path: AttrPath::new(["n"]).unwrap() });
-    assert!(matches!(ns.prepare_catalog_keyed(index, Some(&key("k"))), Err(Error::IdempotencyKeyReused { .. })));
+    assert_matches!(ns.prepare_catalog_keyed(index, Some(&key("k"))), Err(Error::IdempotencyKeyReused { .. }));
 }
 
 #[test]
@@ -98,7 +99,7 @@ fn the_lookup_comes_before_validation() {
     }];
     commit(&mut ns, &create, Some("create"), 1).unwrap();
     // Without the key it would conflict now (the node exists)
-    assert!(matches!(commit(&mut ns, &create, None, 2), Err(Error::Conflict { .. })));
+    assert_matches!(commit(&mut ns, &create, None, 2), Err(Error::Conflict { .. }));
     let (retry, _) = commit(&mut ns, &create, Some("create"), 2).unwrap();
     assert!(retry.deduplicated && retry.seq == 1);
 }
@@ -124,7 +125,7 @@ fn catalog_changes_take_keys_too() {
     };
     ns.apply(prepared, None).unwrap();
     // Without a key the retry fails (the index exists); with it, the original result
-    assert!(matches!(ns.prepare_catalog(index.clone()), Err(Error::IndexExists { .. })));
+    assert_matches!(ns.prepare_catalog(index.clone()), Err(Error::IndexExists { .. }));
     let Prepare::Duplicate(result) = ns.prepare_catalog_keyed(index, Some(&key("ix"))).unwrap() else {
         panic!("duplicate")
     };
@@ -158,7 +159,7 @@ proptest! {
         let mut records = Vec::new();
         for (i, step) in seeded(60, seed).into_iter().enumerate() {
             // Every `keyed`-th step has a key; some keys repeat (retries)
-            let k = (i as u64 % keyed == 0).then(|| format!("k{}", i / 3));
+            let k = (i as u64).is_multiple_of(keyed).then(|| format!("k{}", i / 3));
             let key = k.as_deref().map(key);
             let prepared = match &step {
                 Step::Tx(mutations) => live.prepare_keyed(mutations, key.as_ref()),

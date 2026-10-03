@@ -7,7 +7,7 @@ use iwdb::{
     BackupReport, CheckpointOutcome, CommitTime, Error, Finding, FsyncPolicy, HistoryId, IndexState, Kind,
     NamespaceResult, NamespaceStatus, RecoveryReport, RestoreReport, Status, StoreRecovery, StoreStatus, VerifyReport,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub struct Out {
     pub json: bool,
@@ -343,7 +343,10 @@ impl Out {
                     IndexState::Ready => ("ready", Value::Null),
                     IndexState::Building { scanned, total } => ("building", json!([scanned, total])),
                 };
-                json!({"path": i.path.to_string(), "state": state, "progress": progress, "declared": i.declared, "unique": i.unique})
+                let size = i.size.map_or(Value::Null, |s| {
+                    json!({"entries": s.entries, "distinct_keys": s.distinct_keys, "memory_bytes": s.memory_bytes})
+                });
+                json!({"path": i.path.to_string(), "state": state, "progress": progress, "declared": i.declared, "unique": i.unique, "size": size})
             })
             .collect();
         let constraints: Vec<Value> = catalog.constraints().map(|c| Value::String(c.to_string())).collect();
@@ -360,6 +363,10 @@ impl Out {
                 (false, _) => "unique constraint",
             };
             text += &format!("\n  index {} {} ({})", i.path, state, by);
+            if let Some(s) = i.size {
+                text +=
+                    &format!(": {} entries, {} distinct, {} KiB", s.entries, s.distinct_keys, s.memory_bytes / 1024);
+            }
         }
         for c in catalog.constraints() {
             text += &format!("\n  {}", c);

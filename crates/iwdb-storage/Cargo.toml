@@ -10,7 +10,6 @@ publish = false
 
 [dependencies]
 crc32c.workspace = true
-fs4.workspace = true
 ironweaver-core.workspace = true
 iwdb-engine = { path = "../iwdb-engine" }
 postcard.workspace = true

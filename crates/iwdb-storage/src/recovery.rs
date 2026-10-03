@@ -5,14 +5,14 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use iwdb_engine::catalog::{IndexChanges, NamespaceName};
 use iwdb_engine::Namespace;
+use iwdb_engine::catalog::{IndexChanges, NamespaceName};
 
-use crate::checkpoint::{load_newest, SkippedCheckpoint};
+use crate::checkpoint::{SkippedCheckpoint, load_newest};
 use crate::format::Damage;
 use crate::io::LogFs;
 use crate::layout::{DataDir, NsPaths};
-use crate::namespaces::{read_log, CutLog, NamespaceInfo, NamespaceLog, DEFAULT_NAME, NAMESPACES_NAME};
+use crate::namespaces::{CutLog, DEFAULT_NAME, NAMESPACES_NAME, NamespaceInfo, NamespaceLog, read_log};
 use crate::{Error, LoggedNamespace, Wal, WalOptions, WalReader};
 
 /// What recovery found and did to one namespace. Recovery reports these
@@ -105,24 +105,24 @@ pub fn read_namespace<F: LogFs>(fs: &F, paths: &NsPaths, name: &NamespaceName) -
     let end = reader.end().cloned().ok_or(Error::LogEndsBefore { from, next_seq: namespace.seq() + 1 })?;
 
     let mut torn_tail = None;
-    if let Some(segment) = &end.last_segment {
-        if let Some(torn) = &segment.torn {
-            let removed = segment.valid_len == 0;
-            if removed {
-                fs.remove_file(&segment.path).map_err(|e| Error::io("remove", &segment.path, e))?;
-                fs.sync_dir(&paths.wal).map_err(|e| Error::io("sync directory", &paths.wal, e))?;
-            } else {
-                fs.truncate(&segment.path, segment.valid_len).map_err(|e| Error::io("truncate", &segment.path, e))?;
-            }
-            torn_tail = Some(CutTail {
-                path: segment.path.clone(),
-                file_len: segment.file_len,
-                valid_len: segment.valid_len,
-                damage: torn.damage,
-                discarded_frames: torn.discarded_frames,
-                removed,
-            });
+    if let Some(segment) = &end.last_segment
+        && let Some(torn) = &segment.torn
+    {
+        let removed = segment.valid_len == 0;
+        if removed {
+            fs.remove_file(&segment.path).map_err(|e| Error::io("remove", &segment.path, e))?;
+            fs.sync_dir(&paths.wal).map_err(|e| Error::io("sync directory", &paths.wal, e))?;
+        } else {
+            fs.truncate(&segment.path, segment.valid_len).map_err(|e| Error::io("truncate", &segment.path, e))?;
         }
+        torn_tail = Some(CutTail {
+            path: segment.path.clone(),
+            file_len: segment.file_len,
+            valid_len: segment.valid_len,
+            damage: torn.damage,
+            discarded_frames: torn.discarded_frames,
+            removed,
+        });
     }
     Ok(ReadNamespace {
         namespace,

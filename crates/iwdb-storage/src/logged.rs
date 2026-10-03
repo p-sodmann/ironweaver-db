@@ -1,8 +1,8 @@
 //! [`LoggedNamespace`]: a namespace whose commits go through its log, shared
 //! by one writer and many readers.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// [`FsyncPolicy::Always`](crate::FsyncPolicy::Always), and a commit whose
 /// append fails is never applied.
 ///
-/// **Locks** (step 8, ADR 0014). The WAL sits behind a mutex, which a
+/// **Locks** (ADR 0014). The WAL sits behind a mutex, which a
 /// commit holds from start to end: commits are serialized (the single
 /// writer). The namespace sits behind a reader/writer lock. A commit
 /// prepares under its **read** side (readers go on meanwhile), appends and
@@ -37,7 +37,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// is WAL, then namespace; nothing takes the WAL's lock while holding the
 /// namespace's.
 ///
-/// **Idempotency keys** (step 8, ADR 0015): a commit with a key whose
+/// **Idempotency keys** (ADR 0015): a commit with a key whose
 /// commit is in the namespace's key table returns the original result and
 /// logs nothing, even while the namespace is read-only (that commit was
 /// applied, so its result stands).
@@ -46,9 +46,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// error), or applying a logged record fails and poisons the namespace
 /// ([`iwdb_engine::Error::ApplyFailed`]), every further commit fails with
 /// [`Error::ReadOnly`] until the namespace is reopened from its checkpoint
-/// and log (step 5). Reads still work, and see every applied commit.
-///
-/// One namespace only (step 9 decides how namespaces share logs).
+/// and log. Reads still work, and see every applied commit.
 #[derive(Debug)]
 pub struct LoggedNamespace<F: LogFs = StdFs> {
     namespace: RwLock<Namespace>,
@@ -62,14 +60,19 @@ pub struct LoggedNamespace<F: LogFs = StdFs> {
     progress: Mutex<()>,
     advanced: Condvar,
     stats: Stats,
-    /// The namespace was dropped (step 9): commits and waits fail.
+    /// The namespace was dropped: commits and waits fail.
     dropped: AtomicBool,
-    /// Index builds in progress (step 9).
+    /// Index builds in progress.
     builds: Mutex<Vec<Arc<BuildProgress>>>,
+    /// Commits waiting for the namespace's write lock: an index build's
+    /// scan lets them in before it takes the read lock again, because
+    /// `RwLock` doesn't promise that a waiting writer gets in between two
+    /// read locks of one thread (on macOS a scan starved commits).
+    applies_waiting: AtomicUsize,
 }
 
 /// Rows scanned per read-lock hold of an online index build.
-pub const BUILD_CHUNK: usize = 8192;
+pub const BUILD_CHUNK: usize = 2048;
 
 /// An online index build in progress ([`LoggedNamespace::builds`]).
 #[derive(Debug)]
@@ -141,6 +144,7 @@ impl<F: LogFs> LoggedNamespace<F> {
             stats: Stats::default(),
             dropped: AtomicBool::new(false),
             builds: Mutex::new(Vec::new()),
+            applies_waiting: AtomicUsize::new(0),
         })
     }
 
@@ -188,21 +192,30 @@ impl<F: LogFs> LoggedNamespace<F> {
     }
 
     fn build_index(&self, change: &CatalogChange, key: Option<&IdempotencyKey>) -> Result<Option<IndexBuild>, Error> {
-        let (path, handles) = {
-            let ns = self.namespace();
+        let mut build = {
+            let mut ns = self.namespace.write().unwrap_or_else(PoisonError::into_inner);
             if key.is_some_and(|k| ns.keys().get(k).is_some()) {
                 return Ok(None);
             }
-            match ns.index_needed(change) {
-                Some(path) => (path, ns.node_handles()),
-                None => return Ok(None),
+            let Some(path) = ns.index_needed(change) else { return Ok(None) };
+            // O(1). A path the core refuses is left to the commit, whose
+            // validation reports it
+            match ns.begin_index_build(path) {
+                Ok(build) => build,
+                Err(_) => return Ok(None),
             }
         };
-        let progress = Arc::new(BuildProgress { path: path.clone(), total: handles.len(), scanned: AtomicU64::new(0) });
+        // Nodes added from here on are in the list and tracked as changed;
+        // the install re-reads them either way
+        let handles = self.namespace().node_handles();
+        let progress =
+            Arc::new(BuildProgress { path: build.path().clone(), total: handles.len(), scanned: AtomicU64::new(0) });
         lock(&self.builds).push(progress.clone());
-        let mut build = IndexBuild::new(path);
         let mut result = Ok(());
         for chunk in handles.chunks(BUILD_CHUNK) {
+            while self.applies_waiting.load(Ordering::Acquire) > 0 {
+                std::thread::yield_now();
+            }
             if self.is_dropped() {
                 result = Err(Error::NamespaceDropped { name: self.namespace().name().to_string() });
                 break;
@@ -363,7 +376,9 @@ impl<F: LogFs> LoggedNamespace<F> {
         let time = appended?;
 
         let start = Instant::now();
+        self.applies_waiting.fetch_add(1, Ordering::AcqRel);
         let mut namespace = self.namespace.write().unwrap_or_else(PoisonError::into_inner);
+        self.applies_waiting.fetch_sub(1, Ordering::AcqRel);
         // An error here is ApplyFailed (the namespace is now poisoned, so
         // read-only) or a bug; either way the commit is not acknowledged.
         let applied = namespace.apply_built(prepared, Some(time), build);
@@ -392,11 +407,11 @@ impl<F: LogFs> LoggedNamespace<F> {
 
     /// After a WAL operation: if the log failed, the namespace is read-only.
     fn note_failure<T>(&self, wal: &Wal<F>, result: &Result<T, Error>) {
-        if result.is_err() {
-            if let Some(cause) = wal.failure() {
-                lock(&self.failure).get_or_insert_with(|| cause.to_owned());
-                self.advanced.notify_all();
-            }
+        if result.is_err()
+            && let Some(cause) = wal.failure()
+        {
+            lock(&self.failure).get_or_insert_with(|| cause.to_owned());
+            self.advanced.notify_all();
         }
     }
 }

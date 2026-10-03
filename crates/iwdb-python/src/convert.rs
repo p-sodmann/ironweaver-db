@@ -38,8 +38,7 @@ fn too_deep() -> PyErr {
 }
 
 /// A Python value as a database value. `level` is the value's depth (1 for
-/// an attribute's own value). Depth is counted like the commit pipeline
-/// does: an empty list or dict counts as holding a scalar.
+/// an attribute's own value), counted like the commit pipeline does.
 pub fn to_value(v: &Bound<'_, PyAny>, level: usize) -> PyResult<Value> {
     if level > MAX_VALUE_DEPTH {
         return Err(too_deep());
@@ -61,14 +60,8 @@ pub fn to_value(v: &Bound<'_, PyAny>, level: usize) -> PyResult<Value> {
     } else if let Ok(b) = v.cast::<PyByteArray>() {
         Value::Bytes(b.to_vec())
     } else if let Ok(list) = v.cast::<PyList>() {
-        if list.is_empty() && level + 1 > MAX_VALUE_DEPTH {
-            return Err(too_deep());
-        }
         Value::List(list.iter().map(|item| to_value(&item, level + 1)).collect::<PyResult<_>>()?)
     } else if let Ok(dict) = v.cast::<PyDict>() {
-        if dict.is_empty() && level + 1 > MAX_VALUE_DEPTH {
-            return Err(too_deep());
-        }
         Value::Dict(dict_entries(dict, level + 1)?)
     } else if v.is_instance(datetime_type(py)?)? {
         Value::DateTime(to_datetime(v)?)

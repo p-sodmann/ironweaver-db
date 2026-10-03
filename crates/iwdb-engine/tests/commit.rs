@@ -1,4 +1,4 @@
-//! Step 3: the commit pipeline. Version semantics, conflicts, constraints,
+//! The commit pipeline. Version semantics, conflicts, constraints,
 //! catalog changes, reserved names and limits, each as a typed error that
 //! leaves the namespace unchanged.
 
@@ -576,9 +576,13 @@ fn values_nested_too_deep_for_the_log_are_rejected() {
     ns.apply(prepared, None).unwrap();
 
     rejects(&mut ns, &[set(node("a"), "deep", nest(100, Value::Int(1)))], too_deep("deep"));
-    // An empty list counts as holding a scalar (the log's encoder rejects
-    // 100 nested lists even when the innermost is empty)
-    rejects(&mut ns, &[set(node("a"), "deep", nest(99, Value::List(vec![])))], too_deep("deep"));
+    // An empty list at depth 100 is fine, and the log encodes it; at 101
+    // it is too deep
+    let prepared = ns.prepare(&[set(node("a"), "empty", nest(99, Value::List(vec![])))]).unwrap();
+    let bytes = postcard::to_allocvec(prepared.record()).unwrap();
+    assert_eq!(&postcard::from_bytes::<CommitRecord>(&bytes).unwrap(), prepared.record());
+    ns.apply(prepared, None).unwrap();
+    rejects(&mut ns, &[set(node("a"), "deep", nest(100, Value::List(vec![])))], too_deep("deep"));
     rejects(&mut ns, &[upsert("a", &[], &[("deep", nest(100, Value::Int(1)))])], too_deep("deep"));
     let meta = attrs(&[("m", nest(100, Value::Int(1)))]);
     rejects(
@@ -677,20 +681,6 @@ fn replay_rejects_gaps_and_repeats() {
 // Saved files
 
 #[test]
-fn committed_graphs_save_and_load_with_their_versions() {
-    let mut ns = ns();
-    ns.commit_catalog(CatalogChange::AddConstraint(unique("P", &["k"]))).unwrap();
-    ns.commit(&[upsert("a", &["P"], &[("k", Value::Int(1))]), upsert("b", &["P"], &[]), edge("a", "b", Some("T"))])
-        .unwrap();
-    ns.commit(&[set(node("b"), "k", Value::Int(2)), set(Target::Edge(EdgeId(0)), "w", Value::Int(1))]).unwrap();
-    let meta = ns.graph_meta();
-    let loaded = codec::from_binary(&codec::to_binary(ns.graph(), &meta).unwrap()).unwrap();
-    assert_eq!(canonical(&loaded.graph), canonical(ns.graph()));
-    assert_eq!(loaded.meta, meta);
-    assert!(loaded.index_changes.created.is_empty() && loaded.index_changes.dropped.is_empty());
-}
-
-#[test]
 fn a_namespace_from_a_loaded_file_continues_where_the_original_was() {
     let mut original = ns();
     original.commit_catalog(CatalogChange::AddConstraint(unique("P", &["k"]))).unwrap();
@@ -742,4 +732,77 @@ fn files_with_reserved_attribute_keys_are_rejected() {
     };
     let err = codec::to_binary(&g, &meta).unwrap_err().to_string();
     assert!(err.contains("'iwdb.x' is reserved"), "{}", err);
+}
+
+/// An online index build (ADR 0019) with commits between its scan chunks:
+/// changed, added and deleted nodes, a node changed after it was scanned,
+/// and a node added after the handles were listed. After the install and
+/// the flush the index equals a scan (the invariants), and lookups agree.
+#[test]
+fn an_online_index_build_sees_commits_made_during_the_scan() {
+    let mut ns = ns();
+    let n = |i: i64| upsert(&format!("n{}", i), &[], &[("v", Value::Int(i))]);
+    ns.commit(&(0..100).map(n).collect::<Vec<_>>()).unwrap();
+    let path = AttrPath::new(["v"]).unwrap();
+    let change = CatalogChange::CreateIndex(IndexDef { path: path.clone() });
+    let mut build = ns.begin_index_build(path.clone()).unwrap();
+    // A node added before the handles are listed
+    ns.commit(&[n(100)]).unwrap();
+    let handles = ns.node_handles();
+    let (first, rest) = handles.split_at(50);
+    ns.scan_index_keys(first, &mut build).unwrap();
+    ns.commit(&[
+        set(node("n1"), "v", Value::Int(1001)),  // scanned, then changed
+        set(node("n60"), "v", Value::Int(1060)), // changed, then scanned
+        remove(node("n2"), "v"),
+        delete("n3"),
+        delete("n70"),
+        n(101), // after the listing
+    ])
+    .unwrap();
+    ns.scan_index_keys(rest, &mut build).unwrap();
+    let prepared = ns.prepare_catalog(change).unwrap();
+    ns.apply_built(prepared, None, Some(build)).unwrap();
+
+    assert_eq!(iwdb_engine::invariants::check(&ns), Vec::<String>::new());
+    let find = |v: i64| {
+        let g = ns.graph();
+        let mut ids: Vec<String> = g
+            .find_nodes(path.keys(), &Value::Int(v))
+            .unwrap()
+            .expect("indexed")
+            .into_iter()
+            .map(|ix| g.node(ix).unwrap().id().to_owned())
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(find(1001), ["n1"]);
+    assert_eq!(find(1060), ["n60"]);
+    assert!(find(1).is_empty() && find(2).is_empty() && find(3).is_empty() && find(70).is_empty());
+    assert_eq!(find(100), ["n100"]);
+    assert_eq!(find(101), ["n101"]);
+    assert_eq!(find(99), ["n99"]);
+    assert_eq!(ns.graph().index_stats(path.keys()).unwrap().entries, 99);
+}
+
+/// A build whose commit doesn't come (an error, a dropped namespace) is
+/// dropped: the graph is unchanged and a later build works.
+#[test]
+fn an_abandoned_index_build_leaves_nothing_behind() {
+    let mut ns = ns();
+    ns.commit(&[upsert("a", &[], &[("v", Value::Int(1))])]).unwrap();
+    let path = AttrPath::new(["v"]).unwrap();
+    let build = ns.begin_index_build(path.clone()).unwrap();
+    drop(build);
+    ns.commit(&[upsert("b", &[], &[("v", Value::Int(2))])]).unwrap();
+    assert!(!ns.graph().has_index(path.keys()));
+    assert_eq!(ns.graph().open_index_builds(), 0);
+    let mut build = ns.begin_index_build(path.clone()).unwrap();
+    let handles = ns.node_handles();
+    ns.scan_index_keys(&handles, &mut build).unwrap();
+    let prepared = ns.prepare_catalog(CatalogChange::CreateIndex(IndexDef { path: path.clone() })).unwrap();
+    ns.apply_built(prepared, None, Some(build)).unwrap();
+    assert_eq!(iwdb_engine::invariants::check(&ns), Vec::<String>::new());
+    assert_eq!(ns.graph().index_stats(path.keys()).unwrap().entries, 2);
 }

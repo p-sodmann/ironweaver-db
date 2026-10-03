@@ -1,0 +1,13 @@
+# buf configuration for the gRPC contract (step 11): `buf lint` and
+# `buf breaking` run in CI (.github/workflows/ci.yml).
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    # The strictest category: it protects generated code in every language
+    # and the JSON names REST uses (step 12)
+    - FILE

@@ -1,11 +1,12 @@
 //! The bounded reader (`WalReader::open_until`), which the checkpointer
-//! (step 5) uses on a log that the writer is still appending to: it stops
+//! uses on a log that the writer is still appending to: it stops
 //! after its last record and never looks at the bytes after it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
+use std::assert_matches;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,8 +15,8 @@ use std::thread;
 
 use common::{namespace, segments, upsert};
 use ironweaver_core::Value;
-use iwdb_storage::format::{FrameHeader, FORMAT_VERSION};
-use iwdb_storage::{Error, FsyncPolicy, LoggedNamespace, Wal, WalOptions, WalReader, MIN_SEGMENT_SIZE};
+use iwdb_storage::format::{FORMAT_VERSION, FrameHeader};
+use iwdb_storage::{Error, FsyncPolicy, LoggedNamespace, MIN_SEGMENT_SIZE, Wal, WalOptions, WalReader};
 
 /// A log with records 1..=n in small segments.
 fn log(n: i64) -> (tempfile::TempDir, LoggedNamespace) {
@@ -60,11 +61,11 @@ fn a_range_past_the_end_of_the_log_is_an_error() {
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].as_ref().unwrap().seq, 4);
     assert_eq!(results[1].as_ref().unwrap().seq, 5);
-    assert!(matches!(results[2], Err(Error::LogEndsBefore { from: 6, next_seq: 6 })));
+    assert_matches!(results[2], Err(Error::LogEndsBefore { from: 6, next_seq: 6 }));
 
     let empty = tempfile::tempdir().unwrap();
     let results: Vec<_> = WalReader::open_until(empty.path(), 1, 1).unwrap().collect();
-    assert!(matches!(results[..], [Err(Error::LogEndsBefore { from: 1, next_seq: 1 })]));
+    assert_matches!(results[..], [Err(Error::LogEndsBefore { from: 1, next_seq: 1 })]);
     assert!(seqs(WalReader::open_until(empty.path(), 1, 0).unwrap()).is_empty());
 }
 

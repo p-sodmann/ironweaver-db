@@ -3,9 +3,9 @@
 //! "Exceptions").
 
 use iwdb::Error;
+use pyo3::PyErr;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::PyErr;
 
 /// The exception classes, as Python sees them (`iwdb.Error`, ...).
 pub mod exc {
@@ -108,6 +108,27 @@ pub fn to_py(error: Error) -> PyErr {
         // interrupted restore, a full destination, another history, a
         // record too large, a restore target that isn't there
         _ => InvalidError::new_err(message),
+    }
+}
+
+/// The Python exception for an error of the `Database` trait, by its code.
+pub fn query_to_py(error: iwdb_query::Error) -> PyErr {
+    use iwdb_query::Code;
+    let message = error.message().to_owned();
+    match error.code() {
+        Code::Conflict => ConflictError::new_err(message),
+        Code::ConstraintViolation => ConstraintError::new_err(message),
+        Code::NotFound => NotFoundError::new_err(message),
+        Code::InvalidArgument => InvalidError::new_err(message),
+        Code::ReadOnly => ReadOnlyError::new_err(message),
+        Code::Io => IoError::new_err(message),
+        Code::Corrupt => CorruptError::new_err(message),
+        Code::Timeout => TimeoutError::new_err(message),
+        Code::Internal => InternalError::new_err(message),
+        // Not reachable through the calls Python has yet (budgets and
+        // cursors come with the query methods of step 14), or nothing more
+        // specific to say (unavailable, cancelled)
+        _ => exc::Error::new_err(message),
     }
 }
 

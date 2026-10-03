@@ -2,7 +2,6 @@
 (documentation/python-api.md, "Values")."""
 
 import datetime
-import math
 import struct
 
 import pytest
@@ -50,6 +49,7 @@ def same(a, b):
         1.5,
         float("inf"),
         float("-inf"),
+        float("nan"),
         5e-324,
         "",
         "héllo wörld ✓ \U0001f600",
@@ -66,21 +66,11 @@ def same(a, b):
         datetime.datetime(2026, 10, 1, 12, 30, tzinfo=datetime.timezone.utc),
         datetime.datetime(2026, 10, 1, 12, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=-5, minutes=-30))),
         datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone(datetime.timedelta(seconds=45))),
+        datetime.datetime(2026, 3, 29, 3, tzinfo=datetime.timezone(datetime.timedelta(hours=2), "CEST")),
     ],
 )
 def test_values_round_trip_exactly(store, value):
     assert same(round_trip(store, value), value)
-
-
-def test_nan_and_negative_zero(store):
-    assert math.isnan(round_trip(store, float("nan")))
-    assert math.copysign(1.0, round_trip(store, -0.0)) == -1.0
-
-
-def test_bool_stays_bool_and_int_stays_int(store):
-    assert round_trip(store, True) is True
-    assert type(round_trip(store, 1)) is int
-    assert type(round_trip(store, 1.0)) is float
 
 
 def test_bytearray_reads_back_as_bytes(store):
@@ -90,12 +80,6 @@ def test_bytearray_reads_back_as_bytes(store):
 
 def test_dicts_read_back_with_keys_sorted(store):
     assert list(round_trip(store, {"b": 1, "a": 2, "c": 3})) == ["a", "b", "c"]
-
-
-def test_an_aware_datetime_keeps_its_offset_as_a_fixed_timezone(store):
-    value = datetime.datetime(2026, 3, 29, 3, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=2), "CEST"))
-    back = round_trip(store, value)
-    assert back == value and back.utcoffset() == datetime.timedelta(hours=2)
 
 
 @pytest.mark.parametrize(
@@ -134,10 +118,11 @@ def test_the_depth_limit(store):
     assert same(round_trip(store, nested(99, 1)), nested(99, 1))
     with pytest.raises(ValueError, match="100 levels"):
         round_trip(store, nested(100, 1))
-    # An empty list counts as holding a scalar
-    assert same(round_trip(store, nested(98, [])), nested(98, []))
+    # An empty list is a value like a scalar
+    assert same(round_trip(store, nested(99, [])), nested(99, []))
+    assert same(round_trip(store, nested(99, {})), nested(99, {}))
     with pytest.raises(ValueError):
-        round_trip(store, nested(99, []))
+        round_trip(store, nested(100, []))
     # A list that contains itself
     loop = []
     loop.append(loop)

@@ -86,7 +86,7 @@ pub fn check_options(policy: Policy, keep: usize, archive: Option<&Path>) -> Sto
 /// One thing the child does.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Act {
-    /// A commit, with an idempotency key for about a third of them (step 8).
+    /// A commit, with an idempotency key for about a third of them.
     Commit(Step, Option<IdempotencyKey>),
     Checkpoint,
     Sync,

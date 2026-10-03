@@ -1,4 +1,4 @@
-//! Step 4 acceptance: with `always`, every acknowledged commit is readable
+//! With `always`, every acknowledged commit is readable
 //! after reopening the files, and replaying the log gives the same state.
 //! Also the fsync policies (when fsyncs happen), the record size limit and
 //! the rules for starting a writer.
@@ -7,16 +7,17 @@
 
 mod common;
 
+use std::assert_matches;
 use std::fs;
 use std::time::Duration;
 
-use common::{namespace, replay, segments, state, upsert, Call, TestFs};
+use common::{Call, TestFs, namespace, replay, segments, state, upsert};
 use ironweaver_core::Value;
-use iwdb_engine::testutil::workload::{seed, step, Step};
+use iwdb_engine::testutil::workload::{Step, seed, step};
 use iwdb_engine::{CommitRecord, CommitResult, Namespace};
 use iwdb_storage::format::{MAX_RECORD_LEN, SEGMENT_HEADER_LEN};
 use iwdb_storage::{
-    read_log, Error, FsyncPolicy, LoggedNamespace, Wal, WalOptions, WalReader, DEFAULT_SEGMENT_SIZE, MIN_SEGMENT_SIZE,
+    DEFAULT_SEGMENT_SIZE, Error, FsyncPolicy, LoggedNamespace, MIN_SEGMENT_SIZE, Wal, WalOptions, WalReader, read_log,
 };
 use proptest::collection::vec;
 use proptest::prelude::*;
@@ -303,15 +304,15 @@ fn a_writer_never_overwrites_records() {
 
     // A log with records at or after next_seq, or ending before it
     for next_seq in [1, 2, 3] {
-        assert!(matches!(
+        assert_matches!(
             Wal::create(dir.path(), WalOptions::default(), next_seq),
             Err(Error::LogAhead { first_seq: 1, .. })
-        ));
+        );
     }
-    assert!(matches!(
+    assert_matches!(
         Wal::create(dir.path(), WalOptions::default(), 5),
         Err(Error::LogEndsBefore { from: 5, next_seq: 4 })
-    ));
+    );
     // Only possible at the end; the previous segment keeps its records
     let wal = Wal::create(dir.path(), WalOptions::default(), 4).unwrap();
     // A header-only segment at next_seq (a crash right after rotating) is replaced
@@ -331,16 +332,16 @@ fn a_writer_never_overwrites_records() {
         .map(|mut f| std::io::Write::write_all(&mut f, &[1, 2, 3]))
         .unwrap()
         .unwrap();
-    assert!(matches!(
+    assert_matches!(
         Wal::create(dir.path(), WalOptions::default(), 4),
         Err(Error::TornTail { valid_len, .. }) if valid_len == SEGMENT_HEADER_LEN as u64
-    ));
+    );
     fs::OpenOptions::new().write(true).open(&last).unwrap().set_len(SEGMENT_HEADER_LEN as u64).unwrap();
 
     // Out-of-range starts, and a namespace that doesn't match its log
-    assert!(matches!(Wal::create(dir.path(), WalOptions::default(), 0), Err(Error::InvalidOptions(_))));
+    assert_matches!(Wal::create(dir.path(), WalOptions::default(), 0), Err(Error::InvalidOptions(_)));
     let wal = Wal::create(dir.path(), WalOptions::default(), 4).unwrap();
-    assert!(matches!(LoggedNamespace::new(namespace(), wal), Err(Error::OutOfOrder { expected: 1, found: 4 })));
+    assert_matches!(LoggedNamespace::new(namespace(), wal), Err(Error::OutOfOrder { expected: 1, found: 4 }));
 }
 
 #[test]
@@ -349,8 +350,8 @@ fn appends_must_come_in_seq_order() {
     let mut wal = Wal::create(dir.path(), WalOptions::default(), 1).unwrap();
     let record = |seq| CommitRecord::new(seq, iwdb_engine::Change::Data(vec![]));
     wal.append(&record(1)).unwrap();
-    assert!(matches!(wal.append(&record(3)), Err(Error::OutOfOrder { expected: 2, found: 3 })));
-    assert!(matches!(wal.append(&record(1)), Err(Error::OutOfOrder { expected: 2, found: 1 })));
+    assert_matches!(wal.append(&record(3)), Err(Error::OutOfOrder { expected: 2, found: 3 }));
+    assert_matches!(wal.append(&record(1)), Err(Error::OutOfOrder { expected: 2, found: 1 }));
     // Still usable
     assert!(wal.failure().is_none());
     wal.append(&record(2)).unwrap();
@@ -377,7 +378,7 @@ fn reading_from_a_seq_needs_the_records_from_there() {
         logged.commit(&[upsert("a", Value::Int(i))]).unwrap();
     }
     drop(logged);
-    assert!(matches!(read_log(dir.path(), 9), Err(Error::MissingRecords { from: 9, first_seq: 10 })));
+    assert_matches!(read_log(dir.path(), 9), Err(Error::MissingRecords { from: 9, first_seq: 10 }));
     let (records, end) = read_log(dir.path(), 10).unwrap();
     assert_eq!((records.len(), records[0].seq, end.next_seq), (30, 10, 40));
     let (records, end) = read_log(dir.path(), 25).unwrap();
@@ -385,7 +386,7 @@ fn reading_from_a_seq_needs_the_records_from_there() {
     // From the end: nothing, but a valid end
     let (records, end) = read_log(dir.path(), 40).unwrap();
     assert!(records.is_empty() && end.next_seq == 40);
-    assert!(matches!(read_log(dir.path(), 41), Err(Error::LogEndsBefore { from: 41, next_seq: 40 })));
+    assert_matches!(read_log(dir.path(), 41), Err(Error::LogEndsBefore { from: 41, next_seq: 40 }));
 
     // The iterator reports the end once it has returned None
     let mut reader = WalReader::open(dir.path(), 30).unwrap();

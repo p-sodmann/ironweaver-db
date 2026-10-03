@@ -21,13 +21,13 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::history::HistoryId;
-use crate::io::{LogFile, LogFs};
+use crate::io::{CHUNK, LogFs, copy_file};
 use crate::layout::{LOCK_NAME, TEMP_SUFFIX};
 use crate::namespaces::{
-    ns_dir_name, parse_ns_dir_name, read_log, write_whole, Event, EventKind, DEFAULT_ID, NAMESPACES_NAME, NS_DIR,
+    DEFAULT_ID, Event, EventKind, NAMESPACES_NAME, NS_DIR, ns_dir_name, parse_ns_dir_name, read_log, write_whole,
 };
 use crate::verify::{Kind, VerifyReport};
-use crate::{format, reader, Error, WalReader};
+use crate::{Error, WalReader, format, reader};
 
 /// The archive marker's name.
 pub const ARCHIVE_MARKER_NAME: &str = "IWDBARCH";
@@ -39,7 +39,6 @@ pub const ARCHIVE_MAGIC: [u8; 8] = *b"IWDBARC\n";
 pub const ARCHIVE_VERSION: u32 = 2;
 /// Length of the archive marker.
 pub const ARCHIVE_MARKER_LEN: usize = 32;
-const CHUNK: usize = 1 << 20;
 
 /// The archive marker of history `history` in the current format: magic,
 /// version (u32 LE), the history id, CRC32C of the 28 bytes before it.
@@ -97,11 +96,7 @@ pub fn archive_segments(dir: &Path, version: u32, id: u64) -> Result<Vec<(u64, P
         return if id == DEFAULT_ID { reader::list_segments(dir) } else { Ok(Vec::new()) };
     }
     let ns_dir = dir.join(NS_DIR).join(ns_dir_name(id));
-    if ns_dir.is_dir() {
-        reader::list_segments(&ns_dir)
-    } else {
-        Ok(Vec::new())
-    }
+    if ns_dir.is_dir() { reader::list_segments(&ns_dir) } else { Ok(Vec::new()) }
 }
 
 /// The ids of the namespaces that have a directory in the format 2 archive
@@ -134,7 +129,9 @@ pub struct Archive<F: LogFs> {
 impl<F: LogFs> Archive<F> {
     /// Open the archive directory `dir` for a store of history `history`,
     /// creating and initializing it if it is missing or empty (`ns/`, then
-    /// the marker written with `write_atomic`, then the directory synced),
+    /// the marker written with `write_atomic`, then the directory synced;
+    /// an empty `ns/` without a marker counts as empty, since a crash
+    /// during initialization leaves it),
     /// and take its exclusive lock. A format 1 archive (one namespace, the
     /// segments at the top) is upgraded: its segments are renamed into
     /// `ns/1/` (each rename is atomic, and a crash leaves the format 1
@@ -149,7 +146,7 @@ impl<F: LogFs> Archive<F> {
     /// archives into it; [`Error::Io`].
     pub fn open(fs: F, dir: &Path, history: HistoryId) -> Result<Self, Error> {
         if !dir.is_dir() {
-            crate::backup::create_dir(&fs, dir)?;
+            crate::io::create_dir(&fs, dir)?;
         }
         let lock_path = dir.join(LOCK_NAME);
         let lock = OpenOptions::new()
@@ -169,8 +166,14 @@ impl<F: LogFs> Archive<F> {
             Some(_) => {}
             None => {
                 for entry in fs::read_dir(dir).map_err(|e| Error::io("list", dir, e))? {
-                    let name = entry.map_err(|e| Error::io("list", dir, e))?.file_name();
+                    let entry = entry.map_err(|e| Error::io("list", dir, e))?;
+                    let name = entry.file_name();
                     let name = name.to_string_lossy();
+                    // An empty `ns/` is what a crash between creating it and
+                    // writing the marker leaves behind.
+                    if name == NS_DIR && dir_is_empty(&entry.path())? {
+                        continue;
+                    }
                     if name != LOCK_NAME && !name.ends_with(TEMP_SUFFIX) {
                         return Err(Error::NotAnArchive {
                             path: dir.to_path_buf(),
@@ -180,8 +183,8 @@ impl<F: LogFs> Archive<F> {
                 }
                 archive.make_dir(&archive.dir.join(NS_DIR))?;
                 let marker = encode_archive_marker(history);
-                crate::backup::write_atomic(&archive.fs, &dir.join(ARCHIVE_MARKER_NAME), &marker)?;
-                crate::backup::sync_dir(&archive.fs, dir)?;
+                crate::io::write_atomic(&archive.fs, &dir.join(ARCHIVE_MARKER_NAME), &marker)?;
+                crate::io::sync_dir(&archive.fs, dir)?;
             }
         }
         Ok(archive)
@@ -202,7 +205,7 @@ impl<F: LogFs> Archive<F> {
         let target = ns_root.join(ns_dir_name(DEFAULT_ID));
         self.make_dir(&ns_root)?;
         self.make_dir(&target)?;
-        crate::backup::sync_dir(&self.fs, &ns_root)?;
+        crate::io::sync_dir(&self.fs, &ns_root)?;
         for (first_seq, source) in reader::list_segments(&self.dir)? {
             let to = target.join(format::segment_name(first_seq));
             if to.exists() {
@@ -210,11 +213,11 @@ impl<F: LogFs> Archive<F> {
             }
             self.fs.rename(&source, &to).map_err(|e| Error::io("rename", &source, e))?;
         }
-        crate::backup::sync_dir(&self.fs, &target)?;
-        crate::backup::sync_dir(&self.fs, &self.dir)?;
+        crate::io::sync_dir(&self.fs, &target)?;
+        crate::io::sync_dir(&self.fs, &self.dir)?;
         let marker = encode_archive_marker(self.history);
-        crate::backup::write_atomic(&self.fs, &self.dir.join(ARCHIVE_MARKER_NAME), &marker)?;
-        crate::backup::sync_dir(&self.fs, &self.dir)
+        crate::io::write_atomic(&self.fs, &self.dir.join(ARCHIVE_MARKER_NAME), &marker)?;
+        crate::io::sync_dir(&self.fs, &self.dir)
     }
 
     pub fn dir(&self) -> &Path {
@@ -261,8 +264,8 @@ impl<F: LogFs> Archive<F> {
         if !dir.is_dir() {
             self.make_dir(&ns_root)?;
             self.make_dir(&dir)?;
-            crate::backup::sync_dir(&self.fs, &ns_root)?;
-            crate::backup::sync_dir(&self.fs, &self.dir)?;
+            crate::io::sync_dir(&self.fs, &ns_root)?;
+            crate::io::sync_dir(&self.fs, &self.dir)?;
         }
         Ok(())
     }
@@ -270,7 +273,7 @@ impl<F: LogFs> Archive<F> {
     /// Sync the directory of namespace `id`: the segments copied are then
     /// durable. The caller must never retry a failed sync (ADR 0005).
     pub fn sync(&self, id: u64) -> Result<(), Error> {
-        crate::backup::sync_dir(&self.fs, &self.dir.join(NS_DIR).join(ns_dir_name(id)))
+        crate::io::sync_dir(&self.fs, &self.dir.join(NS_DIR).join(ns_dir_name(id)))
     }
 
     /// Replace the archive's copy of the store's namespace log with
@@ -278,7 +281,7 @@ impl<F: LogFs> Archive<F> {
     /// to know which namespaces existed when.
     pub fn write_log(&self, events: &[Event]) -> Result<(), Error> {
         write_whole(&self.fs, &self.dir.join(NAMESPACES_NAME), events)?;
-        crate::backup::sync_dir(&self.fs, &self.dir)
+        crate::io::sync_dir(&self.fs, &self.dir)
     }
 }
 
@@ -346,21 +349,6 @@ fn read_full(file: &mut File, buf: &mut [u8]) -> io::Result<usize> {
     Ok(n)
 }
 
-/// Copy `source` to a new file `target` in chunks, and fsync it.
-fn copy_file<F: LogFs>(fs: &F, source: &Path, target: &Path) -> Result<(), Error> {
-    let mut input = File::open(source).map_err(|e| Error::io("open", source, e))?;
-    let mut file = fs.create(target).map_err(|e| Error::io("create", target, e))?;
-    let mut buf = vec![0u8; CHUNK];
-    loop {
-        let n = input.read(&mut buf).map_err(|e| Error::io("read", source, e))?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n]).map_err(|e| Error::io("write", target, e))?;
-    }
-    file.sync().map_err(|e| Error::io("fsync", target, e))
-}
-
 /// Verify an archive directory without changing it: its marker, the
 /// namespace log copy, and for each namespace every segment from the first
 /// to the last (headers, every frame's checksum, seq and contents), the
@@ -382,7 +370,7 @@ pub fn verify_archive(dir: &Path) -> Result<VerifyReport, Error> {
             return Err(Error::NotAnArchive {
                 path: dir.to_path_buf(),
                 reason: format!("it has no '{}' marker", ARCHIVE_MARKER_NAME),
-            })
+            });
         }
         Err(Error::NotAnArchive { reason, .. }) => report.problem(Some(&dir.join(ARCHIVE_MARKER_NAME)), reason),
         Err(e) => return Err(e),
@@ -468,23 +456,30 @@ fn verify_namespace_segments(report: &mut VerifyReport, dir: &Path, version: u32
             }
         }
     }
-    if let Some(last) = reader.end().and_then(|end| end.last_segment.clone()) {
-        if let Some(torn) = last.torn {
-            report.problem(
-                Some(&last.path),
-                format!(
-                    "the segment is incomplete at offset {} ({}): archived segments are whole",
-                    last.valid_len, torn.damage
-                ),
-            );
-        }
+    if let Some(last) = reader.end().and_then(|end| end.last_segment.clone())
+        && let Some(torn) = last.torn
+    {
+        report.problem(
+            Some(&last.path),
+            format!(
+                "the segment is incomplete at offset {} ({}): archived segments are whole",
+                last.valid_len, torn.damage
+            ),
+        );
     }
     Ok(())
+}
+
+/// Whether directory `dir` has no entries.
+fn dir_is_empty(dir: &Path) -> Result<bool, Error> {
+    let mut entries = fs::read_dir(dir).map_err(|e| Error::io("list", dir, e))?;
+    Ok(entries.next().is_none())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn markers_round_trip_and_damage_is_found() {
@@ -498,7 +493,22 @@ mod tests {
             let mut bad = marker;
             bad[at] ^= 1;
             fs::write(dir.path().join(ARCHIVE_MARKER_NAME), bad).expect("write");
-            assert!(matches!(read_archive_marker(dir.path()), Err(Error::NotAnArchive { .. })), "byte {}", at);
+            assert_matches!(read_archive_marker(dir.path()), Err(Error::NotAnArchive { .. }), "byte {}", at);
         }
+    }
+
+    #[test]
+    fn an_empty_ns_dir_without_a_marker_is_initialized() {
+        // A crash between creating `ns/` and writing the marker
+        let dir = tempfile::tempdir().expect("dir");
+        fs::create_dir(dir.path().join(NS_DIR)).expect("create");
+        let id = HistoryId([3; 16]);
+        drop(Archive::open(crate::io::StdFs, dir.path(), id).expect("open"));
+        assert_eq!(read_archive_marker(dir.path()).expect("read"), Some(id));
+
+        // A non-empty `ns/` without a marker is still refused
+        let dir = tempfile::tempdir().expect("dir");
+        fs::create_dir_all(dir.path().join(NS_DIR).join("1")).expect("create");
+        assert_matches!(Archive::open(crate::io::StdFs, dir.path(), id), Err(Error::NotAnArchive { .. }));
     }
 }

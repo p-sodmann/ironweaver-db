@@ -20,7 +20,7 @@ use iwdb_engine::catalog::{AttrPath, Constraint, ConstraintKind, IndexDef, Label
 use iwdb_engine::reserved::VERSION_KEY;
 use iwdb_engine::{CatalogChange, Change, CommitRecord, DbRecord, IdempotencyKey, Keyed, Target};
 use iwdb_storage::format::FORMAT_VERSION;
-use iwdb_storage::{read_log, CommitTime, FsyncPolicy, Wal, WalOptions, WalReader};
+use iwdb_storage::{CommitTime, FsyncPolicy, Wal, WalOptions, WalReader, read_log};
 
 fn fixture_dir(version: u32) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/wal-v{}", version))

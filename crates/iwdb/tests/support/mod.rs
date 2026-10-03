@@ -10,10 +10,10 @@ use iwdb::{
     CheckpointOptions, Error, FsyncPolicy, LogFs, Namespace, NamespaceCatalog, Store, StoreOptions, WalOptions,
 };
 use iwdb_engine::catalog::NamespaceName;
-use iwdb_engine::testutil::canonical;
+pub use iwdb_engine::testutil::{State, canonical, keys, state};
 use iwdb_storage::MIN_SEGMENT_SIZE;
 
-pub use iwdb_engine::testutil::workload::{self, pad, Step};
+pub use iwdb_engine::testutil::workload::{self, Step, pad};
 
 /// `always`, 1 KiB segments (many rotations), no background threads, keep
 /// `keep` checkpoints.
@@ -28,26 +28,6 @@ pub fn options(keep: usize) -> StoreOptions {
 
 pub fn reference() -> Namespace {
     Namespace::new(NamespaceName::new(iwdb::NAMESPACE).unwrap())
-}
-
-/// The observable state: canonical graph, catalog, seq, and the
-/// idempotency key table (without commit times, which a reference that
-/// has no log doesn't know).
-pub type State = (Vec<String>, NamespaceCatalog, u64, Vec<String>);
-
-pub fn state(ns: &Namespace) -> State {
-    (canonical(ns.graph()), ns.catalog().clone(), ns.seq(), keys(ns))
-}
-
-/// The key table, one line per entry, without times.
-pub fn keys(ns: &Namespace) -> Vec<String> {
-    let entries = ns.keys().entries();
-    entries
-        .map(|e| {
-            let r = &e.result;
-            format!("{} {} {:08x} {:?} {:?}", r.seq, e.key, e.fingerprint, r.edge_ids, r.versions)
-        })
-        .collect()
 }
 
 /// Run `steps` with idempotency keys `<prefix><i>` against the store and
@@ -151,7 +131,7 @@ pub fn last_segment(dir: &Path) -> PathBuf {
 /// A data record frame of the current WAL format
 /// (`documentation/formats/wal.md`).
 pub fn frame(seq: u64, synced_seq: u64, payload: &[u8]) -> Vec<u8> {
-    use iwdb_storage::format::{encode_frame, FrameHeader, FORMAT_VERSION, KIND_DATA};
+    use iwdb_storage::format::{FORMAT_VERSION, FrameHeader, KIND_DATA, encode_frame};
     let mut out = Vec::new();
     encode_frame(&mut out, FORMAT_VERSION, FrameHeader { seq, synced_seq, time: 0, kind: KIND_DATA }, payload);
     out

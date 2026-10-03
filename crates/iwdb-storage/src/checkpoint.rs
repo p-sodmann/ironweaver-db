@@ -13,14 +13,14 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use iwdb_engine::Namespace;
 use iwdb_engine::catalog::{IndexChanges, NamespaceName};
 use iwdb_engine::codec::{self, Loaded};
-use iwdb_engine::Namespace;
 
 use crate::archive::ArchiveHandle;
 use crate::io::LogFs;
 use crate::layout::NsPaths;
-use crate::{reader, Error, WalReader};
+use crate::{Error, WalReader, reader};
 
 /// Suffix of checkpoint file names: `<seq, 20 digits>.ckpt`.
 pub const CHECKPOINT_SUFFIX: &str = ".ckpt";
@@ -374,8 +374,7 @@ impl<F: LogFs> Checkpointer<F> {
     fn remove_segments(&mut self, cutoff: u64) -> Result<Vec<u64>, Error> {
         let segments = self.guard(reader::list_segments(&self.wal))?;
         let mut removable = Vec::new();
-        for pair in segments.windows(2) {
-            let ((first_seq, path), (next_first, _)) = (&pair[0], &pair[1]);
+        for [(first_seq, path), (next_first, _)] in segments.array_windows() {
             if *next_first > cutoff.saturating_add(1) {
                 break;
             }

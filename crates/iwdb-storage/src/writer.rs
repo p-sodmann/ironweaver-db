@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use iwdb_engine::CommitRecord;
 
-use crate::format::{self, FrameHeader, FORMAT_VERSION, FRAME_HEADER_LEN, SEGMENT_HEADER_LEN};
+use crate::format::{self, FORMAT_VERSION, FRAME_HEADER_LEN, FrameHeader, SEGMENT_HEADER_LEN};
 use crate::io::{LogFile, LogFs, StdFs};
-use crate::{reader, Error};
+use crate::{Error, reader};
 use iwdb_engine::CommitTime;
 
 /// Smallest segment size (1 KiB).
@@ -149,7 +149,7 @@ impl<F: LogFs> Wal<F> {
     ///
     /// The log in `dir` must be empty or end right before `next_seq`, with
     /// no torn tail: in a new directory there is nothing; after a restart,
-    /// recovery (step 5) has read the log to its end and truncated a torn
+    /// recovery has read the log to its end and truncated a torn
     /// tail. The last segment is read to check this (O(its size)) and, except
     /// with [`FsyncPolicy::Off`], fsynced: the writer's first record says that
     /// everything before it is synced.
@@ -358,21 +358,21 @@ impl<F: LogFs> Wal<F> {
     /// were created without a directory sync). Never retried on failure
     /// (see the type docs).
     fn sync_now(&mut self) -> Result<(), Error> {
-        if self.options.fsync == FsyncPolicy::Off {
-            if let Err(e) = self.sync_older_segments() {
-                self.failed = Some(e.to_string());
-                return Err(e);
-            }
+        if self.options.fsync == FsyncPolicy::Off
+            && let Err(e) = self.sync_older_segments()
+        {
+            self.failed = Some(e.to_string());
+            return Err(e);
         }
         if let Err(e) = self.file.sync() {
             return Err(self.fail("fsync", e));
         }
-        if self.options.fsync == FsyncPolicy::Off {
-            if let Err(e) = self.fs.sync_dir(&self.dir) {
-                let error = Error::io("sync directory", &self.dir, e);
-                self.failed = Some(error.to_string());
-                return Err(error);
-            }
+        if self.options.fsync == FsyncPolicy::Off
+            && let Err(e) = self.fs.sync_dir(&self.dir)
+        {
+            let error = Error::io("sync directory", &self.dir, e);
+            self.failed = Some(error.to_string());
+            return Err(error);
         }
         self.synced_seq = self.next_seq - 1;
         self.oldest_unsynced = None;
@@ -385,8 +385,7 @@ impl<F: LogFs> Wal<F> {
     /// after a checkpoint that covers it.
     fn sync_older_segments(&mut self) -> Result<(), Error> {
         let segments = reader::list_segments(&self.dir)?;
-        for pair in segments.windows(2) {
-            let ((_, path), (next_first, _)) = (&pair[0], &pair[1]);
+        for [(_, path), (next_first, _)] in segments.array_windows() {
             if *next_first > self.synced_seq + 1 && *path != self.segment_path {
                 let mut file = match self.fs.open_append(path) {
                     Ok(file) => file,

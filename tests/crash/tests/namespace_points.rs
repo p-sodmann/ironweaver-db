@@ -1,4 +1,4 @@
-//! Crash points of namespace operations (step 9, ADR 0017), each hit
+//! Crash points of namespace operations (ADR 0017), each hit
 //! exactly by a pause: a namespace's directory created and its create
 //! event written, a drop's archive copy, its event and its directory
 //! removal, each write of the namespace log, and the upgrade of a layout 3

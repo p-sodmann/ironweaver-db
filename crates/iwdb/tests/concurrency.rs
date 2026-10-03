@@ -1,4 +1,4 @@
-//! Step 8: concurrent readers (ADR 0014), read-your-writes and deadlines
+//! Concurrent readers (ADR 0014), read-your-writes and deadlines
 //! (ADR 0016).
 //!
 //! - Many reader threads against a committing writer: every read sees the
@@ -18,6 +18,7 @@
 mod common;
 mod support;
 
+use std::assert_matches;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
@@ -25,12 +26,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{Action, Call, Rule, TestFs, When};
-use ironweaver_core::algo::centrality::{pagerank, PageRank};
+use ironweaver_core::algo::centrality::{PageRank, pagerank};
 use iwdb::{
     CancelToken, Direction, EdgeCost, Error, FsyncPolicy, HistoryId, Mutation, ProjectionSpec, ReadOptions, Store,
     StoreOptions, Value, WalOptions,
 };
-use support::{options, reference, state, workload, State, Step};
+use support::{State, Step, options, reference, state, workload};
 
 fn fast_options() -> StoreOptions {
     StoreOptions { wal: WalOptions { fsync: FsyncPolicy::Off, ..options(2).wal }, ..options(2) }
@@ -181,7 +182,7 @@ fn reads_and_commits_go_on_during_a_long_analytics_job() {
         }
     }
     let (outcome, took) = job.join().unwrap();
-    assert!(matches!(outcome, Err(Error::Timeout { .. })), "{:?}", outcome);
+    assert_matches!(outcome, Err(Error::Timeout { .. }), "{:?}", outcome);
     assert!(took >= job_time && took < job_time * 4, "stopped at its deadline: {:?}", took);
     let (p50, p99, max) = (percentile(&mut reads, 50), percentile(&mut reads, 99), percentile(&mut reads, 100));
     let commit_max = percentile(&mut commits, 100);
@@ -210,7 +211,14 @@ fn min_seq_waits_until_the_seq_is_applied_and_no_longer() {
     let first = store.commit(&node("a")).unwrap();
     // Applied already: no wait, even with a zero timeout
     let at_once = ReadOptions { timeout: Some(Duration::ZERO), ..ReadOptions::min_seq(first.seq) };
-    assert_eq!(store.read_with(&at_once, |ns| ns.seq()).unwrap(), first.seq);
+    assert_eq!(store.wait_for_seq(first.seq, &at_once).unwrap(), first.seq);
+    // But a read with no time left fails, every time: it doesn't race the
+    // timer thread (it used to succeed unless the timer cancelled it first)
+    for _ in 0..1000 {
+        assert_matches!(store.read_with(&at_once, |ns| ns.seq()), Err(Error::Timeout { .. }));
+        let job = |_: &_| Ok(());
+        assert_matches!(store.analyze(&ProjectionSpec::default(), &at_once, job), Err(Error::Timeout { .. }));
+    }
 
     // A reader waiting for the next seq returns once it is applied
     let waiter = {
@@ -237,9 +245,9 @@ fn min_seq_waits_until_the_seq_is_applied_and_no_longer() {
     // A seq that never comes: Timeout after about the timeout
     let options = ReadOptions { timeout: Some(Duration::from_millis(50)), ..ReadOptions::min_seq(100) };
     let t = Instant::now();
-    assert!(matches!(store.read_with(&options, |_| ()), Err(Error::Timeout { .. })));
+    assert_matches!(store.read_with(&options, |_| ()), Err(Error::Timeout { .. }));
     assert!(t.elapsed() >= Duration::from_millis(50) && t.elapsed() < Duration::from_secs(5));
-    assert!(matches!(store.wait_for_seq(100, &options), Err(Error::Timeout { .. })));
+    assert_matches!(store.wait_for_seq(100, &options), Err(Error::Timeout { .. }));
 
     // Cancelled by the caller
     let token = CancelToken::new();
@@ -248,13 +256,13 @@ fn min_seq_waits_until_the_seq_is_applied_and_no_longer() {
         thread::sleep(Duration::from_millis(30));
         token.cancel();
     });
-    assert!(matches!(store.read_with(&options, |_| ()), Err(Error::Cancelled)));
+    assert_matches!(store.read_with(&options, |_| ()), Err(Error::Cancelled));
     canceller.join().unwrap();
 
     // Another history: refused, whatever the seq
     let other = HistoryId([9; 16]);
     let options = ReadOptions { history: Some(other), ..ReadOptions::min_seq(1) };
-    assert!(matches!(store.read_with(&options, |_| ()), Err(Error::OtherHistory { .. })));
+    assert_matches!(store.read_with(&options, |_| ()), Err(Error::OtherHistory { .. }));
     let own = ReadOptions { history: Some(store.history()), ..ReadOptions::min_seq(1) };
     assert!(store.read_with(&own, |_| ()).is_ok());
 }
@@ -269,7 +277,7 @@ fn a_read_only_store_fails_a_min_seq_wait_at_once() {
     assert!(store.commit(&node("b")).is_err());
     let options = ReadOptions { timeout: Some(Duration::from_secs(30)), ..ReadOptions::min_seq(2) };
     let t = Instant::now();
-    assert!(matches!(store.read_with(&options, |_| ()), Err(Error::ReadOnly { .. })));
+    assert_matches!(store.read_with(&options, |_| ()), Err(Error::ReadOnly { .. }));
     assert!(t.elapsed() < Duration::from_secs(5));
     // Seqs it has are still read
     assert!(store.read_with(&ReadOptions::min_seq(1), |_| ()).is_ok());
@@ -284,7 +292,7 @@ fn analytics_stop_at_their_deadline_or_when_cancelled() {
         |p: &iwdb::Projection| pagerank(p, &PageRank { tol: 0.0, max_iter: usize::MAX, ..PageRank::default() });
 
     let options = ReadOptions { timeout: Some(Duration::from_millis(100)), ..ReadOptions::default() };
-    assert!(matches!(store.analyze(&ProjectionSpec::default(), &options, endless), Err(Error::Timeout { .. })));
+    assert_matches!(store.analyze(&ProjectionSpec::default(), &options, endless), Err(Error::Timeout { .. }));
 
     let token = CancelToken::new();
     let options = ReadOptions { cancel: Some(token.clone()), ..ReadOptions::default() };
@@ -292,7 +300,7 @@ fn analytics_stop_at_their_deadline_or_when_cancelled() {
         thread::sleep(Duration::from_millis(50));
         token.cancel();
     });
-    assert!(matches!(store.analyze(&ProjectionSpec::default(), &options, endless), Err(Error::Cancelled)));
+    assert_matches!(store.analyze(&ProjectionSpec::default(), &options, endless), Err(Error::Cancelled));
     canceller.join().unwrap();
 
     // A job that finishes: its result and the seq it ran on
@@ -304,7 +312,7 @@ fn analytics_stop_at_their_deadline_or_when_cancelled() {
     assert!(ranks.values().all(|r| **r > 0.0));
     // A job error passes through
     let bad = |p: &iwdb::Projection| pagerank(p, &PageRank { alpha: 2.0, ..PageRank::default() });
-    assert!(matches!(store.analyze(&spec, &ReadOptions::default(), bad), Err(Error::Engine(_))));
+    assert_matches!(store.analyze(&spec, &ReadOptions::default(), bad), Err(Error::Engine(_)));
     // The store is fine afterwards
     store.commit(&node("after")).unwrap();
 }

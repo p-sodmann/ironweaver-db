@@ -1,4 +1,4 @@
-//! Step 8 acceptance: a retried commit with the same idempotency key
+//! A retried commit with the same idempotency key
 //! returns the original result and applies once, across restarts,
 //! checkpoints, a backup and restore, and a commit whose outcome is
 //! unknown (a failed WAL write or fsync). The kill -9 harness checks the
@@ -12,6 +12,7 @@ mod support;
 
 use common::{Action, Call, Rule, TestFs, When};
 use iwdb::{CommitOptions, CommitResult, Error, IdempotencyKey, Mutation, RestoreSources, RestoreTarget, Store, Value};
+use std::assert_matches;
 use support::{options, reference, run_keyed, state, store_state, workload};
 
 fn key(k: &str) -> CommitOptions {
@@ -78,7 +79,7 @@ fn a_retry_applies_once_across_restarts_and_checkpoints() {
 
     // Another request under a known key changes nothing
     let error = store.commit_with(&bump(3), &key("one")).unwrap_err();
-    assert!(matches!(error, Error::Engine(iwdb_engine::Error::IdempotencyKeyReused { seq: 2, .. })), "{}", error);
+    assert_matches!(error, Error::Engine(iwdb_engine::Error::IdempotencyKeyReused { seq: 2, .. }), "{}", error);
     assert_eq!(store.node("a").unwrap().attr.get("n"), Some(&Value::Int(2)));
 }
 
@@ -136,9 +137,9 @@ fn a_retry_after_an_unknown_outcome_applies_once() {
         run_keyed(&store, &mut reference, &workload(10, 5), "w");
         fs.add(rule.clone());
         let error = store.commit_with(&node("z"), &key("in-flight")).unwrap_err();
-        assert!(matches!(error, Error::Io { .. }), "{:?}: {}", rule, error);
+        assert_matches!(error, Error::Io { .. }, "{:?}: {}", rule, error);
         // Read-only now; the retry can't commit, and the key isn't known
-        assert!(matches!(store.commit_with(&node("z"), &key("in-flight")), Err(Error::ReadOnly { .. })));
+        assert_matches!(store.commit_with(&node("z"), &key("in-flight")), Err(Error::ReadOnly { .. }));
         // A key the store knows is still answered
         let known = store.read(|ns| ns.keys().entries().next().map(|e| (e.key.clone(), e.result.clone())));
         if let Some((k, result)) = known {

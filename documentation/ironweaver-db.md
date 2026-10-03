@@ -45,7 +45,7 @@ Ironweaver DB is a **separate project** that turns `ironweaver-core` into a dura
 |---|---|---|
 | Embedded Rust (`iwdb::Store`) | Rust applications, tests | Opens a data directory; full durability; no network |
 | Embedded Python (`iwdb-python`) | Python apps and tests | Same API shape as the remote client, so code can switch |
-| gRPC | Services, other languages | Canonical contract in `proto/`; server streaming for large results and the change stream |
+| gRPC | Services, other languages | Canonical contract in `proto/` ([api/grpc.md](api/grpc.md), step 11); values and filters as the core's serde in postcard (ADR 0023); large answers streamed in chunks (ADR 0025); the change stream (step 13) |
 | REST/JSON | Browsers, scripts, curl | Same message shapes as the protos (via `pbjson`); OpenAPI generated; SSE for streams |
 | Change stream | Caches, indexers, replicas | Resume from any retained `seq` |
 | `iwctl` | Operators | Admin commands plus an interactive query shell |
@@ -76,6 +76,7 @@ Ironweaver DB is a **separate project** that turns `ironweaver-core` into a dura
 - Operations: get/multi-get, neighbourhood, BFS/DFS, shortest paths, random walks, subgraph extraction, `match` patterns with `Expr` filters, analytics jobs on a `Projection`.
 - Every read: max results, max visited, timeout (cancel token), cursor pagination. `EXPLAIN` shows index use.
 - Error model shared by all access methods.
+- Built in step 10 as `iwdb-query`: the `Database` trait and its embedded implementation ([ADR 0020](adr/0020-database-trait.md)), limits and cursors ([ADR 0021](adr/0021-bounded-reads-and-cursors.md)), synchronous analytics jobs ([ADR 0022](adr/0022-analytics-jobs.md)), error codes ([api/errors.md](api/errors.md)).
 
 ### 6. Access methods
 - `Database` service trait; embedded facade; Python bindings; gRPC server; REST gateway; `iwctl` shell.
