@@ -31,6 +31,8 @@
 | POST | `/v1/namespaces/{ns}/subgraph` | `SubgraphRequest` | `SubgraphResponse` (streamed) | `subgraph` |
 | POST | `/v1/namespaces/{ns}/match` | `MatchPatternRequest` | `MatchPatternResponse` (streamed) | `match_pattern` |
 | POST | `/v1/namespaces/{ns}/analyze` | `AnalyzeRequest` | `AnalyzeResponse` (streamed) | `analyze` |
+| GET | `/v1/namespaces/{ns}/changes` | `from_seq`, `wait` and options as query parameters | `GetChangesResponse` | `changes` |
+| GET | `/v1/namespaces/{ns}/changes/stream` | `from_seq` and options as query parameters, `Last-Event-ID` | Server-Sent Events ([changes.md](changes.md)) | `changes` with `wait`, in a loop |
 | GET | `/v1/openapi.json` | – | the OpenAPI document | – |
 
 Path parameters are percent-encoded: node `a/b` is `/nodes/a%2Fb`.
@@ -102,7 +104,7 @@ An answer without an `Error` body (a proxy's 502, for example) didn't come from 
 
 ## Shutdown
 
-On SIGINT or SIGTERM the server stops accepting connections. Idle HTTP/1.1 connections close at once, and busy ones after their current request. Running requests may finish for up to `drain_timeout_secs` (ADR 0027); everything else is as for gRPC ([grpc.md](grpc.md#shutdown)).
+On SIGINT or SIGTERM the server stops accepting connections. Idle HTTP/1.1 connections close at once, and busy ones after their current request. Running requests may finish for up to `drain_timeout_secs` (ADR 0027), and change streams (SSE) end at once with an `error` event (`unavailable`); everything else is as for gRPC ([grpc.md](grpc.md#shutdown)).
 
 ## Examples
 
@@ -130,6 +132,9 @@ curl -s $B/match -H "$J" -d '{"pattern": "(a:Person)-[:knows]->(b)"}'
 
 # PageRank
 curl -s $B/analyze -H "$J" -d '{"job": {"pageRank": {}}}'
+
+# Follow the change stream from seq 1 (Server-Sent Events; Ctrl-C to stop)
+curl -N "$B/changes/stream?from_seq=1"
 
 # Create a namespace with an idempotency key (a retry answers "deduplicated": true), then drop it
 curl -s -X PUT http://127.0.0.1:7600/v1/namespaces/other -H "$J" -d '{"idempotencyKey": "create-1"}'

@@ -14,6 +14,7 @@ The engine's and the storage layer's errors are mapped to codes in one place (`c
 | `timeout` | The request didn't finish within its timeout (the `min_seq` wait included). Nothing changed | yes | `TimeoutError` | `DEADLINE_EXCEEDED` | 504 |
 | `cancelled` | The caller cancelled the request | – | `iwdb.Error` | `CANCELLED` | 499 |
 | `cursor_expired` | A paginated read's namespace changed since its first page (cursors are valid at one seq) | start again without the cursor | `iwdb.Error` (step 14 adds a class) | `FAILED_PRECONDITION` | 410 |
+| `not_retained` | The change stream was asked for a seq older than the oldest one still in the WAL ([ADR 0031](../adr/0031-change-stream.md)); the message names the oldest retained seq | no: start again from a snapshot, or keep the WAL longer (retention) | `iwdb.Error` (step 14 adds a class) | `OUT_OF_RANGE` | 410 |
 | `read_only` | The namespace is read-only after a failed WAL write or fsync, or a failed apply, until the store is reopened | after reopening | `ReadOnlyError` | `UNAVAILABLE` | 503 |
 | `unavailable` | The store can't take the request now: shutting down, too many queued requests, the data directory locked by another store | yes, with backoff | `iwdb.Error` | `UNAVAILABLE` | 503 |
 | `io` | A file operation failed. **A commit's outcome is unknown**: retry with the same idempotency key ([ADR 0015](../adr/0015-idempotency-keys.md)) | with the same idempotency key | `IoError` | `UNAVAILABLE` | 503 |

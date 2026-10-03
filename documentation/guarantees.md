@@ -143,6 +143,14 @@ The server ([api/grpc.md](api/grpc.md)) gives the guarantees of the store it ser
 - **Errors carry their code** (`iwdb-code`) next to the gRPC status of [errors.md](api/errors.md).
 - A bug in a commit's apply path aborts the whole server (all namespaces), as a crash: run it under a supervisor ([ADR 0028](adr/0028-internal-apply-errors-abort.md)).
 
+## The change stream (step 13)
+
+The change stream ([api/changes.md](api/changes.md), [ADR 0031](adr/0031-change-stream.md)) returns a namespace's commits from a seq on, as logged:
+
+- **Only durable commits**: up to the lower of the applied and the synced seq (the applied seq under `off`). So no crash takes back a commit it returned, and a seq never comes back with other content (`an_os_crash_under_group_commit_takes_back_no_streamed_commit` in `crates/iwdb/tests/changes.rs` cuts the WAL to its last fsync under `group` and checks it). Under `group` it lags behind acknowledged commits by up to `2 * max_delay`.
+- **In order, without gaps**: a consumer that resumes from the seq after the last one it processed sees every commit once, across restarts (`a_consumer_resumes_after_restarts_without_gaps_or_duplicates`).
+- **As long as the WAL holds it**: older seqs fail with `not_retained`. Retention (`WalRetention`) keeps segments that checkpoints no longer need. Damage in the WAL it reads is `corrupt`, never skipped.
+
 ## Platforms (step 7)
 
 Linux and macOS. **Windows is not supported yet**: there the directory fsync is a no-op, so after an OS crash a rotation, a checkpoint, a backup or a restore can lose a directory entry, and none of this is tested on Windows. No Windows wheel is shipped (ADR 0013).

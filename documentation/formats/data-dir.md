@@ -102,7 +102,7 @@ Content: a graph file in the core's **binary format, version 2** (magic `IRONWEA
 2. write `checkpoints/<target>.ckpt` with the core's `write_atomic`: a temporary file, fsynced, renamed over the name;
 3. fsync `checkpoints/`, and check the result. The core's own directory sync ignores errors (upstream #32);
 4. keep the new checkpoint and the newest `keep - 1` older ones that are not known to be damaged (`keep` defaults to 2). Remove every checkpoint older than the oldest one kept, then fsync `checkpoints/`;
-5. remove every WAL segment whose records are all at or below the oldest kept checkpoint's seq (a segment ends right before the next one starts; the last segment is never removed), then fsync `wal/`.
+5. remove every WAL segment whose records are all at or below the oldest kept checkpoint's seq (a segment ends right before the next one starts; the last segment is never removed) and that the WAL retention doesn't keep for the change stream (`WalRetention`, step 13: segments holding one of the last `records` commits, or a commit younger than `age`), then fsync `wal/`. Retention changes no file format: it only keeps segments longer.
 
 A checkpoint is durable before anything is removed, and the WAL always holds every record after the oldest kept checkpoint. So recovery can start from any kept checkpoint.
 

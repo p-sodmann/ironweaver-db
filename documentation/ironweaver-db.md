@@ -47,7 +47,7 @@ Ironweaver DB is a **separate project** that turns `ironweaver-core` into a dura
 | Embedded Python (`iwdb-python`) | Python apps and tests | Same API shape as the remote client, so code can switch |
 | gRPC | Services, other languages | Canonical contract in `proto/` ([api/grpc.md](api/grpc.md), step 11); values and filters as the core's serde in postcard (ADR 0023); large answers streamed in chunks (ADR 0025); the change stream (step 13) |
 | REST/JSON | Browsers, scripts, curl | Same message shapes as the protos (via `pbjson`), on the gRPC port; OpenAPI generated; streamed answers as one message or NDJSON; SSE for the change stream (step 13) |
-| Change stream | Caches, indexers, replicas | Resume from any retained `seq` |
+| Change stream | Caches, indexers, replicas | Resume from any retained `seq`: durable commits only, as logged; gRPC `Watch`, SSE, polling, embedded ([api/changes.md](api/changes.md), ADR 0031, step 13) |
 | `iwctl` | Operators | Admin commands plus an interactive query shell |
 
 ## Workstreams
@@ -82,7 +82,7 @@ Ironweaver DB is a **separate project** that turns `ironweaver-core` into a dura
 - `Database` service trait; embedded facade; Python bindings; gRPC server; REST gateway; `iwctl` shell.
 
 ### 7. Change data capture and integration
-- Change stream from any retained `seq`.
+- Change stream from any retained `seq` (step 13, [ADR 0031](adr/0031-change-stream.md)): a bounded, long-polling `changes` read on the trait over the WAL, followed by gRPC `Watch` and SSE; WAL retention for it.
 - Projection mode: follow an external ordered event log (e.g. a Postgres outbox table), storing the high-water mark in the same transaction.
 - Bulk import/export: ironweaver JSON/binary, LGF, CSV/Parquet edge lists, GraphML.
 

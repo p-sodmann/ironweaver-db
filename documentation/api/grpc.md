@@ -21,6 +21,8 @@ fsync = "always"                  # always | group | off (guarantees.md)
 group_max_delay_ms = 10
 group_max_batch = 64
 checkpoint_on_shutdown = true
+retain_records = 0                # WAL kept for the change stream: the last N commits ...
+retain_age_secs = 0               # ... and commits younger than this (changes.md)
 
 [server]
 drain_timeout_secs = 30
@@ -67,6 +69,8 @@ timeout_ms = 300000
 | `GetNamespaceStatus` | `namespace_status` | unary |
 | `ListNamespaces` | `namespaces` | unary |
 | `CreateNamespace`, `DropNamespace` | `create_namespace`, `drop_namespace` | unary |
+| `GetChanges` | `changes` (ADR 0031) | unary |
+| `Watch` | `changes` with `wait`, in a loop | stream, until cancelled, an error or shutdown ([changes.md](changes.md)) |
 
 Every operation names a namespace; seqs, cursors, idempotency keys and catalogs are per namespace.
 
@@ -143,7 +147,7 @@ A failed call ends with the gRPC status of its error code, and the code itself, 
 
 ## Shutdown
 
-On SIGINT or SIGTERM the server stops accepting connections and sends every HTTP/2 connection GOAWAY (new calls fail with `UNAVAILABLE`; HTTP/1.1 connections of REST clients close after their current request), lets running calls finish for up to `drain_timeout_secs`, and then closes the connections still open, which cancels their reads. Commits that were accepted are applied. It then flushes every namespace's WAL, writes a checkpoint (if `checkpoint_on_shutdown`) and releases the data directory: every commit acknowledged before shutdown is durable, whatever the fsync policy ([ADR 0027](../adr/0027-graceful-shutdown.md)).
+On SIGINT or SIGTERM the server stops accepting connections and sends every HTTP/2 connection GOAWAY (new calls fail with `UNAVAILABLE`; HTTP/1.1 connections of REST clients close after their current request), lets running calls finish for up to `drain_timeout_secs`, and then closes the connections still open, which cancels their reads. Commits that were accepted are applied. `Watch` streams end with `unavailable` when shutdown starts ([changes.md](changes.md)). It then flushes every namespace's WAL, writes a checkpoint (if `checkpoint_on_shutdown`) and releases the data directory: every commit acknowledged before shutdown is durable, whatever the fsync policy ([ADR 0027](../adr/0027-graceful-shutdown.md)).
 
 ## The Rust client
 
