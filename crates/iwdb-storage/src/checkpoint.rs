@@ -374,8 +374,7 @@ impl<F: LogFs> Checkpointer<F> {
     fn remove_segments(&mut self, cutoff: u64) -> Result<Vec<u64>, Error> {
         let segments = self.guard(reader::list_segments(&self.wal))?;
         let mut removable = Vec::new();
-        for pair in segments.windows(2) {
-            let ((first_seq, path), (next_first, _)) = (&pair[0], &pair[1]);
+        for [(first_seq, path), (next_first, _)] in segments.array_windows() {
             if *next_first > cutoff.saturating_add(1) {
                 break;
             }

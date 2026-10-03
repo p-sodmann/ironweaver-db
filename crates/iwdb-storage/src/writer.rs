@@ -385,8 +385,7 @@ impl<F: LogFs> Wal<F> {
     /// after a checkpoint that covers it.
     fn sync_older_segments(&mut self) -> Result<(), Error> {
         let segments = reader::list_segments(&self.dir)?;
-        for pair in segments.windows(2) {
-            let ((_, path), (next_first, _)) = (&pair[0], &pair[1]);
+        for [(_, path), (next_first, _)] in segments.array_windows() {
             if *next_first > self.synced_seq + 1 && *path != self.segment_path {
                 let mut file = match self.fs.open_append(path) {
                     Ok(file) => file,

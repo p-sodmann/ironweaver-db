@@ -466,7 +466,8 @@ fn check_coverage(report: &mut VerifyReport, checkpoints: &[(u64, PathBuf)], seg
             ),
         }
     }
-    let covered = |cutoff: u64| segments.windows(2).filter(|w| w[1].0 <= cutoff + 1).count();
+    let covered =
+        |cutoff: u64| segments.array_windows().filter(|[_, (next_first, _)]| *next_first <= cutoff + 1).count();
     if let Some(&(oldest, _)) = checkpoints.first() {
         let extra = covered(oldest);
         if extra > 0 {

@@ -167,7 +167,7 @@ impl Manifest {
         }
         let mut ids: Vec<u64> = namespaces.iter().map(|n| n.id).collect();
         ids.sort_unstable();
-        if ids.windows(2).any(|w| w[0] == w[1]) || ids.first() == Some(&0) {
+        if ids.array_windows().any(|[a, b]| a == b) || ids.first() == Some(&0) {
             return Err("the manifest lists a namespace id twice, or id 0".into());
         }
         for file in &files {
