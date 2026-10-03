@@ -41,3 +41,7 @@ Panics elsewhere are not crashes:
 - An embedded application, and the Python interpreter from step 7, dies on such a bug instead of getting an error. That is the same trade-off PostgreSQL makes when it PANICs, and it happens only on a bug, never on user input. If embedded users need to survive it, a later step can add an option that keeps the process alive and closes the store for reads as well (option 3). Until then, the abort is documented on `Store`.
 - In the server (step 11), a panic in one namespace's commit path takes down the whole process and every namespace with it. Upstream #28 (make the apply path panic-free) matters more then; the row in [upstream-check.md](../steps/upstream-check.md) says so.
 - The test in `crates/iwdb/tests/panics.rs` and the crash harness (step 6) cover it. A failpoint panics in the WAL write, halfway through it, in the fsync and in the group commit timer. The child process must die with `SIGABRT`, and recovery must restore the reference state.
+
+## Update (step 11)
+
+Upstream #28 is fixed: the core's apply path returns `GraphError::Internal` instead of panicking. [ADR 0028](0028-internal-apply-errors-abort.md) keeps this ADR's abort for the server and extends it: an apply that fails with `GraphError::Internal` (the graph may hold part of the transaction) aborts like a panic.
