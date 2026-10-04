@@ -101,6 +101,7 @@ fn run(parsed: &Parsed, out: &Out) -> Result<u8, Error> {
             endpoint,
             one_namespace(parsed),
             parsed.json,
+            &parsed.tls,
             parsed.token.as_deref(),
             parsed.user.as_deref(),
         )),
