@@ -138,10 +138,15 @@
     const R = root.React; const h = R.createElement; const { useState, useEffect, useRef, useMemo } = R;
     const I = root.IronWeaver;
 
-    /** The page links and the mock marker, for the rail's children. */
+    /** The page links, the mock marker and who is logged in (with a logout), for the rail's children. */
     function RailLinks({ page }) {
+      const s = IW._session;
+      const logout = () => source().logout().catch(() => {}).then(() => { root.location.reload(); });
       return h('span', { className: 'cs-links' },
         source().kind === 'mock' && h('span', { className: 'cs-mockword', title: 'This console runs on generated data. Nothing here is read from or written to a server. Serve it with serve.py for a real server.' }, 'MOCK DATA'),
+        s && s.authEnabled && h('span', { className: 'cs-user' },
+          h('span', { className: 'iw-mono-s', title: s.user.admin ? 'a server-wide admin' : 'roles: ' + (Object.entries(s.user.grants).map(([n, r]) => n + '=' + r).join(', ') || 'none') }, s.user.name),
+          h('button', { type: 'button', className: 'cs-logout', onClick: logout, title: 'End the session' }, 'LOG OUT')),
         h('nav', { className: 'cs-pages', 'aria-label': 'Pages' },
           [['explore', 'EXPLORE', 'index.html'], ['status', 'STATUS', 'status.html']].map(([id, label, file]) =>
             h('a', { key: id, href: href(file), className: 'cs-page' + (page === id ? ' is-on' : ''), 'aria-current': page === id ? 'page' : undefined }, label))));
@@ -205,7 +210,56 @@
       ];
     }
 
-    IW.ui = Object.assign(IW.ui || {}, { RailLinks, Palette, commonItems });
+    /** The login form (step 15a): user and password, the server's answer as the error line. */
+    function Login({ expired, onDone }) {
+      const [name, setName] = useState(''); const [password, setPassword] = useState('');
+      const [error, setError] = useState(null); const [busy, setBusy] = useState(false);
+      const mock = source().kind === 'mock';
+      const plain = !mock && root.location && root.location.protocol === 'http:' && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(root.location.hostname);
+      const submit = (e) => {
+        e.preventDefault(); if (busy) return; setBusy(true); setError(null);
+        source().login(name.trim(), password).then((s) => { IW._session = s; onDone(s); }, (err) => { setBusy(false); setPassword(''); setError(err.message); });
+      };
+      return h('div', { className: 'cs-login', role: expired ? 'dialog' : undefined, 'aria-modal': expired ? true : undefined, 'aria-labelledby': 'cs-login-title' },
+        h('form', { className: 'cs-login__card', onSubmit: submit },
+          h('div', { className: 'iw-cap' }, mock ? 'IRONWEAVER DB · MOCK DATA' : 'IRONWEAVER DB'),
+          h('h1', { id: 'cs-login-title', className: 'cs-login__title' }, expired ? 'Your session ended' : 'Log in'),
+          h('p', { className: 'iw-small iw-muted cs-login__note' },
+            expired ? 'Log in again to go on. Nothing staged is lost.' :
+              mock ? 'Generated data, nothing sent anywhere. Users: admin / admin, reader / reader.' :
+                'The console uses your server account. Ask an admin for one: iwctl user create.'),
+          h('label', { className: 'cs-login__field' }, h('span', { className: 'iw-cap' }, 'User'),
+            h('input', { className: 'cs-input', name: 'username', autoComplete: 'username', autoFocus: true, required: true, value: name, onChange: (e) => setName(e.target.value) })),
+          h('label', { className: 'cs-login__field' }, h('span', { className: 'iw-cap' }, 'Password'),
+            h('input', { className: 'cs-input', type: 'password', name: 'password', autoComplete: 'current-password', required: true, value: password, onChange: (e) => setPassword(e.target.value) })),
+          error && h('div', { className: 'cs-login__error iw-small', role: 'alert' }, error),
+          plain && h('div', { className: 'cs-login__warn iw-small' }, 'This page is plain HTTP: the password crosses the network in clear until the server has TLS.'),
+          h('div', { className: 'cs-login__go' }, h(I.Button, { variant: 'primary', type: 'submit', disabled: busy }, busy ? 'LOGGING IN' : 'LOG IN'))));
+    }
+
+    /** The page once the server knows who this is (step 15a): asks for the session, shows the login without one,
+     *  and over the page when a call answers 401 later (the page stays mounted, so nothing staged is lost). A
+     *  server without authentication answers the session at once. */
+    function AuthGate({ children }) {
+      const [st, setSt] = useState({ phase: 'checking' });
+      useEffect(() => {
+        let live = true; const src = source();
+        src.session().then((s) => { if (live) { IW._session = s; setSt({ phase: 'ready' }); } },
+          (e) => { if (live) setSt(e.code === 'unauthenticated' ? { phase: 'login' } : { phase: 'error', error: e }); });
+        const off = src.onAuth(() => { IW._session = null; setSt((cur) => ({ phase: cur.phase === 'ready' || cur.mounted ? 'expired' : 'login', mounted: cur.phase === 'ready' || cur.mounted })); });
+        return () => { live = false; off(); };
+      }, []);
+      const done = () => setSt({ phase: 'ready', mounted: true });
+      if (st.phase === 'checking') return h('div', { className: 'cs-login' }, h('div', { className: 'iw-cap' }, 'Connecting'));
+      if (st.phase === 'error') return h('div', { className: 'cs-login' }, h('div', { className: 'cs-login__card' },
+        h('div', { className: 'iw-cap' }, 'IRONWEAVER DB'), h('h1', { className: 'cs-login__title' }, 'No answer from the server'),
+        h('p', { className: 'iw-small cs-login__error' }, st.error.message),
+        h('div', { className: 'cs-login__go' }, h(I.Button, { onClick: () => root.location.reload() }, 'TRY AGAIN'))));
+      if (st.phase === 'login') return h(Login, { onDone: done });
+      return h(R.Fragment, null, children, st.phase === 'expired' && h(Login, { expired: true, onDone: done }));
+    }
+
+    IW.ui = Object.assign(IW.ui || {}, { RailLinks, Palette, commonItems, Login, AuthGate });
   }
 
   const ui = { group, num, bytes, ms, span, date, pct, kindOf, TYPE, text, parseValue, plainToValue, caption, labelStyles, primaryLabel, layout, source, href, params, cycleTheme, store };

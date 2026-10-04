@@ -14,16 +14,24 @@ mutation to a transaction does no I/O and stays a plain call.
 
 import asyncio
 import functools
-from typing import Any
+from typing import Any, Optional
 
 from ._iwdb import Namespace, Store, Transaction
 
 __all__ = ["AsyncNamespace", "AsyncStore", "AsyncTransaction", "connect", "open"]
 
 
-async def connect(endpoint: str) -> "AsyncStore":
+async def connect(
+    endpoint: str,
+    *,
+    token: Optional[str] = None,
+    user: Optional[str] = None,
+    password: Optional[str] = None,
+) -> "AsyncStore":
     """`iwdb.connect`, for asyncio."""
-    return AsyncStore(await asyncio.to_thread(Store.connect, endpoint))
+    return AsyncStore(
+        await asyncio.to_thread(Store.connect, endpoint, token=token, user=user, password=password)
+    )
 
 
 async def open(path: Any, **options: Any) -> "AsyncStore":  # noqa: A001 (like Store.open)

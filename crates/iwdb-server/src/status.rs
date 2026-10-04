@@ -17,6 +17,8 @@ pub const CODE_KEY: &str = "iwdb-code";
 pub fn grpc_code(code: Code) -> tonic::Code {
     match code {
         Code::InvalidArgument => tonic::Code::InvalidArgument,
+        Code::Unauthenticated => tonic::Code::Unauthenticated,
+        Code::PermissionDenied => tonic::Code::PermissionDenied,
         Code::NotFound => tonic::Code::NotFound,
         Code::Conflict => tonic::Code::Aborted,
         Code::ConstraintViolation => tonic::Code::FailedPrecondition,
@@ -39,6 +41,8 @@ pub fn http_status(code: Code) -> http::StatusCode {
     use http::StatusCode as S;
     match code {
         Code::InvalidArgument => S::BAD_REQUEST,
+        Code::Unauthenticated => S::UNAUTHORIZED,
+        Code::PermissionDenied => S::FORBIDDEN,
         Code::NotFound => S::NOT_FOUND,
         Code::Conflict | Code::ConstraintViolation => S::CONFLICT,
         Code::BudgetExceeded => S::UNPROCESSABLE_ENTITY,
@@ -58,6 +62,8 @@ pub fn http_status(code: Code) -> http::StatusCode {
 pub fn from_http(status: http::StatusCode, code: Option<&str>, message: &str) -> Error {
     let code = code.and_then(Code::parse).unwrap_or(match status.as_u16() {
         400 | 405 | 411 | 413 | 414 | 415 | 431 => Code::InvalidArgument,
+        401 => Code::Unauthenticated,
+        403 => Code::PermissionDenied,
         404 => Code::NotFound,
         409 => Code::Conflict,
         410 => Code::CursorExpired,
@@ -95,6 +101,8 @@ pub fn from_status(status: &tonic::Status) -> Error {
     let sent = status.metadata().get(CODE_KEY).and_then(|v| v.to_str().ok()).and_then(Code::parse);
     let code = sent.unwrap_or(match status.code() {
         tonic::Code::InvalidArgument => Code::InvalidArgument,
+        tonic::Code::Unauthenticated => Code::Unauthenticated,
+        tonic::Code::PermissionDenied => Code::PermissionDenied,
         tonic::Code::OutOfRange => Code::NotRetained,
         tonic::Code::NotFound => Code::NotFound,
         tonic::Code::Aborted | tonic::Code::AlreadyExists => Code::Conflict,
@@ -113,8 +121,10 @@ mod tests {
 
     /// The table of `documentation/api/errors.md`, written out again: a
     /// change to either must change this test.
-    const TABLE: [(Code, tonic::Code); 14] = [
+    const TABLE: [(Code, tonic::Code); 16] = [
         (Code::InvalidArgument, tonic::Code::InvalidArgument),
+        (Code::Unauthenticated, tonic::Code::Unauthenticated),
+        (Code::PermissionDenied, tonic::Code::PermissionDenied),
         (Code::NotFound, tonic::Code::NotFound),
         (Code::Conflict, tonic::Code::Aborted),
         (Code::ConstraintViolation, tonic::Code::FailedPrecondition),
@@ -143,8 +153,10 @@ mod tests {
     }
 
     /// The HTTP column of errors.md.
-    const HTTP: [(Code, u16); 14] = [
+    const HTTP: [(Code, u16); 16] = [
         (Code::InvalidArgument, 400),
+        (Code::Unauthenticated, 401),
+        (Code::PermissionDenied, 403),
         (Code::NotFound, 404),
         (Code::Conflict, 409),
         (Code::ConstraintViolation, 409),

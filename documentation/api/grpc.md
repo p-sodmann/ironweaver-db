@@ -38,7 +38,10 @@ level = "info"                    # a filter: "warn,iwdb_storage=debug"
 
 [console]                         # the operator console at /console/ (feature `console`)
 enabled = false
-public = false                    # allow it on a non-loopback address (no authentication until step 15)
+
+[auth]                            # step 15a (config.md)
+enabled = true                    # every call but Login and health needs a token
+session_lifetime_secs = 43200
 
 [limits.default]                  # what a read gets if it asks for nothing
 max_results = 1000
@@ -59,7 +62,7 @@ timeout_ms = 300000
 - **SIGINT / SIGTERM** shut down gracefully (below): readiness turns off first (and with `unready_delay_ms` the server keeps serving that long), then the drain; a second signal cancels the calls still running. Exit codes: 0 after a clean shutdown, 1 if serving or closing the store failed, 2 for a bad command line or configuration.
 - **Logs** are JSON lines on stderr unless it is a terminal ([config.md](config.md#logs)).
 - **Run it under a supervisor** (systemd, Kubernetes). A bug in a commit's apply path (a panic, or `GraphError::Internal` from the core) aborts the whole process, as a crash, so that no reader ever sees part of a transaction (ADR 0008, ADR 0028). The next start recovers every logged commit.
-- **No TLS and no authentication yet** (step 15): bind to localhost or a private network.
+- **Authentication** is on by default ([Authentication](#authentication)); a store without users refuses to start. **No TLS until step 15b**: a non-loopback `listen` address needs `[server] plaintext_public = true`, and passwords and tokens cross the network in clear.
 - Metrics and status views come with step 16c.
 
 ### Features and Docker
@@ -80,7 +83,7 @@ docker build --build-arg FEATURES="" -t iwdb:grpc .   # gRPC only
 docker run -p 127.0.0.1:7600:7600 -v iwdb-data:/var/lib/iwdb iwdb
 ```
 
-The image runs as the user `iwdb` (uid 10001), keeps its data in the volume `/var/lib/iwdb`, and reads `/etc/iwdb/iwdb.toml` ([docker/iwdb.toml](../../docker/iwdb.toml): listens on `0.0.0.0:7600`, drains for 8 s so that `docker stop` ends with a checkpoint). Mount your own config there, or set `IWDB_*` variables (`docker run -e IWDB_STORE_FSYNC=group ...`); if you raise `drain_timeout_secs`, raise `docker stop -t` above it. `compose.yaml` runs it, and with `--profile postgres` a Postgres with an example projection. Run `iwctl` against the volume only while the server is stopped: one process opens a data directory at a time. The image's `HEALTHCHECK` runs `iwdb-server --probe` (ready once recovery has finished). The console is compiled in but off: `-e IWDB_CONSOLE_ENABLED=true -e IWDB_CONSOLE_PUBLIC=true -p 127.0.0.1:7600:7600` serves it at `http://127.0.0.1:7600/console/` (public, because the container listens on `0.0.0.0`; publish the port on localhost only).
+The image runs as the user `iwdb` (uid 10001), keeps its data in the volume `/var/lib/iwdb`, and reads `/etc/iwdb/iwdb.toml` ([docker/iwdb.toml](../../docker/iwdb.toml): listens on `0.0.0.0:7600`, drains for 8 s so that `docker stop` ends with a checkpoint). Mount your own config there, or set `IWDB_*` variables (`docker run -e IWDB_STORE_FSYNC=group ...`); if you raise `drain_timeout_secs`, raise `docker stop -t` above it. `compose.yaml` runs it, and with `--profile postgres` a Postgres with an example projection. Run `iwctl` against the volume only while the server is stopped: one process opens a data directory at a time. The image's `HEALTHCHECK` runs `iwdb-server --probe` (ready once recovery has finished). Because the container listens on `0.0.0.0`, the image needs `-e IWDB_SERVER_PLAINTEXT_PUBLIC=true` until TLS (step 15b; publish the port on localhost only), and its first start needs `-e IWDB_AUTH_BOOTSTRAP_PASSWORD=...` (the user `admin`; there is no default password). The console is compiled in but off: `-e IWDB_CONSOLE_ENABLED=true` serves it at `http://127.0.0.1:7600/console/`, behind the login.
 
 ## RPCs
 
@@ -182,6 +185,20 @@ A failed call ends with the gRPC status of its error code, and the code itself, 
 ## Shutdown
 
 On SIGINT or SIGTERM the server stops accepting connections and sends every HTTP/2 connection GOAWAY (new calls fail with `UNAVAILABLE`; HTTP/1.1 connections of REST clients close after their current request), lets running calls finish for up to `drain_timeout_secs`, and then closes the connections still open, which cancels their reads. Commits that were accepted are applied. `Watch` streams end with `unavailable` when shutdown starts ([changes.md](changes.md)). It then flushes every namespace's WAL, writes a checkpoint (if `checkpoint_on_shutdown`) and releases the data directory: every commit acknowledged before shutdown is durable, whatever the fsync policy ([ADR 0027](../adr/0027-graceful-shutdown.md)).
+
+## Authentication
+
+`AuthService` (`proto/ironweaver_db/v1/auth.proto`, step 15a) logs in and manages users, grants and API tokens; `DatabaseService` calls need a token. Send it in the metadata as `authorization: Bearer <token>`: a session's (from `Login`) or an API token (from `CreateToken`). The server decides once, in front of the `Database` trait, whether the caller's roles allow the call ([ADR 0045](../adr/0045-the-authorisation-point.md)); a refusal is `PERMISSION_DENIED` (`iwdb-code: permission_denied`), missing or invalid credentials `UNAUTHENTICATED` (`unauthenticated`). `grpc.health.v1.Health` and `Login` need no token.
+
+| Role (per namespace) | Allows |
+|---|---|
+| `read` | `WaitForSeq`, `GetNodes`, `GetEdges`, `Find`, `Explain`, `Neighbourhood`, `Traverse`, `ShortestPath`, `RandomWalks`, `Subgraph`, `MatchPattern`, `Analyze`, `GetChanges`, `Watch`, `GetCatalog`, `GetNamespaceStatus` |
+| `write` | `read`, and `Commit` |
+| `admin` | `write`, and `CommitCatalog`, `DropNamespace` |
+| server-wide admin | every role on every namespace, `CreateNamespace`, and the user, grant and token RPCs for anyone |
+| any user | `ListNamespaces` (the ones it has a role on), `WhoAmI`, `Logout`, and `SetPassword` (with its current password), `CreateToken`, `RevokeToken`, `ListTokens` for itself |
+
+The Rust clients take a token (`Remote::with_token`) or log in (`Remote::login`, which keeps the session's token), and implement `iwdb_query::Accounts` for the user RPCs.
 
 ## The Rust client
 

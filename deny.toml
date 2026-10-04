@@ -10,7 +10,8 @@ all-features = true
 ignore = []
 
 [licenses]
-# Permissive licenses compatible with shipping Ironweaver DB under MIT.
+# Permissive licenses, compatible with shipping Ironweaver DB under AGPL-3.0
+# and under its commercial license (ADR 0038). No copyleft dependencies.
 allow = [
     "MIT",
     "Apache-2.0",

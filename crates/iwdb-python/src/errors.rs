@@ -73,11 +73,24 @@ pub mod exc {
         "The server can't take the request now (no connection, shutting down, overloaded): retry with backoff."
     );
     create_exception!(iwdb, InternalError, Error, "A bug: a Rust panic outside the commit path.");
+    create_exception!(
+        iwdb,
+        UnauthenticatedError,
+        Error,
+        "The server needs credentials: none were sent, or the token or password isn't valid (any more). Log in again."
+    );
+    create_exception!(
+        iwdb,
+        PermissionDeniedError,
+        Error,
+        "The user's roles don't allow the operation on this namespace. Nothing changed."
+    );
 }
 
 use exc::{
     BudgetExceededError, ClosedError, ConflictError, ConstraintError, CorruptError, CursorExpiredError, InternalError,
-    InvalidError, IoError, LockedError, NotFoundError, NotRetainedError, ReadOnlyError, TimeoutError, UnavailableError,
+    InvalidError, IoError, LockedError, NotFoundError, NotRetainedError, PermissionDeniedError, ReadOnlyError,
+    TimeoutError, UnauthenticatedError, UnavailableError,
 };
 
 /// Register the exceptions in the module.
@@ -99,6 +112,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CursorExpiredError", py.get_type::<CursorExpiredError>())?;
     m.add("NotRetainedError", py.get_type::<NotRetainedError>())?;
     m.add("UnavailableError", py.get_type::<UnavailableError>())?;
+    m.add("UnauthenticatedError", py.get_type::<UnauthenticatedError>())?;
+    m.add("PermissionDeniedError", py.get_type::<PermissionDeniedError>())?;
     Ok(())
 }
 
@@ -158,6 +173,8 @@ pub fn query_to_py(error: iwdb_query::Error) -> PyErr {
         Code::CursorExpired => CursorExpiredError::new_err(message),
         Code::NotRetained => NotRetainedError::new_err(message),
         Code::Unavailable => UnavailableError::new_err(message),
+        Code::Unauthenticated => UnauthenticatedError::new_err(message),
+        Code::PermissionDenied => PermissionDeniedError::new_err(message),
         // Python has no way to cancel a request
         _ => exc::Error::new_err(message),
     }

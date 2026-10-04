@@ -7,6 +7,11 @@
  *
  * What the server can't answer yet (step 16): `schema` is sampled from the first SAMPLE nodes; `server` has the
  * namespaces' status and no metrics; `cancel` fails with `unavailable`; the log is this page's own requests.
+ *
+ * The session (step 15a, ADR 0046) is the server's HttpOnly cookie, set by `login` and sent by the browser on the
+ * page's own origin; this script never sees the token. Every request carries `X-Iwdb-Csrf`, which the server
+ * requires of cookie-authenticated writes (a page of another origin can't send it without a preflight). A 401
+ * rejects with `unauthenticated` and calls the onAuth listeners with null.
  * Classic script: defines globalThis.IW.rest (and module.exports for node --test). */
 (function (root) {
   'use strict';
@@ -59,13 +64,15 @@
       return (row ? row.nodes : []).map((_, k) => ({ name: 'n' + k, kind: 'node' })).concat((row ? row.edges || [] : []).map((_, k) => ({ name: 'e' + k, kind: 'edge' })));
     }
   }
+  const ROLES = { ROLE_READ: 'read', ROLE_WRITE: 'write', ROLE_ADMIN: 'admin' };
+  const user = (u = {}) => ({ name: u.name || '', admin: !!u.admin, grants: Object.fromEntries(Object.entries(u.grants || {}).map(([ns, r]) => [ns, ROLES[r] || r])) });
   const unavailable = (what) => new SourceError('unavailable', `${what} needs the server's status views (step 16)`);
 
   /** A Source over the REST API at `base` ('' for the page's origin). `fetch` can be passed in for tests. */
   function create(opts = {}) {
     const base = opts.base || '';
     const doFetch = opts.fetch || root.fetch.bind(root);
-    const log = []; const listeners = new Set();
+    const log = []; const listeners = new Set(); const auth = new Set();
     const emit = (level, msg) => {
       const d = new Date(); const e = { t: d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0'), level, msg };
       log.push(e); if (log.length > 200) log.shift(); listeners.forEach((f) => { try { f(e); } catch (_) { /* its own */ } });
@@ -75,7 +82,9 @@
     async function call(method, path, body, quiet) {
       const t0 = Date.now(); let res;
       try {
-        res = await doFetch(base + path, { method, headers: body === undefined ? { accept: 'application/json' } : { 'content-type': 'application/json', accept: 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+        const headers = { accept: 'application/json', 'x-iwdb-csrf': '1' };
+        if (body !== undefined) headers['content-type'] = 'application/json';
+        res = await doFetch(base + path, { method, headers, credentials: 'same-origin', body: body === undefined ? undefined : JSON.stringify(body) });
       } catch (e) {
         emit('ERROR', `${method} ${path} · no answer: ${e.message}`);
         throw new SourceError('unavailable', `no answer from ${base || 'the console server'}${path}: ${e.message}`);
@@ -87,7 +96,9 @@
         const code = (json && json.code) || (res.status === 502 || res.status === 504 ? 'unavailable' : 'internal');
         const message = (json && json.message) || `HTTP ${res.status} from ${path}`;
         emit(res.status >= 500 ? 'ERROR' : 'WARN', `${method} ${path} · ${res.status} ${code} · ${ms} ms`);
-        throw new SourceError(code, message);
+        // The session ended (or there was none): the pages ask for a login, not report an outage
+        if (res.status === 401 && path !== '/v1/auth/login') auth.forEach((f) => { try { f(null); } catch (_) { /* its own */ } });
+        throw new SourceError(res.status === 401 ? 'unauthenticated' : code, message);
       }
       if (!quiet) emit('INFO', `${method} ${path} · ${res.status} · ${ms} ms`);
       return json;
@@ -171,6 +182,18 @@
       log: () => log.slice(),
       onLog: (f) => { listeners.add(f); return () => listeners.delete(f); },
       tick: () => {},
+      /** Who the server takes this page for: {authEnabled, user}; rejects `unauthenticated` without a session. */
+      session: async () => {
+        const r = await call('GET', '/v1/auth/whoami', undefined, true);
+        return { authEnabled: !!r.authEnabled, user: user(r.user) };
+      },
+      /** Log in: the server sets the session cookie (the answer holds no token). */
+      login: async (name, password) => {
+        const r = await call('POST', '/v1/auth/login', { user: name, password, cookie: true });
+        return { authEnabled: true, user: user(r.user) };
+      },
+      logout: async () => { await call('POST', '/v1/auth/logout', {}); auth.forEach((f) => { try { f(null); } catch (_) { /* its own */ } }); return {}; },
+      onAuth: (f) => { auth.add(f); return () => auth.delete(f); },
     };
     emit('INFO', `REST source on ${base || 'this origin'}`);
     return src;

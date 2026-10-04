@@ -26,6 +26,7 @@
 
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::rejection::{PathRejection, QueryRejection};
@@ -34,13 +35,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, delete, get, post, put};
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
-use iwdb_query::{Code, Database, Error};
+use iwdb_query::{Authorized, Code, Error};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::watch;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::auth::{AuthMode, Caller, SESSION_COOKIE, Served, authorized};
 use crate::ops;
 use crate::proto as pb;
 use crate::status::http_status;
@@ -93,6 +95,12 @@ impl Route {
     /// A health route: served by the server's gate, not the router.
     pub fn health(&self) -> bool {
         matches!(self.operation, "live" | "ready")
+    }
+
+    /// A route that needs no credentials: health, login, the OpenAPI
+    /// document (step 15a).
+    pub fn open(&self) -> bool {
+        self.health() || matches!(self.operation, "login" | "openapi")
     }
 }
 
@@ -198,6 +206,34 @@ pub const ROUTES: &[Route] = &[
         "watchChanges",
         "Follow the change stream (Server-Sent Events)",
     ),
+    // Authentication, users, grants, tokens (auth.proto, step 15a)
+    route(Method::POST, crate::auth::LOGIN_PATH, "Login", BODY, "login", "Log in: start a session"),
+    route(Method::POST, "/v1/auth/logout", "Logout", OPTIONAL_BODY, "logout", "End the caller's session"),
+    route(Method::GET, "/v1/auth/whoami", "WhoAmI", Input::Nothing, "whoAmI", "The caller and its roles"),
+    route(Method::GET, "/v1/users", "ListUsers", Input::Nothing, "listUsers", "List the users"),
+    route(Method::POST, "/v1/users", "CreateUser", BODY, "createUser", "Create a user"),
+    route(Method::DELETE, "/v1/users/{user}", "DeleteUser", OPTIONAL_BODY, "deleteUser", "Delete a user"),
+    route(Method::PUT, "/v1/users/{user}/password", "SetPassword", BODY, "setPassword", "Set a user's password"),
+    route(Method::PUT, "/v1/users/{user}/admin", "SetAdmin", BODY, "setAdmin", "Make a user a server admin or not"),
+    route(Method::PUT, "/v1/users/{user}/grants/{ns}", "Grant", BODY, "grant", "Give a user a role on a namespace"),
+    route(
+        Method::DELETE,
+        "/v1/users/{user}/grants/{ns}",
+        "Revoke",
+        OPTIONAL_BODY,
+        "revoke",
+        "Take a user's role on a namespace away",
+    ),
+    route(Method::GET, "/v1/users/{user}/tokens", "ListTokens", Input::Nothing, "listTokens", "A user's API tokens"),
+    route(Method::POST, "/v1/users/{user}/tokens", "CreateToken", BODY, "createToken", "Make an API token"),
+    route(
+        Method::DELETE,
+        "/v1/users/{user}/tokens/{token}",
+        "RevokeToken",
+        OPTIONAL_BODY,
+        "revokeToken",
+        "Revoke an API token",
+    ),
     // Served before the router, in every build and during recovery
     // (crate::health); here for the OpenAPI document
     Route {
@@ -229,6 +265,7 @@ pub const ROUTES: &[Route] = &[
 /// What the handlers share.
 struct Shared<D> {
     db: Arc<D>,
+    mode: AuthMode,
     max_body: usize,
     /// Turns true when the server shuts down: change streams end.
     stopping: watch::Receiver<bool>,
@@ -236,10 +273,20 @@ struct Shared<D> {
 
 type St<D> = State<Arc<Shared<D>>>;
 
+/// The caller the gate attached (none when the router runs without it).
+type Caller_ = Option<Extension<Caller>>;
+
+impl<D> Shared<D> {
+    /// The database as the caller may use it (design rule 8, ADR 0045).
+    fn db(&self, caller: &Caller_) -> Result<Authorized<D>, Failure> {
+        Ok(authorized(&self.db, self.mode, caller.as_ref().map(|Extension(c)| c))?)
+    }
+}
+
 /// The REST routes over `db`, with request bodies of at most `max_body`
 /// bytes. Requests that match no route are answered here too (404). The
 /// change streams end when `stopping` turns true.
-pub fn router<D: Database + 'static>(db: Arc<D>, max_body: usize, stopping: watch::Receiver<bool>) -> Router {
+pub fn router<D: Served>(db: Arc<D>, max_body: usize, stopping: watch::Receiver<bool>, mode: AuthMode) -> Router {
     let mut router = Router::new();
     for r in ROUTES.iter().filter(|r| !r.health()) {
         router = router.route(r.path, handler::<D>(r));
@@ -249,11 +296,11 @@ pub fn router<D: Database + 'static>(db: Arc<D>, max_body: usize, stopping: watc
         .method_not_allowed_fallback(|| async {
             Failure::http(StatusCode::METHOD_NOT_ALLOWED, "the route doesn't take this method")
         })
-        .with_state(Arc::new(Shared { db, max_body, stopping }))
+        .with_state(Arc::new(Shared { db, mode, max_body, stopping }))
 }
 
 /// The handler of `r`.
-fn handler<D: Database + 'static>(r: &Route) -> MethodRouter<Arc<Shared<D>>> {
+fn handler<D: Served>(r: &Route) -> MethodRouter<Arc<Shared<D>>> {
     match r.operation {
         "listNamespaces" => get(list_namespaces::<D>),
         "createNamespace" => put(create_namespace::<D>),
@@ -279,6 +326,19 @@ fn handler<D: Database + 'static>(r: &Route) -> MethodRouter<Arc<Shared<D>>> {
         "getChanges" => get(get_changes::<D>),
         "watchChanges" => get(watch_changes::<D>),
         "openapi" => get(openapi_document),
+        "login" => post(login::<D>),
+        "logout" => post(logout::<D>),
+        "whoAmI" => get(who_am_i::<D>),
+        "listUsers" => get(list_users::<D>),
+        "createUser" => post(create_user::<D>),
+        "deleteUser" => delete(delete_user::<D>),
+        "setPassword" => put(set_password::<D>),
+        "setAdmin" => put(set_admin::<D>),
+        "grant" => put(grant::<D>),
+        "revoke" => delete(revoke::<D>),
+        "listTokens" => get(list_tokens::<D>),
+        "createToken" => post(create_token::<D>),
+        "revokeToken" => delete(revoke_token::<D>),
         other => get(move || async move { Failure::from(Error::internal(format!("route {} has no handler", other))) }),
     }
 }
@@ -491,93 +551,97 @@ where
 
 // ---- handlers ----
 
-async fn list_namespaces<D: Database + 'static>(State(s): St<D>) -> Answer {
-    unary(ops::list_namespaces(&*s.db).await)
+async fn list_namespaces<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
+    unary(ops::list_namespaces(&s.db(&caller)?).await)
 }
 
-async fn create_namespace<D: Database + 'static>(
+async fn create_namespace<D: Served>(
     State(s): St<D>,
+    caller: Caller_,
     p: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     body: Body,
 ) -> Answer {
     let mut r: pb::CreateNamespaceRequest = read(&headers, body, s.max_body).await?;
     namespace(&mut r.name, path(p)?)?;
-    unary(ops::create_namespace(&*s.db, r).await)
+    unary(ops::create_namespace(&s.db(&caller)?, r).await)
 }
 
-async fn drop_namespace<D: Database + 'static>(
+async fn drop_namespace<D: Served>(
     State(s): St<D>,
+    caller: Caller_,
     p: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
     body: Body,
 ) -> Answer {
     let mut r: pb::DropNamespaceRequest = read(&headers, body, s.max_body).await?;
     namespace(&mut r.name, path(p)?)?;
-    unary(ops::drop_namespace(&*s.db, r).await)
+    unary(ops::drop_namespace(&s.db(&caller)?, r).await)
 }
 
-async fn namespace_status<D: Database + 'static>(State(s): St<D>, p: Result<Path<String>, PathRejection>) -> Answer {
-    let r = pb::GetNamespaceStatusRequest { namespace: path(p)? };
-    unary(ops::get_namespace_status(&*s.db, r).await)
-}
-
-async fn catalog<D: Database + 'static>(
+async fn namespace_status<D: Served>(
     State(s): St<D>,
+    caller: Caller_,
+    p: Result<Path<String>, PathRejection>,
+) -> Answer {
+    let r = pb::GetNamespaceStatusRequest { namespace: path(p)? };
+    unary(ops::get_namespace_status(&s.db(&caller)?, r).await)
+}
+
+async fn catalog<D: Served>(
+    State(s): St<D>,
+    caller: Caller_,
     p: Result<Path<String>, PathRejection>,
     q: Result<Query<OptionsQuery>, QueryRejection>,
 ) -> Answer {
     let r = pb::GetCatalogRequest { namespace: path(p)?, options: options(q)? };
-    unary(ops::get_catalog(&*s.db, r, None).await)
+    unary(ops::get_catalog(&s.db(&caller)?, r, None).await)
 }
 
 /// A handler that reads its body, takes the namespace from the path, and
 /// runs its operation.
 macro_rules! body_handler {
-    ($name:ident, $request:ty, |$s:ident, $r:ident, $headers:ident| $run:expr) => {
-        async fn $name<D: Database + 'static>(
-            State($s): St<D>,
+    ($name:ident, $request:ty, |$db:ident, $r:ident, $headers:ident| $run:expr) => {
+        async fn $name<D: Served>(
+            State(s): St<D>,
+            caller: Caller_,
             p: Result<Path<String>, PathRejection>,
             $headers: HeaderMap,
             body: Body,
         ) -> Answer {
-            let mut $r: $request = read(&$headers, body, $s.max_body).await?;
+            let $db = s.db(&caller)?;
+            let mut $r: $request = read(&$headers, body, s.max_body).await?;
             namespace(&mut $r.namespace, path(p)?)?;
             $run
         }
     };
 }
 
-body_handler!(commit_catalog, pb::CommitCatalogRequest, |s, r, _h| unary(ops::commit_catalog(&*s.db, r).await));
-body_handler!(commit, pb::CommitRequest, |s, r, _h| unary(ops::commit(&*s.db, r).await));
-body_handler!(wait_for_seq, pb::WaitForSeqRequest, |s, r, _h| unary(ops::wait_for_seq(&*s.db, r, None).await));
-body_handler!(get_nodes, pb::GetNodesRequest, |s, r, h| streamed(&h, ops::get_nodes(&*s.db, r, None).await));
-body_handler!(get_edges, pb::GetEdgesRequest, |s, r, h| streamed(&h, ops::get_edges(&*s.db, r, None).await));
-body_handler!(find, pb::FindRequest, |s, r, h| streamed(&h, ops::find(&*s.db, r, None).await));
-body_handler!(explain, pb::ExplainRequest, |s, r, _h| unary(ops::explain(&*s.db, r, None).await));
-body_handler!(neighbourhood, pb::NeighbourhoodRequest, |s, r, h| streamed(
-    &h,
-    ops::neighbourhood(&*s.db, r, None).await
-));
-body_handler!(traverse, pb::TraverseRequest, |s, r, h| streamed(&h, ops::traverse(&*s.db, r, None).await));
-body_handler!(shortest_path, pb::ShortestPathRequest, |s, r, _h| unary(ops::shortest_path(&*s.db, r, None).await));
-body_handler!(random_walks, pb::RandomWalksRequest, |s, r, h| streamed(&h, ops::random_walks(&*s.db, r, None).await));
-body_handler!(subgraph, pb::SubgraphRequest, |s, r, h| streamed(&h, ops::subgraph(&*s.db, r, None).await));
-body_handler!(match_pattern, pb::MatchPatternRequest, |s, r, h| streamed(
-    &h,
-    ops::match_pattern(&*s.db, r, None).await
-));
-body_handler!(analyze, pb::AnalyzeRequest, |s, r, h| streamed(&h, ops::analyze(&*s.db, r, None).await));
+body_handler!(commit_catalog, pb::CommitCatalogRequest, |db, r, _h| unary(ops::commit_catalog(&db, r).await));
+body_handler!(commit, pb::CommitRequest, |db, r, _h| unary(ops::commit(&db, r).await));
+body_handler!(wait_for_seq, pb::WaitForSeqRequest, |db, r, _h| unary(ops::wait_for_seq(&db, r, None).await));
+body_handler!(get_nodes, pb::GetNodesRequest, |db, r, h| streamed(&h, ops::get_nodes(&db, r, None).await));
+body_handler!(get_edges, pb::GetEdgesRequest, |db, r, h| streamed(&h, ops::get_edges(&db, r, None).await));
+body_handler!(find, pb::FindRequest, |db, r, h| streamed(&h, ops::find(&db, r, None).await));
+body_handler!(explain, pb::ExplainRequest, |db, r, _h| unary(ops::explain(&db, r, None).await));
+body_handler!(neighbourhood, pb::NeighbourhoodRequest, |db, r, h| streamed(&h, ops::neighbourhood(&db, r, None).await));
+body_handler!(traverse, pb::TraverseRequest, |db, r, h| streamed(&h, ops::traverse(&db, r, None).await));
+body_handler!(shortest_path, pb::ShortestPathRequest, |db, r, _h| unary(ops::shortest_path(&db, r, None).await));
+body_handler!(random_walks, pb::RandomWalksRequest, |db, r, h| streamed(&h, ops::random_walks(&db, r, None).await));
+body_handler!(subgraph, pb::SubgraphRequest, |db, r, h| streamed(&h, ops::subgraph(&db, r, None).await));
+body_handler!(match_pattern, pb::MatchPatternRequest, |db, r, h| streamed(&h, ops::match_pattern(&db, r, None).await));
+body_handler!(analyze, pb::AnalyzeRequest, |db, r, h| streamed(&h, ops::analyze(&db, r, None).await));
 
 /// One node by id: its `GetNodesResponse`, or 404 if it doesn't exist.
-async fn get_node<D: Database + 'static>(
+async fn get_node<D: Served>(
     State(s): St<D>,
+    caller: Caller_,
     p: Result<Path<(String, String)>, PathRejection>,
     q: Result<Query<OptionsQuery>, QueryRejection>,
 ) -> Answer {
     let (ns, id) = path(p)?;
     let r = pb::GetNodesRequest { namespace: ns.clone(), ids: vec![id.clone()], options: options(q)? };
-    let answer = merged(ops::get_nodes(&*s.db, r, None).await?)?;
+    let answer = merged(ops::get_nodes(&s.db(&caller)?, r, None).await?)?;
     if answer.nodes.iter().all(|n| n.node.is_none()) {
         return Err(Error::new(Code::NotFound, format!("no node '{}' in namespace '{}'", id, ns)).into());
     }
@@ -585,29 +649,31 @@ async fn get_node<D: Database + 'static>(
 }
 
 /// One edge by id: its `GetEdgesResponse`, or 404 if it doesn't exist.
-async fn get_edge<D: Database + 'static>(
+async fn get_edge<D: Served>(
     State(s): St<D>,
+    caller: Caller_,
     p: Result<Path<(String, String)>, PathRejection>,
     q: Result<Query<OptionsQuery>, QueryRejection>,
 ) -> Answer {
     let (ns, id) = path(p)?;
     let edge: u64 = id.parse().map_err(|_| Error::invalid(format!("invalid edge id '{}'", id)))?;
     let r = pb::GetEdgesRequest { namespace: ns.clone(), ids: vec![edge], options: options(q)? };
-    let answer = merged(ops::get_edges(&*s.db, r, None).await?)?;
+    let answer = merged(ops::get_edges(&s.db(&caller)?, r, None).await?)?;
     if answer.edges.iter().all(|e| e.edge.is_none()) {
         return Err(Error::new(Code::NotFound, format!("no edge {} in namespace '{}'", edge, ns)).into());
     }
     unary(Ok(answer))
 }
 
-async fn get_changes<D: Database + 'static>(
+async fn get_changes<D: Served>(
     State(s): St<D>,
+    caller: Caller_,
     p: Result<Path<String>, PathRejection>,
     q: Result<Query<ChangesQuery>, QueryRejection>,
 ) -> Answer {
     let (from_seq, wait, options) = changes_query(q, false)?;
     let r = pb::GetChangesRequest { namespace: path(p)?, from_seq, wait, options };
-    unary(ops::get_changes(&*s.db, r, None).await)
+    unary(ops::get_changes(&s.db(&caller)?, r, None).await)
 }
 
 /// The change stream as Server-Sent Events (ADR 0031): a `change` event per
@@ -618,8 +684,9 @@ async fn get_changes<D: Database + 'static>(
 /// reconnects) resumes after that seq, instead of `from_seq`. An error in
 /// the first batch (no namespace, `not_retained`, ...) is the answer's
 /// status instead.
-async fn watch_changes<D: Database + 'static>(
+async fn watch_changes<D: Served>(
     State(s): St<D>,
+    caller: Caller_,
     p: Result<Path<String>, PathRejection>,
     q: Result<Query<ChangesQuery>, QueryRejection>,
     headers: HeaderMap,
@@ -631,7 +698,7 @@ async fn watch_changes<D: Database + 'static>(
         from_seq = seq.saturating_add(1);
     }
     let r = pb::WatchRequest { namespace: path(p)?, from_seq, options };
-    let mut batches = ops::follow(s.db.clone(), r, None, s.stopping.clone());
+    let mut batches = ops::follow(Arc::new(s.db(&caller)?), r, None, s.stopping.clone());
     let first = match batches.recv().await {
         Some(first) => first?,
         None => return Err(Error::unavailable("the server is shutting down").into()),
@@ -687,6 +754,157 @@ fn merged<T: Default>(mut chunks: Vec<T>) -> Result<T, Failure> {
         1 => Ok(chunks.pop().unwrap_or_default()),
         n => Err(Error::internal(format!("an answer of one item came in {} chunks", n)).into()),
     }
+}
+
+// ---- authentication, users, grants, tokens (step 15a) ----
+
+/// A field of a body that names what the path names already.
+fn same(field: &mut String, path: &str, what: &str) -> Result<(), Failure> {
+    if !field.is_empty() && field != path {
+        return Err(Error::invalid(format!("the body names {} '{}', the path '{}'", what, field, path)).into());
+    }
+    *field = path.to_owned();
+    Ok(())
+}
+
+/// The session cookie (ADR 0046): HttpOnly (no script reads it),
+/// SameSite=Strict (no other site sends it). Not `Secure` until the server
+/// speaks TLS (step 15b): browsers drop Secure cookies over plain HTTP
+/// except on localhost.
+fn session_cookie(token: &str, max_age_secs: u64) -> HeaderValue {
+    let text = format!("{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}", SESSION_COOKIE, token, max_age_secs);
+    HeaderValue::from_str(&text).unwrap_or_else(|_| HeaderValue::from_static("iwdb_session=; Max-Age=0"))
+}
+
+/// `POST /v1/auth/login`: the session's token in the body, or with `cookie`
+/// as the session cookie.
+async fn login<D: Served>(State(s): St<D>, caller: Caller_, headers: HeaderMap, body: Body) -> Answer {
+    let r: pb::LoginRequest = read(&headers, body, s.max_body).await?;
+    let cookie = r.cookie;
+    let client = caller.as_ref().and_then(|Extension(c)| c.client);
+    let (response, session) = ops::login(&*s.db, r, client).await?;
+    let mut answer = unary(Ok(response))?;
+    if cookie {
+        let max_age = session.expires_ms.saturating_sub(iwdb::auth::now_ms()) / 1000;
+        answer.headers_mut().insert(header::SET_COOKIE, session_cookie(session.token.expose(), max_age));
+    }
+    answer.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(answer)
+}
+
+/// `POST /v1/auth/logout`: ends the session and clears the cookie.
+async fn logout<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
+    s.db(&caller)?;
+    let token = caller.as_ref().and_then(|Extension(c)| c.token.clone());
+    let mut answer = unary(ops::logout(&*s.db, token.as_ref()).await)?;
+    answer.headers_mut().insert(header::SET_COOKIE, session_cookie("", 0));
+    Ok(answer)
+}
+
+async fn who_am_i<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
+    unary(Ok(ops::who_am_i(&s.db(&caller)?, s.mode)))
+}
+
+async fn list_users<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
+    unary(ops::list_users(&s.db(&caller)?).await)
+}
+
+async fn create_user<D: Served>(State(s): St<D>, caller: Caller_, headers: HeaderMap, body: Body) -> Answer {
+    let db = s.db(&caller)?;
+    let r: pb::CreateUserRequest = read(&headers, body, s.max_body).await?;
+    unary(ops::create_user(&db, r).await)
+}
+
+/// A handler of a route under `/v1/users/{user}` whose body is the RPC's
+/// request message: the user (and namespace or token name) from the path.
+macro_rules! user_handler {
+    ($name:ident, $request:ty, $params:ty, |$r:ident, $p:ident| $fill:block, $op:ident) => {
+        async fn $name<D: Served>(
+            State(s): St<D>,
+            caller: Caller_,
+            p: Result<Path<$params>, PathRejection>,
+            headers: HeaderMap,
+            body: Body,
+        ) -> Answer {
+            let db = s.db(&caller)?;
+            let mut $r: $request = read(&headers, body, s.max_body).await?;
+            let $p = path(p)?;
+            $fill
+            unary(ops::$op(&db, $r).await)
+        }
+    };
+}
+
+user_handler!(
+    delete_user,
+    pb::DeleteUserRequest,
+    String,
+    |r, user| {
+        same(&mut r.name, &user, "user")?;
+    },
+    delete_user
+);
+user_handler!(
+    set_password,
+    pb::SetPasswordRequest,
+    String,
+    |r, user| {
+        same(&mut r.name, &user, "user")?;
+    },
+    set_password
+);
+user_handler!(
+    set_admin,
+    pb::SetAdminRequest,
+    String,
+    |r, user| {
+        same(&mut r.name, &user, "user")?;
+    },
+    set_admin
+);
+user_handler!(
+    grant,
+    pb::GrantRequest,
+    (String, String),
+    |r, p| {
+        same(&mut r.name, &p.0, "user")?;
+        namespace(&mut r.namespace, p.1)?;
+    },
+    grant
+);
+user_handler!(
+    revoke,
+    pb::RevokeRequest,
+    (String, String),
+    |r, p| {
+        same(&mut r.name, &p.0, "user")?;
+        namespace(&mut r.namespace, p.1)?;
+    },
+    revoke
+);
+user_handler!(
+    create_token,
+    pb::CreateTokenRequest,
+    String,
+    |r, user| {
+        same(&mut r.user, &user, "user")?;
+    },
+    create_token
+);
+user_handler!(
+    revoke_token,
+    pb::RevokeTokenRequest,
+    (String, String),
+    |r, p| {
+        same(&mut r.user, &p.0, "user")?;
+        same(&mut r.name, &p.1, "token")?;
+    },
+    revoke_token
+);
+
+async fn list_tokens<D: Served>(State(s): St<D>, caller: Caller_, p: Result<Path<String>, PathRejection>) -> Answer {
+    let db = s.db(&caller)?;
+    unary(ops::list_tokens(&db, pb::ListTokensRequest { user: path(p)? }).await)
 }
 
 async fn openapi_document() -> Response {

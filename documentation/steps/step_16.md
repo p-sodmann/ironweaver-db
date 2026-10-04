@@ -41,7 +41,7 @@ Operators can configure, monitor and administer the server without reading the c
 | [16h](step_16h.md) | Windows | Storage and CI only; independent, can run in parallel with any of them. |
 | [16i](step_16i.md) | `documentation/operations.md` | Documents what the others built, so it comes last. |
 
-Step 15's "max memory per namespace" builds on 16d's accounting; 16d only sets a process-wide limit.
+Step 15d's "max memory per namespace" builds on 16d's accounting; 16d only sets a process-wide limit.
 
 ## Acceptance criteria
 

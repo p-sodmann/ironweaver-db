@@ -1,5 +1,7 @@
 //! Helpers for the server's tests: a server on an ephemeral port with a
-//! store in a temporary directory, and a `Remote` connected to it.
+//! store in a temporary directory, and a `Remote` connected to it. The
+//! conformance fixtures run with authentication on (step 15a): an admin
+//! is created before the server starts, and the client logs in.
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
@@ -9,8 +11,9 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
-use iwdb::{CheckpointOptions, Embedded, FsyncPolicy, LogFs, QueryConfig, Store, StoreOptions, WalOptions};
-use iwdb_query::Database;
+use iwdb::auth::{AuthSettings, HashParams};
+use iwdb::{CheckpointOptions, Embedded, FsyncPolicy, LogFs, QueryConfig, Secret, Store, StoreOptions, WalOptions};
+use iwdb_server::auth::AuthMode;
 use iwdb_server::client::Remote;
 #[cfg(feature = "rest")]
 use iwdb_server::client::RestRemote;
@@ -30,17 +33,41 @@ pub fn options() -> StoreOptions {
     }
 }
 
+/// Cheap password hashes for tests.
+pub const FAST: HashParams = HashParams { memory_kib: 64, iterations: 1, parallelism: 1 };
+/// The conformance fixtures' admin.
+pub const ADMIN: (&str, &str) = ("admin", "admin-password");
+
+/// Authentication settings for tests: cheap hashes.
+pub fn auth_settings() -> AuthSettings {
+    AuthSettings { hash: FAST, ..AuthSettings::default() }
+}
+
 /// A server of `D` on its own runtime, listening on 127.0.0.1 with an
 /// ephemeral port.
-pub struct Running<D: Database + 'static> {
+pub struct Running<D: iwdb_server::auth::Served> {
     pub addr: SocketAddr,
     runtime: Option<Runtime>,
     stop: Option<oneshot::Sender<Duration>>,
     task: Option<JoinHandle<(Drain, Server<D>)>>,
 }
 
-impl<D: Database + 'static> Running<D> {
+impl<D: iwdb_server::auth::Served> Running<D> {
     pub fn start(db: D) -> Self {
+        Self::start_with(db, AuthMode::default())
+    }
+
+    /// With authentication on.
+    pub fn start_auth(db: D) -> Self {
+        Self::start_with(db, AuthMode { enabled: true })
+    }
+
+    pub fn start_with(db: D, auth: AuthMode) -> Self {
+        Self::start_built(db, |server| server.auth(auth))
+    }
+
+    /// With the server as `build` makes it (console, auth, limits).
+    pub fn start_built(db: D, build: impl FnOnce(Server<D>) -> Server<D>) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("test-server")
@@ -49,7 +76,7 @@ impl<D: Database + 'static> Running<D> {
             .unwrap();
         let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = Server::new(Arc::new(db));
+        let server = build(Server::new(Arc::new(db)));
         let (stop, stopped) = oneshot::channel::<Duration>();
         let task = runtime.spawn(async move {
             let (tx, rx) = oneshot::channel::<Duration>();
@@ -100,7 +127,7 @@ impl<D: Database + 'static> Running<D> {
     }
 }
 
-impl<D: Database + 'static> Drop for Running<D> {
+impl<D: iwdb_server::auth::Served> Drop for Running<D> {
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(Duration::ZERO);
@@ -143,21 +170,47 @@ impl<C> Deref for Fresh<C> {
     }
 }
 
-fn served() -> (Running<Embedded>, tempfile::TempDir) {
+/// A store served without authentication, and a gRPC client: for the
+/// tests of what the adapters add (raw requests carry no token).
+pub fn fresh_open() -> Fresh {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), options()).unwrap();
-    (Running::start(Embedded::new(store, QueryConfig::default()).unwrap()), dir)
-}
-
-/// Over gRPC.
-pub fn fresh() -> Fresh {
-    let (server, dir) = served();
+    let server = Running::start(Embedded::new(store, QueryConfig::default()).unwrap());
     Fresh { remote: server.client(), server, _dir: dir }
 }
 
-/// Over REST; streamed answers as NDJSON or as one JSON message.
+/// The same, with a REST client.
+#[cfg(feature = "rest")]
+pub fn fresh_open_rest() -> Fresh<RestRemote> {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), options()).unwrap();
+    let server = Running::start(Embedded::new(store, QueryConfig::default()).unwrap());
+    Fresh { remote: server.rest_client(), server, _dir: dir }
+}
+
+/// A store with the admin [`ADMIN`], served with authentication on.
+pub fn served() -> (Running<Embedded>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), options()).unwrap();
+    store.users().with_params(FAST).create(ADMIN.0, &Secret::new(ADMIN.1), true).unwrap();
+    let db = Embedded::new(store, QueryConfig::default()).unwrap().with_auth(auth_settings());
+    (Running::start_auth(db), dir)
+}
+
+/// Over gRPC, logged in as the admin.
+pub fn fresh() -> Fresh {
+    let (server, dir) = served();
+    let remote = server.client();
+    iwdb_query::exec::block_on(remote.login(ADMIN.0, Secret::new(ADMIN.1))).unwrap();
+    Fresh { remote, server, _dir: dir }
+}
+
+/// Over REST, logged in as the admin; streamed answers as NDJSON or as one
+/// JSON message.
 #[cfg(feature = "rest")]
 pub fn fresh_rest(ndjson: bool) -> Fresh<RestRemote> {
     let (server, dir) = served();
-    Fresh { remote: server.rest_client().ndjson(ndjson), server, _dir: dir }
+    let remote = server.rest_client().ndjson(ndjson);
+    iwdb_query::exec::block_on(remote.login(ADMIN.0, Secret::new(ADMIN.1))).unwrap();
+    Fresh { remote, server, _dir: dir }
 }

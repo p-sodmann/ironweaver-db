@@ -7,8 +7,14 @@
 //! The shell only translates (design rule 8): every command is one trait
 //! call, and a page (`\next`) is the same call with the previous answer's
 //! cursor.
+//!
+//! Against a server with authentication on (step 15a) it logs in: with
+//! `--token` (or `IWDB_TOKEN`), with `--user` and a password prompt, or
+//! with `\login <user>`; `\logout` ends the session, `\whoami` shows who
+//! the server takes it for. A password is read without echo from a
+//! terminal, or as the next line of input when piped.
 
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
 
 use ironweaver_core::query::Pattern;
@@ -51,6 +57,8 @@ settings:
   \\partial on|off                 answer with what was found when a limit is reached
   \\timeout <seconds>|off          the timeout of each request
   \\json, \\table                   print JSON (one object per line) or tables
+  \\login <user>                   log in (the password is prompted for, or the next line when piped)
+  \\logout, \\whoami                end the session; who the server takes you for
   \\help, \\quit (or end of input)";
 
 /// Why a command failed: a mistake in the command, or the database's error
@@ -99,12 +107,16 @@ struct Shell {
 
 /// Run the shell on stdin until `\quit` or the end of input. Exit code 0
 /// if every command succeeded, 4 if one failed, 2 for an invalid endpoint.
-pub fn run(endpoint: &str, namespace: &str, json: bool) -> u8 {
-    let db = match Remote::connect(endpoint) {
+pub fn run(endpoint: &str, namespace: &str, json: bool, token: Option<&str>, user: Option<&str>) -> u8 {
+    let db = match crate::users::connect(endpoint, token, user) {
         Ok(db) => db,
-        Err(e) => {
+        Err(e) if e.code() == iwdb_query::Code::InvalidArgument => {
             eprintln!("iwctl: {}", e.message());
             return crate::exit::USAGE;
+        }
+        Err(e) => {
+            eprintln!("iwctl: {}: {}", e.code(), e.message());
+            return crate::exit::FAILED;
         }
     };
     let mut shell = Shell {
@@ -121,14 +133,18 @@ pub fn run(endpoint: &str, namespace: &str, json: bool) -> u8 {
         eprintln!("iwctl shell: {} (\\help for help, \\quit to leave)", endpoint);
     }
     let mut failed = false;
-    let mut lines = io::stdin().lock().lines();
+    let mut buffer = String::new();
     loop {
         if interactive {
             eprint!("{}> ", shell.namespace);
             let _ = io::stderr().flush();
         }
-        let Some(Ok(line)) = lines.next() else { break };
-        let line = line.trim();
+        // A line at a time, without holding stdin: `\login` reads a password
+        buffer.clear();
+        if !matches!(io::stdin().read_line(&mut buffer), Ok(n) if n > 0) {
+            break;
+        }
+        let line = buffer.trim();
         if line.is_empty() || line.starts_with("--") {
             continue;
         }
@@ -305,6 +321,15 @@ impl Shell {
         }
     }
 
+    /// Print an answer without results: JSON, or a line of text.
+    fn say(&self, value: Json, text: &str) {
+        if self.out.json {
+            println!("{}", value);
+        } else {
+            println!("{}", text);
+        }
+    }
+
     fn report(&self, failure: Failure) {
         let (code, message) = match failure {
             Failure::Usage(message) => ("usage".to_owned(), message),
@@ -353,6 +378,31 @@ impl Shell {
             }
             "\\json" => {
                 self.out.json = true;
+                Ok(())
+            }
+            "\\login" => {
+                let user = words(rest, 1, "\\login <user>")?[0];
+                let password = crate::users::read_secret(&format!("password for {}: ", user))
+                    .map_err(|e| Failure::Usage(e.to_string()))?;
+                let session = block_on(self.db.login(user, password))?;
+                let text = format!("logged in as {}", session.user.name);
+                self.say(json!({"user": session.user.name, "admin": session.user.admin}), &text);
+                Ok(())
+            }
+            "\\logout" => {
+                block_on(self.db.logout())?;
+                self.say(json!({"logged_out": true}), "logged out");
+                Ok(())
+            }
+            "\\whoami" => {
+                let (user, enabled) = block_on(self.db.whoami())?;
+                let grants: Vec<String> = user.grants.iter().map(|(n, r)| format!("{}={}", n, r)).collect();
+                let text = if enabled {
+                    format!("{}{}: {}", user.name, if user.admin { " (admin)" } else { "" }, grants.join(", "))
+                } else {
+                    "the server doesn't check credentials (authentication is off)".to_owned()
+                };
+                self.say(json!({"user": user.name, "admin": user.admin, "auth_enabled": enabled}), &text);
                 Ok(())
             }
             "\\table" => {

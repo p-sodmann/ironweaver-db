@@ -7,9 +7,11 @@
 //! (one connection per call in flight, kept alive), and reads streamed
 //! answers either as one JSON message or, with [`RestRemote::ndjson`], as
 //! NDJSON. Calls run on a tokio runtime as `Remote`'s do; dropping a call's
-//! future closes its connection.
+//! future closes its connection. Credentials work as `Remote`'s (a token
+//! sent as `authorization: Bearer`, [`RestRemote::login`]).
 
 use std::future::Future;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::{Method, Request, StatusCode, header};
@@ -21,6 +23,7 @@ use ironweaver_core::EdgeId;
 use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation};
 use iwdb_query::read::Explain;
+use iwdb_query::{Accounts, NewToken, Role, Secret, Session, TokenInfo, UserInfo};
 use iwdb_query::{
     AnalyticsRequest, Answer, Changes, ChangesRequest, CommitOptions, Database, Edge, Error, ExplainRequest,
     FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
@@ -31,7 +34,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::runtime::{Handle, Runtime};
 
-use super::{Call, bad_answer};
+use super::{Call, TokenSlot, bad_answer, read_token, write_token};
 use crate::convert::*;
 use crate::proto as pb;
 use crate::rest::{JSON, NDJSON};
@@ -45,6 +48,7 @@ pub struct RestRemote {
     /// `http://host:port`, without a trailing slash.
     base: String,
     ndjson: bool,
+    token: TokenSlot,
     handle: Handle,
     runtime: Option<Runtime>,
 }
@@ -81,7 +85,66 @@ impl RestRemote {
         let mut connector = HttpConnector::new();
         connector.set_nodelay(true);
         let http = Client::builder(TokioExecutor::new()).build(connector);
-        Ok(RestRemote { http, base: base.to_owned(), ndjson: false, handle, runtime: None })
+        Ok(RestRemote {
+            http,
+            base: base.to_owned(),
+            ndjson: false,
+            token: TokenSlot::default(),
+            handle,
+            runtime: None,
+        })
+    }
+
+    /// Send `token` (a session's or an API token) with every call.
+    pub fn with_token(self, token: Secret) -> Self {
+        self.set_token(Some(token));
+        self
+    }
+
+    /// Replace the token every call sends (`None`: none).
+    pub fn set_token(&self, token: Option<Secret>) {
+        write_token(&self.token, token);
+    }
+
+    /// The token calls send now.
+    pub fn token(&self) -> Option<Secret> {
+        read_token(&self.token)
+    }
+
+    /// Log in (`POST /v1/auth/login`): on success the session's token is
+    /// what calls send from now on.
+    pub fn login(&self, user: &str, password: Secret) -> impl Future<Output = Result<Session, Error>> + Send {
+        let (user, slot) = (user.to_owned(), self.token.clone());
+        self.call(move |c| async move {
+            let request = pb::LoginRequest { user, password: password.expose().to_owned(), cookie: false };
+            let response: pb::LoginResponse = c.post(format!("{}/v1/auth/login", c.base), &request).await?;
+            let token = Secret::new(response.token);
+            write_token(&slot, Some(token.clone()));
+            Ok(Session {
+                token,
+                user: user_from_pb(response.user).map_err(bad_answer)?,
+                expires_ms: response.expires_ms,
+            })
+        })
+    }
+
+    /// End the session; calls send no token afterwards.
+    pub fn logout(&self) -> impl Future<Output = Result<(), Error>> + Send {
+        let slot = self.token.clone();
+        self.call(move |c| async move {
+            let _: pb::LogoutResponse = c.post(format!("{}/v1/auth/logout", c.base), &pb::LogoutRequest {}).await?;
+            write_token(&slot, None);
+            Ok(())
+        })
+    }
+
+    /// Who the server takes this client for, and whether it checks
+    /// credentials at all.
+    pub fn whoami(&self) -> impl Future<Output = Result<(UserInfo, bool), Error>> + Send {
+        self.call(move |c| async move {
+            let response: pb::WhoAmIResponse = c.get(format!("{}/v1/auth/whoami", c.base)).await?;
+            Ok((user_from_pb(response.user).map_err(bad_answer)?, response.auth_enabled))
+        })
     }
 
     /// Read streamed answers as NDJSON (one chunk per line) instead of one
@@ -96,7 +159,8 @@ impl RestRemote {
         T: Send + 'static,
         F: Future<Output = Result<T, Error>> + Send + 'static,
     {
-        let calls = Calls { http: self.http.clone(), base: self.base.clone(), ndjson: self.ndjson };
+        let calls =
+            Calls { http: self.http.clone(), base: self.base.clone(), ndjson: self.ndjson, token: self.token() };
         Call(self.handle.spawn(f(calls)))
     }
 }
@@ -128,6 +192,7 @@ struct Calls {
     http: Http,
     base: String,
     ndjson: bool,
+    token: Option<Secret>,
 }
 
 impl Calls {
@@ -139,6 +204,9 @@ impl Calls {
     /// status and body stand for otherwise.
     async fn send(&self, method: Method, url: String, body: Option<Vec<u8>>, accept: &str) -> Result<Bytes, Error> {
         let mut builder = Request::builder().method(method).uri(&url).header(header::ACCEPT, accept);
+        if let Some(token) = &self.token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {}", token.expose()));
+        }
         if body.is_some() {
             builder = builder.header(header::CONTENT_TYPE, JSON);
         }
@@ -170,6 +238,22 @@ impl Calls {
             serde_json::to_vec(request).map_err(|e| Error::invalid(format!("can't write the request: {}", e)))?;
         let bytes = self.send(Method::POST, url, Some(body), JSON).await?;
         parse(&bytes)
+    }
+
+    /// A unary call with any method: `request` as the body.
+    async fn json<Q: Serialize, R: DeserializeOwned>(
+        &self,
+        method: Method,
+        url: String,
+        request: &Q,
+    ) -> Result<R, Error> {
+        let body =
+            serde_json::to_vec(request).map_err(|e| Error::invalid(format!("can't write the request: {}", e)))?;
+        parse(&self.send(method, url, Some(body), JSON).await?)
+    }
+
+    fn user_url(&self, user: &str, rest: &str) -> String {
+        format!("{}/v1/users/{}{}", self.base, segment(user), rest)
     }
 
     async fn get<R: DeserializeOwned>(&self, url: String) -> Result<R, Error> {
@@ -574,6 +658,116 @@ impl Database for RestRemote {
             let bytes = c.send(Method::DELETE, c.url(&name, ""), body, JSON).await?;
             let response: pb::DropNamespaceResponse = parse(&bytes)?;
             namespace_result_from_pb(response.event, response.deduplicated).map_err(bad_answer)
+        })
+    }
+}
+
+impl Accounts for RestRemote {
+    fn users(&self) -> impl Future<Output = Result<Vec<UserInfo>, Error>> + Send {
+        self.call(move |c| async move {
+            let response: pb::ListUsersResponse = c.get(format!("{}/v1/users", c.base)).await?;
+            response.users.into_iter().map(|u| user_from_pb(Some(u))).collect::<Result<_, _>>().map_err(bad_answer)
+        })
+    }
+
+    fn create_user(
+        &self,
+        name: &str,
+        password: Secret,
+        admin: bool,
+    ) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let name = name.to_owned();
+        self.call(move |c| async move {
+            let request = pb::CreateUserRequest { name, password: password.expose().to_owned(), admin };
+            let response: pb::CreateUserResponse = c.post(format!("{}/v1/users", c.base), &request).await?;
+            user_from_pb(response.user).map_err(bad_answer)
+        })
+    }
+
+    fn set_password(
+        &self,
+        name: &str,
+        password: Secret,
+        current: Option<Secret>,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        let name = name.to_owned();
+        self.call(move |c| async move {
+            let request = pb::SetPasswordRequest {
+                name: String::new(),
+                password: password.expose().to_owned(),
+                current_password: current.map(|c| c.expose().to_owned()),
+            };
+            let _: pb::SetPasswordResponse = c.json(Method::PUT, c.user_url(&name, "/password"), &request).await?;
+            Ok(())
+        })
+    }
+
+    fn delete_user(&self, name: &str) -> impl Future<Output = Result<(), Error>> + Send {
+        let name = name.to_owned();
+        self.call(move |c| async move {
+            let _: pb::DeleteUserResponse =
+                c.json(Method::DELETE, c.user_url(&name, ""), &pb::DeleteUserRequest::default()).await?;
+            Ok(())
+        })
+    }
+
+    fn set_admin(&self, name: &str, admin: bool) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let name = name.to_owned();
+        self.call(move |c| async move {
+            let request = pb::SetAdminRequest { name: String::new(), admin };
+            let response: pb::SetAdminResponse = c.json(Method::PUT, c.user_url(&name, "/admin"), &request).await?;
+            user_from_pb(response.user).map_err(bad_answer)
+        })
+    }
+
+    fn grant(&self, name: &str, namespace: &str, role: Role) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let (name, namespace) = (name.to_owned(), namespace.to_owned());
+        self.call(move |c| async move {
+            let request = pb::GrantRequest { role: role_to_pb(role) as i32, ..pb::GrantRequest::default() };
+            let url = c.user_url(&name, &format!("/grants/{}", segment(&namespace)));
+            let response: pb::GrantResponse = c.json(Method::PUT, url, &request).await?;
+            user_from_pb(response.user).map_err(bad_answer)
+        })
+    }
+
+    fn revoke(&self, name: &str, namespace: &str) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let (name, namespace) = (name.to_owned(), namespace.to_owned());
+        self.call(move |c| async move {
+            let url = c.user_url(&name, &format!("/grants/{}", segment(&namespace)));
+            let response: pb::RevokeResponse = c.json(Method::DELETE, url, &pb::RevokeRequest::default()).await?;
+            user_from_pb(response.user).map_err(bad_answer)
+        })
+    }
+
+    fn create_token(
+        &self,
+        user: &str,
+        name: &str,
+        expires_in: Option<Duration>,
+    ) -> impl Future<Output = Result<NewToken, Error>> + Send {
+        let (user, name) = (user.to_owned(), name.to_owned());
+        self.call(move |c| async move {
+            let request =
+                pb::CreateTokenRequest { user: String::new(), name, expires_in_secs: expires_in.map(|d| d.as_secs()) };
+            let response: pb::CreateTokenResponse = c.post(c.user_url(&user, "/tokens"), &request).await?;
+            new_token_from_pb(response).map_err(bad_answer)
+        })
+    }
+
+    fn revoke_token(&self, user: &str, name: &str) -> impl Future<Output = Result<(), Error>> + Send {
+        let (user, name) = (user.to_owned(), name.to_owned());
+        self.call(move |c| async move {
+            let url = c.user_url(&user, &format!("/tokens/{}", segment(&name)));
+            let _: pb::RevokeTokenResponse = c.json(Method::DELETE, url, &pb::RevokeTokenRequest::default()).await?;
+            Ok(())
+        })
+    }
+
+    fn tokens(&self, user: &str) -> impl Future<Output = Result<Vec<TokenInfo>, Error>> + Send {
+        let user = user.to_owned();
+        self.call(move |c| async move {
+            let response: pb::ListTokensResponse = c.get(c.user_url(&user, "/tokens")).await?;
+            Ok(response.tokens.into_iter().map(token_info_from_pb).collect())
         })
     }
 }

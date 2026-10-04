@@ -21,6 +21,13 @@ pub enum Code {
     /// pattern the core rejects, an invalid transaction. Retrying the same
     /// request fails the same way.
     InvalidArgument,
+    /// The server needs credentials and the request had none, or they
+    /// aren't valid: an unknown or expired token, a wrong password (step
+    /// 15a, ADR 0045). Log in again.
+    Unauthenticated,
+    /// The caller is known but its roles don't allow the operation on this
+    /// namespace (ADR 0045). Nothing changed.
+    PermissionDenied,
     /// A namespace (or, in a mutation, a node or edge, an index or a
     /// constraint) doesn't exist.
     NotFound,
@@ -63,8 +70,10 @@ pub enum Code {
 
 impl Code {
     /// Every code, in the order of `documentation/api/errors.md`.
-    pub const ALL: [Code; 14] = [
+    pub const ALL: [Code; 16] = [
         Code::InvalidArgument,
+        Code::Unauthenticated,
+        Code::PermissionDenied,
         Code::NotFound,
         Code::Conflict,
         Code::ConstraintViolation,
@@ -84,6 +93,8 @@ impl Code {
     pub fn as_str(self) -> &'static str {
         match self {
             Code::InvalidArgument => "invalid_argument",
+            Code::Unauthenticated => "unauthenticated",
+            Code::PermissionDenied => "permission_denied",
             Code::NotFound => "not_found",
             Code::Conflict => "conflict",
             Code::ConstraintViolation => "constraint_violation",

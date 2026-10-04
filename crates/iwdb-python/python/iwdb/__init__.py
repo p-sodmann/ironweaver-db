@@ -6,6 +6,8 @@ kinds of store have the same one (ADR 0035). `iwdb.aio` wraps it for
 asyncio.
 """
 
+from typing import Optional
+
 from ._iwdb import (
     BudgetExceededError,
     ClosedError,
@@ -21,10 +23,12 @@ from ._iwdb import (
     Namespace,
     NotFoundError,
     NotRetainedError,
+    PermissionDeniedError,
     ReadOnlyError,
     Store,
     TimeoutError,
     Transaction,
+    UnauthenticatedError,
     UnavailableError,
     __version__,
     restore,
@@ -33,12 +37,25 @@ from ._iwdb import (
 from .filter import Attr, Filter, attr, const, edge_type, label
 
 
-def connect(endpoint: str) -> Store:
+def connect(
+    endpoint: str,
+    *,
+    token: Optional[str] = None,
+    user: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Store:
     """A store served by the `iwdb-server` at `endpoint` (`"http://host:port"`):
     the API of `Store.open`'s store, minus the calls that need the store's
     directory. It connects on the first call, and again after a lost
-    connection; without a server, calls raise `UnavailableError`."""
-    return Store.connect(endpoint)
+    connection; without a server, calls raise `UnavailableError`.
+
+    With authentication on (the server's default), pass a `token` (an API
+    token, or a session's), or a `user` and `password`: that logs in now
+    (`UnauthenticatedError` if they are wrong) and keeps the session's token,
+    which lasts until the server's session lifetime ends; then calls raise
+    `UnauthenticatedError` and you connect again. A call the user's roles
+    don't allow raises `PermissionDeniedError`."""
+    return Store.connect(endpoint, token=token, user=user, password=password)
 
 
 __all__ = [
@@ -58,10 +75,12 @@ __all__ = [
     "Namespace",
     "NotFoundError",
     "NotRetainedError",
+    "PermissionDeniedError",
     "ReadOnlyError",
     "Store",
     "TimeoutError",
     "Transaction",
+    "UnauthenticatedError",
     "UnavailableError",
     "__version__",
     "attr",

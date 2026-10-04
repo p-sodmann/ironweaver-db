@@ -1,0 +1,206 @@
+// Ironweaver DB gRPC contract, version 1: authentication, users, grants and
+// API tokens (step 15a, ADRs 0043 to 0047).
+//
+// With authentication on (the server's `[auth] enabled`, the default),
+// every call but `Login` and the health service needs a token: a
+// session's (from `Login`) or an API token's (from `CreateToken`), sent as
+// `authorization: Bearer <token>` in the metadata (over REST, the HTTP
+// header; the console also uses an HttpOnly cookie). A missing, unknown or
+// expired token fails with `unauthenticated`; a call the caller's roles
+// don't allow with `permission_denied`.
+//
+// Roles are per namespace: `read` (every read, the change stream, the
+// catalog, the status), `write` (and commits), `admin` (and catalog
+// changes and dropping it). A server-wide admin has `admin` on every
+// namespace and manages users, grants and namespaces.
+//
+// Passwords and tokens are never logged, echoed or put in an error
+// message. Until step 15b they cross the network in clear: keep the
+// server on loopback or a trusted network.
+
+syntax = "proto3";
+
+package ironweaver_db.v1;
+
+service AuthService {
+  // Check a user's password and start a session. Failed logins are slowed
+  // down per user and per client address. Needs no token.
+  rpc Login(LoginRequest) returns (LoginResponse);
+  // End the caller's session.
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+  // The caller: its user, whether it is a server-wide admin, its roles.
+  rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
+
+  // Every user (server-wide admin).
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  // Create a user (server-wide admin).
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  // Set a password: a server-wide admin anyone's, a user its own with its
+  // current password. Ends the user's sessions.
+  rpc SetPassword(SetPasswordRequest) returns (SetPasswordResponse);
+  // Delete a user with its grants and tokens (server-wide admin).
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+  // Make a user a server-wide admin or not (server-wide admin).
+  rpc SetAdmin(SetAdminRequest) returns (SetAdminResponse);
+  // Give a user a role on a namespace (server-wide admin).
+  rpc Grant(GrantRequest) returns (GrantResponse);
+  // Take a user's role on a namespace away (server-wide admin).
+  rpc Revoke(RevokeRequest) returns (RevokeResponse);
+
+  // Make an API token (a server-wide admin for anyone, a user for itself).
+  rpc CreateToken(CreateTokenRequest) returns (CreateTokenResponse);
+  // Revoke an API token (a server-wide admin for anyone, a user its own).
+  rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse);
+  // A user's API tokens, without their secrets.
+  rpc ListTokens(ListTokensRequest) returns (ListTokensResponse);
+}
+
+// A role on a namespace.
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_READ = 1;
+  ROLE_WRITE = 2;
+  ROLE_ADMIN = 3;
+}
+
+// A user, never with its password hash.
+message User {
+  string name = 1;
+  // The server-wide admin role.
+  bool admin = 2;
+  // Roles by namespace name.
+  map<string, Role> grants = 3;
+}
+
+// An API token, never with its secret.
+message TokenInfo {
+  string user = 1;
+  string name = 2;
+  // When it was made, in milliseconds since 1970 (UTC).
+  uint64 created_ms = 3;
+  // When it expires, in milliseconds since 1970 (UTC); unset: never.
+  optional uint64 expires_ms = 4;
+}
+
+message LoginRequest {
+  string user = 1;
+  string password = 2;
+  // REST only: set the session as an HttpOnly, SameSite=Strict cookie
+  // (`iwdb_session`) instead of returning its token (the console does).
+  bool cookie = 3;
+}
+
+message LoginResponse {
+  // The session's bearer token (empty when it was set as a cookie).
+  string token = 1;
+  User user = 2;
+  // When the session ends, in milliseconds since 1970 (UTC).
+  uint64 expires_ms = 3;
+}
+
+message LogoutRequest {}
+
+message LogoutResponse {}
+
+message WhoAmIRequest {}
+
+message WhoAmIResponse {
+  User user = 1;
+  // Whether the server checks credentials (`[auth] enabled`); if not,
+  // every caller is a server-wide admin.
+  bool auth_enabled = 2;
+}
+
+message ListUsersRequest {}
+
+message ListUsersResponse {
+  // By name.
+  repeated User users = 1;
+}
+
+message CreateUserRequest {
+  // 1 to 64 ASCII letters, digits, `_` or `-`, starting with a letter or
+  // digit.
+  string name = 1;
+  // 8 to 1024 bytes.
+  string password = 2;
+  bool admin = 3;
+}
+
+message CreateUserResponse {
+  User user = 1;
+}
+
+message SetPasswordRequest {
+  string name = 1;
+  string password = 2;
+  // The user's current password: required when users change their own
+  // (a server-wide admin may leave it out).
+  optional string current_password = 3;
+}
+
+message SetPasswordResponse {}
+
+message DeleteUserRequest {
+  string name = 1;
+}
+
+message DeleteUserResponse {}
+
+message SetAdminRequest {
+  string name = 1;
+  bool admin = 2;
+}
+
+message SetAdminResponse {
+  User user = 1;
+}
+
+message GrantRequest {
+  string name = 1;
+  string namespace = 2;
+  Role role = 3;
+}
+
+message GrantResponse {
+  User user = 1;
+}
+
+message RevokeRequest {
+  string name = 1;
+  string namespace = 2;
+}
+
+message RevokeResponse {
+  User user = 1;
+}
+
+message CreateTokenRequest {
+  string user = 1;
+  // Unique per user: 1 to 64 ASCII letters, digits, `_`, `-` or `.`.
+  string name = 2;
+  // Seconds until it expires; unset: never.
+  optional uint64 expires_in_secs = 3;
+}
+
+message CreateTokenResponse {
+  TokenInfo info = 1;
+  // The secret: shown this once, stored only as a hash.
+  string token = 2;
+}
+
+message RevokeTokenRequest {
+  string user = 1;
+  string name = 2;
+}
+
+message RevokeTokenResponse {}
+
+message ListTokensRequest {
+  string user = 1;
+}
+
+message ListTokensResponse {
+  // By name.
+  repeated TokenInfo tokens = 1;
+}

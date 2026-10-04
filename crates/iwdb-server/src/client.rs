@@ -11,15 +11,24 @@
 //! Errors carry the server's code (`iwdb-code`); a transport failure (no
 //! connection, a message over the size limit) maps to the closest code, a
 //! lost connection to `unavailable`.
+//!
+//! **Credentials** (step 15a): a client holds one token (a session's or an
+//! API token) and sends it with every call as `authorization: Bearer`.
+//! Give it with [`Remote::with_token`], or log in with [`Remote::login`],
+//! which keeps the session's token. It implements
+//! [`Accounts`](iwdb_query::Accounts) too (users, grants, tokens).
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use ironweaver_core::EdgeId;
 use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation};
 use iwdb_query::read::Explain;
+use iwdb_query::{Accounts, NewToken, Role, Secret, Session, TokenInfo, UserInfo};
 use iwdb_query::{
     AnalyticsRequest, Answer, Changes, ChangesRequest, CommitOptions, Database, Edge, Error, ExplainRequest,
     FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
@@ -29,11 +38,15 @@ use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 use tokio::runtime::{Handle, Runtime};
 use tokio::task::JoinHandle;
 use tonic::Streaming;
+use tonic::metadata::MetadataValue;
+use tonic::service::Interceptor;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::DEFAULT_MAX_MESSAGE_BYTES;
 use crate::convert::*;
 use crate::proto as pb;
+use crate::proto::auth_service_client::AuthServiceClient;
 use crate::proto::database_service_client::DatabaseServiceClient;
 use crate::status::from_status;
 
@@ -42,11 +55,40 @@ mod rest;
 #[cfg(feature = "rest")]
 pub use rest::RestRemote;
 
-type Client = DatabaseServiceClient<Channel>;
+type Client = DatabaseServiceClient<InterceptedService<Channel, Bearer>>;
+type AuthClient = AuthServiceClient<InterceptedService<Channel, Bearer>>;
+
+/// The token a client sends, shared by its calls.
+pub(crate) type TokenSlot = Arc<RwLock<Option<Secret>>>;
+
+pub(crate) fn read_token(slot: &TokenSlot) -> Option<Secret> {
+    slot.read().unwrap_or_else(PoisonError::into_inner).clone()
+}
+
+pub(crate) fn write_token(slot: &TokenSlot, token: Option<Secret>) {
+    *slot.write().unwrap_or_else(PoisonError::into_inner) = token;
+}
+
+/// Adds `authorization: Bearer <token>` to every call.
+#[derive(Clone)]
+pub struct Bearer(TokenSlot);
+
+impl Interceptor for Bearer {
+    fn call(&mut self, mut request: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+        if let Some(token) = read_token(&self.0) {
+            let value = MetadataValue::try_from(format!("Bearer {}", token.expose()))
+                .map_err(|_| tonic::Status::invalid_argument("the token isn't valid in a header"))?;
+            request.metadata_mut().insert("authorization", value);
+        }
+        Ok(request)
+    }
+}
 
 /// A database served by an `iwdb-server`, as a [`Database`].
 pub struct Remote {
     client: Client,
+    auth: AuthClient,
+    token: TokenSlot,
     handle: Handle,
     /// The runtime this client started, if it started one.
     runtime: Option<Runtime>,
@@ -85,10 +127,73 @@ impl Remote {
             let _runtime = handle.enter();
             endpoint.connect_lazy()
         };
-        let client = DatabaseServiceClient::new(channel)
+        let token = TokenSlot::default();
+        let client = DatabaseServiceClient::with_interceptor(channel.clone(), Bearer(token.clone()))
             .max_decoding_message_size(DEFAULT_MAX_MESSAGE_BYTES)
             .max_encoding_message_size(DEFAULT_MAX_MESSAGE_BYTES);
-        Ok(Remote { client, handle, runtime: None })
+        let auth = AuthServiceClient::with_interceptor(channel, Bearer(token.clone()));
+        Ok(Remote { client, auth, token, handle, runtime: None })
+    }
+
+    /// Send `token` (a session's or an API token) with every call.
+    pub fn with_token(self, token: Secret) -> Self {
+        self.set_token(Some(token));
+        self
+    }
+
+    /// Replace the token every call sends (`None`: none).
+    pub fn set_token(&self, token: Option<Secret>) {
+        write_token(&self.token, token);
+    }
+
+    /// The token calls send now.
+    pub fn token(&self) -> Option<Secret> {
+        read_token(&self.token)
+    }
+
+    /// Log in: on success the session's token is what calls send from now
+    /// on. Errors: `unauthenticated` (a wrong user or password, too many
+    /// failures).
+    pub fn login(&self, user: &str, password: Secret) -> impl Future<Output = Result<Session, Error>> + Send {
+        let (user, slot) = (user.to_owned(), self.token.clone());
+        self.call_auth(move |mut client| async move {
+            let request = pb::LoginRequest { user, password: password.expose().to_owned(), cookie: false };
+            let response = client.login(request).await.map_err(status)?.into_inner();
+            let token = Secret::new(response.token);
+            write_token(&slot, Some(token.clone()));
+            Ok(Session {
+                token,
+                user: user_from_pb(response.user).map_err(bad_answer)?,
+                expires_ms: response.expires_ms,
+            })
+        })
+    }
+
+    /// End the session; calls send no token afterwards.
+    pub fn logout(&self) -> impl Future<Output = Result<(), Error>> + Send {
+        let slot = self.token.clone();
+        self.call_auth(move |mut client| async move {
+            client.logout(pb::LogoutRequest {}).await.map_err(status)?;
+            write_token(&slot, None);
+            Ok(())
+        })
+    }
+
+    /// Who the server takes this client for, and whether it checks
+    /// credentials at all.
+    pub fn whoami(&self) -> impl Future<Output = Result<(UserInfo, bool), Error>> + Send {
+        self.call_auth(move |mut client| async move {
+            let response = client.who_am_i(pb::WhoAmIRequest {}).await.map_err(status)?.into_inner();
+            Ok((user_from_pb(response.user).map_err(bad_answer)?, response.auth_enabled))
+        })
+    }
+
+    fn call_auth<T, F>(&self, f: impl FnOnce(AuthClient) -> F) -> Call<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, Error>> + Send + 'static,
+    {
+        Call(self.handle.spawn(f(self.auth.clone())))
     }
 
     /// Run `f` with a client on the runtime.
@@ -503,6 +608,110 @@ impl Database for Remote {
             let request = pb::DropNamespaceRequest { name, idempotency_key: idempotency_key_to_pb(&key) };
             let response = client.drop_namespace(request).await.map_err(status)?.into_inner();
             namespace_result_from_pb(response.event, response.deduplicated).map_err(bad_answer)
+        })
+    }
+}
+
+impl Accounts for Remote {
+    fn users(&self) -> impl Future<Output = Result<Vec<UserInfo>, Error>> + Send {
+        self.call_auth(move |mut client| async move {
+            let response = client.list_users(pb::ListUsersRequest {}).await.map_err(status)?.into_inner();
+            response.users.into_iter().map(|u| user_from_pb(Some(u))).collect::<Result<_, _>>().map_err(bad_answer)
+        })
+    }
+
+    fn create_user(
+        &self,
+        name: &str,
+        password: Secret,
+        admin: bool,
+    ) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let name = name.to_owned();
+        self.call_auth(move |mut client| async move {
+            let request = pb::CreateUserRequest { name, password: password.expose().to_owned(), admin };
+            let response = client.create_user(request).await.map_err(status)?.into_inner();
+            user_from_pb(response.user).map_err(bad_answer)
+        })
+    }
+
+    fn set_password(
+        &self,
+        name: &str,
+        password: Secret,
+        current: Option<Secret>,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        let name = name.to_owned();
+        self.call_auth(move |mut client| async move {
+            let request = pb::SetPasswordRequest {
+                name,
+                password: password.expose().to_owned(),
+                current_password: current.map(|c| c.expose().to_owned()),
+            };
+            client.set_password(request).await.map_err(status)?;
+            Ok(())
+        })
+    }
+
+    fn delete_user(&self, name: &str) -> impl Future<Output = Result<(), Error>> + Send {
+        let name = name.to_owned();
+        self.call_auth(move |mut client| async move {
+            client.delete_user(pb::DeleteUserRequest { name }).await.map_err(status)?;
+            Ok(())
+        })
+    }
+
+    fn set_admin(&self, name: &str, admin: bool) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let name = name.to_owned();
+        self.call_auth(move |mut client| async move {
+            let response = client.set_admin(pb::SetAdminRequest { name, admin }).await.map_err(status)?.into_inner();
+            user_from_pb(response.user).map_err(bad_answer)
+        })
+    }
+
+    fn grant(&self, name: &str, namespace: &str, role: Role) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let (name, namespace) = (name.to_owned(), namespace.to_owned());
+        self.call_auth(move |mut client| async move {
+            let request = pb::GrantRequest { name, namespace, role: role_to_pb(role) as i32 };
+            let response = client.grant(request).await.map_err(status)?.into_inner();
+            user_from_pb(response.user).map_err(bad_answer)
+        })
+    }
+
+    fn revoke(&self, name: &str, namespace: &str) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let (name, namespace) = (name.to_owned(), namespace.to_owned());
+        self.call_auth(move |mut client| async move {
+            let response = client.revoke(pb::RevokeRequest { name, namespace }).await.map_err(status)?.into_inner();
+            user_from_pb(response.user).map_err(bad_answer)
+        })
+    }
+
+    fn create_token(
+        &self,
+        user: &str,
+        name: &str,
+        expires_in: Option<Duration>,
+    ) -> impl Future<Output = Result<NewToken, Error>> + Send {
+        let (user, name) = (user.to_owned(), name.to_owned());
+        self.call_auth(move |mut client| async move {
+            let request = pb::CreateTokenRequest { user, name, expires_in_secs: expires_in.map(|d| d.as_secs()) };
+            let response = client.create_token(request).await.map_err(status)?.into_inner();
+            new_token_from_pb(response).map_err(bad_answer)
+        })
+    }
+
+    fn revoke_token(&self, user: &str, name: &str) -> impl Future<Output = Result<(), Error>> + Send {
+        let (user, name) = (user.to_owned(), name.to_owned());
+        self.call_auth(move |mut client| async move {
+            client.revoke_token(pb::RevokeTokenRequest { user, name }).await.map_err(status)?;
+            Ok(())
+        })
+    }
+
+    fn tokens(&self, user: &str) -> impl Future<Output = Result<Vec<TokenInfo>, Error>> + Send {
+        let user = user.to_owned();
+        self.call_auth(move |mut client| async move {
+            let response = client.list_tokens(pb::ListTokensRequest { user }).await.map_err(status)?.into_inner();
+            Ok(response.tokens.into_iter().map(token_info_from_pb).collect())
         })
     }
 }

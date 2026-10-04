@@ -15,10 +15,10 @@ with iwdb.Store.open("data") as store:
     print(store.node("alice"))
 ```
 
-The server in Docker (gRPC and REST on port 7600; no TLS or authentication yet, so keep it on localhost):
+The server in Docker (gRPC and REST on port 7600, the console at `/console/`). Authentication is on: the first start makes the user `admin` with the password you give. There is no TLS until step 15b, so keep it on localhost:
 
 ```
-docker compose up --build
+IWDB_ADMIN_PASSWORD=... docker compose up --build
 ```
 
 `docker build --build-arg FEATURES="" .` builds a gRPC-only image without REST or the Postgres projection source ([details](documentation/api/grpc.md#features-and-docker)).
@@ -38,4 +38,9 @@ docker compose up --build
 
 ## License
 
-[MIT](LICENSE)
+Ironweaver DB is dual-licensed:
+
+- [GNU AGPL-3.0](LICENSE) (`AGPL-3.0-only`), free of charge, or
+- a [commercial license](COMMERCIAL-LICENSE.md) for using it in proprietary products or services without the AGPL's obligations.
+
+See [ADR 0038](documentation/adr/0038-agpl-and-commercial-license.md) for the reasons.

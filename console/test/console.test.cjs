@@ -288,3 +288,49 @@ test('a server that doesn\'t answer is unavailable', async () => {
   const p = rest.create({ fetch: async () => ({ ok: false, status: 502, text: async () => '<html>bad gateway</html>' }) });
   await rejects(p.namespaces(), 'unavailable');
 });
+
+/* ------------------------------------------------------------------ logging in (step 15a) */
+test('the REST Source logs in with the session cookie and sends the CSRF header', async () => {
+  let loggedIn = false;
+  const { fetch, calls } = fakeServer({
+    'GET /v1/auth/whoami': () => (loggedIn ? [200, { user: { name: 'ann', grants: { social: 'ROLE_WRITE' } }, authEnabled: true }] : [401, { code: 'unauthenticated', message: 'this server needs credentials' }]),
+    'POST /v1/auth/login': (b) => (b.password === 'right' ? ((loggedIn = true), [200, { user: { name: 'ann', grants: { social: 'ROLE_WRITE' } }, expiresMs: '9' }]) : [401, { code: 'unauthenticated', message: 'wrong user or password' }]),
+    'POST /v1/auth/logout': () => ((loggedIn = false), [200, {}]),
+    'GET /v1/namespaces': () => (loggedIn ? [200, { namespaces: [] }] : [401, { code: 'unauthenticated', message: 'the token is unknown, expired or revoked' }]),
+  });
+  const s = rest.create({ fetch });
+  const ended = []; const off = s.onAuth((x) => ended.push(x));
+  await rejects(s.session(), 'unauthenticated');
+  assert.deepEqual(ended, [null], 'a 401 tells the pages to log in again');
+  await rejects(s.login('ann', 'wrong'), 'unauthenticated');
+  assert.equal(ended.length, 1, 'a failed login is not a lost session');
+  const session = await s.login('ann', 'right');
+  assert.deepEqual(session, { authEnabled: true, user: { name: 'ann', admin: false, grants: { social: 'write' } } });
+  assert.deepEqual(calls.filter((c) => c.url === '/v1/auth/login').at(-1).body, { user: 'ann', password: 'right', cookie: true }, 'the token goes into the HttpOnly cookie, not to this script');
+  assert.deepEqual((await s.session()).user.name, 'ann');
+  assert.deepEqual(await s.namespaces(), []);
+  for (const c of calls) assert.equal(c.headers['x-iwdb-csrf'], '1', `${c.method} ${c.url} carries the CSRF header`);
+  await s.logout();
+  await rejects(s.namespaces(), 'unauthenticated');
+  assert.equal(ended.length, 3);
+  off();
+  assert.ok(!s.log().some((e) => e.msg.includes('right')), 'no password in the log');
+});
+
+test('the mock has a login too, per tab', async () => {
+  const kept = new Map(); const storage = { getItem: (k) => kept.get(k) ?? null, setItem: (k, v) => kept.set(k, v), removeItem: (k) => kept.delete(k) };
+  const s = fresh({ storage });
+  await rejects(s.session(), 'unauthenticated');
+  await rejects(s.login('admin', 'nope'), 'unauthenticated');
+  const session = await s.login('admin', 'admin');
+  assert.equal(session.user.admin, true);
+  // Another page of the same tab knows it
+  const other = fresh({ storage });
+  assert.equal((await other.session()).user.name, 'admin');
+  const ended = []; other.onAuth((x) => ended.push(x));
+  await other.logout();
+  assert.deepEqual(ended, [null]);
+  await rejects(s.session(), 'unauthenticated');
+  const reader = await s.login('reader', 'reader');
+  assert.deepEqual(reader.user.grants, { social: 'read' });
+});

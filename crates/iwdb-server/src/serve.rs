@@ -26,6 +26,7 @@
 use std::convert::Infallible;
 use std::future::Future;
 use std::io;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
@@ -36,14 +37,16 @@ use axum::body::Body;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
-use iwdb_query::{Code, Database, Error};
+use iwdb_query::{Code, Error};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tonic_health::pb::health_server::HealthServer;
 use tower_service::Service;
 use tracing::Instrument;
 
+use crate::auth::{AuthMode, GRPC_AUTH_PREFIX, Served};
 use crate::health::{GRPC_PREFIX, GrpcHealth, Health, LIVE_PATH, Phase, READY_PATH};
+use crate::proto::auth_service_server::AuthServiceServer;
 use crate::proto::database_service_server::DatabaseServiceServer;
 use crate::{Adapter, Server};
 
@@ -51,9 +54,14 @@ use crate::{Adapter, Server};
 #[cfg(not(feature = "rest"))]
 type Body = tonic::body::Body;
 
-/// Both APIs as one service: gRPC by content type, REST otherwise.
+/// Both APIs as one service: gRPC by content type (`AuthService` by its
+/// path, `DatabaseService` otherwise), REST otherwise. The gate
+/// authenticates with `db` before it passes a request on.
 pub(crate) struct Dispatch<D> {
+    db: Arc<D>,
+    mode: AuthMode,
     grpc: DatabaseServiceServer<Adapter<D>>,
+    auth: AuthServiceServer<Adapter<D>>,
     #[cfg(feature = "rest")]
     rest: axum::Router,
 }
@@ -62,7 +70,10 @@ pub(crate) struct Dispatch<D> {
 impl<D> Clone for Dispatch<D> {
     fn clone(&self) -> Self {
         Dispatch {
+            db: self.db.clone(),
+            mode: self.mode,
             grpc: self.grpc.clone(),
+            auth: self.auth.clone(),
             #[cfg(feature = "rest")]
             rest: self.rest.clone(),
         }
@@ -71,13 +82,24 @@ impl<D> Clone for Dispatch<D> {
 
 impl<D> Dispatch<D> {
     #[cfg(feature = "rest")]
-    pub(crate) fn new(grpc: DatabaseServiceServer<Adapter<D>>, rest: axum::Router) -> Self {
-        Dispatch { grpc, rest }
+    pub(crate) fn new(
+        db: Arc<D>,
+        mode: AuthMode,
+        grpc: DatabaseServiceServer<Adapter<D>>,
+        auth: AuthServiceServer<Adapter<D>>,
+        rest: axum::Router,
+    ) -> Self {
+        Dispatch { db, mode, grpc, auth, rest }
     }
 
     #[cfg(not(feature = "rest"))]
-    pub(crate) fn new(grpc: DatabaseServiceServer<Adapter<D>>) -> Self {
-        Dispatch { grpc }
+    pub(crate) fn new(
+        db: Arc<D>,
+        mode: AuthMode,
+        grpc: DatabaseServiceServer<Adapter<D>>,
+        auth: AuthServiceServer<Adapter<D>>,
+    ) -> Self {
+        Dispatch { db, mode, grpc, auth }
     }
 }
 
@@ -89,7 +111,7 @@ type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 impl<D, B> Service<http::Request<B>> for Dispatch<D>
 where
-    D: Database + 'static,
+    D: Served,
     B: hyper::body::Body<Data = bytes::Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
 {
@@ -103,7 +125,13 @@ where
     }
 
     fn call(&mut self, request: http::Request<B>) -> Self::Future {
-        if is_grpc(&request) {
+        if is_grpc(&request) && request.uri().path().starts_with(GRPC_AUTH_PREFIX) {
+            let mut auth = self.auth.clone();
+            Box::pin(async move {
+                let response = auth.call(request).await?;
+                Ok(response.map(Body::new))
+            })
+        } else if is_grpc(&request) {
             let mut grpc = self.grpc.clone();
             Box::pin(async move {
                 let response = grpc.call(request).await?;
@@ -146,6 +174,8 @@ type Slot<D> = Arc<OnceLock<Dispatch<D>>>;
 /// The service of every connection: health and the console at any time,
 /// database calls once [`Slot`] holds the database's service.
 pub(crate) struct Gate<D> {
+    /// The connection's peer (set per connection), for the login slowdown.
+    peer: Option<IpAddr>,
     health: Health,
     grpc_health: HealthServer<GrpcHealth>,
     inner: Slot<D>,
@@ -157,6 +187,7 @@ pub(crate) struct Gate<D> {
 impl<D> Clone for Gate<D> {
     fn clone(&self) -> Self {
         Gate {
+            peer: self.peer,
             health: self.health.clone(),
             grpc_health: self.grpc_health.clone(),
             inner: self.inner.clone(),
@@ -167,7 +198,7 @@ impl<D> Clone for Gate<D> {
 
 impl<D> Gate<D> {
     fn new(health: Health, inner: Slot<D>, console: bool) -> Self {
-        Gate { grpc_health: health.grpc_service(), health, inner, console }
+        Gate { peer: None, grpc_health: health.grpc_service(), health, inner, console }
     }
 }
 
@@ -178,7 +209,7 @@ fn recovering() -> Error {
 
 impl<D, B> Service<http::Request<B>> for Gate<D>
 where
-    D: Database + 'static,
+    D: Served,
     B: hyper::body::Body<Data = bytes::Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
 {
@@ -226,20 +257,44 @@ where
         match self.inner.get() {
             Some(inner) => {
                 let mut inner = inner.clone();
-                Box::pin(async move { inner.call(request).await }.instrument(span))
+                let credentials = match crate::auth::credentials(inner.mode, &request, grpc, self.peer) {
+                    Ok(credentials) => credentials,
+                    Err(e) => return Box::pin(std::future::ready(Ok(refused(grpc, e)))),
+                };
+                Box::pin(
+                    async move {
+                        let mut request = request;
+                        match crate::auth::authenticate(&*inner.db, credentials).await {
+                            Ok(caller) => {
+                                request.extensions_mut().insert(caller);
+                                inner.call(request).await
+                            }
+                            Err(e) => Ok(refused(grpc, e)),
+                        }
+                    }
+                    .instrument(span),
+                )
             }
-            None if grpc => {
-                let status = crate::status::to_status(&recovering());
-                Box::pin(std::future::ready(Ok(status.into_http::<tonic::body::Body>().map(Body::new))))
-            }
-            #[cfg(feature = "rest")]
-            None => {
-                use axum::response::IntoResponse;
-                Box::pin(std::future::ready(Ok(crate::rest::Failure::from(recovering()).into_response())))
-            }
-            #[cfg(not(feature = "rest"))]
-            None => Box::pin(std::future::ready(Ok(not_found()))),
+            None => Box::pin(std::future::ready(Ok(refused(grpc, recovering())))),
         }
+    }
+}
+
+/// The answer to a request the gate refuses: a gRPC status, or a REST
+/// `Error` body (an empty 404 without REST).
+fn refused(grpc: bool, e: Error) -> http::Response<Body> {
+    if grpc {
+        return crate::status::to_status(&e).into_http::<tonic::body::Body>().map(Body::new);
+    }
+    #[cfg(feature = "rest")]
+    {
+        use axum::response::IntoResponse;
+        crate::rest::Failure::from(e).into_response()
+    }
+    #[cfg(not(feature = "rest"))]
+    {
+        let _ = e;
+        not_found()
     }
 }
 
@@ -261,7 +316,7 @@ pub struct Drain {
 /// open then are closed.
 async fn accept<D, U, F, G>(listener: TcpListener, gate: Gate<D>, until: U, drain: F, stopping: impl FnOnce()) -> Drain
 where
-    D: Database + 'static,
+    D: Served,
     U: Future<Output = ()>,
     F: FnOnce() -> G,
     G: Future<Output = ()>,
@@ -274,10 +329,12 @@ where
         tokio::select! {
             () = &mut until => break,
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
+                Ok((stream, peer)) => {
                     // Small answers shouldn't wait for Nagle's algorithm
                     let _ = stream.set_nodelay(true);
-                    let service = TowerToHyperService::new(gate.clone());
+                    let mut gate = gate.clone();
+                    gate.peer = Some(peer.ip());
+                    let service = TowerToHyperService::new(gate);
                     let connection =
                         graceful.watch(builder.serve_connection(TokioIo::new(stream), service).into_owned());
                     connections.spawn(async move {
@@ -309,7 +366,7 @@ where
     Drain { complete, cancelled }
 }
 
-impl<D: Database + 'static> Server<D> {
+impl<D: Served> Server<D> {
     /// Serve gRPC and REST on `listener` until `stop` completes; then shut
     /// down (ADR 0027): readiness turns off, the server goes on serving for
     /// the [`unready_delay`](Self::unready_delay) (so load balancers stop
@@ -391,6 +448,8 @@ pub struct LaunchOptions {
     pub unready_delay: Duration,
     /// Serve the operator console (feature `console`; ignored without it).
     pub console: bool,
+    /// [`Server::auth`].
+    pub auth: AuthMode,
     /// What the logs call what is served (the data directory).
     pub name: String,
 }
@@ -401,6 +460,7 @@ impl Default for LaunchOptions {
             max_message_bytes: crate::DEFAULT_MAX_MESSAGE_BYTES,
             unready_delay: Duration::ZERO,
             console: false,
+            auth: AuthMode::default(),
             name: String::new(),
         }
     }
@@ -437,7 +497,7 @@ pub async fn launch<D, O, S, F, G>(
     drain: F,
 ) -> Result<Launched<D>, String>
 where
-    D: Database + 'static,
+    D: Served,
     O: FnOnce() -> Result<D, String> + Send + 'static,
     S: Future<Output = ()>,
     F: FnOnce() -> G,
@@ -470,6 +530,7 @@ where
                     .max_message_bytes(options.max_message_bytes)
                     .unready_delay(options.unready_delay)
                     .console(options.console)
+                    .auth(options.auth)
                     .with_health(health.clone()),
                 Ok(Err(e)) => {
                     let _ = opened.set(Err(e));

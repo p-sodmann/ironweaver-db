@@ -407,5 +407,5 @@
       palette && h(U.Palette, { items: paletteItems, dynamic, initial: palette.initial || '', onClose: () => setPalette(null) }));
   }
 
-  ReactDOM.createRoot(document.getElementById('root')).render(h(Explorer));
+  ReactDOM.createRoot(document.getElementById('root')).render(h(IW.ui.AuthGate, null, h(Explorer)));
 })();

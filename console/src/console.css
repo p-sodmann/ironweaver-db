@@ -129,3 +129,19 @@ html, body { background: var(--surface-000); color: var(--ink); }
 @media (prefers-reduced-motion: reduce) {
   .cs-palette, .cs-palette__card, .cs-staged { animation: none !important; }
 }
+
+/* ---------- the login (step 15a): a card on the page's ground, the design system's controls and words */
+.cs-login { position: fixed; inset: 0; z-index: 30; display: flex; justify-content: center; align-items: flex-start; padding: 14vh 16px 16px; background: var(--surface-000); }
+.cs-login[role="dialog"] { background: color-mix(in srgb, var(--surface-000) 70%, transparent); animation: iw-fade var(--t-instant) linear both; }
+.cs-login__card { display: flex; flex-direction: column; gap: 12px; width: min(360px, 100%); box-sizing: border-box; padding: 20px; background: var(--surface-100); border: 1px solid var(--line-200); box-shadow: var(--shadow-float); }
+.cs-login__title { margin: 0; font: 600 18px/24px var(--font-sans); color: var(--ink); }
+.cs-login__note { margin: 0; }
+.cs-login__field { display: flex; flex-direction: column; gap: 4px; }
+.cs-login__field .cs-input { width: 100%; }
+.cs-login__error { color: var(--danger); border-left: 2px solid var(--danger); padding-left: 8px; }
+.cs-login__warn { color: var(--signal-ink); }
+.cs-login__go { display: flex; justify-content: flex-end; }
+.cs-user { display: inline-flex; align-items: center; gap: 8px; }
+.cs-logout { height: 22px; padding: 0 8px; border: 1px solid var(--line-100); border-radius: var(--radius-1); background: none; color: var(--ink-muted); font: 600 10px/1 var(--font-sans); letter-spacing: .08em; cursor: pointer; }
+.cs-logout:hover { color: var(--ink); background: var(--surface-000); }
+.cs-logout:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }

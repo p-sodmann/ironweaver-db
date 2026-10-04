@@ -5,13 +5,15 @@
 #
 #   docker build -t iwdb .                                # gRPC, REST, Postgres projections, console
 #   docker build --build-arg FEATURES="" -t iwdb:grpc .   # gRPC only
-#   docker run -p 7600:7600 -v iwdb-data:/var/lib/iwdb iwdb
+#   docker run -p 127.0.0.1:7600:7600 -v iwdb-data:/var/lib/iwdb \
+#     -e IWDB_SERVER_PLAINTEXT_PUBLIC=true -e IWDB_AUTH_BOOTSTRAP_PASSWORD=... iwdb
 #
 # FEATURES are iwdb-server's cargo features (rest, postgres, console), space
-# separated. The console is compiled in but off: IWDB_CONSOLE_ENABLED=true and
-# IWDB_CONSOLE_PUBLIC=true turn it on (the container listens on 0.0.0.0).
-# No TLS and no authentication until step 15: publish the port on localhost
-# or a private network only.
+# separated. The console is compiled in but off: IWDB_CONSOLE_ENABLED=true
+# turns it on. The container listens on 0.0.0.0, which needs
+# IWDB_SERVER_PLAINTEXT_PUBLIC=true until TLS (step 15b): publish the port on
+# localhost or a private network only. Authentication is on: the first start
+# needs IWDB_AUTH_BOOTSTRAP_PASSWORD (the user admin; no default password).
 
 ARG RUST_VERSION=1.99
 ARG DEBIAN=trixie
@@ -34,7 +36,7 @@ FROM debian:${DEBIAN}-slim
 LABEL org.opencontainers.image.title="iwdb-server" \
       org.opencontainers.image.description="Ironweaver DB: a durable graph database over gRPC and REST" \
       org.opencontainers.image.source="https://github.com/p-sodmann/ironweaver-db" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="AGPL-3.0-only"
 RUN useradd --system --uid 10001 --home-dir /var/lib/iwdb --shell /usr/sbin/nologin iwdb \
     && mkdir -p /var/lib/iwdb /etc/iwdb \
     && chown iwdb:iwdb /var/lib/iwdb

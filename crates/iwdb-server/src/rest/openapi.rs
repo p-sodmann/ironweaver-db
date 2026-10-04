@@ -255,9 +255,15 @@ impl Protos {
         operation.insert("operationId".into(), route.operation.into());
         operation.insert("summary".into(), route.summary.into());
         let mut parameters = Vec::new();
-        for name in ["ns", "id"].into_iter().filter(|p| route.path.contains(&format!("{{{}}}", p))) {
+        if route.open() {
+            // Health, login and this document need no credentials
+            operation.insert("security".into(), json!([]));
+        }
+        for name in ["user", "ns", "token", "id"].into_iter().filter(|p| route.path.contains(&format!("{{{}}}", p))) {
             let (schema, description) = match (name, route.rpc) {
                 ("ns", _) => (json!({ "type": "string" }), "The namespace."),
+                ("user", _) => (json!({ "type": "string" }), "The user."),
+                ("token", _) => (json!({ "type": "string" }), "The API token's name."),
                 (_, Some("GetEdges")) => (json!({ "type": "string", "pattern": "^[0-9]+$" }), "The edge's id."),
                 _ => (json!({ "type": "string" }), "The node's id (percent-encoded)."),
             };
@@ -471,12 +477,13 @@ pub fn generate() -> Json {
     let schemas = reachable(&paths, protos.schemas());
     json!({
         "openapi": "3.1.0",
-        // No authentication yet (step 15 adds it)
-        "security": [],
+        // A bearer token (a session's or an API token) or the console's
+        // session cookie; the open routes say `security: []` (step 15a)
+        "security": [{ "bearer": [] }, { "sessionCookie": [] }],
         "info": {
             "title": "Ironweaver DB REST API",
             "version": "v1",
-            "license": { "name": "MIT", "identifier": "MIT" },
+            "license": { "name": "AGPL-3.0-only (or a commercial license)", "identifier": "AGPL-3.0-only" },
             "description": format!(
                 "The `Database` trait over HTTP/JSON, with the messages of the gRPC contract (`proto/{}`) in their \
                  proto3 JSON form. See documentation/api/rest.md.",
@@ -485,6 +492,22 @@ pub fn generate() -> Json {
         },
         "servers": [{ "url": "http://127.0.0.1:7600" }],
         "paths": paths,
-        "components": { "schemas": schemas },
+        "components": {
+            "schemas": schemas,
+            "securitySchemes": {
+                "bearer": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "description": "A session token from `POST /v1/auth/login`, or an API token.",
+                },
+                "sessionCookie": {
+                    "type": "apiKey",
+                    "in": "cookie",
+                    "name": crate::auth::SESSION_COOKIE,
+                    "description": "The console's session (login with `cookie: true`). Requests other than GET \
+                                    and HEAD must also send the `X-Iwdb-Csrf` header.",
+                },
+            },
+        },
     })
 }

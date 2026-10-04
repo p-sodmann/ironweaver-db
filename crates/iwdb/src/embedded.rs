@@ -4,8 +4,13 @@
 //! `iwdb_query::read`, the commit pipeline is the store's. This module runs
 //! them on a worker pool, under the namespace's read lock and the store's
 //! deadline timer, and maps the errors.
+//!
+//! It also serves the store's users ([`Accounts`], on [`Store::users`]) and
+//! logs in ([`Authenticate`], step 15a): sessions and the login slowdown
+//! live here, in memory, with the [`AuthSettings`].
 
 use std::future::Future;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,6 +20,7 @@ use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation, Namespace};
 use iwdb_query::exec::{Pending, Pool};
 use iwdb_query::read::{self, ReadContext};
+use iwdb_query::{Accounts, Authenticate, NewToken, Principal, Role, Secret, Session, TokenInfo, UserInfo};
 use iwdb_query::{
     AnalyticsRequest, Answer, CHANGES_BATCH_BYTES, ChangeEvent, Changes, ChangesRequest, Code, CommitOptions, Database,
     Edge, Error, Explain, ExplainRequest, FindRequest, JobResult, LimitConfig, MatchRequest, MatchRow, NamespaceStatus,
@@ -25,6 +31,7 @@ use iwdb_storage::io::{LogFs, StdFs};
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 use iwdb_storage::{BatchLimits, Wait};
 
+use crate::auth::{AuthSettings, SessionEntry, Sessions, Throttle, Who, new_token, now_ms, token_hash};
 use crate::{Ns, ReadOptions, Store};
 
 /// How an [`Embedded`] database runs requests.
@@ -64,6 +71,15 @@ where
     store: Arc<Store<F>>,
     pool: Pool,
     config: QueryConfig,
+    auth: Arc<AuthState>,
+}
+
+/// Logins: the settings, the sessions and the slowdown of failures.
+#[derive(Debug, Default)]
+struct AuthState {
+    settings: AuthSettings,
+    sessions: Sessions,
+    throttle: Throttle,
 }
 
 impl<F: LogFs + Send + Sync + 'static> std::fmt::Debug for Embedded<F>
@@ -84,7 +100,44 @@ where
     pub fn new(store: Store<F>, config: QueryConfig) -> Result<Self, Error> {
         config.limits.check()?;
         let pool = Pool::new("iwdb-query", config.workers, config.queue)?;
-        Ok(Embedded { store: Arc::new(store), pool, config })
+        Ok(Embedded { store: Arc::new(store), pool, config, auth: Arc::default() })
+    }
+
+    /// Log in with `settings` (session lifetime, login slowdown, hash
+    /// parameters) instead of the defaults. Ends every session.
+    pub fn with_auth(mut self, settings: AuthSettings) -> Self {
+        self.auth = Arc::new(AuthState { settings, ..AuthState::default() });
+        self
+    }
+
+    pub fn auth_settings(&self) -> &AuthSettings {
+        &self.auth.settings
+    }
+
+    /// The principal of `token`, now, on this thread (reads two nodes of the
+    /// system namespace under its read lock).
+    fn principal(&self, token: &Secret) -> Result<Principal, Error> {
+        let unknown = || Error::new(Code::Unauthenticated, "the token is unknown, expired or revoked: log in again");
+        let users = self.store.users();
+        let hash = token_hash(token);
+        let user = if let Some(session) = self.auth.sessions.get(&hash) {
+            match users.record(&session.user)? {
+                Some(user) if user.epoch == session.epoch => user,
+                // Deleted, or its password changed since the login
+                _ => {
+                    self.auth.sessions.remove(&hash);
+                    return Err(unknown());
+                }
+            }
+        } else {
+            let token = users.token(&hash)?.ok_or_else(unknown)?;
+            if token.expired(now_ms()) {
+                return Err(unknown());
+            }
+            users.record(&token.user)?.ok_or_else(unknown)?
+        };
+        let info = users.info_of(&user);
+        Ok(Principal { user: info.name, admin: info.admin, grants: info.grants })
     }
 
     /// The store, for what the trait doesn't cover: backups, checkpoints,
@@ -100,7 +153,8 @@ where
     /// Finish the queued requests, stop the workers, and close the store
     /// ([`Store::close`]).
     pub fn close(self) -> Result<(), crate::Error> {
-        let Embedded { store, pool, .. } = self;
+        let Embedded { store, pool, auth, .. } = self;
+        drop(auth);
         pool.shutdown();
         drop(pool);
         match Arc::try_unwrap(store) {
@@ -457,5 +511,146 @@ where
     ) -> impl Future<Output = Result<NamespaceResult, Error>> + Send {
         let name = name.to_owned();
         self.run(move |store, _| Ok(store.drop_namespace(&name, key_options(key).idempotency_key.as_ref())?))
+    }
+}
+
+impl<F: LogFs + Clone + Send + Sync + 'static> Accounts for Embedded<F>
+where
+    F::File: Send,
+{
+    fn users(&self) -> impl Future<Output = Result<Vec<UserInfo>, Error>> + Send {
+        self.run(|store, _| store.users().list())
+    }
+
+    fn create_user(
+        &self,
+        name: &str,
+        password: Secret,
+        admin: bool,
+    ) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let (name, params) = (name.to_owned(), self.auth.settings.hash);
+        self.run(move |store, _| store.users().with_params(params).create(&name, &password, admin))
+    }
+
+    fn set_password(
+        &self,
+        name: &str,
+        password: Secret,
+        current: Option<Secret>,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        let (name, auth) = (name.to_owned(), self.auth.clone());
+        self.run(move |store, _| {
+            store.users().with_params(auth.settings.hash).set_password(&name, &password, current.as_ref())?;
+            auth.sessions.remove_user(&name);
+            Ok(())
+        })
+    }
+
+    fn delete_user(&self, name: &str) -> impl Future<Output = Result<(), Error>> + Send {
+        let (name, auth) = (name.to_owned(), self.auth.clone());
+        self.run(move |store, _| {
+            store.users().delete(&name)?;
+            auth.sessions.remove_user(&name);
+            Ok(())
+        })
+    }
+
+    fn set_admin(&self, name: &str, admin: bool) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let name = name.to_owned();
+        self.run(move |store, _| store.users().set_admin(&name, admin))
+    }
+
+    fn grant(&self, name: &str, namespace: &str, role: Role) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let (name, namespace) = (name.to_owned(), namespace.to_owned());
+        self.run(move |store, _| store.users().grant(&name, &namespace, role))
+    }
+
+    fn revoke(&self, name: &str, namespace: &str) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let (name, namespace) = (name.to_owned(), namespace.to_owned());
+        self.run(move |store, _| store.users().revoke(&name, &namespace))
+    }
+
+    fn create_token(
+        &self,
+        user: &str,
+        name: &str,
+        expires_in: Option<Duration>,
+    ) -> impl Future<Output = Result<NewToken, Error>> + Send {
+        let (user, name) = (user.to_owned(), name.to_owned());
+        self.run(move |store, _| store.users().create_token(&user, &name, expires_in))
+    }
+
+    fn revoke_token(&self, user: &str, name: &str) -> impl Future<Output = Result<(), Error>> + Send {
+        let (user, name) = (user.to_owned(), name.to_owned());
+        self.run(move |store, _| store.users().revoke_token(&user, &name))
+    }
+
+    fn tokens(&self, user: &str) -> impl Future<Output = Result<Vec<TokenInfo>, Error>> + Send {
+        let user = user.to_owned();
+        self.run(move |store, _| store.users().tokens(&user))
+    }
+}
+
+impl<F: LogFs + Clone + Send + Sync + 'static> Authenticate for Embedded<F>
+where
+    F::File: Send,
+{
+    /// Checks the password on a worker (argon2 takes tens of
+    /// milliseconds). A user or address with too many recent failures is
+    /// refused without a check. Failures are logged (target `iwdb::auth`)
+    /// with the user and address, never the password.
+    fn login(
+        &self,
+        user: &str,
+        password: Secret,
+        client: Option<IpAddr>,
+    ) -> impl Future<Output = Result<Session, Error>> + Send {
+        let (user, auth) = (user.to_owned(), self.auth.clone());
+        self.run(move |store, _| {
+            let settings = &auth.settings;
+            let mut who = vec![Who::User(user.clone())];
+            who.extend(client.map(Who::Address));
+            let client_text = client.map_or_else(|| "an unknown address".to_owned(), |a| a.to_string());
+            if let Some(wait) = auth.throttle.wait(&who, settings) {
+                log::warn!(target: "iwdb::auth", "login refused for user {:?} from {}: too many failed logins", user, client_text);
+                return Err(Error::new(
+                    Code::Unauthenticated,
+                    format!("too many failed logins: try again in {} s", wait.as_secs().max(1)),
+                ));
+            }
+            let users = store.users().with_params(settings.hash);
+            let checked = match users.check(&user, &password) {
+                Ok(checked) => checked,
+                Err(e) => {
+                    if e.code() == Code::Unauthenticated {
+                        auth.throttle.failed(&who, settings);
+                        log::warn!(target: "iwdb::auth", "failed login for user {:?} from {}", user, client_text);
+                    }
+                    return Err(e);
+                }
+            };
+            auth.throttle.succeeded(&Who::User(user.clone()));
+            if checked.rehash
+                && let Err(e) = users.rehash(&user, &password, checked.phc())
+            {
+                log::warn!(target: "iwdb::auth", "user {:?}: replacing an old password hash failed: {}", user, e);
+            }
+            let token = new_token()?;
+            let lifetime = u64::try_from(settings.session_lifetime.as_millis()).unwrap_or(u64::MAX);
+            let expires_ms = now_ms().saturating_add(lifetime);
+            let entry = SessionEntry { user: user.clone(), epoch: checked.user.epoch, expires_ms };
+            auth.sessions.insert(token_hash(&token), entry, settings.max_sessions);
+            log::info!(target: "iwdb::auth", "user {:?} logged in from {}", user, client_text);
+            Ok(Session { token, user: users.info_of(&checked.user), expires_ms })
+        })
+    }
+
+    fn logout(&self, token: &Secret) -> impl Future<Output = Result<(), Error>> + Send {
+        self.auth.sessions.remove(&token_hash(token));
+        std::future::ready(Ok(()))
+    }
+
+    fn authenticate(&self, token: &Secret) -> impl Future<Output = Result<Principal, Error>> + Send {
+        std::future::ready(self.principal(token))
     }
 }

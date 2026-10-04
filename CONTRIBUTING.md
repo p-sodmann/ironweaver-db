@@ -43,4 +43,10 @@ Keep commits small and prefix them with the step, e.g. `step 3: add WAL record C
 
 ## License
 
-By contributing you agree that your contributions are licensed under the [MIT License](LICENSE).
+Ironweaver DB is dual-licensed under the [AGPL-3.0](LICENSE) and a [commercial license](COMMERCIAL-LICENSE.md) ([ADR 0038](documentation/adr/0038-agpl-and-commercial-license.md)).
+
+By contributing you agree that:
+
+- your contributions are licensed under the GNU Affero General Public License, version 3 only, and
+- you grant Philipp Sodmann a perpetual, worldwide, non-exclusive, royalty-free, irrevocable license to use, modify and sublicense your contributions under other terms as well, including commercial licenses, and
+- you have the right to grant both (the work is yours, or your employer allows it).
