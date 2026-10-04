@@ -47,7 +47,7 @@ The server starts its projections after it opened the store and stops them when 
 
 ## Sources
 
-**Postgres** (`iwdb` feature `postgres`; the server has it). The table (or view) has a position column, a `bigint` or `integer` above 0 that increases with every event, typically a `bigserial` primary key. Each row is an event, its columns the fields:
+**Postgres** (`iwdb` feature `postgres`; `iwdb-server` has it unless built without its `postgres` feature, see [grpc.md](grpc.md#features-and-docker)). The table (or view) has a position column, a `bigint` or `integer` above 0 that increases with every event, typically a `bigserial` primary key. Each row is an event, its columns the fields:
 
 | Postgres | value |
 |---|---|

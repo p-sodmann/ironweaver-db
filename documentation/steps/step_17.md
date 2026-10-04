@@ -15,7 +15,7 @@ Ship 1.0 with documented guarantees and a full verification suite.
 - [ ] Continuous fuzzing (nightly or OSS-Fuzz): WAL reader, checkpoint loader, proto and JSON decoding, pattern and filter inputs.
 - [ ] 24h soak test with mixed load; runbook for running it before each minor release.
 - [ ] Docs site: concepts, guarantees (`documentation/guarantees.md`: durability per fsync policy, isolation, limits, failure behaviour), operations, gRPC and REST reference.
-- [ ] Release pipeline: semver, crates.io, PyPI wheels (embedded and client), multi-arch Docker image, optional Helm chart, CHANGELOG.
+- [ ] Release pipeline: semver, crates.io, PyPI wheels (embedded and client), multi-arch Docker image (published from the `Dockerfile` of step 13a), optional Helm chart, CHANGELOG.
 
 ## Acceptance criteria
 

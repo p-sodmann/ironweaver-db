@@ -1,0 +1,18 @@
+# The build context of the Dockerfile: the workspace's sources only
+target/
+fuzz/
+.git/
+.github/
+documentation/
+clients/
+**/__pycache__/
+**/.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+*.so
+.DS_Store
+# The image's toolchain builds; rust-toolchain.toml would make rustup
+# download the current stable inside the build
+rust-toolchain.toml

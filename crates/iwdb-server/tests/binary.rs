@@ -82,6 +82,7 @@ fn a_bad_command_line_or_config_exits_with_2() {
 /// follows a Postgres table (PGlite, `scripts/pglite.sh`; skipped without
 /// `IWDB_TEST_POSTGRES_URL`), its mark shows in the namespace status, and
 /// after a restart it goes on from the mark.
+#[cfg(feature = "postgres")]
 #[test]
 fn runs_the_projections_of_its_config() {
     let Some(url) = std::env::var("IWDB_TEST_POSTGRES_URL").ok().filter(|u| !u.is_empty()) else {
@@ -159,4 +160,26 @@ mutations = [{ upsert_node = { id = "${who}", labels = ["Person"], attr = { gree
     assert_eq!(store.node("bob").unwrap().attr.get("greeted_at"), Some(&iwdb::Value::Int(2)));
     assert_eq!(store.default_namespace().status().nodes, 2);
     store.close().unwrap();
+}
+
+/// `--version` names what the build has (ADR 0034); a build without
+/// `postgres` refuses a Postgres projection when it reads its config.
+#[test]
+fn the_version_lists_the_features() {
+    let out = Command::new(BIN).arg("--version").output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && text.contains("(grpc"), "{}", text);
+    assert_eq!(text.contains("rest"), cfg!(feature = "rest"), "{}", text);
+    assert_eq!(text.contains("postgres"), cfg!(feature = "postgres"), "{}", text);
+    #[cfg(not(feature = "postgres"))]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("server.toml");
+        let text = "data_dir = \"d\"\n[[projection]]\nname = \"p\"\n[projection.source]\nkind = \"postgres\"\nurl = \"host=x\"\ntable = \"t\"\nposition = \"id\"\n";
+        std::fs::write(&config, text).unwrap();
+        let out = Command::new(BIN).arg("--config").arg(&config).output().unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("postgres feature"));
+        assert!(!dir.path().join("d").exists(), "the store was opened");
+    }
 }

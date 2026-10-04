@@ -4,6 +4,7 @@
 //! depth limit, single nodes and edges by id, HTTP/1.1 and HTTP/2 on the
 //! gRPC port, a client that goes away, and idle connections at shutdown.
 
+#![cfg(feature = "rest")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;

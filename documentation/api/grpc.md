@@ -50,6 +50,25 @@ timeout_ms = 300000
 - **No TLS and no authentication yet** (step 15): bind to localhost or a private network.
 - Health and readiness endpoints, metrics and environment overrides come with step 16.
 
+### Features and Docker
+
+`iwdb-server` has two cargo features, both on by default (ADR 0034):
+
+- `rest`: the REST/JSON API on the same port ([rest.md](rest.md)). Without it the server speaks gRPC only, and answers every other request 404.
+- `postgres`: the Postgres source of `[[projection]]`s. Without it, a config file with a Postgres source is refused at startup (exit 2).
+
+`cargo build -p iwdb-server --no-default-features` builds a gRPC-only server. `iwdb-server --version` lists what a binary has.
+
+The `Dockerfile` at the root builds an image with `iwdb-server` and `iwctl`, with the same features chosen by the `FEATURES` build argument:
+
+```
+docker build -t iwdb .                                # gRPC, REST, Postgres projections
+docker build --build-arg FEATURES="" -t iwdb:grpc .   # gRPC only
+docker run -p 127.0.0.1:7600:7600 -v iwdb-data:/var/lib/iwdb iwdb
+```
+
+The image runs as the user `iwdb` (uid 10001), keeps its data in the volume `/var/lib/iwdb`, and reads `/etc/iwdb/iwdb.toml` ([docker/iwdb.toml](../../docker/iwdb.toml): listens on `0.0.0.0:7600`, drains for 8 s so that `docker stop` ends with a checkpoint). Mount your own config there; if you raise `drain_timeout_secs`, raise `docker stop -t` above it. `compose.yaml` runs it, and with `--profile postgres` a Postgres with an example projection. Run `iwctl` against the volume only while the server is stopped: one process opens a data directory at a time.
+
 ## RPCs
 
 | RPC | Trait method | Answer |

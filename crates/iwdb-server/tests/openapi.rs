@@ -8,6 +8,7 @@
 //! `IWDB_BLESS=1 cargo test -p iwdb-server --test openapi`, and validate it
 //! with `npx @redocly/cli lint documentation/api/openapi.json`.
 
+#![cfg(feature = "rest")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeSet;

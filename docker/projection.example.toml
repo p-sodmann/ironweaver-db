@@ -1,0 +1,36 @@
+# docker/iwdb.toml plus a projection from the compose file's Postgres
+# (documentation/api/projections.md). Needs an image with the postgres
+# feature (the default).
+#
+#   IWDB_CONFIG=projection.example.toml docker compose --profile postgres up --build
+#   docker compose exec postgres psql -U postgres \
+#     -c "INSERT INTO order_events (kind, payload) VALUES ('order_placed', '{\"total\": 12.5, \"customer\": \"ann\"}')"
+#   docker compose exec iwdb iwctl status /var/lib/iwdb   # shows the mark (stop the server first: one process per data directory)
+
+data_dir = "/var/lib/iwdb"
+listen = "0.0.0.0:7600"
+
+[server]
+drain_timeout_secs = 8
+
+[[projection]]
+name = "orders"
+namespace = "default"
+
+[projection.source]
+kind = "postgres"
+url_env = "ORDERS_DB_URL"
+table = "public.order_events"
+position = "id"
+
+[[projection.rule]]
+when = { kind = "order_placed" }
+mutations = [
+  { upsert_node = { id = "customer:${payload.customer}", labels = ["Customer"] } },
+  { upsert_node = { id = "order:${id}", labels = ["Order"], attr = { total = "${payload.total}" } } },
+  { upsert_edge = { from = "customer:${payload.customer}", to = "order:${id}", type = "PLACED" } },
+]
+
+[[projection.rule]]
+when = { kind = "order_cancelled" }
+mutations = [{ delete_node = { id = "order:${payload.order}" } }]

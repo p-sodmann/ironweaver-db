@@ -66,8 +66,11 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(feature = "postgres")]
+use iwdb::projection::OnError;
+#[cfg(feature = "postgres")]
 use iwdb::projection::postgres::{PostgresConfig, PostgresSource};
-use iwdb::projection::{OnError, Projection, ProjectionHandle, ProjectionOptions, Rules};
+use iwdb::projection::{Projection, ProjectionHandle, ProjectionOptions, Rules};
 use iwdb::{CheckpointOptions, FsyncPolicy, MarkName, QueryConfig, Store, StoreOptions, WalRetention};
 use iwdb_query::{Bounds, LimitConfig};
 use serde::Deserialize;
@@ -140,6 +143,57 @@ pub enum SourceSection {
         #[serde(default = "default_gap_timeout_ms")]
         gap_timeout_ms: u64,
     },
+}
+
+impl ProjectionSection {
+    /// The projection, ready to run: its source (the URL read from the
+    /// environment now, for `url_env`), rules and options.
+    #[cfg(feature = "postgres")]
+    fn projection(&self) -> Result<Projection, String> {
+        let at = format!("[[projection]] {:?}", self.name);
+        let SourceSection::Postgres { url, url_env, table, position, columns, gap_timeout_ms } = &self.source;
+        let url = match (url, url_env) {
+            (Some(url), _) => url.clone(),
+            (None, Some(var)) => {
+                std::env::var(var).map_err(|_| format!("{}: the environment variable {} is not set", at, var))?
+            }
+            (None, None) => return Err(format!("{}: the source needs one of url and url_env", at)),
+        };
+        let config = PostgresConfig {
+            url,
+            table: table.clone(),
+            position: position.clone(),
+            columns: columns.clone(),
+            gap_timeout: Duration::from_millis(*gap_timeout_ms),
+        };
+        let source = PostgresSource::new(config).map_err(|e| format!("{}: {}", at, e))?;
+        let name = MarkName::new(self.name.as_str()).map_err(|e| format!("{}: {}", at, e))?;
+        Ok(Projection::new(name, source, self.rules.clone(), self.options()))
+    }
+
+    /// Without the `postgres` feature there is no source to read.
+    #[cfg(not(feature = "postgres"))]
+    fn projection(&self) -> Result<Projection, String> {
+        Err(no_postgres(&format!("[[projection]] {:?}", self.name)))
+    }
+
+    #[cfg(feature = "postgres")]
+    fn options(&self) -> ProjectionOptions {
+        ProjectionOptions {
+            batch: self.batch,
+            poll: Duration::from_millis(self.poll_ms),
+            on_error: match self.on_error {
+                OnErrorSection::Stop => OnError::Stop,
+                OnErrorSection::Skip => OnError::Skip,
+            },
+            ..ProjectionOptions::default()
+        }
+    }
+}
+
+/// The error for a Postgres source in a server built without them (ADR 0034).
+fn no_postgres(at: &str) -> String {
+    format!("{}: this iwdb-server was built without the postgres feature, so it has no Postgres source", at)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -290,6 +344,9 @@ impl Config {
             if url.is_some() == url_env.is_some() {
                 return Err(format!("{}: the source needs one of url and url_env", at));
             }
+            if cfg!(not(feature = "postgres")) {
+                return Err(no_postgres(&at));
+            }
         }
         Ok(config)
     }
@@ -340,38 +397,7 @@ impl Config {
     /// read from the environment now, for `url_env`) and its rules, with
     /// the namespace to run in.
     pub fn projections(&self) -> Result<Vec<(String, Projection)>, String> {
-        let mut out = Vec::new();
-        for p in &self.projections {
-            let at = format!("[[projection]] {:?}", p.name);
-            let SourceSection::Postgres { url, url_env, table, position, columns, gap_timeout_ms } = &p.source;
-            let url = match (url, url_env) {
-                (Some(url), _) => url.clone(),
-                (None, Some(var)) => {
-                    std::env::var(var).map_err(|_| format!("{}: the environment variable {} is not set", at, var))?
-                }
-                (None, None) => return Err(format!("{}: the source needs one of url and url_env", at)),
-            };
-            let config = PostgresConfig {
-                url,
-                table: table.clone(),
-                position: position.clone(),
-                columns: columns.clone(),
-                gap_timeout: Duration::from_millis(*gap_timeout_ms),
-            };
-            let source = PostgresSource::new(config).map_err(|e| format!("{}: {}", at, e))?;
-            let options = ProjectionOptions {
-                batch: p.batch,
-                poll: Duration::from_millis(p.poll_ms),
-                on_error: match p.on_error {
-                    OnErrorSection::Stop => OnError::Stop,
-                    OnErrorSection::Skip => OnError::Skip,
-                },
-                ..ProjectionOptions::default()
-            };
-            let name = MarkName::new(p.name.as_str()).map_err(|e| format!("{}: {}", at, e))?;
-            out.push((p.namespace.clone(), Projection::new(name, source, p.rules.clone(), options)));
-        }
-        Ok(out)
+        self.projections.iter().map(|p| p.projection().map(|projection| (p.namespace.clone(), projection))).collect()
     }
 
     /// Start the file's projections on `store` (each on a thread of its
@@ -432,8 +458,14 @@ mod tests {
             .take_while(|l| !l.starts_with("//! ```"))
             .map(|l| l.trim_start_matches("//!").trim_start().to_owned() + "\n")
             .collect();
-        let projections = Config::parse(&format!("data_dir = \"d\"\n{}", second)).unwrap().projections;
-        assert_eq!((projections.len(), projections[0].rules.0.len(), projections[0].poll_ms), (1, 1, 500));
+        let projections = Config::parse(&format!("data_dir = \"d\"\n{}", second));
+        #[cfg(feature = "postgres")]
+        {
+            let projections = projections.unwrap().projections;
+            assert_eq!((projections.len(), projections[0].rules.0.len(), projections[0].poll_ms), (1, 1, 500));
+        }
+        #[cfg(not(feature = "postgres"))]
+        assert!(projections.unwrap_err().contains("without the postgres feature"));
         let minimal = Config::parse("data_dir = \"/var/lib/iwdb\"").unwrap();
         // The example shows the defaults
         assert_eq!((&config.store, &config.server), (&minimal.store, &minimal.server));
@@ -467,6 +499,7 @@ mod tests {
         assert_eq!(config.store_options().retention, retention);
     }
 
+    #[cfg(feature = "postgres")]
     #[test]
     fn projections_are_checked() {
         let base = "data_dir = \"d\"\n";
@@ -496,6 +529,21 @@ mod tests {
         let from_env = section("").replace("url = \"host=x\"", "url_env = \"IWDB_TEST_UNSET_VARIABLE\"");
         let e = Config::parse(&from_env).unwrap().projections().err().unwrap();
         assert!(e.contains("IWDB_TEST_UNSET_VARIABLE"), "{}", e);
+    }
+
+    /// A server built without Postgres refuses a Postgres source when it
+    /// reads its config, before it opens the store (ADR 0034).
+    #[cfg(not(feature = "postgres"))]
+    #[test]
+    fn a_postgres_source_needs_the_postgres_feature() {
+        let text = "data_dir = \"d\"\n[[projection]]\nname = \"p\"\n[projection.source]\nkind = \"postgres\"\nurl = \"host=x\"\ntable = \"t\"\nposition = \"id\"\n";
+        let e = Config::parse(text).unwrap_err();
+        assert!(e.contains("[[projection]] \"p\"") && e.contains("postgres feature"), "{}", e);
+        // Checked before the feature: a section that is wrong anyway says so
+        let e = Config::parse(&text.replace("url = \"host=x\"\n", "")).unwrap_err();
+        assert!(e.contains("url_env"), "{}", e);
+        // A config without projections is fine
+        assert!(Config::parse("data_dir = \"d\"").unwrap().projections().unwrap().is_empty());
     }
 
     #[test]

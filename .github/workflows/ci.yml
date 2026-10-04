@@ -59,6 +59,77 @@ jobs:
             exit 1
           fi
 
+  features:
+    # Step 13a (ADR 0034): iwdb-server without its default features (gRPC
+    # only, no Postgres source) and with each one alone; the jobs above
+    # cover all features together
+    name: iwdb-server feature sets
+    runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_WARNINGS: deny
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "rest", "postgres"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: features-${{ matrix.features }}
+      - run: cargo clippy -p iwdb-server --all-targets --locked --no-default-features --features "${{ matrix.features }}"
+      - run: cargo test -p iwdb-server --locked --no-default-features --features "${{ matrix.features }}"
+      - name: No Postgres or REST crates in a gRPC-only build
+        if: matrix.features == ''
+        run: |
+          if cargo tree -p iwdb-server --no-default-features -e normal | grep -E ' (postgres|pbjson|axum|prost-types) '; then
+            echo "a gRPC-only iwdb-server must not depend on these crates" >&2
+            exit 1
+          fi
+
+  docker:
+    # Step 13a: the image builds, with and without the default features,
+    # serves, and shuts down cleanly on docker stop
+    name: docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build (default features)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: iwdb-server:ci
+          cache-from: type=gha,scope=docker
+          cache-to: type=gha,mode=max,scope=docker
+      - name: Build (gRPC only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: iwdb-server:ci-grpc
+          build-args: FEATURES=
+          cache-from: type=gha,scope=docker-grpc
+          cache-to: type=gha,mode=max,scope=docker-grpc
+      - name: Serve, answer, stop
+        run: |
+          docker run --rm iwdb-server:ci --version | tee version.txt
+          grep -q "grpc, rest, postgres" version.txt
+          docker run --rm iwdb-server:ci-grpc --version | tee version.txt
+          grep -q "(grpc)" version.txt
+          docker run -d --name iwdb -p 127.0.0.1:7600:7600 iwdb-server:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:7600/v1/openapi.json -o /dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:7600/v1/namespaces | tee namespaces.json
+          grep -q default namespaces.json
+          docker stop iwdb
+          docker logs iwdb 2>&1 | tee server.log
+          test "$(docker inspect -f '{{.State.ExitCode}}' iwdb)" = 0
+          grep -q "closed /var/lib/iwdb" server.log
+
   python:
     # Step 7: the wheel (abi3, CPython 3.9 and later) built by maturin on
     # every platform we ship, and the Python tests run against it on the

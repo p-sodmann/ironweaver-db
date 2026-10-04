@@ -3,6 +3,7 @@
 //! port, and runs through a `RestRemote` client, once with streamed answers
 //! as one JSON message and once as NDJSON.
 
+#![cfg(feature = "rest")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod support;

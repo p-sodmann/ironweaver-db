@@ -1,0 +1,45 @@
+# Ironweaver DB in Docker (step 13a, ADR 0034).
+#
+#   docker compose up --build                     # iwdb-server on 127.0.0.1:7600
+#   IWDB_CONFIG=projection.example.toml docker compose --profile postgres up --build
+#                                                  # plus Postgres and a projection from it
+#
+# The server has no TLS and no authentication until step 15: the port is
+# published on localhost only.
+
+services:
+  iwdb:
+    build:
+      context: .
+      args:
+        FEATURES: ${IWDB_FEATURES:-rest postgres}
+    image: iwdb-server:dev
+    ports:
+      - "127.0.0.1:7600:7600"
+    volumes:
+      - iwdb-data:/var/lib/iwdb
+      - ./docker/${IWDB_CONFIG:-iwdb.toml}:/etc/iwdb/iwdb.toml:ro
+    environment:
+      # Read by docker/projection.example.toml (url_env)
+      ORDERS_DB_URL: postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+        # Only with the postgres profile
+        required: false
+    stop_grace_period: 30s
+
+  postgres:
+    profiles: ["postgres"]
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      retries: 30
+
+volumes:
+  iwdb-data:

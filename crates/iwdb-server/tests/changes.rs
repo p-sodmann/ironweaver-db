@@ -2,15 +2,21 @@
 //! commits with heartbeats; SSE events, resuming with `Last-Event-ID`;
 //! errors before the first event are statuses; `not_retained` maps to
 //! `OUT_OF_RANGE` and 410; and both streams end when the server shuts down.
+//! The SSE parts need the `rest` feature.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "rest")]
 use bytes::Bytes;
+#[cfg(feature = "rest")]
 use http::{Request, StatusCode, header};
+#[cfg(feature = "rest")]
 use http_body_util::{BodyExt, Empty};
+#[cfg(feature = "rest")]
 use hyper_util::client::legacy::Client;
+#[cfg(feature = "rest")]
 use hyper_util::rt::TokioExecutor;
 use ironweaver_core::Value;
 use iwdb::{Embedded, QueryConfig, Store, StoreOptions};
@@ -145,14 +151,18 @@ fn seqs_that_are_not_retained_are_out_of_range_and_gone() {
         let status = grpc.get_changes(request).await.unwrap_err();
         assert_eq!(status.code(), tonic::Code::OutOfRange);
     });
-    let rest = server.rest_client();
-    let error = block_on(rest.changes(NS, ChangesRequest { from_seq: 1, wait: false }, QueryOptions::default()));
-    assert_eq!(error.unwrap_err().code(), Code::NotRetained);
-    let (status, body) = sse(&server, "/v1/namespaces/default/changes/stream?from_seq=1", None, |_| false);
-    assert_eq!(status, StatusCode::GONE);
-    assert!(body.contains("not_retained"), "{}", body);
+    #[cfg(feature = "rest")]
+    {
+        let rest = server.rest_client();
+        let error = block_on(rest.changes(NS, ChangesRequest { from_seq: 1, wait: false }, QueryOptions::default()));
+        assert_eq!(error.unwrap_err().code(), Code::NotRetained);
+        let (status, body) = sse(&server, "/v1/namespaces/default/changes/stream?from_seq=1", None, |_| false);
+        assert_eq!(status, StatusCode::GONE);
+        assert!(body.contains("not_retained"), "{}", body);
+    }
 }
 
+#[cfg(feature = "rest")]
 /// GET an SSE route and read its body until `enough` says so (or it
 /// ends); the status and what was read.
 fn sse(
@@ -192,6 +202,7 @@ fn sse(
 }
 
 /// The `id`s of the `change` events in an SSE body.
+#[cfg(feature = "rest")]
 fn event_ids(body: &str) -> Vec<u64> {
     body.split("\n\n")
         .filter(|e| e.contains("event: change"))
@@ -200,6 +211,7 @@ fn event_ids(body: &str) -> Vec<u64> {
         .collect()
 }
 
+#[cfg(feature = "rest")]
 #[test]
 fn server_sent_events_resume_after_the_last_event_id() {
     let (_dir, server) = served(options());
@@ -225,6 +237,7 @@ fn server_sent_events_resume_after_the_last_event_id() {
     assert!(event_ids(&body).is_empty());
 }
 
+#[cfg(feature = "rest")]
 #[test]
 fn server_sent_events_refuse_bad_requests_with_a_status() {
     let (_dir, server) = served(options());
@@ -247,7 +260,7 @@ fn streams_end_when_the_server_shuts_down() {
     commit(&server.client(), "a");
     let endpoint = server.endpoint();
     let url = format!("{}/v1/namespaces/default/changes/stream?from_seq=1&timeout_ms=60000", endpoint);
-    let (grpc_done, sse_done) = (std::sync::mpsc::channel(), std::sync::mpsc::channel());
+    let (grpc_done, sse_done) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<String>());
     let (grpc_tx, sse_tx) = (grpc_done.0, sse_done.0);
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     runtime.spawn(async move {
@@ -262,6 +275,7 @@ fn streams_end_when_the_server_shuts_down() {
         };
         grpc_tx.send(end).unwrap();
     });
+    #[cfg(feature = "rest")]
     runtime.spawn(async move {
         let client = Client::builder(TokioExecutor::new()).build_http::<Empty<Bytes>>();
         let response = client.request(Request::get(url).body(Empty::new()).unwrap()).await.unwrap();
@@ -276,8 +290,13 @@ fn streams_end_when_the_server_shuts_down() {
     assert!(drain.complete, "{:?}", drain);
     let grpc_end = grpc_done.1.recv_timeout(Duration::from_secs(10)).unwrap();
     assert_eq!(grpc_end, Some(tonic::Code::Unavailable));
-    let body = sse_done.1.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert!(body.contains("event: error") && body.contains("unavailable"), "{}", body);
-    assert_eq!(event_ids(&body), [1]);
+    #[cfg(feature = "rest")]
+    {
+        let body = sse_done.1.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(body.contains("event: error") && body.contains("unavailable"), "{}", body);
+        assert_eq!(event_ids(&body), [1]);
+    }
+    #[cfg(not(feature = "rest"))]
+    let _ = (sse_tx, sse_done.1, url);
     runtime.shutdown_timeout(Duration::from_secs(1));
 }
