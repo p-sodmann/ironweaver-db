@@ -1,16 +1,20 @@
-//! Python bindings of the embedded store (`import iwdb`): PyO3, built with
-//! maturin (`pyproject.toml`). The API is a contract shared with the remote
-//! client of step 14 (`documentation/python-api.md`, ADR 0013).
+//! Python bindings (`import iwdb`): PyO3, built with maturin
+//! (`pyproject.toml`). One API for the embedded store (`Store.open`) and a
+//! server (`connect`, ADR 0035), the contract of
+//! `documentation/python-api.md` (ADR 0013).
 //!
 //! The bindings only translate (design rule 8): Python values to
 //! `iwdb` types and back, errors to exceptions. Every call that does I/O
 //! or may wait releases the GIL. Python lives only in this crate (design
 //! rule 1).
 
+mod backend;
 mod changes;
 mod convert;
 mod errors;
+mod filter;
 mod namespace;
+mod query;
 mod reports;
 mod store;
 mod transaction;

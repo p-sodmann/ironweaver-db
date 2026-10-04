@@ -10,8 +10,12 @@ use std::path::Path;
 use prost::Message;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../proto");
+    // `proto` in this crate is a symlink to the workspace's `proto/`, so that
+    // a package of the crate (the Python sdist, ADR 0035) carries the protos
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("proto");
     let dir = root.join("ironweaver_db/v1");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed={}", dir.display());
     let mut files: Vec<String> = std::fs::read_dir(&dir)?
         .filter_map(|entry| entry.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
         .filter(|name| name.ends_with(".proto"))

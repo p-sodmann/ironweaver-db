@@ -97,6 +97,7 @@ def test_unique_constraints_and_indexes_are_per_namespace(store):
     assert a.catalog()["constraints"][0]["kind"] == "unique"
 
 
+@pytest.mark.embedded
 def test_status_per_namespace(store):
     store.create_namespace("a")
     a = store.namespace("a")
@@ -152,6 +153,7 @@ def test_backup_and_restore_with_several_namespaces(path, tmp_path):
     assert [n["name"] for n in only["namespaces"]] == ["a"]
 
 
+@pytest.mark.embedded
 def test_checkpoint_all(store):
     store.create_namespace("a")
     put(store, "d")
