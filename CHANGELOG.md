@@ -65,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `iwdb-engine` feature `failpoints` (tests only): `failpoint::fail_next_apply`.
 
 ### Changed
+- License: Ironweaver DB is dual-licensed under `AGPL-3.0-only` or a commercial license (ADR 0038), replacing the MIT `LICENSE` of the private repository before its first publication. Contributors grant a relicensing right (`CONTRIBUTING.md`).
 - An apply that fails inside the core with `GraphError::Internal` aborts the process like a panic (ADR 0028): since upstream #28 such failures return an error instead of panicking, and the namespace was only made read-only while readers went on seeing a graph that might hold part of the transaction.
 - Upstream issue #57 filed: the serde form of `Value` and `Expr` can't be read from JSON beyond 64 levels of nesting (needed by step 12's REST).
 - Step 9 changes the on-disk layout: data directory layout 4, backup manifest 2 and archive format 2 (older versions are still read and upgraded; older releases can't open a layout 4 directory). `Store::status`, `BackupReport`, `RestoreReport` and `StoreRecovery` have per-namespace parts (the default namespace's are reachable as before).

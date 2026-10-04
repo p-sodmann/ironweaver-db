@@ -3025,8 +3025,8 @@
   "info": {
     "description": "The `Database` trait over HTTP/JSON, with the messages of the gRPC contract (`proto/ironweaver_db/v1`) in their proto3 JSON form. See documentation/api/rest.md.",
     "license": {
-      "identifier": "MIT",
-      "name": "MIT"
+      "identifier": "AGPL-3.0-only",
+      "name": "AGPL-3.0-only (or a commercial license)"
     },
     "title": "Ironweaver DB REST API",
     "version": "v1"

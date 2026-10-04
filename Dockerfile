@@ -34,7 +34,7 @@ FROM debian:${DEBIAN}-slim
 LABEL org.opencontainers.image.title="iwdb-server" \
       org.opencontainers.image.description="Ironweaver DB: a durable graph database over gRPC and REST" \
       org.opencontainers.image.source="https://github.com/p-sodmann/ironweaver-db" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="AGPL-3.0-only"
 RUN useradd --system --uid 10001 --home-dir /var/lib/iwdb --shell /usr/sbin/nologin iwdb \
     && mkdir -p /var/lib/iwdb /etc/iwdb \
     && chown iwdb:iwdb /var/lib/iwdb

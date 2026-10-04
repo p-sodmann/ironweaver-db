@@ -38,4 +38,9 @@ docker compose up --build
 
 ## License
 
-[MIT](LICENSE)
+Ironweaver DB is dual-licensed:
+
+- [GNU AGPL-3.0](LICENSE) (`AGPL-3.0-only`), free of charge, or
+- a [commercial license](COMMERCIAL-LICENSE.md) for using it in proprietary products or services without the AGPL's obligations.
+
+See [ADR 0038](documentation/adr/0038-agpl-and-commercial-license.md) for the reasons.

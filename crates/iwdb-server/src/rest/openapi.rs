@@ -476,7 +476,7 @@ pub fn generate() -> Json {
         "info": {
             "title": "Ironweaver DB REST API",
             "version": "v1",
-            "license": { "name": "MIT", "identifier": "MIT" },
+            "license": { "name": "AGPL-3.0-only (or a commercial license)", "identifier": "AGPL-3.0-only" },
             "description": format!(
                 "The `Database` trait over HTTP/JSON, with the messages of the gRPC contract (`proto/{}`) in their \
                  proto3 JSON form. See documentation/api/rest.md.",
