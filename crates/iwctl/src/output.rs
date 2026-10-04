@@ -504,7 +504,7 @@ impl Out {
     }
 }
 
-fn ns_status_json(n: &NamespaceStatus) -> Value {
+pub fn ns_status_json(n: &NamespaceStatus) -> Value {
     json!({
         "id": n.id, "name": n.name, "created": time(Some(n.created)), "seq": n.seq, "synced_seq": n.synced_seq,
         "checkpoint": n.checkpoint, "read_only": n.read_only, "checkpoint_failure": n.checkpoint_failure,
@@ -518,7 +518,7 @@ fn ns_status_json(n: &NamespaceStatus) -> Value {
     })
 }
 
-fn ns_status_text(n: &NamespaceStatus) -> String {
+pub fn ns_status_text(n: &NamespaceStatus) -> String {
     let mut text = format!(
         "namespace {} (id {}): seq {}, {} nodes, {} edges, {} indexes, {} constraints, ~{} KiB",
         n.name,

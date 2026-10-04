@@ -1,6 +1,6 @@
 # iwctl
 
-`iwctl` is the admin CLI for local Ironweaver DB directories (step 7). It works on directories that no store has open; a running store is backed up from the program that runs it (`Store::backup`, or `store.backup()` in Python). The query shell (`iwctl shell`) comes with the server in step 14. Decisions: [ADR 0012](adr/0012-iwctl.md).
+`iwctl` is the admin CLI for local Ironweaver DB directories (step 7). It works on directories that no store has open; a running store is backed up from the program that runs it (`Store::backup`, or `store.backup()` in Python). `iwctl shell` is an interactive client of a server ([below](#query-shell), step 14a). Decisions: [ADR 0012](adr/0012-iwctl.md), [ADR 0036](adr/0036-query-shell.md).
 
 ```
 iwctl [--json] <command> [options]
@@ -37,6 +37,42 @@ Options:
 | `--no-verify` | Don't verify after `backup` or `restore`. |
 | `--merge` | `import` into an existing namespace through commits. |
 | `--format <format>` | The file format of `import` (`json`, `binary`, `lgf`) or `export` (`json`, `binary`). |
+
+## Query shell
+
+```
+iwctl shell <endpoint> [-n <namespace>] [--json]
+```
+
+Connects to the `iwdb-server` at `<endpoint>` (`http://host:port`) and reads one command per line from stdin, so it works interactively and piped from a script. The prompt (`social> `) goes to stderr, and only when stdin is a terminal. For line editing and history, run it under `rlwrap`. Each command is one call of the `Database` trait over gRPC, bounded like any other read.
+
+| Command | What it does |
+|---|---|
+| `match <pattern>` | every match of a pattern, in the core's text: `(a:Person {age: 30})-[k:KNOWS*1..2]->(b)`. One column per node variable, then one per edge variable (edge ids; a path for a variable-length edge); anonymous ones are `_0`, `_e0`, … |
+| `find <filter>` | nodes matching a filter, in the core's JSON form (as over REST): `{"Label": "Person"}`, `{"Compare": {"path": ["age"], "op": "Ge", "value": {"Int": 18}}}` |
+| `explain <filter>` | how `find` would read the filter: the plan, estimated and exact candidates |
+| `node <id>...`, `edge <id>...` | lookups; missing ids are listed as not found |
+| `upsert-node <id> [:Label]... [{json}]` | create a node or replace its attributes (plain JSON: integers are `Int`, other numbers `Float`, objects dicts); one commit |
+| `add-edge <from> <to> [:type] [{json}]`, `delete-node <id>`, `delete-edge <id>` | one commit each |
+| `namespaces`, `use <name>`, `create-namespace <name>`, `drop-namespace <name>` | namespaces; `use` switches (and checks that it exists) |
+| `status`, `indexes` | the namespace's state; its indexes and constraints |
+| `create-index`, `drop-index`, `add-constraint`, `drop-constraint` | as the commands above, with the same arguments minus the directory |
+| `\next` | the next page of the last `find` or `match` (shown as `(more: \next)`) |
+| `\limit <n>\|off`, `\partial on\|off`, `\timeout <s>\|off` | read options of the following commands |
+| `\json`, `\table` | output: one JSON object per answer (with `seq`, `cursor`, `truncated`, `work`), or aligned tables |
+| `\help`, `\quit` | also `quit`, `exit`, or the end of input. `--` starts a comment |
+
+An error prints `error (<code>): <message>` ([codes](api/errors.md)) to stderr (in JSON mode `{"error": {"code", "message"}}` to stdout) and the shell goes on. The exit code is 0 if every command succeeded, 4 if one failed, 2 for an invalid endpoint.
+
+```
+$ iwctl shell http://127.0.0.1:7600 -n social
+social> match (a:Person)-[k:KNOWS]->(b)
+a     | b     | k
+------+-------+--
+alice | bob   | 0
+bob   | carol | 1
+(2 rows)
+```
 
 ## Exit codes
 
