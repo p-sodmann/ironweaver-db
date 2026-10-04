@@ -26,7 +26,8 @@ use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 /// A store's backend.
 pub enum Backend {
     Embedded(Embedded),
-    Remote(RemoteDb),
+    /// Boxed: a client holds a channel per service.
+    Remote(Box<RemoteDb>),
 }
 
 /// A server's database, with the seq of this client's last commit per

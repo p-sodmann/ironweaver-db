@@ -17,9 +17,11 @@ def put(ns, id, **attr):
 def test_namespaces_are_independent_graphs(store):
     assert [n["name"] for n in store.namespaces()] == ["default"]
     created = store.create_namespace("social")
-    assert created["name"] == "social" and created["id"] == 2 and created["deduplicated"] is False
+    # Ids grow and are never reused; on a server with users the store's own
+    # system namespace (ADR 0043) took one already
+    assert created["name"] == "social" and created["id"] >= 2 and created["deduplicated"] is False
     social = store.namespace("social")
-    assert (social.name, social.id) == ("social", 2)
+    assert (social.name, social.id) == ("social", created["id"])
     put(store, "a")
     put(social, "x")
     put(social, "y")

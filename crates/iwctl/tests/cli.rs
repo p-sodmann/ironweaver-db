@@ -271,3 +271,65 @@ fn import_and_export() {
     assert_eq!(code(&out), 0);
     assert!(iwdb::verify(&dir).unwrap().is_ok());
 }
+
+/// `iwctl` with `input` on stdin (passwords, one per line).
+fn iwctl_with(args: &[&str], input: &str) -> Output {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_iwctl"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// `iwctl user` and `iwctl token` on a data directory (step 15a): the
+/// first admin without a server, grants, tokens, a password change; the
+/// passwords come from stdin and never appear in the output.
+#[test]
+fn users_and_tokens_on_a_data_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    store(dir.path(), 2, None);
+    let d = p(dir.path());
+    let o = iwctl_with(&["user", "create", d, "root", "--admin"], "root-password\n");
+    assert_eq!(code(&o), 0, "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(stdout(&o).contains("created user root (admin)"), "{}", stdout(&o));
+    assert_eq!(code(&iwctl_with(&["user", "create", d, "ann"], "ann-password\n")), 0);
+    assert_eq!(code(&iwctl(&["user", "grant", d, "ann", "default", "write"])), 0);
+    let listed = json(&iwctl(&["--json", "user", "list", d]));
+    assert_eq!(listed["users"][0]["name"], "ann");
+    assert_eq!(listed["users"][0]["grants"]["default"], "write");
+    assert_eq!(listed["users"][1]["admin"], true);
+    // A token, printed once
+    let token = json(&iwctl(&["--json", "token", "create", d, "ann", "ci", "--expires", "3600"]));
+    let secret = token["token"].as_str().unwrap().to_owned();
+    assert!(secret.starts_with("iwdb_") && token["expires_ms"].is_u64(), "{}", token);
+    let tokens = json(&iwctl(&["--json", "token", "list", d, "ann"]));
+    assert_eq!(tokens["tokens"][0]["name"], "ci");
+    assert!(!tokens.to_string().contains(&secret), "a listing never shows the secret");
+    assert_eq!(code(&iwctl(&["token", "revoke", d, "ann", "ci"])), 0);
+    // Password, revoke, admin flag, delete
+    let o = iwctl_with(&["user", "passwd", d, "ann"], "new-ann-password\n");
+    assert_eq!(code(&o), 0);
+    assert!(
+        !stdout(&o).contains("new-ann-password") && !String::from_utf8_lossy(&o.stderr).contains("new-ann-password")
+    );
+    assert_eq!(code(&iwctl(&["user", "revoke", d, "ann", "default"])), 0);
+    assert_eq!(code(&iwctl(&["user", "admin", d, "ann", "on"])), 0);
+    // Errors: no such user, the last admin, a short password
+    let o = iwctl(&["user", "delete", d, "nobody"]);
+    assert_eq!(code(&o), 4);
+    assert!(String::from_utf8_lossy(&o.stderr).contains("not_found"), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(code(&iwctl(&["user", "delete", d, "ann"])), 0);
+    assert_eq!(code(&iwctl(&["user", "admin", d, "root", "off"])), 4);
+    assert_eq!(code(&iwctl_with(&["user", "create", d, "bob"], "short\n")), 4);
+    assert_eq!(code(&iwctl(&["user", "frob", d])), 2);
+    let store = Store::open(dir.path(), StoreOptions::default()).unwrap();
+    assert!(store.users().verify("root", &iwdb::Secret::new("root-password")).unwrap());
+    assert_eq!(store.users().list().unwrap().len(), 1);
+    store.close().unwrap();
+}

@@ -16,3 +16,9 @@ build/
 # The image's toolchain builds; rust-toolchain.toml would make rustup
 # download the current stable inside the build
 rust-toolchain.toml
+# The operator console: only the pages are compiled in (feature `console`,
+# ADR 0041); its tools, tests and node_modules stay out
+console/node_modules/
+console/test/
+console/tools/
+console/design-system/src/

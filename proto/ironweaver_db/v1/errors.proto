@@ -7,6 +7,8 @@
 // | `iwdb-code`            | gRPC status           |
 // |------------------------|-----------------------|
 // | `invalid_argument`     | `INVALID_ARGUMENT`    |
+// | `unauthenticated`      | `UNAUTHENTICATED`     |
+// | `permission_denied`    | `PERMISSION_DENIED`   |
 // | `not_found`            | `NOT_FOUND`           |
 // | `conflict`             | `ABORTED`             |
 // | `constraint_violation` | `FAILED_PRECONDITION` |

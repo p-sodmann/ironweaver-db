@@ -9,8 +9,13 @@ The server binary is `$IWDB_SERVER`, or the newest of
 `target/{debug,release}/iwdb-server` (`cargo build -p iwdb-server`). Without
 one the remote runs are skipped, unless `IWDB_REQUIRE_REMOTE=1` (CI), which
 makes them fail.
+
+The servers run with authentication on (step 15a): the first start makes
+the admin `ADMIN` from `IWDB_AUTH_BOOTSTRAP_PASSWORD`, and the clients log
+in as it (`Server.connect`).
 """
 
+import json
 import os
 import re
 import signal
@@ -23,6 +28,8 @@ import pytest
 import iwdb
 
 REPO = Path(__file__).resolve().parents[3]
+# The servers' first admin: user, password
+ADMIN = ("admin", "admin-password-for-tests")
 
 
 def pytest_configure(config):
@@ -38,10 +45,24 @@ def server_binary():
     return max(found, key=lambda p: p.stat().st_mtime) if found else None
 
 
-class Server:
-    """An iwdb-server on a free port, serving `data_dir`."""
+def serving_address(line):
+    """The address of the server's `serving` log event, or None."""
+    try:
+        event = json.loads(line)
+    except ValueError:
+        match = re.search(r"serving .* on (\S+)$", line.strip())
+        return match.group(1) if match else None
+    if isinstance(event, dict) and str(event.get("message", "")).startswith("serving"):
+        return event.get("address")
+    return None
 
-    def __init__(self, data_dir, config_dir):
+
+class Server:
+    """An iwdb-server on a free port, serving `data_dir`, with
+    authentication on and the admin `ADMIN`; `auth` adds lines to the
+    config's `[auth]` section."""
+
+    def __init__(self, data_dir, config_dir, auth=""):
         binary = server_binary()
         if binary is None:
             message = "no iwdb-server binary (cargo build -p iwdb-server, or set IWDB_SERVER)"
@@ -50,26 +71,34 @@ class Server:
             pytest.skip(message)
         config = Path(config_dir) / "iwdb.toml"
         config.write_text(
-            'data_dir = "{}"\nlisten = "127.0.0.1:0"\n\n[store]\nfsync = "off"\n'.format(
-                str(data_dir).replace("\\", "\\\\")
+            'data_dir = "{}"\nlisten = "127.0.0.1:0"\n\n[store]\nfsync = "off"\n\n[auth]\n{}\n'.format(
+                str(data_dir).replace("\\", "\\\\"), auth
             )
         )
         self.stderr = []
+        env = dict(os.environ, IWDB_AUTH_BOOTSTRAP_PASSWORD=ADMIN[1])
         self.process = subprocess.Popen(
-            [str(binary), "--config", str(config)], stderr=subprocess.PIPE, text=True
+            [str(binary), "--config", str(config)], stderr=subprocess.PIPE, text=True, env=env
         )
-        # "iwdb-server: serving <dir> on <address>"
+        # The "serving <dir> on <address>" event: the server is ready (a JSON
+        # line, since stderr is a pipe; a text line with IWDB_LOG_FORMAT=text)
         for line in self.process.stderr:
             self.stderr.append(line)
-            match = re.search(r"serving .* on (\S+)$", line.strip())
-            if match:
-                self.endpoint = "http://" + match.group(1)
+            address = serving_address(line)
+            if address:
+                self.endpoint = "http://" + address
                 break
         else:
             self.process.wait()
             pytest.fail("iwdb-server didn't start:\n" + "".join(self.stderr))
         # Keep reading, so the server never blocks on a full pipe
         threading.Thread(target=self._drain, daemon=True).start()
+
+    def connect(self, **credentials):
+        """A client, logged in as the admin unless given credentials."""
+        if not credentials:
+            credentials = {"user": ADMIN[0], "password": ADMIN[1]}
+        return iwdb.connect(self.endpoint, **credentials)
 
     def _drain(self):
         for line in self.process.stderr:
@@ -112,7 +141,7 @@ def store(request, path, tmp_path):
         pytest.skip("needs an embedded store")
     server = Server(path, tmp_path)
     try:
-        with iwdb.connect(server.endpoint) as store:
+        with server.connect() as store:
             yield store
     finally:
         assert server.stop() == 0, "".join(server.stderr)

@@ -116,10 +116,34 @@ fn the_document_describes_exactly_the_routes() {
 
 #[test]
 fn every_rpc_has_a_route() {
-    let proto = include_str!("../../../proto/ironweaver_db/v1/service.proto");
+    let proto = [
+        include_str!("../../../proto/ironweaver_db/v1/service.proto"),
+        include_str!("../../../proto/ironweaver_db/v1/auth.proto"),
+    ]
+    .concat();
     let rpcs: BTreeSet<&str> =
         proto.lines().filter_map(|l| l.trim().strip_prefix("rpc ")).filter_map(|l| l.split('(').next()).collect();
     let routed: BTreeSet<&str> = ROUTES.iter().filter_map(|r| r.rpc).collect();
-    assert_eq!(rpcs.len(), 21);
+    assert_eq!(rpcs.len(), 21 + 13);
     assert_eq!(routed, rpcs);
+}
+
+/// rest.md's route table lists exactly the routes.
+#[test]
+fn rest_md_lists_every_route() {
+    let doc = include_str!("../../../documentation/api/rest.md");
+    let documented: BTreeSet<(String, String)> = doc
+        .lines()
+        .skip_while(|l| !l.starts_with("## Routes"))
+        .take_while(|l| !l.starts_with("## Requests"))
+        .filter(|l| {
+            l.starts_with("| GET") || l.starts_with("| POST") || l.starts_with("| PUT") || l.starts_with("| DELETE")
+        })
+        .map(|l| {
+            let cells: Vec<&str> = l.trim_matches('|').split('|').map(str::trim).collect();
+            (cells[0].to_owned(), cells[1].trim_matches('`').to_owned())
+        })
+        .collect();
+    let routes: BTreeSet<(String, String)> = ROUTES.iter().map(|r| (r.method.to_string(), r.path.to_owned())).collect();
+    assert_eq!(documented, routes);
 }

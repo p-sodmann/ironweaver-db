@@ -47,11 +47,28 @@ for status, which then shows what the files say):
                                 write a namespace's graph to <file> as a core file (JSON for
                                 a .json file, binary otherwise, unless --format)
 
+users, grants and API tokens (step 15a), on a data directory <dir> (the server
+stopped) or, with --server <endpoint> instead of <dir>, on a running server:
+  user create <dir> <name> [--admin]
+  user passwd <dir> <name>      set a password (ends the user's sessions)
+  user delete <dir> <name>
+  user admin <dir> <name> on|off
+                                make a user a server-wide admin, or not
+  user grant <dir> <name> <namespace> read|write|admin
+  user revoke <dir> <name> <namespace>
+  user list <dir>
+  token create <dir> <user> <name> [--expires <seconds>]
+                                make an API token (printed once)
+  token revoke <dir> <user> <name>
+  token list <dir> <user>
+  Passwords are read without echo from a terminal, or one line each from stdin.
+
 query shell (a server, over gRPC):
   shell <endpoint> [-n <ns>]    an interactive client of the iwdb-server at <endpoint>
                                 (http://host:port): match patterns, lookups, commits and
                                 catalog commands, one per line from stdin (\\help lists
-                                them); with --json, one JSON object per answer
+                                them); with --json, one JSON object per answer; log in
+                                with --token, --user (a password prompt) or \\login
 
   help, --help                  this text
   --version                     the version
@@ -66,6 +83,12 @@ options:
   --no-verify                   don't verify after backup or restore
   --format <f>                  the file format of import or export
   --merge                       import into an existing namespace
+  --server <endpoint>           user and token commands: act on a server, not a directory
+  --token <token>               the API or session token to send (shell, --server); also
+                                IWDB_TOKEN
+  --user <name>                 log in as <name> (shell, --server); prompts for the password
+  --admin                       user create: a server-wide admin
+  --expires <seconds>           token create: the token expires after this long
 
 exit codes: 0 ok, 1 damage found, 2 usage error, 3 locked (a store has the
 directory open), 4 any other failure";
@@ -88,6 +111,7 @@ pub enum Command {
     Import { dir: PathBuf, name: String, file: PathBuf, format: Option<ImportFormat>, merge: bool },
     Export { dir: PathBuf, file: PathBuf, format: Option<ExportFormat> },
     Shell { endpoint: String },
+    Accounts { action: crate::users::Action, target: crate::users::Target },
     Help,
     Version,
 }
@@ -106,6 +130,10 @@ pub struct Parsed {
     pub key: Option<String>,
     /// `--no-archive` was given.
     pub no_archive: bool,
+    /// `--token` (shell).
+    pub token: Option<String>,
+    /// `--user` (shell).
+    pub user: Option<String>,
 }
 
 fn dotted(path: &str) -> Vec<String> {
@@ -128,6 +156,9 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
     let (mut archive, mut backup, mut seq, mut time) = (None, None, None, None);
     let (mut namespaces, mut key): (Vec<String>, Option<String>) = (Vec::new(), None);
     let mut format: Option<String> = None;
+    let (mut server, mut token, mut user, mut expires): (Option<String>, Option<String>, Option<String>, Option<u64>) =
+        (None, None, None, None);
+    let mut admin = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| args.next().cloned().ok_or_else(|| format!("{} needs a value", flag));
@@ -136,6 +167,14 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
             "--no-verify" => no_verify = true,
             "--no-archive" => no_archive = true,
             "--merge" => merge = true,
+            "--admin" => admin = true,
+            "--server" => server = Some(value("--server")?),
+            "--token" => token = Some(value("--token")?),
+            "--user" => user = Some(value("--user")?),
+            "--expires" => {
+                expires =
+                    Some(value("--expires")?.parse().map_err(|_| "--expires needs a number of seconds".to_owned())?)
+            }
             "--help" | "-h" => words.insert(0, "help".to_owned()),
             "--version" | "-V" => words.insert(0, "version".to_owned()),
             "--fsync" => {
@@ -172,6 +211,34 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
         }
         Ok(())
     };
+    if name == "user" || name == "token" {
+        let command = accounts(name, rest, server, token, user, admin, expires)?;
+        if format.is_some() || merge || backup.is_some() || seq.is_some() || time.is_some() || key.is_some() {
+            return Err(format!("{} takes none of --format, --merge, --backup, --seq, --time, --key", name));
+        }
+        if !namespaces.is_empty() {
+            return Err(format!("{} takes no --namespace", name));
+        }
+        return Ok(Parsed {
+            command,
+            json,
+            fsync,
+            keep,
+            archive,
+            no_verify,
+            namespaces,
+            key,
+            no_archive,
+            token: None,
+            user: None,
+        });
+    }
+    if admin || expires.is_some() || server.is_some() {
+        return Err(format!("{} takes none of --admin, --expires, --server", name));
+    }
+    if (token.is_some() || user.is_some()) && name != "shell" {
+        return Err(format!("{} takes no --token or --user", name));
+    }
     let command = match name.as_str() {
         "help" => Command::Help,
         "version" => Command::Version,
@@ -208,7 +275,19 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
             if format.is_some() {
                 return Err("restore takes no --format".into());
             }
-            return Ok(Parsed { command, json, fsync, keep, archive: None, no_verify, namespaces, key, no_archive });
+            return Ok(Parsed {
+                command,
+                json,
+                fsync,
+                keep,
+                archive: None,
+                no_verify,
+                namespaces,
+                key,
+                no_archive,
+                token: None,
+                user: None,
+            });
         }
         "shell" => {
             expect(1)?;
@@ -311,12 +390,91 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
     if key.is_some() && !takes_key {
         return Err(format!("{} takes no --key", name));
     }
-    Ok(Parsed { command, json, fsync, keep, archive, no_verify, namespaces, key, no_archive })
+    Ok(Parsed { command, json, fsync, keep, archive, no_verify, namespaces, key, no_archive, token, user })
+}
+
+/// `user ...` and `token ...`: the action and where it acts.
+fn accounts(
+    name: &str,
+    rest: &[String],
+    server: Option<String>,
+    token: Option<String>,
+    user: Option<String>,
+    admin: bool,
+    expires: Option<u64>,
+) -> Result<Command, String> {
+    use crate::users::{Action, Target, TokenAction, UserAction};
+    let Some((action, rest)) = rest.split_first() else {
+        return Err(format!("{} needs an action (see --help)", name));
+    };
+    let (target, args) = match server {
+        Some(endpoint) => (Target::Server { endpoint, token, user }, rest),
+        None => {
+            if token.is_some() || user.is_some() {
+                return Err("--token and --user go with --server".into());
+            }
+            let (dir, args) =
+                rest.split_first().ok_or_else(|| format!("{} {} needs a directory or --server", name, action))?;
+            (Target::Dir(PathBuf::from(dir)), args)
+        }
+    };
+    let usage = |n: usize, what: &str| -> Result<(), String> {
+        if args.len() == n { Ok(()) } else { Err(format!("usage: iwctl {} {} <dir> {}", name, action, what)) }
+    };
+    let arg = |i: usize| args[i].clone();
+    let role =
+        |word: &str| iwdb::Role::parse(word).ok_or_else(|| format!("a role is read, write or admin, not '{}'", word));
+    if admin && !(name == "user" && action == "create") {
+        return Err("--admin goes with user create".into());
+    }
+    if expires.is_some() && !(name == "token" && action == "create") {
+        return Err("--expires goes with token create".into());
+    }
+    let action = match (name, action.as_str()) {
+        ("user", "create") => {
+            usage(1, "<name> [--admin]").map(|()| Action::User(UserAction::Create { name: arg(0), admin }))?
+        }
+        ("user", "passwd") => usage(1, "<name>").map(|()| Action::User(UserAction::Passwd { name: arg(0) }))?,
+        ("user", "delete") => usage(1, "<name>").map(|()| Action::User(UserAction::Delete { name: arg(0) }))?,
+        ("user", "admin") => {
+            usage(2, "<name> on|off")?;
+            let admin = match args[1].as_str() {
+                "on" => true,
+                "off" => false,
+                other => return Err(format!("user admin takes on or off, not '{}'", other)),
+            };
+            Action::User(UserAction::Admin { name: arg(0), admin })
+        }
+        ("user", "grant") => {
+            usage(3, "<name> <namespace> read|write|admin")?;
+            Action::User(UserAction::Grant { name: arg(0), namespace: arg(1), role: role(&args[2])? })
+        }
+        ("user", "revoke") => {
+            usage(2, "<name> <namespace>")?;
+            Action::User(UserAction::Revoke { name: arg(0), namespace: arg(1) })
+        }
+        ("user", "list") => usage(0, "").map(|()| Action::User(UserAction::List))?,
+        ("token", "create") => {
+            usage(2, "<user> <name> [--expires <seconds>]")?;
+            Action::Token(TokenAction::Create {
+                user: arg(0),
+                name: arg(1),
+                expires: expires.map(std::time::Duration::from_secs),
+            })
+        }
+        ("token", "revoke") => {
+            usage(2, "<user> <name>").map(|()| Action::Token(TokenAction::Revoke { user: arg(0), name: arg(1) }))?
+        }
+        ("token", "list") => usage(1, "<user>").map(|()| Action::Token(TokenAction::List { user: arg(0) }))?,
+        (_, other) => return Err(format!("unknown action '{} {}' (see --help)", name, other)),
+    };
+    Ok(Command::Accounts { action, target })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iwdb::Role;
     use std::assert_matches;
 
     fn parse_words(s: &str) -> Result<Parsed, String> {
@@ -360,6 +518,54 @@ mod tests {
             assert!(parse_words(bad).is_err(), "{}", bad);
         }
         assert_eq!(parse_words("--help").expect("parse").command, Command::Help);
+    }
+
+    #[test]
+    fn user_and_token_commands() {
+        use crate::users::{Action, Target, TokenAction, UserAction};
+        let p = parse_words("user create d ann --admin").expect("parse");
+        assert_eq!(
+            p.command,
+            Command::Accounts {
+                action: Action::User(UserAction::Create { name: "ann".into(), admin: true }),
+                target: Target::Dir("d".into())
+            }
+        );
+        let p = parse_words("user grant --server http://h:1 ann social write --token t").expect("parse");
+        assert_eq!(
+            p.command,
+            Command::Accounts {
+                action: Action::User(UserAction::Grant {
+                    name: "ann".into(),
+                    namespace: "social".into(),
+                    role: Role::Write
+                }),
+                target: Target::Server { endpoint: "http://h:1".into(), token: Some("t".into()), user: None }
+            }
+        );
+        let p = parse_words("token create d ann ci --expires 60").expect("parse");
+        assert_matches!(
+            p.command,
+            Command::Accounts { action: Action::Token(TokenAction::Create { expires: Some(_), .. }), .. }
+        );
+        for bad in [
+            "user",
+            "user create",
+            "user create d",
+            "user frob d",
+            "user grant d ann ns owner",
+            "user admin d ann maybe",
+            "user list d --admin",
+            "user list d --token t",
+            "token create d ann ci x",
+            "user list d --expires 3",
+            "status d --admin",
+            "status d --token t",
+        ] {
+            assert!(parse_words(bad).is_err(), "{}", bad);
+        }
+        let p = parse_words("shell http://h:1 --user ann").expect("parse");
+        assert_eq!(p.user.as_deref(), Some("ann"));
         assert_eq!(parse_words("status d --version").expect("parse").command, Command::Version);
     }
 }

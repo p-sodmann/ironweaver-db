@@ -2,7 +2,7 @@
 # (documentation/api/projections.md). Needs an image with the postgres
 # feature (the default).
 #
-#   IWDB_CONFIG=projection.example.toml docker compose --profile postgres up --build
+#   IWDB_ADMIN_PASSWORD=... IWDB_CONFIG=projection.example.toml docker compose --profile postgres up --build
 #   docker compose exec postgres psql -U postgres \
 #     -c "INSERT INTO order_events (kind, payload) VALUES ('order_placed', '{\"total\": 12.5, \"customer\": \"ann\"}')"
 #   docker compose exec iwdb iwctl status /var/lib/iwdb   # shows the mark (stop the server first: one process per data directory)

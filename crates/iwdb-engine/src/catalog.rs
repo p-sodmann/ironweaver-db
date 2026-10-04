@@ -144,13 +144,33 @@ impl From<Label> for String {
 /// A namespace name: 1 to [`MAX_NAMESPACE_LEN`] ASCII letters, digits, `_`
 /// or `-`, starting with a letter or digit. Names end up in file and
 /// directory names, hence the small alphabet.
+///
+/// One more name is valid: [`NamespaceName::SYSTEM`], the store's own
+/// namespace of users and grants (ADR 0043). It starts with `_`, so no
+/// name a user picks can be it; the store refuses to create, drop or
+/// serve it through its public API ([`is_reserved`](Self::is_reserved)).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct NamespaceName(String);
 
 impl NamespaceName {
+    /// The reserved namespace that holds the store's users, grants and API
+    /// tokens (ADR 0043).
+    pub const SYSTEM: &'static str = "_system";
+
     pub fn new(name: impl Into<String>) -> Result<Self, CatalogError> {
         Self::try_from(name.into())
+    }
+
+    /// The reserved [`SYSTEM`](Self::SYSTEM) namespace's name.
+    pub fn system() -> Self {
+        NamespaceName(Self::SYSTEM.to_owned())
+    }
+
+    /// Whether this is the reserved [`SYSTEM`](Self::SYSTEM) namespace,
+    /// which only the store itself reads and writes.
+    pub fn is_reserved(&self) -> bool {
+        self.0 == Self::SYSTEM
     }
 
     pub fn as_str(&self) -> &str {
@@ -162,7 +182,9 @@ impl TryFrom<String> for NamespaceName {
     type Error = CatalogError;
 
     fn try_from(name: String) -> Result<Self, CatalogError> {
-        let reason = if name.is_empty() {
+        let reason = if name == Self::SYSTEM {
+            None
+        } else if name.is_empty() {
             Some("empty")
         } else if name.len() > MAX_NAMESPACE_LEN {
             Some("longer than 64 bytes")
@@ -427,9 +449,13 @@ mod tests {
         for ok in ["default", "a", "A-1_b", "0x", &"n".repeat(64)] {
             assert!(NamespaceName::new(ok).is_ok(), "{}", ok);
         }
-        for bad in ["", "-a", "_a", "a b", "a/b", "..", "ä", &"n".repeat(65)] {
+        for bad in ["", "-a", "_a", "_System", "_system_", "a b", "a/b", "..", "ä", &"n".repeat(65)] {
             assert_matches!(NamespaceName::new(bad), Err(CatalogError::InvalidNamespaceName { .. }), "{}", bad);
         }
+        // The one name that starts with '_': the store's own
+        let system = NamespaceName::new("_system").expect("the reserved name");
+        assert!(system.is_reserved() && system == NamespaceName::system());
+        assert!(!NamespaceName::new("system").expect("name").is_reserved());
     }
 
     #[test]

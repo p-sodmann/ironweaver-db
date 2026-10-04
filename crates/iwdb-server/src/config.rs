@@ -1,4 +1,6 @@
-//! The `iwdb-server` config file (TOML). Only `data_dir` is required:
+//! The `iwdb-server` configuration: a TOML file, environment overrides of
+//! its settings (`IWDB_*`, [`KEYS`]), or both (ADR 0039). Only `data_dir`
+//! is required, in the file or as `IWDB_DATA_DIR`:
 //!
 //! ```toml
 //! data_dir = "/var/lib/iwdb"        # relative paths are relative to this file
@@ -17,6 +19,22 @@
 //! max_message_bytes = 67108864      # largest request or answer message (REST: body)
 //! workers = 0                       # threads running requests (0: one per CPU)
 //! queue = 1024                      # requests that may wait for a worker
+//! unready_delay_ms = 0              # on shutdown: serve unready this long before draining
+//! plaintext_public = false          # allow a non-loopback listen address without TLS (until step 15b)
+//!
+//! [auth]                            # step 15a
+//! enabled = true                    # every call but login and health needs a token
+//! session_lifetime_secs = 43200     # how long a login's session lasts
+//! login_max_failures = 5            # failed logins per user and per address ...
+//! login_window_secs = 60            # ... within this window, then refused until it has passed
+//! login_table_size = 10000          # users and addresses the slowdown remembers
+//!
+//! [log]
+//! format = "auto"                   # auto (json unless on a terminal) | json | text
+//! level = "info"                    # a filter: "warn,iwdb_storage=debug"
+//!
+//! [console]                         # the operator console at /console/ (feature `console`)
+//! enabled = false
 //!
 //! [limits.default]                  # what a read gets if it asks for nothing
 //! max_results = 1000
@@ -58,24 +76,46 @@
 //! ]
 //! ```
 //!
-//! Environment overrides come with step 16. TLS and authentication with
-//! step 15: until then the server listens on plain TCP, so bind it to
-//! localhost or a private network.
+//! **Environment overrides.** Every setting above but the projections can
+//! be set as `IWDB_<KEY>`: the key's path in upper case, `.` as `_`
+//! (`IWDB_LISTEN`, `IWDB_STORE_FSYNC`, `IWDB_LIMITS_MAX_TIMEOUT_MS`). A
+//! variable wins over the file. A variable that starts like a section
+//! (`IWDB_STORE_`, `IWDB_SERVER_`, `IWDB_LIMITS_`, `IWDB_LOG_`,
+//! `IWDB_CONSOLE_`, `IWDB_AUTH_`) but names no setting is an error, so a
+//! typo isn't ignored. With `IWDB_DATA_DIR` set, the file is optional.
+//!
+//! **Bootstrap** (ADR 0047): `IWDB_AUTH_BOOTSTRAP_PASSWORD` (and
+//! optionally `IWDB_AUTH_BOOTSTRAP_USER`, default `admin`) creates the first
+//! admin on a start that finds no users; with users it is ignored with a
+//! warning. Variables only (a password doesn't belong in a file), never
+//! printed by `--check-config`.
+//!
+//! **Validation.** [`Config::from_sources`] reports every problem at once,
+//! each with the variable it came from; a TOML syntax or type error in the
+//! file stops the file's checks at the first. All of this happens before
+//! the store opens.
+//!
+//! TLS comes with step 15b: until then the server listens on plain TCP, so
+//! passwords and tokens cross the network in clear. A non-loopback listen
+//! address needs `[server] plaintext_public = true`.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use iwdb::auth::AuthSettings;
 #[cfg(feature = "postgres")]
 use iwdb::projection::OnError;
 #[cfg(feature = "postgres")]
 use iwdb::projection::postgres::{PostgresConfig, PostgresSource};
 use iwdb::projection::{Projection, ProjectionHandle, ProjectionOptions, Rules};
 use iwdb::{CheckpointOptions, FsyncPolicy, MarkName, QueryConfig, Store, StoreOptions, WalRetention};
-use iwdb_query::{Bounds, LimitConfig};
-use serde::Deserialize;
+use iwdb_query::{Bounds, LimitConfig, Secret};
+use serde::{Deserialize, Serialize};
 
 use crate::DEFAULT_MAX_MESSAGE_BYTES;
+use crate::logging::LogFormat;
 
 /// The default listen address.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7600";
@@ -85,15 +125,18 @@ pub const DEFAULT_LISTEN: &str = "127.0.0.1:7600";
 pub enum ConfigError {
     #[error("can't read the config file {}: {source}", path.display())]
     Read { path: PathBuf, source: std::io::Error },
-    #[error("invalid config file {}: {message}", path.display())]
-    Invalid { path: PathBuf, message: String },
+    /// Every problem found, each saying where (the file, a variable).
+    #[error("invalid configuration{}:\n  - {}", path.as_ref().map(|p| format!(" ({})", p.display())).unwrap_or_default(), problems.join("\n  - "))]
+    Invalid { path: Option<PathBuf>, problems: Vec<String> },
 }
 
 /// The server's configuration (see the module docs for the file).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// The store's data directory, created if missing.
+    /// The store's data directory, created if missing. Required (empty
+    /// means missing).
+    #[serde(default)]
     pub data_dir: PathBuf,
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
@@ -103,10 +146,227 @@ pub struct Config {
     pub server: ServerSection,
     #[serde(default)]
     pub limits: LimitsSection,
+    #[serde(default)]
+    pub log: LogSection,
+    #[serde(default)]
+    pub console: ConsoleSection,
+    #[serde(default)]
+    pub auth: AuthSection,
     /// `[[projection]]` sections (ADR 0032).
     #[serde(default, rename = "projection")]
     pub projections: Vec<ProjectionSection>,
+    /// Where each setting set by the file or the environment came from.
+    #[serde(skip)]
+    sources: BTreeMap<&'static str, Source>,
+    /// The first admin to create on a start without users
+    /// (`IWDB_AUTH_BOOTSTRAP_USER` and `IWDB_AUTH_BOOTSTRAP_PASSWORD`).
+    #[serde(skip)]
+    pub bootstrap: Option<(String, Secret)>,
 }
+
+/// `[auth]`: authentication (step 15a, ADRs 0044 and 0047).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AuthSection {
+    /// Every call but login and health needs a token. Off, every caller is
+    /// a server-wide admin.
+    pub enabled: bool,
+    pub session_lifetime_secs: u64,
+    pub login_max_failures: u32,
+    pub login_window_secs: u64,
+    pub login_table_size: usize,
+}
+
+impl Default for AuthSection {
+    fn default() -> Self {
+        let d = AuthSettings::default();
+        AuthSection {
+            enabled: true,
+            session_lifetime_secs: d.session_lifetime.as_secs(),
+            login_max_failures: d.max_failures,
+            login_window_secs: d.failure_window.as_secs(),
+            login_table_size: d.table_size,
+        }
+    }
+}
+
+/// The bootstrap variables (ADR 0047): read, but not settings.
+pub const BOOTSTRAP_USER_VAR: &str = "IWDB_AUTH_BOOTSTRAP_USER";
+pub const BOOTSTRAP_PASSWORD_VAR: &str = "IWDB_AUTH_BOOTSTRAP_PASSWORD";
+
+/// Where a setting's value comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Default,
+    File,
+    /// An environment variable.
+    Env(&'static str),
+}
+
+/// `[log]`: structured logs (ADR 0042).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LogSection {
+    pub format: LogFormat,
+    /// A filter in `tracing-subscriber`'s `EnvFilter` syntax.
+    pub level: String,
+}
+
+impl Default for LogSection {
+    fn default() -> Self {
+        LogSection { format: LogFormat::Auto, level: "info".into() }
+    }
+}
+
+/// `[console]`: the operator console's pages at `/console/` (feature
+/// `console`, ADR 0041).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ConsoleSection {
+    pub enabled: bool,
+    /// Replaced by `[server] plaintext_public` in step 15a; refused with a
+    /// message that says so.
+    #[serde(skip_serializing)]
+    pub public: Option<bool>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            data_dir: PathBuf::new(),
+            listen: default_listen(),
+            store: StoreSection::default(),
+            server: ServerSection::default(),
+            limits: LimitsSection::default(),
+            log: LogSection::default(),
+            console: ConsoleSection::default(),
+            auth: AuthSection::default(),
+            projections: Vec::new(),
+            sources: BTreeMap::new(),
+            bootstrap: None,
+        }
+    }
+}
+
+/// A setting that the environment can override ([`KEYS`]).
+pub struct Key {
+    /// Its path in the file (`store.fsync`).
+    pub key: &'static str,
+    /// Its variable (`IWDB_STORE_FSYNC`).
+    pub var: &'static str,
+    set: fn(&mut Config, &str) -> Result<(), String>,
+    get: fn(&Config) -> Option<toml::Value>,
+}
+
+/// A setting's type, read from a variable's text.
+trait FromEnv: Sized {
+    fn from_env(text: &str) -> Result<Self, String>;
+}
+
+macro_rules! from_str_env {
+    ($($t:ty: $what:literal),*) => {$(
+        impl FromEnv for $t {
+            fn from_env(text: &str) -> Result<Self, String> {
+                text.trim().parse().map_err(|_| format!("expected {}, got {:?}", $what, text))
+            }
+        }
+    )*};
+}
+from_str_env!(u64: "a whole number", u32: "a whole number", usize: "a whole number", SocketAddr: "an address like 127.0.0.1:7600");
+
+impl FromEnv for bool {
+    fn from_env(text: &str) -> Result<Self, String> {
+        match text.trim() {
+            "true" | "1" => Ok(true),
+            "false" | "0" => Ok(false),
+            _ => Err(format!("expected true or false, got {:?}", text)),
+        }
+    }
+}
+
+impl FromEnv for PathBuf {
+    fn from_env(text: &str) -> Result<Self, String> {
+        if text.is_empty() { Err("expected a path, got nothing".into()) } else { Ok(PathBuf::from(text)) }
+    }
+}
+
+impl FromEnv for String {
+    fn from_env(text: &str) -> Result<Self, String> {
+        Ok(text.to_owned())
+    }
+}
+
+impl<T: FromEnv> FromEnv for Option<T> {
+    fn from_env(text: &str) -> Result<Self, String> {
+        T::from_env(text).map(Some)
+    }
+}
+
+/// The enums: their names, as in the file.
+macro_rules! serde_env {
+    ($($t:ty),*) => {$(
+        impl FromEnv for $t {
+            fn from_env(text: &str) -> Result<Self, String> {
+                use serde::de::IntoDeserializer;
+                let d: serde::de::value::StrDeserializer<'_, serde::de::value::Error> = text.trim().into_deserializer();
+                <$t>::deserialize(d).map_err(|e| e.to_string())
+            }
+        }
+    )*};
+}
+serde_env!(Fsync, LogFormat);
+
+macro_rules! keys {
+    ($($key:literal $var:literal => $($field:ident).+;)*) => {
+        /// Every setting of the file but the projections, with its variable:
+        /// the one list the docs and `--check-config` are checked against.
+        pub const KEYS: &[Key] = &[$(
+            Key {
+                key: $key,
+                var: $var,
+                set: |c, text| { c.$($field).+ = FromEnv::from_env(text)?; Ok(()) },
+                get: |c| toml::Value::try_from(&c.$($field).+).ok(),
+            },
+        )*];
+    };
+}
+
+keys! {
+    "data_dir" "IWDB_DATA_DIR" => data_dir;
+    "listen" "IWDB_LISTEN" => listen;
+    "store.fsync" "IWDB_STORE_FSYNC" => store.fsync;
+    "store.group_max_delay_ms" "IWDB_STORE_GROUP_MAX_DELAY_MS" => store.group_max_delay_ms;
+    "store.group_max_batch" "IWDB_STORE_GROUP_MAX_BATCH" => store.group_max_batch;
+    "store.checkpoint_on_shutdown" "IWDB_STORE_CHECKPOINT_ON_SHUTDOWN" => store.checkpoint_on_shutdown;
+    "store.retain_records" "IWDB_STORE_RETAIN_RECORDS" => store.retain_records;
+    "store.retain_age_secs" "IWDB_STORE_RETAIN_AGE_SECS" => store.retain_age_secs;
+    "server.drain_timeout_secs" "IWDB_SERVER_DRAIN_TIMEOUT_SECS" => server.drain_timeout_secs;
+    "server.max_message_bytes" "IWDB_SERVER_MAX_MESSAGE_BYTES" => server.max_message_bytes;
+    "server.workers" "IWDB_SERVER_WORKERS" => server.workers;
+    "server.queue" "IWDB_SERVER_QUEUE" => server.queue;
+    "server.unready_delay_ms" "IWDB_SERVER_UNREADY_DELAY_MS" => server.unready_delay_ms;
+    "server.plaintext_public" "IWDB_SERVER_PLAINTEXT_PUBLIC" => server.plaintext_public;
+    "limits.default.max_results" "IWDB_LIMITS_DEFAULT_MAX_RESULTS" => limits.default.max_results;
+    "limits.default.max_visited" "IWDB_LIMITS_DEFAULT_MAX_VISITED" => limits.default.max_visited;
+    "limits.default.max_edges" "IWDB_LIMITS_DEFAULT_MAX_EDGES" => limits.default.max_edges;
+    "limits.default.timeout_ms" "IWDB_LIMITS_DEFAULT_TIMEOUT_MS" => limits.default.timeout_ms;
+    "limits.max.max_results" "IWDB_LIMITS_MAX_MAX_RESULTS" => limits.max.max_results;
+    "limits.max.max_visited" "IWDB_LIMITS_MAX_MAX_VISITED" => limits.max.max_visited;
+    "limits.max.max_edges" "IWDB_LIMITS_MAX_MAX_EDGES" => limits.max.max_edges;
+    "limits.max.timeout_ms" "IWDB_LIMITS_MAX_TIMEOUT_MS" => limits.max.timeout_ms;
+    "log.format" "IWDB_LOG_FORMAT" => log.format;
+    "log.level" "IWDB_LOG_LEVEL" => log.level;
+    "console.enabled" "IWDB_CONSOLE_ENABLED" => console.enabled;
+    "auth.enabled" "IWDB_AUTH_ENABLED" => auth.enabled;
+    "auth.session_lifetime_secs" "IWDB_AUTH_SESSION_LIFETIME_SECS" => auth.session_lifetime_secs;
+    "auth.login_max_failures" "IWDB_AUTH_LOGIN_MAX_FAILURES" => auth.login_max_failures;
+    "auth.login_window_secs" "IWDB_AUTH_LOGIN_WINDOW_SECS" => auth.login_window_secs;
+    "auth.login_table_size" "IWDB_AUTH_LOGIN_TABLE_SIZE" => auth.login_table_size;
+}
+
+/// Variables with these prefixes must name a setting.
+const SECTION_PREFIXES: &[&str] =
+    &["IWDB_STORE_", "IWDB_SERVER_", "IWDB_LIMITS_", "IWDB_LOG_", "IWDB_CONSOLE_", "IWDB_AUTH_"];
 
 /// A projection the server runs (ADR 0032).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -248,7 +508,7 @@ impl Default for StoreSection {
 }
 
 /// The WAL's fsync policy (`documentation/guarantees.md`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Fsync {
     Always,
@@ -264,11 +524,25 @@ pub struct ServerSection {
     /// 0: the available parallelism (at least 2).
     pub workers: usize,
     pub queue: usize,
+    /// On shutdown, serve this long with readiness off before draining
+    /// (ADR 0040).
+    pub unready_delay_ms: u64,
+    /// Allow a non-loopback listen address although the server has no TLS
+    /// yet (step 15b): passwords, tokens and data cross the network in
+    /// clear (ADR 0047).
+    pub plaintext_public: bool,
 }
 
 impl Default for ServerSection {
     fn default() -> Self {
-        ServerSection { drain_timeout_secs: 30, max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES, workers: 0, queue: 1024 }
+        ServerSection {
+            drain_timeout_secs: 30,
+            max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
+            workers: 0,
+            queue: 1024,
+            unready_delay_ms: 0,
+            plaintext_public: false,
+        }
     }
 }
 
@@ -301,54 +575,260 @@ impl LimitValues {
     }
 }
 
+/// The value at the dotted `key` of a parsed file.
+fn lookup<'a>(table: &'a toml::Table, key: &str) -> Option<&'a toml::Value> {
+    let mut parts = key.split('.');
+    let mut value = table.get(parts.next()?)?;
+    for part in parts {
+        value = value.as_table()?.get(part)?;
+    }
+    Some(value)
+}
+
 fn default_listen() -> SocketAddr {
     // A constant that parses
     DEFAULT_LISTEN.parse().unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 7600)))
 }
 
 impl Config {
-    /// Read and check the file at `path`; a relative `data_dir` is resolved
-    /// against the file's directory.
+    /// Read and check the file at `path` alone (no environment); a relative
+    /// `data_dir` is resolved against the file's directory.
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read { path: path.into(), source })?;
-        let mut config = Config::parse(&text).map_err(|message| ConfigError::Invalid { path: path.into(), message })?;
-        if config.data_dir.is_relative()
-            && let Some(dir) = path.parent()
+        Config::from_sources(Some(path), std::iter::empty())
+    }
+
+    /// The configuration from the file at `path` (if any) and the
+    /// variables of `env` (pass `std::env::vars()`), checked: every problem
+    /// at once. A relative `data_dir` from the file is resolved against the
+    /// file's directory; one from `IWDB_DATA_DIR` against the working
+    /// directory.
+    pub fn from_sources(
+        path: Option<&Path>,
+        env: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Config, ConfigError> {
+        let text = match path {
+            Some(path) => {
+                Some(std::fs::read_to_string(path).map_err(|source| ConfigError::Read { path: path.into(), source })?)
+            }
+            None => None,
+        };
+        let env: Vec<(String, String)> = env.into_iter().collect();
+        let mut config = Config::build(text.as_deref(), &env)
+            .map_err(|problems| ConfigError::Invalid { path: path.map(Path::to_path_buf), problems })?;
+        if config.source("data_dir") == Source::File
+            && config.data_dir.is_relative()
+            && let Some(dir) = path.and_then(Path::parent)
         {
             config.data_dir = dir.join(&config.data_dir);
         }
         Ok(config)
     }
 
-    /// Parse and check a config file's text.
+    /// Parse and check a config file's text (no environment).
     pub fn parse(text: &str) -> Result<Config, String> {
-        let config: Config = toml::from_str(text).map_err(|e| e.to_string())?;
-        config.limit_config().check().map_err(|e| format!("[limits]: {}", e))?;
-        if config.store.fsync == Fsync::Group && config.store.group_max_batch == 0 {
-            return Err("[store] group_max_batch must be at least 1".into());
+        Config::build(Some(text), &[]).map_err(|problems| problems.join("\n"))
+    }
+
+    fn build(text: Option<&str>, env: &[(String, String)]) -> Result<Config, Vec<String>> {
+        let mut problems = Vec::new();
+        let mut config = Config::default();
+        // A file that doesn't parse leaves nothing to check beyond the
+        // variables
+        let mut parsed = true;
+        if let Some(text) = text {
+            match toml::from_str::<Config>(text) {
+                Ok(c) => config = c,
+                Err(e) => {
+                    parsed = false;
+                    problems.push(e.to_string().trim_end().to_owned());
+                }
+            }
+            if let Ok(table) = toml::from_str::<toml::Table>(text) {
+                for k in KEYS {
+                    if lookup(&table, k.key).is_some() {
+                        config.sources.insert(k.key, Source::File);
+                    }
+                }
+            }
         }
-        if config.server.max_message_bytes < 1024 {
-            return Err("[server] max_message_bytes must be at least 1024".into());
+        let mut vars: Vec<&(String, String)> = env.iter().filter(|(var, _)| var.starts_with("IWDB_")).collect();
+        vars.sort();
+        for (var, value) in vars {
+            if var == BOOTSTRAP_USER_VAR || var == BOOTSTRAP_PASSWORD_VAR {
+                continue;
+            }
+            if var == "IWDB_CONSOLE_PUBLIC" {
+                problems.push(format!("{}: replaced by IWDB_SERVER_PLAINTEXT_PUBLIC (step 15a)", var));
+                continue;
+            }
+            match KEYS.iter().find(|k| k.var == var) {
+                Some(k) => match (k.set)(&mut config, value) {
+                    Ok(()) => {
+                        config.sources.insert(k.key, Source::Env(k.var));
+                    }
+                    Err(e) => problems.push(format!("{}: {}", var, e)),
+                },
+                None if SECTION_PREFIXES.iter().any(|p| var.starts_with(p)) => {
+                    problems.push(format!("{}: no such setting (the settings: documentation/api/config.md)", var))
+                }
+                None => {}
+            }
+        }
+        // An empty variable is an unset one (compose's `${VAR:-}`)
+        let get = |name: &str| env.iter().find(|(var, v)| var == name && !v.is_empty()).map(|(_, v)| v.clone());
+        match (get(BOOTSTRAP_USER_VAR), get(BOOTSTRAP_PASSWORD_VAR)) {
+            (user, Some(password)) => {
+                config.bootstrap = Some((user.unwrap_or_else(|| "admin".into()), Secret::new(password)));
+            }
+            (Some(_), None) => problems.push(format!("{}: needs {} too", BOOTSTRAP_USER_VAR, BOOTSTRAP_PASSWORD_VAR)),
+            (None, None) => {}
+        }
+        if parsed {
+            problems.extend(config.check());
+        }
+        if problems.is_empty() { Ok(config) } else { Err(problems) }
+    }
+
+    /// Where `key`'s value came from ([`Key::key`]).
+    pub fn source(&self, key: &str) -> Source {
+        self.sources.get(key).copied().unwrap_or(Source::Default)
+    }
+
+    /// `key` for a message: `[section] name`, and the variable it came from.
+    fn at(&self, key: &str) -> String {
+        let named = match key.rsplit_once('.') {
+            Some((section, name)) => format!("[{}] {}", section, name),
+            None => key.to_owned(),
+        };
+        match self.source(key) {
+            Source::Env(var) => format!("{} (from {})", named, var),
+            _ => named,
+        }
+    }
+
+    /// The checks beyond the types: every problem.
+    fn check(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if self.data_dir.as_os_str().is_empty() {
+            problems.push("data_dir is required: set it in the config file or as IWDB_DATA_DIR".to_owned());
+        }
+        if let Err(e) = self.limit_config().check() {
+            let vars: Vec<&str> = KEYS
+                .iter()
+                .filter(|k| k.key.starts_with("limits."))
+                .filter_map(|k| match self.source(k.key) {
+                    Source::Env(var) => Some(var),
+                    _ => None,
+                })
+                .collect();
+            let from = if vars.is_empty() { String::new() } else { format!(" (from {})", vars.join(", ")) };
+            problems.push(format!("[limits]: {}{}", e, from));
+        }
+        if self.store.fsync == Fsync::Group && self.store.group_max_batch == 0 {
+            problems.push(format!("{} must be at least 1", self.at("store.group_max_batch")));
+        }
+        if self.server.max_message_bytes < 1024 {
+            problems.push(format!("{} must be at least 1024", self.at("server.max_message_bytes")));
+        }
+        if let Err(e) = crate::logging::check_level(&self.log.level) {
+            problems.push(format!("{}: {}", self.at("log.level"), e));
+        }
+        if self.console.enabled && cfg!(not(feature = "console")) {
+            problems.push(format!(
+                "{}: this iwdb-server was built without the console feature",
+                self.at("console.enabled")
+            ));
+        }
+        if self.console.public.is_some() {
+            problems.push("[console] public: replaced by [server] plaintext_public (step 15a)".to_owned());
+        }
+        if !self.listen.ip().is_loopback() && !self.server.plaintext_public {
+            let exposed = if self.auth.enabled {
+                "passwords, tokens and data would cross the network in clear"
+            } else {
+                "authentication is off, so anyone who reaches the port could read and change everything, in clear"
+            };
+            problems.push(format!(
+                "{} is {}, not a loopback address, and the server has no TLS until step 15b: {}; set \
+                 [server] plaintext_public = true (IWDB_SERVER_PLAINTEXT_PUBLIC) to listen there anyway",
+                self.at("listen"),
+                self.listen,
+                exposed
+            ));
+        }
+        if self.auth.session_lifetime_secs == 0 {
+            problems.push(format!("{} must be at least 1", self.at("auth.session_lifetime_secs")));
+        }
+        if self.auth.login_max_failures == 0 {
+            problems.push(format!("{} must be at least 1", self.at("auth.login_max_failures")));
+        }
+        if self.auth.login_table_size == 0 {
+            problems.push(format!("{} must be at least 1", self.at("auth.login_table_size")));
+        }
+        if let Some((user, password)) = &self.bootstrap {
+            let n = password.expose().len();
+            if !(iwdb::auth::MIN_PASSWORD_BYTES..=iwdb::auth::MAX_PASSWORD_BYTES).contains(&n) {
+                problems.push(format!(
+                    "{}: a password must be {} to {} bytes long",
+                    BOOTSTRAP_PASSWORD_VAR,
+                    iwdb::auth::MIN_PASSWORD_BYTES,
+                    iwdb::auth::MAX_PASSWORD_BYTES
+                ));
+            }
+            if iwdb::NamespaceName::new(user.as_str()).map_or(true, |n| n.is_reserved()) {
+                problems.push(format!("{}: invalid user name {:?}", BOOTSTRAP_USER_VAR, user));
+            }
         }
         let mut names = std::collections::BTreeSet::new();
-        for p in &config.projections {
+        for p in &self.projections {
             let at = format!("[[projection]] {:?}", p.name);
-            MarkName::new(p.name.as_str()).map_err(|e| format!("{}: {}", at, e))?;
+            if let Err(e) = MarkName::new(p.name.as_str()) {
+                problems.push(format!("{}: {}", at, e));
+                continue;
+            }
             if !names.insert((p.namespace.as_str(), p.name.as_str())) {
-                return Err(format!("{}: the name is used twice in namespace {:?}", at, p.namespace));
+                problems.push(format!("{}: the name is used twice in namespace {:?}", at, p.namespace));
             }
             if p.batch == 0 {
-                return Err(format!("{}: batch must be at least 1", at));
+                problems.push(format!("{}: batch must be at least 1", at));
             }
             let SourceSection::Postgres { url, url_env, .. } = &p.source;
             if url.is_some() == url_env.is_some() {
-                return Err(format!("{}: the source needs one of url and url_env", at));
-            }
-            if cfg!(not(feature = "postgres")) {
-                return Err(no_postgres(&at));
+                problems.push(format!("{}: the source needs one of url and url_env", at));
+            } else if cfg!(not(feature = "postgres")) {
+                problems.push(no_postgres(&at));
             }
         }
-        Ok(config)
+        problems
+    }
+
+    /// The effective configuration as TOML, each setting with where it
+    /// came from (`iwdb-server --check-config`). It parses back to the same
+    /// settings; projections are only counted.
+    pub fn describe(&self) -> String {
+        let mut out = String::from("# iwdb-server: the effective configuration\n");
+        let mut section = "";
+        for k in KEYS {
+            let (head, name) = k.key.rsplit_once('.').unwrap_or(("", k.key));
+            if head != section {
+                out.push_str(&format!("\n[{}]\n", head));
+                section = head;
+            }
+            let from = match self.source(k.key) {
+                Source::Default => "default".to_owned(),
+                Source::File => "file".to_owned(),
+                Source::Env(var) => var.to_owned(),
+            };
+            let line = match (k.get)(self) {
+                Some(value) => format!("{} = {}", name, value),
+                None => format!("# {} = (built in)", name),
+            };
+            out.push_str(&format!("{:<44} # {}\n", line, from));
+        }
+        if !self.projections.is_empty() {
+            out.push_str(&format!("\n# {} [[projection]] section(s) from the file\n", self.projections.len()));
+        }
+        out
     }
 
     /// The store's options: the defaults, with the fsync policy, checkpoint
@@ -379,6 +859,17 @@ impl Config {
         LimitConfig { default_limits, max_limits, default_timeout, max_timeout }
     }
 
+    /// How the embedded database logs in (step 15a).
+    pub fn auth_settings(&self) -> AuthSettings {
+        AuthSettings {
+            session_lifetime: Duration::from_secs(self.auth.session_lifetime_secs),
+            max_failures: self.auth.login_max_failures,
+            failure_window: Duration::from_secs(self.auth.login_window_secs),
+            table_size: self.auth.login_table_size,
+            ..AuthSettings::default()
+        }
+    }
+
     /// How the embedded database runs requests.
     pub fn query_config(&self) -> QueryConfig {
         let defaults = QueryConfig::default();
@@ -391,6 +882,10 @@ impl Config {
 
     pub fn drain_timeout(&self) -> Duration {
         Duration::from_secs(self.server.drain_timeout_secs)
+    }
+
+    pub fn unready_delay(&self) -> Duration {
+        Duration::from_millis(self.server.unready_delay_ms)
     }
 
     /// The projections of the file, ready to run: a source each (its URL
@@ -544,6 +1039,201 @@ mod tests {
         assert!(e.contains("url_env"), "{}", e);
         // A config without projections is fine
         assert!(Config::parse("data_dir = \"d\"").unwrap().projections().unwrap().is_empty());
+    }
+
+    fn env(vars: &[(&str, &str)]) -> Vec<(String, String)> {
+        vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn every_setting_has_a_variable_that_overrides_the_file() {
+        for k in KEYS {
+            assert_eq!(k.var, format!("IWDB_{}", k.key.replace('.', "_").to_uppercase()), "{}", k.key);
+        }
+        let file = "data_dir = \"/from/file\"\n[store]\nfsync = \"always\"\n[server]\nqueue = 5\n";
+        let config = Config::build(
+            Some(file),
+            &env(&[
+                ("IWDB_STORE_FSYNC", "group"),
+                ("IWDB_LISTEN", "0.0.0.0:9000"),
+                ("IWDB_LIMITS_MAX_TIMEOUT_MS", "60000"),
+                ("IWDB_LOG_FORMAT", "text"),
+                ("IWDB_SERVER_PLAINTEXT_PUBLIC", "true"),
+                ("IWDB_AUTH_ENABLED", "false"),
+                // Not settings: ignored (the test suites' and serve.py's)
+                ("IWDB_SERVER", "target/debug/iwdb-server"),
+                ("IWDB_URL", "http://x"),
+                ("PATH", "/bin"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(config.store.fsync, Fsync::Group);
+        assert_eq!(config.listen.to_string(), "0.0.0.0:9000");
+        assert_eq!(config.limits.max.timeout_ms, Some(60000));
+        assert_eq!(config.log.format, LogFormat::Text);
+        assert!(config.server.plaintext_public && !config.auth.enabled);
+        assert_eq!(config.server.queue, 5);
+        assert_eq!(config.source("store.fsync"), Source::Env("IWDB_STORE_FSYNC"));
+        assert_eq!(config.source("server.queue"), Source::File);
+        assert_eq!(config.source("server.workers"), Source::Default);
+        // Without a file
+        let config = Config::build(None, &env(&[("IWDB_DATA_DIR", "rel/dir")])).unwrap();
+        assert_eq!(config.data_dir, PathBuf::from("rel/dir"));
+    }
+
+    #[test]
+    fn every_problem_is_reported_at_once() {
+        let problems = Config::build(
+            Some("[store]\nfsync = \"group\"\ngroup_max_batch = 0\n[log]\nlevel = \"loud=?=\"\n"),
+            &env(&[
+                ("IWDB_STORE_FSYNC", "sometimes"),
+                ("IWDB_SERVER_WORKRES", "4"),
+                ("IWDB_CONSOLE_ENABLED", "yes"),
+                ("IWDB_SERVER_MAX_MESSAGE_BYTES", "12"),
+            ]),
+        )
+        .unwrap_err();
+        let all = problems.join("\n");
+        for expected in [
+            "IWDB_STORE_FSYNC: unknown variant `sometimes`",
+            "IWDB_SERVER_WORKRES: no such setting",
+            "IWDB_CONSOLE_ENABLED: expected true or false",
+            "data_dir is required",
+            "[store] group_max_batch must be at least 1",
+            "[server] max_message_bytes (from IWDB_SERVER_MAX_MESSAGE_BYTES) must be at least 1024",
+            "[log] level",
+        ] {
+            assert!(all.contains(expected), "{:?} in\n{}", expected, all);
+        }
+        assert_eq!(problems.len(), 7, "{}", all);
+        // A file that doesn't parse: its error (with the line), and the
+        // variables' problems
+        let problems = Config::build(Some("data_dir = 3\n"), &env(&[("IWDB_LISTEN", "x")])).unwrap_err();
+        assert_eq!(problems.len(), 2, "{:?}", problems);
+        assert!(problems.iter().any(|p| p.contains("line 1")), "{:?}", problems);
+    }
+
+    #[test]
+    fn the_console_needs_its_feature() {
+        let console = Config::parse("data_dir = \"d\"\n[console]\nenabled = true\n");
+        if cfg!(feature = "console") {
+            assert!(console.is_ok());
+        } else {
+            assert!(console.unwrap_err().contains("console feature"));
+        }
+        // `public` was replaced by `[server] plaintext_public`
+        let e = Config::parse("data_dir = \"d\"\n[console]\npublic = true\n").unwrap_err();
+        assert!(e.contains("replaced by [server] plaintext_public"), "{}", e);
+        let e = Config::build(None, &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_CONSOLE_PUBLIC", "true")])).unwrap_err();
+        assert!(e.join("").contains("IWDB_SERVER_PLAINTEXT_PUBLIC"), "{:?}", e);
+    }
+
+    /// Until TLS (step 15b), a non-loopback address needs an explicit flag,
+    /// with authentication on or off (ADR 0047).
+    #[test]
+    fn a_non_loopback_address_needs_the_plaintext_flag() {
+        for auth in ["true", "false"] {
+            let base = format!("data_dir = \"d\"\nlisten = \"0.0.0.0:7600\"\n[auth]\nenabled = {}\n", auth);
+            let e = Config::parse(&base).unwrap_err();
+            assert!(e.contains("plaintext_public = true"), "{}", e);
+            let why = if auth == "true" { "passwords, tokens and data" } else { "authentication is off" };
+            assert!(e.contains(why), "{}", e);
+            assert!(Config::parse(&format!("{}[server]\nplaintext_public = true\n", base)).is_ok());
+        }
+        let ok = "data_dir = \"d\"\nlisten = \"0.0.0.0:7600\"\n[server]\nplaintext_public = true\n";
+        assert!(Config::parse(ok).is_ok());
+        assert!(Config::parse("data_dir = \"d\"\nlisten = \"[::1]:7600\"\n").is_ok());
+    }
+
+    #[test]
+    fn auth_is_on_by_default_and_checked() {
+        let config = Config::parse("data_dir = \"d\"").unwrap();
+        assert!(config.auth.enabled);
+        assert_eq!(config.auth_settings().session_lifetime, Duration::from_secs(43200));
+        for (text, why) in [
+            ("[auth]\nsession_lifetime_secs = 0", "session_lifetime_secs"),
+            ("[auth]\nlogin_max_failures = 0", "login_max_failures"),
+            ("[auth]\nlogin_table_size = 0", "login_table_size"),
+            ("[auth]\ncolour = 1", "colour"),
+        ] {
+            let e = Config::parse(&format!("data_dir = \"d\"\n{}", text)).unwrap_err();
+            assert!(e.contains(why), "{}: {}", why, e);
+        }
+    }
+
+    #[test]
+    fn the_bootstrap_password_comes_from_the_environment_only_and_is_never_printed() {
+        let config =
+            Config::build(None, &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_AUTH_BOOTSTRAP_PASSWORD", "first-admin-pw")]))
+                .unwrap();
+        let (user, password) = config.bootstrap.clone().unwrap();
+        assert_eq!((user.as_str(), password.expose()), ("admin", "first-admin-pw"));
+        assert!(!config.describe().contains("first-admin-pw"));
+        assert!(!format!("{:?}", config).contains("first-admin-pw"));
+        let named = Config::build(
+            None,
+            &env(&[
+                ("IWDB_DATA_DIR", "d"),
+                ("IWDB_AUTH_BOOTSTRAP_USER", "root"),
+                ("IWDB_AUTH_BOOTSTRAP_PASSWORD", "first-admin-pw"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(named.bootstrap.unwrap().0, "root");
+        let problems = Config::build(
+            None,
+            &env(&[
+                ("IWDB_DATA_DIR", "d"),
+                ("IWDB_AUTH_BOOTSTRAP_USER", "_x"),
+                ("IWDB_AUTH_BOOTSTRAP_PASSWORD", "short"),
+            ]),
+        )
+        .unwrap_err()
+        .join("\n");
+        assert!(problems.contains("8 to 1024 bytes") && problems.contains("invalid user name"), "{}", problems);
+        assert!(!problems.contains("short\""), "{}", problems);
+        let empty = Config::build(None, &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_AUTH_BOOTSTRAP_PASSWORD", "")])).unwrap();
+        assert!(empty.bootstrap.is_none(), "an empty variable is an unset one");
+        let alone = Config::build(None, &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_AUTH_BOOTSTRAP_USER", "root")]));
+        assert!(alone.unwrap_err().join("").contains("needs IWDB_AUTH_BOOTSTRAP_PASSWORD"));
+    }
+
+    #[test]
+    fn the_described_configuration_reads_back() {
+        let config = Config::build(
+            Some("data_dir = \"/d\"\n[limits.max]\nmax_results = 50\n[limits.default]\nmax_results = 10\n"),
+            &env(&[("IWDB_LOG_LEVEL", "warn,iwdb_storage=debug")]),
+        )
+        .unwrap();
+        let text = config.describe();
+        let back = Config::parse(&text).unwrap();
+        assert_eq!(
+            (&back.store, &back.server, &back.log, &back.console, &back.auth),
+            (&config.store, &config.server, &config.log, &config.console, &config.auth)
+        );
+        assert_eq!(back.limit_config(), config.limit_config());
+        assert!(text.contains("# max_visited = (built in)"), "{}", text);
+    }
+
+    /// `documentation/api/config.md` lists exactly the settings, with their
+    /// variables and defaults.
+    #[test]
+    fn the_documentation_lists_every_setting() {
+        let doc = include_str!("../../../documentation/api/config.md");
+        let rows: Vec<Vec<String>> = doc
+            .lines()
+            .filter(|l| l.starts_with("| `"))
+            .map(|l| l.trim_matches('|').split(" | ").map(|c| c.trim().trim_matches('`').to_owned()).collect())
+            .collect();
+        let documented: Vec<(&str, &str)> = rows.iter().map(|r| (r[0].as_str(), r[1].as_str())).collect();
+        let keys: Vec<(&str, &str)> = KEYS.iter().map(|k| (k.key, k.var)).collect();
+        assert_eq!(documented, keys);
+        let defaults = Config::parse("data_dir = \"d\"").unwrap();
+        for (row, k) in rows.iter().zip(KEYS) {
+            let value = (k.get)(&defaults).map(|v| v.to_string()).unwrap_or_else(|| "built in".into());
+            let expected = if k.key == "data_dir" { "required".to_owned() } else { value };
+            assert_eq!(row[2], expected, "{}", k.key);
+        }
     }
 
     #[test]

@@ -1,0 +1,147 @@
+/* Ironweaver DB operator console (step 16a): the console's own layout and the few pieces the design system
+   doesn't have (the palette, the staged-changes bar, the error line, the structure and status grids). Only the
+   design system's tokens; no colours, radii or shadows of its own. */
+
+html, body { background: var(--surface-000); color: var(--ink); }
+#root { min-height: 100vh; }
+.cs-wb { min-height: 560px; }
+
+/* ---------- the rail's page links and the mock marker */
+.cs-links { display: inline-flex; align-items: center; gap: 12px; }
+.cs-mockword { font: 600 10px/1 var(--font-sans); letter-spacing: .08em; color: var(--signal-ink); cursor: help; }
+.cs-pages { display: inline-flex; align-items: stretch; height: 22px; box-sizing: border-box; border: 1px solid var(--line-100); border-radius: var(--radius-1); overflow: hidden; }
+.cs-page { display: inline-flex; align-items: center; box-sizing: border-box; height: 100%; padding: 0 8px; font: 600 10px/1 var(--font-sans); letter-spacing: .08em; color: var(--ink-muted); text-decoration: none; transition: background var(--t-instant), color var(--t-instant); }
+.cs-page + .cs-page { border-left: 1px solid var(--line-100); }
+.cs-page:hover { color: var(--ink); background: var(--surface-000); }
+.cs-page.is-on { color: var(--on-ink); background: var(--ink); }
+.cs-page:focus-visible, .cs-link:focus-visible, .cs-input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+/* ---------- Go to anything (⌘K) */
+.cs-palette { position: fixed; inset: 0; z-index: 20; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; background: color-mix(in srgb, var(--surface-000) 55%, transparent); animation: iw-fade var(--t-instant) linear both; }
+.cs-palette__card { width: min(620px, calc(100% - 32px)); background: var(--surface-100); border: 1px solid var(--line-200); box-shadow: var(--shadow-float); animation: iw-slide var(--t-quick) var(--iw-ease) both; }
+.cs-palette__in { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; border-bottom: 1px solid var(--line-100); color: var(--ink-muted); }
+.cs-palette__in input { flex: 1; min-width: 0; height: 100%; border: 0; background: none; color: var(--ink); font: 400 13px/18px var(--font-sans); outline: none; }
+.cs-palette__list { max-height: min(420px, 60vh); overflow: auto; padding: 4px 0; }
+.cs-palette__row { display: grid; grid-template-columns: 16px auto 1fr auto; align-items: center; gap: 8px; width: 100%; height: var(--row-dense); padding: 0 12px; border: 0; background: none; color: var(--ink); font: 400 13px/18px var(--font-sans); text-align: left; cursor: pointer; }
+.cs-palette__row.is-cur { background: var(--surface-200); box-shadow: inset 2px 0 0 var(--signal-mark); }
+.cs-palette__detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-palette__glyph { display: inline-flex; justify-content: center; }
+.cs-palette__none { padding: 12px; }
+
+/* ---------- the explorer's bar: views in the middle, staged changes on the right */
+.cs-bar { position: relative; }
+.cs-staged { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 6px; animation: iw-fade var(--t-quick) linear both; }
+.cs-staged__n { display: inline-flex; align-items: center; gap: 6px; margin-right: 4px; cursor: help; }
+.cs-staged__n .iw-cap { color: var(--signal-ink); }
+.cs-error { display: flex; align-items: center; gap: 10px; min-height: 28px; padding: 0 4px 0 12px; background: var(--surface-100); border-top: 1px solid var(--line-100); border-bottom: 1px solid var(--line-100); flex: none; }
+.cs-error__msg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- plain dense tables in the design system's table look */
+.cs-th { display: block; padding: 6px 10px 5px; color: var(--ink-muted); }
+.iw-table th.is-num .cs-th { text-align: right; }
+.cs-dense, .cs-struct__table { height: auto; }
+.cs-link { color: var(--accent); text-decoration: none; }
+.cs-link:hover { text-decoration: underline; text-underline-offset: 2px; }
+.cs-input { height: var(--control); box-sizing: border-box; padding: 0 8px; border: 1px solid var(--line-200); border-radius: 0; background: var(--surface-200); color: var(--ink); min-width: 0; }
+.cs-input::placeholder { color: var(--ink-muted); }
+
+/* ---------- structure (the explorer's 4th view) */
+.cs-struct { overflow: auto; background: var(--surface-000); display: flex; flex-direction: column; gap: 1px; }
+.cs-struct > section { background: var(--surface-100); padding: 12px 12px 16px; }
+.cs-struct h2 { margin: 0 0 8px; }
+.cs-struct__head { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 16px 32px; }
+.cs-struct__head > div:first-child { margin-right: auto; }
+.cs-struct__alert { flex-basis: 100%; }
+.cs-struct__group td { background: var(--surface-100); }
+.cs-struct__label { display: inline-flex; align-items: center; gap: 6px; }
+.cs-struct__form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.cs-struct__form .cs-input { width: 260px; }
+.cs-struct__note { margin: 0; }
+.cs-struct .iw-table { border: 1px solid var(--line-100); }
+
+/* ---------- the status page */
+.cs-statuspage { display: flex; flex-direction: column; min-height: 100vh; }
+.cs-status { flex: 1; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 1px; background: var(--line-100); align-content: start; }
+.cs-sec { background: var(--surface-100); padding: 12px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.cs-sec__head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.cs-sec__head h2 { margin: 0; }
+.cs-sec .iw-table { border: 1px solid var(--line-100); }
+.cs-server { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 12px 32px; padding: 16px 12px; }
+.cs-server__id { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-right: auto; }
+.cs-server__ends { display: flex; flex-wrap: wrap; gap: 16px; }
+.cs-server__live { display: flex; align-items: center; gap: 8px; }
+.cs-server__problems { flex-basis: 100%; margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.cs-problems { overflow: hidden; text-overflow: ellipsis; }
+.cs-kpis { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1px; background: var(--line-100); }
+.cs-tile { background: var(--surface-100); padding: 12px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.cs-tile__head { display: flex; justify-content: space-between; gap: 8px; }
+.cs-tile__note { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 14px; }
+.cs-tile.is-warn .iw-metric { color: var(--warn); }
+.cs-spark { display: block; width: 100%; height: 32px; overflow: visible; touch-action: none; }
+.cs-spark__hit { fill: transparent; }
+.cs-spark__line { fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.cs-spark__now { fill: var(--signal-mark); }
+.cs-spark__x { stroke: var(--signal-mark); stroke-width: 1; }
+.cs-ns { grid-column: 1 / -1; }
+.cs-kpisec { grid-column: 1 / -1; }
+.cs-later { margin: 0; }
+.cs-ns tr.is-problem td { border-bottom: 0; }
+.cs-why td { height: auto; padding-bottom: 6px; color: var(--danger); white-space: normal; }
+.cs-ops { grid-column: span 7; }
+.cs-res { grid-column: span 5; }
+.cs-act { grid-column: span 7; }
+.cs-con { grid-column: span 5; }
+.cs-jobs { grid-column: span 5; }
+.cs-logsec { grid-column: span 7; }
+.cs-logsec .iw-log { height: 300px; border: 1px solid var(--line-100); background: var(--surface-200); }
+.cs-res__body { display: flex; flex-direction: column; gap: 16px; }
+.cs-res__mem { display: flex; flex-direction: column; gap: 6px; }
+.cs-res__wal { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; }
+.cs-dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 16px; margin: 0; }
+.cs-dl dd { margin: 2px 0 0; font-variant-numeric: tabular-nums; }
+.cs-hbar { width: 120px; }
+.cs-hbar span { display: block; height: 3px; background: var(--ink-muted); }
+
+/* ---------- narrower screens: the status page stacks; the explorer drops the navigator (⌘K reaches it all) */
+@media (max-width: 1180px) {
+  .cs-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .cs-res, .cs-ops, .cs-act, .cs-con, .cs-jobs, .cs-logsec { grid-column: 1 / -1; }
+}
+@media (max-width: 820px) {
+  .cs-wb, .cs-wb.has-insp { grid-template-columns: 0 minmax(0, 1fr) 0; column-gap: 0; }
+  .cs-wb > .iw-wb__nav { visibility: hidden; margin: 0 !important; }
+  .cs-wb > .iw-wb__insp { position: fixed; z-index: 5; top: var(--rail); right: 0; bottom: 48px; width: min(var(--inspector-width), 85vw); border-left: 1px solid var(--line-100); }
+  .cs-wb:not(.has-insp) > .iw-wb__insp { display: none; }
+  .cs-wb .iw-wb__bottom { grid-template-columns: 1fr; }
+  .cs-wb .iw-wb__bottom:not(.has-log) > .iw-wb__log, .cs-wb .iw-wb__bottom.has-log > .iw-wb__q { display: none; }
+  .iw-rail__go { width: auto; }
+  .iw-rail__go > span:first-child, .cs-mockword { display: none; }
+  .cs-staged .iw-btn--ghost { display: none; }
+}
+@media (max-width: 600px) {
+  .cs-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cs-dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cs-server__ends { display: none; }
+  .iw-rail__go, .iw-rail__db, .iw-rail__help { display: none; }
+  .iw-rail__row { gap: 8px; }
+  .cs-sec, .cs-server { padding-left: 16px; padding-right: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cs-palette, .cs-palette__card, .cs-staged { animation: none !important; }
+}
+
+/* ---------- the login (step 15a): a card on the page's ground, the design system's controls and words */
+.cs-login { position: fixed; inset: 0; z-index: 30; display: flex; justify-content: center; align-items: flex-start; padding: 14vh 16px 16px; background: var(--surface-000); }
+.cs-login[role="dialog"] { background: color-mix(in srgb, var(--surface-000) 70%, transparent); animation: iw-fade var(--t-instant) linear both; }
+.cs-login__card { display: flex; flex-direction: column; gap: 12px; width: min(360px, 100%); box-sizing: border-box; padding: 20px; background: var(--surface-100); border: 1px solid var(--line-200); box-shadow: var(--shadow-float); }
+.cs-login__title { margin: 0; font: 600 18px/24px var(--font-sans); color: var(--ink); }
+.cs-login__note { margin: 0; }
+.cs-login__field { display: flex; flex-direction: column; gap: 4px; }
+.cs-login__field .cs-input { width: 100%; }
+.cs-login__error { color: var(--danger); border-left: 2px solid var(--danger); padding-left: 8px; }
+.cs-login__warn { color: var(--signal-ink); }
+.cs-login__go { display: flex; justify-content: flex-end; }
+.cs-user { display: inline-flex; align-items: center; gap: 8px; }
+.cs-logout { height: 22px; padding: 0 8px; border: 1px solid var(--line-100); border-radius: var(--radius-1); background: none; color: var(--ink-muted); font: 600 10px/1 var(--font-sans); letter-spacing: .08em; cursor: pointer; }
+.cs-logout:hover { color: var(--ink); background: var(--surface-000); }
+.cs-logout:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }

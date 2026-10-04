@@ -1,0 +1,14 @@
+{
+  "name": "iwdb-console",
+  "private": true,
+  "description": "Ironweaver DB operator console (step 16a): static pages, no runtime dependencies beyond the vendored files",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "check": "node tools/build.mjs --check",
+    "test": "node --test test/console.test.cjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

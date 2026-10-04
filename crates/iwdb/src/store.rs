@@ -123,6 +123,9 @@ struct Shared<F: LogFs> {
     /// The projections started on the store (ADR 0032), stopped first
     /// when it stops.
     projections: Mutex<Vec<Arc<crate::projection::Control>>>,
+    /// Serializes changes to users, grants and tokens (`crate::auth`): each
+    /// reads the system namespace and commits what it read plus the change.
+    auth: Mutex<()>,
 }
 
 /// Lock a mutex whatever a panicking holder left. The store's own state
@@ -284,6 +287,7 @@ where
             wake: Condvar::new(),
             options,
             projections: Mutex::new(Vec::new()),
+            auth: Mutex::new(()),
         });
         let mut threads = Vec::new();
         let checkpoint = &shared.options.checkpoint;
@@ -312,12 +316,39 @@ where
 
     // ---- namespaces ----
 
-    /// The namespace `name`, as a handle. Errors: [`Error::NoSuchNamespace`].
+    /// The namespace `name`, as a handle. Errors: [`Error::NoSuchNamespace`]
+    /// (also for the reserved system namespace, which only
+    /// [`users`](Self::users) reads and writes, ADR 0043).
     pub fn namespace(&self, name: &str) -> Result<Ns<'_, F>, Error> {
         match self.shared.find(name) {
-            Some(state) => Ok(Ns { store: self, state }),
-            None => Err(Error::NoSuchNamespace { name: name.to_owned() }),
+            Some(state) if !state.info.name.is_reserved() => Ok(Ns { store: self, state }),
+            _ => Err(Error::NoSuchNamespace { name: name.to_owned() }),
         }
+    }
+
+    /// The reserved system namespace of users and grants (ADR 0043), made
+    /// with `create` if the store has none yet.
+    /// Serialize a change to users, grants or tokens (`crate::auth`).
+    pub(crate) fn auth_lock(&self) -> MutexGuard<'_, ()> {
+        lock(&self.shared.auth)
+    }
+
+    pub(crate) fn system_namespace(&self, create: bool) -> Result<Option<Ns<'_, F>>, Error> {
+        if let Some(state) = self.shared.find(NamespaceName::SYSTEM) {
+            return Ok(Some(Ns { store: self, state }));
+        }
+        if !create {
+            return Ok(None);
+        }
+        let mut catalog = lock(&self.shared.catalog);
+        if self.shared.find(NamespaceName::SYSTEM).is_none() {
+            or_abort("creating the system namespace", || {
+                self.create_locked(&mut catalog, &NamespaceName::system(), None)
+            })?;
+            self.sync_archive_log(&catalog);
+        }
+        drop(catalog);
+        Ok(self.shared.find(NamespaceName::SYSTEM).map(|state| Ns { store: self, state }))
     }
 
     /// The `default` namespace.
@@ -330,9 +361,11 @@ where
         }
     }
 
-    /// The live namespaces, by name. Doesn't wait for any commit.
+    /// The live namespaces, by name (without the reserved system
+    /// namespace). Doesn't wait for any commit.
     pub fn namespaces(&self) -> Vec<NamespaceInfo> {
-        let mut list: Vec<NamespaceInfo> = lock(&self.shared.catalog).log.table().live().cloned().collect();
+        let mut list: Vec<NamespaceInfo> =
+            lock(&self.shared.catalog).log.table().live().filter(|i| !i.name.is_reserved()).cloned().collect();
         list.sort_by(|a, b| a.name.cmp(&b.name));
         list
     }
@@ -355,7 +388,7 @@ where
     /// [`Error::Io`] (nothing is created, or the outcome is unknown: the
     /// namespace log is failed until reopening).
     pub fn create_namespace(&self, name: &str, key: Option<&IdempotencyKey>) -> Result<NamespaceResult, Error> {
-        let name = NamespaceName::new(name).map_err(iwdb_engine::Error::from)?;
+        let name = public_name(name)?;
         let mut catalog = lock(&self.shared.catalog);
         let result = or_abort("creating a namespace", || self.create_locked(&mut catalog, &name, key))?;
         if !result.deduplicated {
@@ -436,7 +469,7 @@ where
     /// [`Error::Io`] from the namespace log (outcome unknown: the namespace
     /// is unavailable and the log failed until reopening).
     pub fn drop_namespace(&self, name: &str, key: Option<&IdempotencyKey>) -> Result<NamespaceResult, Error> {
-        let name = NamespaceName::new(name).map_err(iwdb_engine::Error::from)?;
+        let name = public_name(name)?;
         let mut catalog = lock(&self.shared.catalog);
         let result = or_abort("dropping a namespace", || self.drop_locked(&mut catalog, &name, key))?;
         if !result.deduplicated {
@@ -514,8 +547,13 @@ where
     /// The store's state at a glance (what `iwctl status` shows).
     pub fn status(&self) -> StoreStatus {
         let fsync = self.shared.options.wal.fsync;
-        let namespaces: Vec<NamespaceStatus> =
-            self.shared.states().into_iter().map(|state| Ns { store: self, state }.status()).collect();
+        let namespaces: Vec<NamespaceStatus> = self
+            .shared
+            .states()
+            .into_iter()
+            .filter(|state| !state.info.name.is_reserved())
+            .map(|state| Ns { store: self, state }.status())
+            .collect();
         let default = namespaces.iter().find(|n| n.name == NAMESPACE).cloned();
         StoreStatus {
             seq: default.as_ref().map_or(0, |n| n.seq),
@@ -751,6 +789,20 @@ where
     pub fn checkpoint(&self) -> Result<CheckpointOutcome, Error> {
         self.default_namespace().checkpoint()
     }
+}
+
+/// A namespace name a caller gave: valid, and not the reserved system
+/// namespace's.
+pub(crate) fn public_name(name: &str) -> Result<NamespaceName, Error> {
+    let name = NamespaceName::new(name).map_err(iwdb_engine::Error::from)?;
+    if name.is_reserved() {
+        return Err(iwdb_engine::Error::from(iwdb_engine::catalog::CatalogError::InvalidNamespaceName {
+            name: name.to_string(),
+            reason: "reserved for the store's users and grants",
+        })
+        .into());
+    }
+    Ok(name)
 }
 
 fn default_name() -> Result<NamespaceName, Error> {

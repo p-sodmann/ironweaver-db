@@ -1,0 +1,32 @@
+// Ironweaver DB gRPC contract, version 1: the server's health (step 16b).
+//
+// gRPC clients and probes use the standard health service,
+// `grpc.health.v1.Health` (service "" and
+// "ironweaver_db.v1.DatabaseService": SERVING when ready, NOT_SERVING
+// otherwise). Over REST, `GET /v1/health/live` and `GET /v1/health/ready`
+// answer with `Health`.
+
+syntax = "proto3";
+
+package ironweaver_db.v1;
+
+// The server's state, as the REST health routes answer it: 200 for
+// `/v1/health/live` whenever the process answers; for `/v1/health/ready`,
+// 200 when `ready`, 503 otherwise.
+message Health {
+  HealthState state = 1;
+  // Recovery has finished and the server isn't shutting down: database
+  // calls are served. Otherwise they fail with `unavailable`.
+  bool ready = 2;
+}
+
+// Where the server is in its life.
+enum HealthState {
+  HEALTH_STATE_UNSPECIFIED = 0;
+  // The port is open, the store is being opened: recovery replays the WAL.
+  HEALTH_STATE_RECOVERING = 1;
+  // Recovery has finished; every committed record is visible.
+  HEALTH_STATE_READY = 2;
+  // Shutdown has begun: no longer ready, running calls may finish.
+  HEALTH_STATE_DRAINING = 3;
+}

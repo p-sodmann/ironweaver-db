@@ -18,6 +18,14 @@ log.workspace = true
 # Projection errors (step 13) and the declarative mapping's config (`projection::Rules`)
 thiserror.workspace = true
 serde.workspace = true
+# Users and tokens (step 15a, ADR 0044). Declared here, not in the workspace,
+# so the workspace manifest stays as it is:
+# argon2id password hashes from RustCrypto; the PHC string records its parameters
+argon2 = "0.6"
+# SHA-256 of session and API tokens, from RustCrypto (already in the tree)
+sha2 = "0.11"
+# Token secrets and salts from the OS's random source (already in the tree)
+getrandom = "0.4"
 # The Postgres source of projection mode (step 13, feature `postgres`): the sync
 # client (tokio-postgres inside, on its own runtime); `jsonb` columns as JSON
 postgres = { workspace = true, optional = true }

@@ -7,12 +7,12 @@ name = "ironweaver-db"
 description = "Ironweaver DB, embedded: a durable graph store in a directory (WAL, checkpoints, backups, point-in-time restore)"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = { text = "AGPL-3.0-only" }
 authors = [{ name = "Philipp Sodmann" }]
 keywords = ["graph", "database", "embedded", "wal"]
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",

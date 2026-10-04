@@ -1,0 +1,8 @@
+user ann admin=false grants={"social": Write}
+token ann ci expires=false
+user cy admin=false grants={}
+user root admin=true grants={}
+password root root-password
+password ann ann-password
+password cy cy-password-2
+token-secret iwdb_085e1d9ee19d6f003fc67e08ba6c6b45ad0ef64d1fd06887bd82e5afcd0a2bdb

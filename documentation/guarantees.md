@@ -142,6 +142,28 @@ The server ([api/grpc.md](api/grpc.md)) gives the guarantees of the store it ser
 - **A commit has no deadline on the server.** Once accepted it runs to the end, even if its client's deadline passes or the client disconnects; that client doesn't learn the outcome and retries with the same idempotency key, which applies the commit at most once.
 - **Errors carry their code** (`iwdb-code`) next to the gRPC status of [errors.md](api/errors.md).
 - A bug in a commit's apply path aborts the whole server (all namespaces), as a crash: run it under a supervisor ([ADR 0028](adr/0028-internal-apply-errors-abort.md)).
+- **Ready means recovered** (step 16b). The server opens its port before the store and answers health while it recovers; until recovery has finished it is not ready (`GET /v1/health/ready` 503, `grpc.health.v1` `NOT_SERVING`) and every database call fails with `unavailable`, so no client reads a namespace halfway through its replay. The first ready answer comes after recovery has applied every record in the log: every commit acknowledged before the last stop or crash is visible then. A shutdown turns readiness off before it drains. Tested in-process with the store's open held at a gate, and against the binary recovering a 100 000-node WAL (`crates/iwdb-server/tests/health.rs`, `tests/binary.rs`; [ADR 0040](adr/0040-health-and-readiness.md)).
+
+## Authentication and authorisation (step 15a)
+
+[ADRs 0043 to 0047](adr/0045-the-authorisation-point.md); configuration: [api/config.md](api/config.md#authentication-and-the-first-admin).
+
+What it guarantees, with `[auth] enabled` (the default):
+
+- **Every database call to the server has a principal.** Everything but health, login, the console's pages and the OpenAPI document needs a session or API token; without one it fails with `unauthenticated` before any operation runs.
+- **Roles are checked once, for every operation**, in front of the `Database` trait: `read`, `write` and `admin` per namespace, and a server-wide admin. A refused call changes nothing (`permission_denied`). Every role × operation combination is tested over gRPC and REST from one table (`crates/iwdb-server/tests/roles.rs`).
+- **User, grant and token changes are all or nothing and durable** per the store's fsync policy when they return: each is one commit to the store's reserved system namespace, recovered, backed up and restored with the rest of the store ([ADR 0043](adr/0043-users-and-roles-in-the-system-namespace.md)). Checked by the kill -9 harness at every WAL write and fsync of a sequence of changes, under `always` and `group` (`tests/crash/tests/auth_points.rs`): recovery finds the users of the acknowledged changes, or of the one in flight, never part of one.
+- **No password or token is stored, logged or put in an error message**: passwords as argon2id hashes (compared in constant time), tokens as SHA-256 hashes; tested by grepping the server's logs at `debug` through logins, failures, tokens and password changes (`tests/binary.rs`).
+- **No default password**: a server with authentication on and no users refuses to start.
+- **Sessions end** at their lifetime, at logout, when the user's password changes, when the user is deleted, and when the server restarts. API tokens end when revoked, when they expire (if they do), or with their user. A revoked grant takes effect at the next request.
+- **Failed logins are slowed down**: at most `login_max_failures` per user and per client address within `login_window_secs`.
+
+What it doesn't guarantee:
+
+- **No secrecy on the wire until step 15b.** The server speaks plain TCP: passwords, tokens and data cross the network in clear, so anyone who can see the traffic can take a session. A non-loopback listen address needs `[server] plaintext_public = true`; keep the server on localhost or a trusted network.
+- **No protection of the data directory.** The embedded store, Python's `Store.open` and `iwctl` on a data directory are unauthenticated: whoever can open the directory owns the store, users included. Its file permissions are the boundary. A backup holds the password hashes.
+- **The slowdown is per process**, forgotten at a restart, and can lock a known user out for one window at a time.
+- **A restore brings back the users of its point in time**, passwords included.
 
 ## The change stream (step 13)
 

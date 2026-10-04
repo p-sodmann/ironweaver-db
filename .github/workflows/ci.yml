@@ -70,7 +70,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: ["", "rest", "postgres"]
+        features: ["", "rest", "postgres", "rest console"]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -88,6 +88,29 @@ jobs:
             echo "a gRPC-only iwdb-server must not depend on these crates" >&2
             exit 1
           fi
+
+  console:
+    # Step 16a (ADR 0037): the operator console's generated files
+    # (tokens.css, bundle.js) are what their sources build to, the tests
+    # of its Sources, query line and helpers pass, and so do those of
+    # serve.py, the Flask server that connects it to an iwdb-server
+    name: operator console
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: pip install flask pytest && pytest -q test
 
   docker:
     # Step 13a: the image builds, with and without the default features,
@@ -118,17 +141,26 @@ jobs:
       - name: Serve, answer, stop
         run: |
           docker run --rm iwdb-server:ci --version | tee version.txt
-          grep -q "grpc, rest, postgres" version.txt
+          grep -q "grpc, rest, postgres, console" version.txt
           docker run --rm iwdb-server:ci-grpc --version | tee version.txt
           grep -q "(grpc)" version.txt
-          docker run -d --name iwdb -p 127.0.0.1:7600:7600 iwdb-server:ci
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:7600/v1/openapi.json -o /dev/null && break; sleep 1; done
-          curl -fsS http://127.0.0.1:7600/v1/namespaces | tee namespaces.json
+          # Without the plaintext flag the image refuses 0.0.0.0 (step 15a, exit 2)
+          docker run --name refused iwdb-server:ci || test "$(docker inspect -f '{{.State.ExitCode}}' refused)" = 2
+          docker run -d --name iwdb -p 127.0.0.1:7600:7600 \
+            -e IWDB_SERVER_PLAINTEXT_PUBLIC=true -e IWDB_AUTH_BOOTSTRAP_PASSWORD=ci-admin-password iwdb-server:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:7600/v1/health/ready && break; sleep 1; done
+          docker exec iwdb iwdb-server --probe 127.0.0.1:7600
+          # Authentication is on: no token, 401; log in, then the namespaces
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7600/v1/namespaces)" = 401
+          TOKEN=$(curl -fsS http://127.0.0.1:7600/v1/auth/login -H 'content-type: application/json' \
+            -d '{"user": "admin", "password": "ci-admin-password"}' | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+          curl -fsS http://127.0.0.1:7600/v1/namespaces -H "authorization: Bearer $TOKEN" | tee namespaces.json
           grep -q default namespaces.json
           docker stop iwdb
           docker logs iwdb 2>&1 | tee server.log
           test "$(docker inspect -f '{{.State.ExitCode}}' iwdb)" = 0
           grep -q "closed /var/lib/iwdb" server.log
+          grep -q '"message":"serving /var/lib/iwdb on' server.log
 
   python:
     # Step 7: the wheel (abi3, CPython 3.9 and later) built by maturin on

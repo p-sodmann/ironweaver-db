@@ -30,4 +30,5 @@ A panic in the store's commit path (a bug) aborts the process, and so the
 interpreter; the next `Store.open` recovers every logged commit. Don't fork
 while a store is open (use the `spawn` start method of `multiprocessing`).
 
-MIT license.
+Licensed under the AGPL-3.0 (`AGPL-3.0-only`), or a commercial license: see
+[COMMERCIAL-LICENSE.md](https://github.com/p-sodmann/ironweaver-db/blob/main/COMMERCIAL-LICENSE.md).

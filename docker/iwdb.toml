@@ -2,9 +2,12 @@
 # docs, documentation/api/grpc.md). Replace it by mounting your own file at
 # /etc/iwdb/iwdb.toml.
 #
-# No TLS and no authentication until step 15: the server listens on every
-# interface of the container, so publish the port on localhost or a private
-# network only.
+# The server listens on every interface of the container. It has no TLS until
+# step 15b, so that needs [server] plaintext_public = true, which this file
+# leaves to you: run with -e IWDB_SERVER_PLAINTEXT_PUBLIC=true and publish
+# the port on localhost or a private network only. Authentication is on: the
+# first start needs IWDB_AUTH_BOOTSTRAP_PASSWORD (the user admin), or a user
+# made with `iwctl user create` (step 15a).
 
 data_dir = "/var/lib/iwdb"
 listen = "0.0.0.0:7600"

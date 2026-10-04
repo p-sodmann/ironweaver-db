@@ -25,7 +25,7 @@ Defaults stay on, so nothing changes for existing builds, users or CI's `--all-f
 - The build stage is `rust:1.99-trixie`, the MSRV (ADR 0029), with `--locked`. `rust-toolchain.toml` is left out of the build context, because its floating `stable` channel would make rustup download a toolchain inside every build. Protos compile with protox, so no `protoc` is needed.
 - The runtime stage is `debian:trixie-slim`: glibc, the same Debian as the build stage, and a shell for `docker exec`. Distroless or static musl would be smaller, but would need a musl build of the whole tree for a gain that matters little next to the data.
 - The user is `iwdb` (uid 10001), the data directory is the volume `/var/lib/iwdb`, the port is 7600, and the config is `/etc/iwdb/iwdb.toml`. The image's config sets `drain_timeout_secs = 8`, below `docker stop`'s 10 s, so a default stop ends with the final checkpoint instead of a SIGKILL during the drain. A SIGKILL loses nothing logged, but the next start replays the WAL.
-- No `HEALTHCHECK`: there is no health endpoint before step 16, and a TCP probe would report healthy during recovery.
+- No `HEALTHCHECK`: there is no health endpoint before step 16, and a TCP probe would report healthy during recovery. (Step 16b added one: `iwdb-server --probe`, ready once recovery has finished, [ADR 0040](0040-health-and-readiness.md). It also added the `console` feature, [ADR 0041](0041-console-served-by-the-server.md), built into the image but off by default.)
 
 ## Consequences
 
