@@ -1,7 +1,8 @@
-//! `iwdb.Store`: translations to the `Database`
-//! trait, served by `iwdb::Embedded` (design rule 8), and to
-//! `iwdb::Store` for what the trait doesn't cover (backups, checkpoints,
-//! syncs, the store's status). See `documentation/python-api.md`.
+//! `iwdb.Store`: translations to the `Database` trait, served by
+//! `iwdb::Embedded` or a server ([`Backend`], ADR 0035; design rule 8), and
+//! to `iwdb::Store` for what the trait doesn't cover (backups, checkpoints,
+//! syncs, the store's status), which only an embedded store has. See
+//! `documentation/python-api.md`.
 
 use std::path::PathBuf;
 use std::sync::{PoisonError, RwLock};
@@ -15,24 +16,28 @@ use iwdb::{
 };
 use iwdb_query::exec::block_on;
 use iwdb_query::{ChangesRequest, Database, LimitConfig, QueryOptions};
+use iwdb_server::client::Remote;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
 
-use crate::convert::from_attrs;
+use crate::backend::{Backend, RemoteDb};
 use crate::errors::{closed, guard, invalid, query_to_py, to_py, value_error};
 use crate::namespace::PyNamespace;
+use crate::query::ReadArgs;
 use crate::reports;
 use crate::transaction::PyTransaction;
 
-/// A store, shared between Python threads, served as a `Database`
-/// (`iwdb::Embedded`). Calls hold the read side of the lock (with the GIL
-/// released) while they run; `close` takes the write side, so it waits for
-/// calls in progress, and leaves `None`.
+/// A store, shared between Python threads, served as a `Database` by
+/// `iwdb::Embedded` (`Store.open`) or a server (`iwdb.connect`). Calls
+/// hold the read side of the lock (with the GIL released) while they run;
+/// `close` takes the write side, so it waits for calls in progress, and
+/// leaves `None`.
 #[pyclass(module = "iwdb", name = "Store", frozen)]
 pub struct PyStore {
-    inner: RwLock<Option<Embedded>>,
-    path: PathBuf,
+    inner: RwLock<Option<Backend>>,
+    /// The directory, or the server's endpoint.
+    location: String,
 }
 
 /// The embedded database's config: the default limits, and no cap on
@@ -46,14 +51,21 @@ fn query_config() -> QueryConfig {
 
 impl PyStore {
     /// Run `f` on the open store with the GIL released (for what the
-    /// `Database` trait doesn't cover).
+    /// `Database` trait doesn't cover). A remote store raises
+    /// `InvalidError`: these calls need the store's directory.
     pub fn with<R: Send>(&self, py: Python<'_>, f: impl FnOnce(&Store) -> Result<R, Error> + Send) -> PyResult<R> {
         let result = py.detach(|| {
             let inner = self.inner.read().unwrap_or_else(PoisonError::into_inner);
-            inner.as_ref().map(|db| f(db.store()))
+            inner.as_ref().map(|backend| match backend {
+                Backend::Embedded(db) => Some(f(db.store())),
+                Backend::Remote(_) => None,
+            })
         });
         match result {
-            Some(result) => result.map_err(to_py),
+            Some(Some(result)) => result.map_err(to_py),
+            Some(None) => Err(invalid(
+                "this call needs an embedded store (iwdb.Store.open); a store from iwdb.connect doesn't have it",
+            )),
             None => Err(closed()),
         }
     }
@@ -62,7 +74,7 @@ impl PyStore {
     pub fn query<R: Send>(
         &self,
         py: Python<'_>,
-        f: impl FnOnce(&Embedded) -> Result<R, iwdb_query::Error> + Send,
+        f: impl FnOnce(&Backend) -> Result<R, iwdb_query::Error> + Send,
     ) -> PyResult<R> {
         let result = py.detach(|| {
             let inner = self.inner.read().unwrap_or_else(PoisonError::into_inner);
@@ -204,7 +216,20 @@ impl PyStore {
             };
             let store = py.detach(|| Store::open(&path, options)).map_err(to_py)?;
             let db = Embedded::new(store, query_config()).map_err(query_to_py)?;
-            Ok(PyStore { inner: RwLock::new(Some(db)), path })
+            Ok(PyStore { inner: RwLock::new(Some(Backend::Embedded(db))), location: path.display().to_string() })
+        })
+    }
+
+    /// A client of the server at `endpoint` (`http://host:port`): a store
+    /// with the same API, minus the calls that need the store's directory
+    /// (ADR 0035). It connects on the first call, and again after a lost
+    /// connection.
+    #[staticmethod]
+    fn connect(py: Python<'_>, endpoint: &str) -> PyResult<Self> {
+        guard(|| {
+            let remote = py.detach(|| Remote::connect(endpoint)).map_err(query_to_py)?;
+            let backend = Backend::Remote(RemoteDb::new(remote));
+            Ok(PyStore { inner: RwLock::new(Some(backend)), location: endpoint.to_owned() })
         })
     }
 
@@ -214,10 +239,18 @@ impl PyStore {
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         guard(|| {
             let result = py.detach(|| {
-                let db = self.inner.write().unwrap_or_else(PoisonError::into_inner).take();
-                db.map(Embedded::close)
+                let backend = self.inner.write().unwrap_or_else(PoisonError::into_inner).take();
+                match backend {
+                    Some(Backend::Embedded(db)) => db.close(),
+                    Some(Backend::Remote(db)) => {
+                        // Drops the connection and the client's runtime
+                        drop(db);
+                        Ok(())
+                    }
+                    None => Ok(()),
+                }
             });
-            result.transpose().map(drop).map_err(to_py)
+            result.map_err(to_py)
         })
     }
 
@@ -245,7 +278,7 @@ impl PyStore {
 
     fn __repr__(&self) -> String {
         let state = if self.closed() { "closed" } else { "open" };
-        format!("<iwdb.Store '{}' ({})>", self.path.display(), state)
+        format!("<iwdb.Store '{}' ({})>", self.location, state)
     }
 
     // ---- namespaces ----
@@ -292,8 +325,7 @@ impl PyStore {
     /// A handle on the namespace `name`.
     fn namespace(slf: Py<Self>, py: Python<'_>, name: &str) -> PyResult<PyNamespace> {
         guard(|| {
-            let owned = name.to_owned();
-            let id = slf.get().with(py, move |s| s.namespace(&owned).map(|ns| ns.id()))?;
+            let id = slf.get().status_of(py, name)?.id;
             Ok(PyNamespace { store: slf, name: name.to_owned(), id })
         })
     }
@@ -338,18 +370,18 @@ impl PyStore {
 
     /// The seq of the last commit (0: none).
     fn seq(&self, py: Python<'_>) -> PyResult<u64> {
-        guard(|| self.with(py, |s| Ok(s.seq())))
+        guard(|| Ok(self.status_of(py, NAMESPACE)?.seq))
     }
 
     /// The highest seq known to be durable; `None` under `fsync="off"`
     /// until an explicit `sync()`.
     fn synced_seq(&self, py: Python<'_>) -> PyResult<Option<u64>> {
-        guard(|| self.with(py, |s| Ok(s.status().synced_seq)))
+        guard(|| Ok(self.status_of(py, NAMESPACE)?.synced_seq))
     }
 
     /// Why `"default"` is read-only, or `None`.
     fn read_only(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        guard(|| self.with(py, |s| Ok(s.read_only())))
+        guard(|| Ok(self.status_of(py, NAMESPACE)?.read_only))
     }
 
     /// The history id (32 hex digits).
@@ -501,6 +533,272 @@ impl PyStore {
         self.export_in(py, NAMESPACE, path, format)
     }
 
+    // ---- queries (`crate::query`) ----
+
+    /// Nodes matching `filter` (an `iwdb` filter), by index or scan, sorted by id; paginated (`cursor`).
+    #[pyo3(signature = (filter, *, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn find(
+        &self,
+        py: Python<'_>,
+        filter: &Bound<'_, PyAny>,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.find_in(
+            py,
+            NAMESPACE,
+            filter,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
+    /// How `find` would read `filter`: the index plan and the estimated candidates (with `analyze`, the exact number).
+    #[pyo3(signature = (filter, *, analyze = false, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn explain(
+        &self,
+        py: Python<'_>,
+        filter: &Bound<'_, PyAny>,
+        analyze: bool,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.explain_in(py, NAMESPACE, filter, analyze, min_seq, timeout)
+    }
+
+    /// The nodes within `depth` edges of `seeds` (an id or a list of ids), sorted by id; paginated (`cursor`).
+    #[pyo3(signature = (seeds, *, depth = 1, direction = "out", edge_types = None, edge_filter = None, node_filter = None, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn neighbourhood(
+        &self,
+        py: Python<'_>,
+        seeds: &Bound<'_, PyAny>,
+        depth: usize,
+        direction: &str,
+        edge_types: Option<Vec<String>>,
+        edge_filter: Option<&Bound<'_, PyAny>>,
+        node_filter: Option<&Bound<'_, PyAny>>,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.neighbourhood_in(
+            py,
+            NAMESPACE,
+            seeds,
+            depth,
+            direction,
+            edge_types,
+            edge_filter,
+            node_filter,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
+    /// A breadth-first (`order="bfs"`) or depth-first (`"dfs"`) traversal from `start`: node ids in traversal order.
+    #[pyo3(signature = (start, *, order = "bfs", depth = None, direction = "out", edge_types = None, edge_filter = None, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn traverse(
+        &self,
+        py: Python<'_>,
+        start: &str,
+        order: &str,
+        depth: Option<usize>,
+        direction: &str,
+        edge_types: Option<Vec<String>>,
+        edge_filter: Option<&Bound<'_, PyAny>>,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.traverse_in(
+            py,
+            NAMESPACE,
+            start,
+            order,
+            depth,
+            direction,
+            edge_types,
+            edge_filter,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
+    /// A shortest path from `from_` to `to`: `"bfs"` (fewest edges), `"dijkstra"` or `"astar"` (cheapest by the edge attribute `weight`).
+    #[pyo3(signature = (from_, to, *, method = "bfs", weight = None, default_weight = 1.0, coords = None, metric = "euclidean", direction = "out", max_depth = None, max_cost = None, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn shortest_path(
+        &self,
+        py: Python<'_>,
+        from_: &str,
+        to: &str,
+        method: &str,
+        weight: Option<String>,
+        default_weight: f64,
+        coords: Option<&Bound<'_, PyAny>>,
+        metric: &str,
+        direction: &str,
+        max_depth: Option<usize>,
+        max_cost: Option<f64>,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.shortest_path_in(
+            py,
+            NAMESPACE,
+            from_,
+            to,
+            method,
+            weight,
+            default_weight,
+            coords,
+            metric,
+            direction,
+            max_depth,
+            max_cost,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
+    /// Up to `walks` random walks of at most `max_length` nodes from `start` (duplicates removed).
+    #[pyo3(signature = (start, *, max_length, walks = 1, min_length = 1, allow_revisit = false, seed = None, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn random_walks(
+        &self,
+        py: Python<'_>,
+        start: &str,
+        max_length: usize,
+        walks: usize,
+        min_length: usize,
+        allow_revisit: bool,
+        seed: Option<u64>,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.random_walks_in(
+            py,
+            NAMESPACE,
+            start,
+            max_length,
+            walks,
+            min_length,
+            allow_revisit,
+            seed,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
+    /// The nodes within `depth` edges of `seeds` and the edges between them, both sorted by id.
+    #[pyo3(signature = (seeds, *, depth = 1, direction = "out", edge_types = None, edge_filter = None, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn subgraph(
+        &self,
+        py: Python<'_>,
+        seeds: &Bound<'_, PyAny>,
+        depth: usize,
+        direction: &str,
+        edge_types: Option<Vec<String>>,
+        edge_filter: Option<&Bound<'_, PyAny>>,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.subgraph_in(
+            py,
+            NAMESPACE,
+            seeds,
+            depth,
+            direction,
+            edge_types,
+            edge_filter,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
+    /// Every match of `pattern` (the core's pattern text), with `where` filters per node variable; sorted rows, paginated (`cursor`).
+    #[pyo3(signature = (pattern, *, r#where = None, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn r#match(
+        &self,
+        py: Python<'_>,
+        pattern: &str,
+        r#where: Option<&Bound<'_, PyDict>>,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.match_in(
+            py,
+            NAMESPACE,
+            pattern,
+            r#where,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
+    /// An analytics job (`"pagerank"`, `"degree"`, `"leiden"`, ...) with its `params`, on a projection of the namespace.
+    #[pyo3(signature = (job, *, params = None, direction = "out", weight = None, default_weight = 1.0, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn analyze(
+        &self,
+        py: Python<'_>,
+        job: &str,
+        params: Option<&Bound<'_, PyDict>>,
+        direction: &str,
+        weight: Option<String>,
+        default_weight: f64,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.analyze_in(
+            py,
+            NAMESPACE,
+            job,
+            params,
+            direction,
+            weight,
+            default_weight,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
     /// An online backup of every namespace into `dest`, a new or empty
     /// directory.
     fn backup(&self, py: Python<'_>, dest: PathBuf) -> PyResult<Py<PyAny>> {
@@ -536,13 +834,7 @@ impl PyStore {
             let options = read_options(min_seq, timeout)?;
             let mut nodes = self.query(py, move |db| block_on(db.get_nodes(&ns, vec![id], options)))?.value;
             let Some(node) = nodes.pop().flatten() else { return Ok(None) };
-            let dict = PyDict::new(py);
-            dict.set_item("id", &node.id)?;
-            dict.set_item("labels", PyList::new(py, &node.labels)?)?;
-            dict.set_item("attr", from_attrs(py, &node.attr)?)?;
-            dict.set_item("meta", from_attrs(py, &node.meta)?)?;
-            dict.set_item("version", node.version)?;
-            Ok(Some(dict.into_any().unbind()))
+            Ok(Some(crate::query::node(py, &node)?))
         })
     }
 
@@ -559,15 +851,7 @@ impl PyStore {
             let options = read_options(min_seq, timeout)?;
             let mut edges = self.query(py, move |db| block_on(db.get_edges(&ns, vec![EdgeId(id)], options)))?.value;
             let Some(edge) = edges.pop().flatten() else { return Ok(None) };
-            let dict = PyDict::new(py);
-            dict.set_item("id", edge.id.0)?;
-            dict.set_item("from", &edge.from)?;
-            dict.set_item("to", &edge.to)?;
-            dict.set_item("type", &edge.ty)?;
-            dict.set_item("attr", from_attrs(py, &edge.attr)?)?;
-            dict.set_item("meta", from_attrs(py, &edge.meta)?)?;
-            dict.set_item("version", edge.version)?;
-            Ok(Some(dict.into_any().unbind()))
+            Ok(Some(crate::query::edge(py, &edge)?))
         })
     }
 

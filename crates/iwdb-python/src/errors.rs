@@ -48,12 +48,36 @@ pub mod exc {
         "A read's min_seq wasn't applied within its timeout. Nothing changed."
     );
     create_exception!(iwdb, ClosedError, Error, "The store is closed.");
+    create_exception!(
+        iwdb,
+        BudgetExceededError,
+        Error,
+        "A read reached max_results, max_visited or max_edges and didn't ask for a partial answer."
+    );
+    create_exception!(
+        iwdb,
+        CursorExpiredError,
+        Error,
+        "A paginated read's namespace changed since its first page: start again without the cursor."
+    );
+    create_exception!(
+        iwdb,
+        NotRetainedError,
+        Error,
+        "The change stream was asked for a seq older than the oldest one still in the WAL."
+    );
+    create_exception!(
+        iwdb,
+        UnavailableError,
+        Error,
+        "The server can't take the request now (no connection, shutting down, overloaded): retry with backoff."
+    );
     create_exception!(iwdb, InternalError, Error, "A bug: a Rust panic outside the commit path.");
 }
 
 use exc::{
-    ClosedError, ConflictError, ConstraintError, CorruptError, InternalError, InvalidError, IoError, LockedError,
-    NotFoundError, ReadOnlyError, TimeoutError,
+    BudgetExceededError, ClosedError, ConflictError, ConstraintError, CorruptError, CursorExpiredError, InternalError,
+    InvalidError, IoError, LockedError, NotFoundError, NotRetainedError, ReadOnlyError, TimeoutError, UnavailableError,
 };
 
 /// Register the exceptions in the module.
@@ -71,6 +95,10 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("TimeoutError", py.get_type::<TimeoutError>())?;
     m.add("ClosedError", py.get_type::<ClosedError>())?;
     m.add("InternalError", py.get_type::<InternalError>())?;
+    m.add("BudgetExceededError", py.get_type::<BudgetExceededError>())?;
+    m.add("CursorExpiredError", py.get_type::<CursorExpiredError>())?;
+    m.add("NotRetainedError", py.get_type::<NotRetainedError>())?;
+    m.add("UnavailableError", py.get_type::<UnavailableError>())?;
     Ok(())
 }
 
@@ -126,9 +154,11 @@ pub fn query_to_py(error: iwdb_query::Error) -> PyErr {
         Code::Corrupt => CorruptError::new_err(message),
         Code::Timeout => TimeoutError::new_err(message),
         Code::Internal => InternalError::new_err(message),
-        // Not reachable through the calls Python has yet (budgets and
-        // cursors come with the query methods of step 14), or nothing more
-        // specific to say (unavailable, cancelled)
+        Code::BudgetExceeded => BudgetExceededError::new_err(message),
+        Code::CursorExpired => CursorExpiredError::new_err(message),
+        Code::NotRetained => NotRetainedError::new_err(message),
+        Code::Unavailable => UnavailableError::new_err(message),
+        // Python has no way to cancel a request
         _ => exc::Error::new_err(message),
     }
 }

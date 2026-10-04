@@ -71,6 +71,12 @@ jobs:
         with:
           command: sdist
           args: --out dist --manifest-path crates/iwdb-python/Cargo.toml
+      # The sdist must build on its own: since step 14 it carries
+      # iwdb-server and the protos (through crates/iwdb-server/proto, a
+      # symlink; ADR 0035)
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build a wheel from the sdist
+        run: python -m pip wheel --no-deps -w sdist-check dist/*.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: sdist

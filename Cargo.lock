@@ -783,6 +783,7 @@ dependencies = [
  "iwdb",
  "iwdb-engine",
  "iwdb-query",
+ "iwdb-server",
  "iwdb-storage",
  "pyo3",
 ]

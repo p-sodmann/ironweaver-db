@@ -1,6 +1,6 @@
 [package]
 name = "iwdb-python"
-description = "Ironweaver DB embedded, for Python: PyO3 bindings of the iwdb crate"
+description = "Ironweaver DB for Python: PyO3 bindings of the embedded store and the gRPC client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -23,6 +23,9 @@ iwdb = { path = "../iwdb" }
 iwdb-query = { path = "../iwdb-query" }
 iwdb-engine = { path = "../iwdb-engine" }
 iwdb-storage = { path = "../iwdb-storage" }
+# The remote client (ADR 0035): `iwdb.connect` serves a Store from
+# `client::Remote` over gRPC; no REST or Postgres parts
+iwdb-server = { path = "../iwdb-server", default-features = false, features = ["client"] }
 # The bindings (design rule 1: only in this crate). abi3: one wheel per
 # platform for CPython 3.9 and later (ADR 0013); maturin adds the
 # extension-module feature when it builds the wheel

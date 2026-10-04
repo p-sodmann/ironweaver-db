@@ -23,7 +23,7 @@ Read before making architectural changes:
 
 ## Non-negotiable design rules
 
-1. **Pure Rust below the adapters.** No `pyo3` types or Python concepts in engine, storage, query or server crates. Python lives only in `iwdb-python` and the Python client.
+1. **Pure Rust below the adapters.** No `pyo3` types or Python concepts in engine, storage, query or server crates. Python lives only in `iwdb-python`.
 2. **Single writer, many readers.** All mutations go through one commit pipeline. Never add a second write path that bypasses the WAL.
 3. **Durability claims must be tested.** Any code that touches the WAL, checkpoints or recovery needs a crash/fault-injection test that proves the documented guarantee.
 4. **On-disk formats are versioned contracts.** Every format has magic bytes, a version and checksums. Changing a format means bumping the version, keeping a reader for N-1 and adding a compatibility fixture.
@@ -46,9 +46,8 @@ crates/
   iwdb/                    # embedded facade: Store::open(dir)
   iwdb-server/             # gRPC (tonic) + REST (axum) adapters, auth, metrics
   iwctl/                   # admin CLI and query shell
-  iwdb-python/             # PyO3 bindings (embedded mode)
+  iwdb-python/             # PyO3 bindings: embedded mode and the remote client (ADR 0035)
 proto/                     # protobuf contract (versioned, canonical schema for gRPC and REST)
-clients/python/            # Python client (sync + async)
 fuzz/                      # cargo-fuzz targets
 tests/                     # cross-crate integration, crash and compatibility tests
 documentation/             # design, steps, ADRs
