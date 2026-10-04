@@ -23,7 +23,7 @@ use iwdb_server::proto as pb;
 use iwdb_server::proto::database_service_client::DatabaseServiceClient;
 use iwdb_server::status::CODE_KEY;
 use iwdb_storage::failpoint::{Action, Call, FailFs, Rule, When};
-use support::{Running, fresh, options};
+use support::{Running, fresh_open as fresh, options};
 use tonic::codegen::http::Uri;
 
 mod support;

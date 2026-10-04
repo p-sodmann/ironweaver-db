@@ -170,6 +170,24 @@ impl<C> Deref for Fresh<C> {
     }
 }
 
+/// A store served without authentication, and a gRPC client: for the
+/// tests of what the adapters add (raw requests carry no token).
+pub fn fresh_open() -> Fresh {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), options()).unwrap();
+    let server = Running::start(Embedded::new(store, QueryConfig::default()).unwrap());
+    Fresh { remote: server.client(), server, _dir: dir }
+}
+
+/// The same, with a REST client.
+#[cfg(feature = "rest")]
+pub fn fresh_open_rest() -> Fresh<RestRemote> {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), options()).unwrap();
+    let server = Running::start(Embedded::new(store, QueryConfig::default()).unwrap());
+    Fresh { remote: server.rest_client(), server, _dir: dir }
+}
+
 /// A store with the admin [`ADMIN`], served with authentication on.
 pub fn served() -> (Running<Embedded>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();

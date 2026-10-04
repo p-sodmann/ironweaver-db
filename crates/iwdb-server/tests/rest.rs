@@ -117,7 +117,7 @@ fn fill(path: &str) -> String {
 
 #[test]
 fn every_route_is_served_and_other_methods_are_not_allowed() {
-    let fresh = support::fresh();
+    let fresh = support::fresh_open();
     let server = &fresh.server;
     let http = client(false);
     for route in ROUTES {
@@ -164,7 +164,7 @@ fn every_route_is_served_and_other_methods_are_not_allowed() {
 
 #[test]
 fn errors_have_the_status_of_their_code_and_an_error_body() {
-    let fresh = support::fresh();
+    let fresh = support::fresh_open();
     let server = &fresh.server;
     let cases: Vec<(Reply, StatusCode, &str, &str)> = vec![
         (get(server, "/v1/namespaces/nope"), StatusCode::NOT_FOUND, "not_found", "nope"),
@@ -341,7 +341,7 @@ fn nest(depth: usize) -> Value {
 
 #[test]
 fn values_and_filters_nested_100_levels_pass_and_101_fail_with_the_cores_message() {
-    let fresh = support::fresh_rest(false);
+    let fresh = support::fresh_open_rest();
     let server = &fresh.server;
     let deep = serde_json::to_value(nest(100)).unwrap();
     let commit = |value: &Json| json!({ "mutations": [{ "upsertNode": { "id": "a", "labels": ["N"], "attr": { "deep": value } } }] });
@@ -368,7 +368,7 @@ fn values_and_filters_nested_100_levels_pass_and_101_fail_with_the_cores_message
 
 #[test]
 fn single_nodes_and_edges_by_id() {
-    let fresh = support::fresh();
+    let fresh = support::fresh_open();
     let server = &fresh.server;
     let odd = "a/b ü?#";
     let edge = Mutation::AddEdge {
@@ -400,7 +400,7 @@ fn single_nodes_and_edges_by_id() {
 
 #[test]
 fn http2_and_http1_serve_rest_and_grpc_on_one_port() {
-    let fresh = support::fresh();
+    let fresh = support::fresh_open();
     let server = &fresh.server;
     for http2 in [false, true] {
         let reply = send(server, &client(http2), Method::GET, "/v1/namespaces", None, &[]);
