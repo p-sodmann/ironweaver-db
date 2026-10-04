@@ -108,9 +108,11 @@ where
     /// crash the namespace is there with all its data (the next open
     /// finishes the import) or not at all.
     ///
-    /// **Not in the WAL**: a restore from a backup taken before the import
-    /// and a WAL archive can't rebuild the namespace; take a backup after
-    /// an import. The change stream of the namespace starts at seq 2.
+    /// **Not in the WAL, but in the archive**: the change stream of the
+    /// namespace starts at seq 2. With a WAL archive, the checkpoint is
+    /// copied there before this returns (archive format 3; if that fails,
+    /// it warns and the next open copies it), so restore rebuilds the
+    /// namespace from the archive alone. Without one, take a backup.
     ///
     /// Memory: the graph, plus the whole file for JSON (binary and LGF
     /// files are read as they are decoded). `progress` gets the bytes read,
@@ -203,6 +205,13 @@ where
             };
             let id = paths.id;
             let event = catalog.log.append(EventKind::Create, id, &name, None)?;
+            // The archive gets the checkpoint (no WAL record holds the
+            // import); if that fails, the next open tries again
+            if let Some(archive) = &catalog.archive
+                && let Err(e) = files::archive_base(archive, id, &paths)
+            {
+                log::warn!("namespace '{}': the import isn't in the WAL archive yet: {}", name, e);
+            }
             // Opening reads the namespace, which finishes the import first
             self.open_created(&mut catalog, &name, paths, event)
         })?;

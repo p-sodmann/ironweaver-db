@@ -45,10 +45,12 @@ Memory: the graph, plus a buffer for binary and LGF files; JSON files are read i
 
 **6. Where it is available.** `Store` and `Ns` in Rust (plus `import_file` / `export_file` for paths, which write the export atomically), Python (`Store.import_namespace`, `Store.import_file` / `Namespace.import_file` to merge, `Namespace.export`), and `iwctl import [--merge]` / `iwctl export` on a local data directory. Not over the `Database` trait (gRPC, REST): that needs an upload and a download stream, and the server reading or writing files of its own machine is a question for authentication (step 15). Like backup and restore, these are operations on a store, not requests.
 
+**7. The WAL archive** holds an import's checkpoint (see Consequences, "Backups and PITR").
+
 ## Consequences
 
 - An import of millions of nodes costs one file write, not millions of WAL records, and is atomic.
-- **Backups and PITR.** The import's data is in a checkpoint only, not in the WAL, so the WAL archive doesn't have it. A restore from a backup taken before the import plus the archive can't rebuild the namespace: it fails with missing records once the archive has later segments of it, and gives an empty namespace while it has none. Take a backup after an import (documented in guarantees.md and the import's docs). A backup taken after it restores it as usual.
+- **Backups and PITR** (decision of 2026-10-04, replacing "take a backup after an import"): the import's data is in a checkpoint only, not in the WAL, so the WAL archive also gets that checkpoint: archive format 3 adds `ns/<id>/<seq>.ckpt`. The import copies it after its create event, before it acknowledges; a store's open copies it for any namespace with a checkpoint at seq 1 and no record 1 in its WAL or the archive (a crash in between, or an archive set up later). Restore uses archived checkpoints as bases, so an imported namespace restores from the archive alone, to the latest seq, a seq or a time (a time between the import and the next commit gives the import). Format 2 archives are upgraded by rewriting the marker; fixture `archive-v3`. A merge (1b) is ordinary commits, archived as segments.
 - The change stream of an imported namespace starts at seq 2: seq 1 is `not_retained`.
 - Export blocks commits to the namespace while it runs (a few seconds for a graph of millions of nodes). A consumer that needs a live namespace untouched can export from a restored backup instead.
 - LGF values are typed by their look: a string attribute `"007"` written unquoted comes back as `Int(7)`.

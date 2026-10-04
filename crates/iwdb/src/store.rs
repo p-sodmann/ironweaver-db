@@ -255,6 +255,14 @@ where
         let size_trigger = options.checkpoint.wal_size.unwrap_or(u64::MAX);
         let mut states = BTreeMap::new();
         for recovered in namespaces {
+            // An imported namespace's checkpoint, if the archive lacks it
+            // (ADR 0033): a crash after the import's create event, or an
+            // archive set up after the import
+            if let Some(archive) = &archive
+                && let Err(e) = iwdb_storage::import::archive_base(archive, recovered.info.id, &recovered.paths)
+            {
+                log::warn!("namespace '{}': its import isn't in the WAL archive: {}", recovered.info.name, e);
+            }
             let state = Arc::new(new_state(
                 &fs,
                 &options,

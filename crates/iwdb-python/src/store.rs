@@ -473,8 +473,8 @@ impl PyStore {
     /// Create the namespace `name` from the graph file `path`: a core JSON
     /// or binary file, or LGF (`format` "json", "binary" or "lgf"; by
     /// default detected from the file's first bytes). The namespace is
-    /// made from one checkpoint at seq 1, all or nothing; take a backup
-    /// after an import if you rely on backups (ADR 0033).
+    /// made from one checkpoint at seq 1, all or nothing, and the checkpoint
+    /// is archived if the store has a WAL archive (ADR 0033).
     #[pyo3(signature = (name, path, *, format = None))]
     fn import_namespace(&self, py: Python<'_>, name: &str, path: PathBuf, format: Option<&str>) -> PyResult<Py<PyAny>> {
         guard(|| {

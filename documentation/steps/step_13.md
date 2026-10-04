@@ -83,7 +83,7 @@ The original task, "bulk import/export: ironweaver JSON/binary files, LGF, CSV e
 - [x] Progress callbacks (phase, bytes) for both.
 - [x] Python `Store.import_namespace` and `Namespace.export`; `iwctl import` and `iwctl export`.
 - [x] Tests: the acceptance criterion below; every file operation of an import failing leaves the namespace fully there or fully gone (and the store opens and verifies); export and re-import give the same graph; files of the Ironweaver library (JSON v1 and v2, binary v2) import; LGF files (LEMON's examples, quoting, escapes, errors with lines); bad imports change nothing; the change stream of an imported namespace (`not_retained` at seq 1); backup and restore of an imported namespace.
-- [x] Docs: ADR 0033, `api/import-export.md`, data-dir.md (the staged import), guarantees.md (import atomicity, take a backup after an import), errors.md, iwctl usage, the design doc.
+- [x] Docs: ADR 0033, `api/import-export.md`, data-dir.md (the staged import), guarantees.md (import atomicity, imports in the archive), archive.md (format 3), errors.md, iwctl usage, the design doc.
 
 Refined while writing the code:
 
@@ -92,6 +92,7 @@ Refined while writing the code:
 - **Python**: `NamespaceExists` from the store's own calls is now `ConflictError`, as it already was through the `Database` trait.
 - **Fixtures**: the core's sample files (`tests/fixtures/import/`: version 1 JSON and binary, version 2 JSON, binary and half-float binary) are imported by the tests, so files of the Ironweaver library stay importable.
 - **Tests**: the crash test was checked to fail when recovery doesn't finish a staged import.
+- **The WAL archive holds imports** (decision of 2026-10-04: rather than asking for a backup after every import): archive format 3 adds the checkpoint an imported namespace starts from (`ns/<id>/<seq>.ckpt`), copied by the import after its create event and by every open where it is missing; restore uses archived checkpoints as bases (to a time too). Format 2 is upgraded by rewriting the marker; fixture `archive-v3`. Checked to fail without the copy.
 - **Merging into existing namespaces** (decision of 2026-10-04: an import only into new namespaces was too limiting): `Ns::import` / `import_file` commit the file through the commit pipeline in batches (nodes upserted, edges upserted by ends and type, parallel edges added); Python `import_file`, `iwctl import --merge`. Tests: converging re-runs, `default`, batches split below the WAL record limit, a failing batch.
 
 ## Notes for parts 2 and 3

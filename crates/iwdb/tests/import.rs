@@ -460,17 +460,24 @@ fn progress_is_reported_while_reading_and_writing() {
     store.close().unwrap();
 }
 
-/// A backup taken after an import restores it. The WAL archive doesn't
-/// have the import: a restore from the archive alone fails for the
-/// namespace once the archive holds later segments of it.
+/// An imported namespace restores from a backup taken after the import,
+/// and from the WAL archive alone: the import copies its checkpoint there
+/// (archive format 3). A restore to a time between the import and the next
+/// commit gives the imported state.
 #[test]
-fn an_imported_namespace_is_backed_up_and_restored_but_not_from_the_archive_alone() {
+fn an_imported_namespace_restores_from_a_backup_and_from_the_archive_alone() {
     let dir = tempfile::tempdir().unwrap();
     let archive = tempfile::tempdir().unwrap();
     let mut opts = options(1);
     opts.archive = Some(archive.path().to_path_buf());
     let store = Store::open(dir.path(), opts.clone()).unwrap();
-    store.import_namespace("lemon", ImportFormat::Lgf, LEMON.as_bytes(), None).unwrap();
+    let report = store.import_namespace("lemon", ImportFormat::Lgf, LEMON.as_bytes(), None).unwrap();
+    let archived = archive.path().join("ns").join(format!("{:020}", report.event.id)).join(format!("{:020}.ckpt", 1));
+    assert!(archived.is_file(), "the import's checkpoint is in the archive");
+    let imported = export(&store, "lemon", ExportFormat::Json);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let between = iwdb::CommitTime::now();
+    std::thread::sleep(std::time::Duration::from_millis(5));
     let ns = store.namespace("lemon").unwrap();
     for i in 0..30 {
         ns.commit(&[node(&format!("x{}", i), &[], attrs(&[("pad", Value::from("p".repeat(100)))]))]).unwrap();
@@ -480,18 +487,59 @@ fn an_imported_namespace_is_backed_up_and_restored_but_not_from_the_archive_alon
     let backup = tempfile::tempdir().unwrap().path().join("backup");
     store.backup(&backup).unwrap();
     store.close().unwrap();
+    let report = iwdb::verify(archive.path()).unwrap();
+    assert!(report.is_ok(), "{:#?}", report.problems);
 
-    let restored = tempfile::tempdir().unwrap().path().join("restored");
-    let sources = RestoreSources { backup: Some(backup.clone()), archive: None };
-    iwdb::restore(&restored, &sources, RestoreTarget::Latest).unwrap();
-    let store = Store::open(&restored, options(1)).unwrap();
-    assert_eq!(export(&store, "lemon", ExportFormat::Json), expected);
+    let restore = |sources: RestoreSources, target: RestoreTarget| {
+        let dest = tempfile::tempdir().unwrap().keep().join("restored");
+        iwdb::restore(&dest, &sources, target).unwrap_or_else(|e| panic!("{:?}: {}", sources, e));
+        let store = Store::open(&dest, options(1)).unwrap();
+        let out = export(&store, "lemon", ExportFormat::Json);
+        store.close().unwrap();
+        out
+    };
+    let backup_only = RestoreSources { backup: Some(backup.clone()), archive: None };
+    let archive_only = RestoreSources { backup: None, archive: Some(archive.path().to_path_buf()) };
+    assert_eq!(restore(backup_only, RestoreTarget::Latest), expected);
+    // The archive has the segments the checkpoint removed: not the last ones
+    let from_archive = restore(archive_only.clone(), RestoreTarget::Latest);
+    assert_ne!(from_archive, imported);
+    assert_eq!(restore(archive_only.clone(), RestoreTarget::Time(between)), imported);
+    let lemon = |s: &str| iwdb::NamespaceName::new(s).unwrap();
+    let dest = tempfile::tempdir().unwrap().keep().join("seq1");
+    iwdb::restore_namespaces(&dest, &archive_only, RestoreTarget::Seq(1), Some(&[lemon("lemon")])).unwrap();
+}
+
+/// A store that imported without an archive, opened with one, archives
+/// the import's checkpoint; and so does an open after a crash between the
+/// import's create event and its archive copy (simulated by removing the
+/// copy).
+#[test]
+fn an_open_archives_the_checkpoint_of_an_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), options(1)).unwrap();
+    let report = store.import_namespace("lemon", ImportFormat::Lgf, LEMON.as_bytes(), None).unwrap();
+    store.create_namespace("plain", None).unwrap();
     store.close().unwrap();
-
-    let from_archive = tempfile::tempdir().unwrap().path().join("from-archive");
-    let sources = RestoreSources { backup: None, archive: Some(archive.path().to_path_buf()) };
-    let error = iwdb::restore(&from_archive, &sources, RestoreTarget::Latest).unwrap_err();
-    assert_matches!(error, Error::MissingRecords { from: 1, .. }, "{}", error);
+    let ns_dir = archive.path().join("ns").join(format!("{:020}", report.event.id));
+    let archived = ns_dir.join(format!("{:020}.ckpt", 1));
+    let mut opts = options(1);
+    opts.archive = Some(archive.path().to_path_buf());
+    for _ in 0..2 {
+        let store = Store::open(dir.path(), opts.clone()).unwrap();
+        assert!(archived.is_file());
+        store.close().unwrap();
+        fs::remove_file(&archived).unwrap();
+    }
+    // Only the imported namespace: `plain` and `default` start at record 1
+    let entries: Vec<String> = fs::read_dir(archive.path().join("ns"))
+        .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    for entry in entries {
+        let files = fs::read_dir(archive.path().join("ns").join(&entry)).unwrap().count();
+        assert!(files == 0 || entry == format!("{:020}", report.event.id), "{}", entry);
+    }
 }
 
 // ---- merging into an existing namespace ----

@@ -39,8 +39,10 @@ for status, which then shows what the files say):
   import <dir> <name> <file> [--format json|binary|lgf] [--merge]
                                 create the namespace <name> from a graph file (a core JSON
                                 or binary file, or LGF; detected unless --format) as one
-                                checkpoint; with --merge, upsert the file's nodes and edges
-                                into the existing namespace <name> through commits
+                                checkpoint (with --archive, archived too; otherwise the
+                                store's next open with its archive does it); with --merge,
+                                upsert the file's nodes and edges into the existing
+                                namespace <name> through commits
   export <dir> <file> [-n <ns>] [--format json|binary]
                                 write a namespace's graph to <file> as a core file (JSON for
                                 a .json file, binary otherwise, unless --format)

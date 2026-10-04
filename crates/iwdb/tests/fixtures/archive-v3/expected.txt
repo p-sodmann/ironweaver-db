@@ -1,0 +1,51 @@
+history 034cbdb58fa3cde5622d4ab7b23b496d
+namespace default 1 last 79
+node "b" labels=["A", "B"] attr={"x": []} meta={} version=4
+node "c" labels=["A", "B"] attr={"x": Int(1), "y": String("s")} meta={} version=5
+node "p0" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000054")} meta={} version=19
+node "p1" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000055")} meta={} version=19
+node "p2" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000056")} meta={} version=19
+catalog NamespaceCatalog { indexes: {IndexDef { path: AttrPath(["x"]) }}, constraints: {Constraint { kind: Unique, label: Label("B"), path: AttrPath(["x"]) }, Constraint { kind: Required, label: Label("A"), path: AttrPath(["x"]) }, Constraint { kind: Required, label: Label("B"), path: AttrPath(["x"]) }} }
+seq 79
+namespace a 2 last 63
+edge 0 "b" -> "d" type=Some("T") attr={"x": Int(0), "y": [Float(1.0)]} meta={} version=1
+edge 1 "a" -> "b" type=Some("U") attr={"x": Float(1.0), "y": None} meta={} version=4
+edge 2 "a" -> "b" type=Some("T") attr={"x": None, "y": [Int(2)]} meta={} version=2
+edge 3 "d" -> "b" type=Some("T") attr={} meta={} version=1
+edge 4 "d" -> "b" type=Some("U") attr={"y": Float(1.0)} meta={} version=2
+edge 5 "b" -> "a" type=None attr={} meta={"m": Int(1)} version=2
+node "a" labels=["B"] attr={} meta={} version=6
+node "b" labels=["A"] attr={"x": String("t"), "y": Int(2)} meta={} version=10
+node "c" labels=["B"] attr={"x": String("s")} meta={"m": Int(1)} version=11
+node "d" labels=[] attr={} meta={} version=5
+node "p0" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000039")} meta={} version=14
+node "p1" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000037")} meta={} version=13
+node "p2" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000038")} meta={} version=13
+catalog NamespaceCatalog { indexes: {}, constraints: {} }
+seq 63
+namespace gone 3 last 64
+edge 0 "b" -> "d" type=Some("T") attr={"x": Int(0), "y": [Float(1.0)]} meta={} version=1
+edge 1 "a" -> "b" type=Some("U") attr={"x": Float(1.0), "y": None} meta={} version=4
+edge 2 "a" -> "b" type=Some("T") attr={"x": None, "y": [Int(2)]} meta={} version=2
+edge 3 "d" -> "b" type=Some("T") attr={} meta={} version=1
+edge 4 "d" -> "b" type=Some("U") attr={"y": Float(1.0)} meta={} version=2
+edge 5 "b" -> "a" type=None attr={} meta={"m": Int(1)} version=2
+node "a" labels=["B"] attr={} meta={} version=6
+node "b" labels=["A"] attr={"x": String("t"), "y": Int(2)} meta={} version=10
+node "c" labels=["B"] attr={"x": String("s")} meta={"m": Int(1)} version=11
+node "d" labels=[] attr={} meta={} version=5
+node "p0" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000039")} meta={} version=14
+node "p1" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040")} meta={} version=14
+node "p2" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000038")} meta={} version=13
+catalog NamespaceCatalog { indexes: {}, constraints: {} }
+seq 64
+namespace imported 4 last 38
+edge 2 "d" -> "c" type=None attr={"y": String("s")} meta={} version=2
+node "a" labels=["B"] attr={"x": None} meta={} version=2
+node "c" labels=["A"] attr={"x": Int(2)} meta={} version=2
+node "d" labels=["A", "B"] attr={"y": String("t")} meta={} version=4
+node "p0" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000027")} meta={} version=10
+node "p1" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000025")} meta={} version=9
+node "p2" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000026")} meta={} version=9
+catalog NamespaceCatalog { indexes: {}, constraints: {} }
+seq 38

@@ -63,7 +63,7 @@ The report has the counts, the indexes created, what was left out, the number of
 - **All or nothing.** After a crash at any point, the namespace is there with all the file's data, or not at all. The import's checkpoint is staged before the namespace's create event is logged, and the next open finishes a staged import whose event is logged ([data-dir.md](../formats/data-dir.md), "Import").
 - **Checked first.** The graph is checked like a recovered namespace before anything is written; a refused file creates nothing.
 - **A new namespace.** The name must not exist (`conflict`); to import into an existing one, merge.
-- **Not in the WAL.** The namespace's change stream starts at seq 2 (seq 1 is `not_retained`), and the WAL archive doesn't hold the import. **Take a backup after an import**: a restore from an older backup plus the archive can't rebuild the namespace.
+- **Not in the WAL, but in the archive.** The namespace's change stream starts at seq 2 (seq 1 is `not_retained`). With a WAL archive, the import's checkpoint is copied there before the import returns (and by the next open, if a crash or a missing archive got in the way), so restore and PITR rebuild the namespace from the archive alone ([formats/archive.md](../formats/archive.md)). Without an archive, take a backup after an import.
 - **Export** reads the namespace at one seq; commits to that namespace wait while it writes (reads don't). `export_file` writes a temporary file, fsyncs it and renames it over the path.
 
 Memory: the graph, plus the whole file for a JSON import (binary and LGF files are decoded as they are read) and the whole output for a JSON export.

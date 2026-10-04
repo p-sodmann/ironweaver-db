@@ -110,6 +110,35 @@ pub fn place<F: LogFs>(fs: &F, staged: &Path, paths: &NsPaths) -> Result<(), Err
     Ok(())
 }
 
+/// Make sure the WAL archive holds the checkpoint an imported namespace
+/// starts from (ADR 0033): if the namespace in `paths` has a checkpoint at
+/// [`IMPORT_SEQ`] (or a staged import) and neither its WAL nor the archive
+/// holds record 1, copy it into the archive (synced). Returns whether it
+/// copied. The import calls it after its create event; a store's open
+/// calls it for every namespace, which covers a crash in between, and an
+/// archive set up after the import.
+pub fn archive_base<F: LogFs>(archive: &crate::archive::Archive<F>, id: u64, paths: &NsPaths) -> Result<bool, Error> {
+    let checkpoint = paths.checkpoints.join(checkpoint_name(IMPORT_SEQ));
+    let staged = paths.checkpoints.join(STAGED_NAME);
+    let source = if checkpoint.is_file() {
+        checkpoint
+    } else if staged.is_file() {
+        staged
+    } else {
+        return Ok(false);
+    };
+    let version = crate::archive::ARCHIVE_VERSION;
+    let starts_at_1 = |segments: Vec<(u64, PathBuf)>| segments.first().is_some_and(|(seq, _)| *seq <= 1);
+    if starts_at_1(crate::reader::list_segments(&paths.wal)?)
+        || starts_at_1(crate::archive::archive_segments(archive.dir(), version, id)?)
+        || crate::archive::archive_checkpoints(archive.dir(), version, id)?.iter().any(|(seq, _)| *seq == IMPORT_SEQ)
+    {
+        return Ok(false);
+    }
+    archive.copy_checkpoint(id, IMPORT_SEQ, &source)?;
+    Ok(true)
+}
+
 /// Finish an import whose create event is logged: if `checkpoints/` holds
 /// `import.staged`, rename it to the checkpoint at [`IMPORT_SEQ`] when the
 /// namespace has no checkpoint, and remove it otherwise (an import that
