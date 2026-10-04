@@ -1,22 +1,26 @@
 //! Helpers for the server's tests: a server on an ephemeral port with a
 //! store in a temporary directory, and a `Remote` connected to it. The
 //! conformance fixtures run with authentication on (step 15a): an admin
-//! is created before the server starts, and the client logs in.
+//! is created before the server starts, and the client logs in; and over
+//! TLS (step 15b), with the test certificates of `tests/fixtures/tls`.
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
 use std::future::Future;
 use std::net::SocketAddr;
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use iwdb::auth::{AuthSettings, HashParams};
 use iwdb::{CheckpointOptions, Embedded, FsyncPolicy, LogFs, QueryConfig, Secret, Store, StoreOptions, WalOptions};
 use iwdb_server::auth::AuthMode;
-use iwdb_server::client::Remote;
 #[cfg(feature = "rest")]
 use iwdb_server::client::RestRemote;
+use iwdb_server::client::{ClientTls, Remote};
+use iwdb_server::config::ClientAuth;
+use iwdb_server::tls::{ServerTls, TlsFiles};
 use iwdb_server::{Drain, Server};
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
@@ -43,10 +47,39 @@ pub fn auth_settings() -> AuthSettings {
     AuthSettings { hash: FAST, ..AuthSettings::default() }
 }
 
+/// A test certificate or key (`tests/fixtures/tls`; test-only, public).
+pub fn tls_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tls").join(name)
+}
+
+/// The server's TLS: `server.pem`, and with `client_auth` client
+/// certificates of the test CA.
+pub fn server_tls(client_auth: Option<ClientAuth>) -> Arc<ServerTls> {
+    let files = TlsFiles {
+        cert: tls_fixture("server.pem"),
+        key: tls_fixture("server.key"),
+        client_ca: client_auth.map(|_| tls_fixture("ca.pem")),
+        client_auth: client_auth.unwrap_or(ClientAuth::Optional),
+    };
+    Arc::new(ServerTls::load(files).unwrap())
+}
+
+/// A client that trusts the test CA, presenting `client-<name>.pem` if
+/// `cert` is given.
+pub fn client_tls(cert: Option<&str>) -> ClientTls {
+    ClientTls {
+        ca: Some(tls_fixture("ca.pem")),
+        cert: cert.map(|c| tls_fixture(&format!("client-{}.pem", c))),
+        key: cert.map(|c| tls_fixture(&format!("client-{}.key", c))),
+    }
+}
+
 /// A server of `D` on its own runtime, listening on 127.0.0.1 with an
 /// ephemeral port.
 pub struct Running<D: iwdb_server::auth::Served> {
     pub addr: SocketAddr,
+    /// Over TLS: what its clients trust (the test CA).
+    pub tls: Option<ClientTls>,
     runtime: Option<Runtime>,
     stop: Option<oneshot::Sender<Duration>>,
     task: Option<JoinHandle<(Drain, Server<D>)>>,
@@ -77,6 +110,7 @@ impl<D: iwdb_server::auth::Served> Running<D> {
         let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
         let addr = listener.local_addr().unwrap();
         let server = build(Server::new(Arc::new(db)));
+        let tls = server.serves_tls().then(|| client_tls(None));
         let (stop, stopped) = oneshot::channel::<Duration>();
         let task = runtime.spawn(async move {
             let (tx, rx) = oneshot::channel::<Duration>();
@@ -91,20 +125,26 @@ impl<D: iwdb_server::auth::Served> Running<D> {
             let report = server.serve(listener, stop, drain).await.unwrap();
             (report, server)
         });
-        Running { addr, runtime: Some(runtime), stop: Some(stop), task: Some(task) }
+        Running { addr, tls, runtime: Some(runtime), stop: Some(stop), task: Some(task) }
     }
 
+    /// Over TLS with the test certificate, and authentication as `auth`.
+    pub fn start_tls(db: D, auth: AuthMode, client_auth: Option<ClientAuth>) -> Self {
+        Self::start_built(db, |server| server.auth(auth).tls(Some(server_tls(client_auth))))
+    }
+
+    /// `https://127.0.0.1:port` over TLS, `http://...` otherwise.
     pub fn endpoint(&self) -> String {
-        format!("http://{}", self.addr)
+        format!("{}://{}", if self.tls.is_some() { "https" } else { "http" }, self.addr)
     }
 
     pub fn client(&self) -> Remote {
-        Remote::connect(&self.endpoint()).unwrap()
+        Remote::connect_tls(&self.endpoint(), &self.tls.clone().unwrap_or_default()).unwrap()
     }
 
     #[cfg(feature = "rest")]
     pub fn rest_client(&self) -> RestRemote {
-        RestRemote::connect(&self.endpoint()).unwrap()
+        RestRemote::connect_tls(&self.endpoint(), &self.tls.clone().unwrap_or_default()).unwrap()
     }
 
     /// Shut down with a drain of `drain`; the report and the database.
@@ -188,13 +228,14 @@ pub fn fresh_open_rest() -> Fresh<RestRemote> {
     Fresh { remote: server.rest_client(), server, _dir: dir }
 }
 
-/// A store with the admin [`ADMIN`], served with authentication on.
+/// A store with the admin [`ADMIN`], served with authentication on, over
+/// TLS.
 pub fn served() -> (Running<Embedded>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), options()).unwrap();
     store.users().with_params(FAST).create(ADMIN.0, &Secret::new(ADMIN.1), true).unwrap();
     let db = Embedded::new(store, QueryConfig::default()).unwrap().with_auth(auth_settings());
-    (Running::start_auth(db), dir)
+    (Running::start_tls(db, AuthMode { enabled: true }, None), dir)
 }
 
 /// Over gRPC, logged in as the admin.
