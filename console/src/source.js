@@ -25,12 +25,21 @@
  *   cancel(requestId)              new (step 16: cancel a request)              {}
  *   log(), onLog(f) -> unsubscribe new (step 16: the server log)                [{t, level, msg}]
  *   tick()                         none: the mock's clock; a server Source makes it a no-op
+ *   session()                      GET /v1/auth/whoami                          {authEnabled, user: {name, admin, grants}}
+ *   login(user, password)          POST /v1/auth/login (cookie: true)           the session, as session()
+ *   logout()                       POST /v1/auth/logout                         {}
+ *   onAuth(f) -> unsubscribe       none: f(null) when a call answers 401        (the session ended: log in again)
+ *
+ * Authentication (step 15a, ADR 0046): with the server's [auth] enabled every call but login needs a session. The
+ * REST Source holds it in the server's HttpOnly, SameSite=Strict cookie (no script can read it; never in
+ * localStorage) and sends `X-Iwdb-Csrf` with every request. A call that answers 401 rejects with code
+ * `unauthenticated` and tells the onAuth listeners, so the pages show the login instead of an outage.
  *
  * "new" marks what the server doesn't offer yet; step 16 adds it (see documentation/steps/step_16a.md).
  */
 (function (root) {
   'use strict';
-  const METHODS = ['namespaces', 'namespaceStatus', 'schema', 'getNodes', 'getEdges', 'find', 'explain', 'neighbours', 'subgraph', 'matchPattern', 'commit', 'createIndex', 'server', 'cancel', 'log', 'onLog', 'tick'];
+  const METHODS = ['namespaces', 'namespaceStatus', 'schema', 'getNodes', 'getEdges', 'find', 'explain', 'neighbours', 'subgraph', 'matchPattern', 'commit', 'createIndex', 'server', 'cancel', 'log', 'onLog', 'tick', 'session', 'login', 'logout', 'onAuth'];
   const api = { METHODS };
   root.IW = root.IW || {}; root.IW.sourceContract = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

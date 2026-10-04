@@ -674,7 +674,8 @@ impl Config {
                 None => {}
             }
         }
-        let get = |name: &str| env.iter().find(|(var, _)| var == name).map(|(_, v)| v.clone());
+        // An empty variable is an unset one (compose's `${VAR:-}`)
+        let get = |name: &str| env.iter().find(|(var, v)| var == name && !v.is_empty()).map(|(_, v)| v.clone());
         match (get(BOOTSTRAP_USER_VAR), get(BOOTSTRAP_PASSWORD_VAR)) {
             (user, Some(password)) => {
                 config.bootstrap = Some((user.unwrap_or_else(|| "admin".into()), Secret::new(password)));
@@ -1191,6 +1192,8 @@ mod tests {
         .join("\n");
         assert!(problems.contains("8 to 1024 bytes") && problems.contains("invalid user name"), "{}", problems);
         assert!(!problems.contains("short\""), "{}", problems);
+        let empty = Config::build(None, &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_AUTH_BOOTSTRAP_PASSWORD", "")])).unwrap();
+        assert!(empty.bootstrap.is_none(), "an empty variable is an unset one");
         let alone = Config::build(None, &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_AUTH_BOOTSTRAP_USER", "root")]));
         assert!(alone.unwrap_err().join("").contains("needs IWDB_AUTH_BOOTSTRAP_PASSWORD"));
     }

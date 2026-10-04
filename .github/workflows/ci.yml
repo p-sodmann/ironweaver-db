@@ -144,10 +144,17 @@ jobs:
           grep -q "grpc, rest, postgres, console" version.txt
           docker run --rm iwdb-server:ci-grpc --version | tee version.txt
           grep -q "(grpc)" version.txt
-          docker run -d --name iwdb -p 127.0.0.1:7600:7600 iwdb-server:ci
+          # Without the plaintext flag the image refuses 0.0.0.0 (step 15a, exit 2)
+          docker run --name refused iwdb-server:ci || test "$(docker inspect -f '{{.State.ExitCode}}' refused)" = 2
+          docker run -d --name iwdb -p 127.0.0.1:7600:7600 \
+            -e IWDB_SERVER_PLAINTEXT_PUBLIC=true -e IWDB_AUTH_BOOTSTRAP_PASSWORD=ci-admin-password iwdb-server:ci
           for i in $(seq 1 30); do curl -fsS http://127.0.0.1:7600/v1/health/ready && break; sleep 1; done
           docker exec iwdb iwdb-server --probe 127.0.0.1:7600
-          curl -fsS http://127.0.0.1:7600/v1/namespaces | tee namespaces.json
+          # Authentication is on: no token, 401; log in, then the namespaces
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7600/v1/namespaces)" = 401
+          TOKEN=$(curl -fsS http://127.0.0.1:7600/v1/auth/login -H 'content-type: application/json' \
+            -d '{"user": "admin", "password": "ci-admin-password"}' | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+          curl -fsS http://127.0.0.1:7600/v1/namespaces -H "authorization: Bearer $TOKEN" | tee namespaces.json
           grep -q default namespaces.json
           docker stop iwdb
           docker logs iwdb 2>&1 | tee server.log

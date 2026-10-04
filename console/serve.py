@@ -8,9 +8,11 @@ it is and adds no CORS headers of its own.
     uv run --with flask console/serve.py                    # the server on 127.0.0.1:7600 (docker compose up)
     IWDB_URL=http://10.0.0.5:7600 uv run --with flask console/serve.py --port 8080
 
-Then open http://127.0.0.1:8000/. This is a development tool: it binds to localhost and has no authentication,
-like the server until step 15. Streamed answers (NDJSON, the change stream's Server-Sent Events) are passed on
-as they arrive.
+Then open http://127.0.0.1:8000/. This is a development tool: it binds to localhost. Authentication is the
+server's (step 15a): the proxy passes the `Authorization` header, the session cookie and the console's
+`X-Iwdb-Csrf` header through, and the server's `Set-Cookie` back, so the login and the session work as on the
+server's own `/console/`. Streamed answers (NDJSON, the change stream's Server-Sent Events) are passed on as they
+arrive.
 """
 
 from __future__ import annotations
@@ -28,8 +30,9 @@ ROOT = Path(__file__).resolve().parent
 # What the pages load; nothing else under console/ (tools, tests, node_modules) is served
 SERVED = {"index.html", "status.html"}
 SERVED_DIRS = ("src/", "design-system/", "vendor/")
-# Request headers the server reads; everything else (cookies, the browser's Origin) stays here
-FORWARD = ("Content-Type", "Accept", "Last-Event-ID")
+# Request headers the server reads (credentials included, step 15a); everything else (the browser's Origin,
+# Referer, ...) stays here
+FORWARD = ("Content-Type", "Accept", "Last-Event-ID", "Authorization", "Cookie", "X-Iwdb-Csrf")
 ANSWER = ("Content-Type", "Cache-Control")
 METHODS = ["GET", "POST", "PUT", "DELETE"]
 
@@ -80,6 +83,9 @@ def create_app(upstream: str, timeout: float = 60.0) -> Flask:
         for k in ANSWER:
             if answer.headers.get(k):
                 out.headers[k] = answer.headers[k]
+        # The session cookie of a login, and its removal at logout (a header that may come more than once)
+        for cookie in answer.headers.get_all("Set-Cookie") or []:
+            out.headers.add("Set-Cookie", cookie)
         return out
 
     @app.get("/<path:name>")

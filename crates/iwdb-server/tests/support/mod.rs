@@ -63,6 +63,11 @@ impl<D: iwdb_server::auth::Served> Running<D> {
     }
 
     pub fn start_with(db: D, auth: AuthMode) -> Self {
+        Self::start_built(db, |server| server.auth(auth))
+    }
+
+    /// With the server as `build` makes it (console, auth, limits).
+    pub fn start_built(db: D, build: impl FnOnce(Server<D>) -> Server<D>) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("test-server")
@@ -71,7 +76,7 @@ impl<D: iwdb_server::auth::Served> Running<D> {
             .unwrap();
         let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = Server::new(Arc::new(db)).auth(auth);
+        let server = build(Server::new(Arc::new(db)));
         let (stop, stopped) = oneshot::channel::<Duration>();
         let task = runtime.spawn(async move {
             let (tx, rx) = oneshot::channel::<Duration>();

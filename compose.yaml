@@ -1,12 +1,15 @@
 # Ironweaver DB in Docker (step 13a, ADR 0034).
 #
-#   docker compose up --build                     # iwdb-server on 127.0.0.1:7600,
-#                                                  # the console at http://127.0.0.1:7600/console/
+#   IWDB_ADMIN_PASSWORD=... docker compose up --build
+#                                                  # iwdb-server on 127.0.0.1:7600, the console at
+#                                                  # http://127.0.0.1:7600/console/ (log in as admin)
 #   IWDB_CONFIG=projection.example.toml docker compose --profile postgres up --build
 #                                                  # plus Postgres and a projection from it
 #
-# The server has no TLS and no authentication until step 15: the port is
-# published on localhost only.
+# Authentication is on (step 15a): the first start needs IWDB_ADMIN_PASSWORD,
+# which creates the user admin; later starts ignore it (unset it then). There
+# is no default password. The server has no TLS until step 15b, so the port
+# is published on localhost only.
 
 services:
   iwdb:
@@ -21,10 +24,13 @@ services:
       - iwdb-data:/var/lib/iwdb
       - ./docker/${IWDB_CONFIG:-iwdb.toml}:/etc/iwdb/iwdb.toml:ro
     environment:
-      # The operator console (ADR 0041). The container listens on 0.0.0.0,
-      # so it must be marked public; the port is published on localhost only
+      # The operator console (ADR 0041), behind the server's login
       IWDB_CONSOLE_ENABLED: "true"
-      IWDB_CONSOLE_PUBLIC: "true"
+      # The container listens on 0.0.0.0, which needs the explicit plaintext
+      # flag until TLS (step 15b); the port is published on localhost only
+      IWDB_SERVER_PLAINTEXT_PUBLIC: "true"
+      # The first admin, on the first start only (empty: unset)
+      IWDB_AUTH_BOOTSTRAP_PASSWORD: ${IWDB_ADMIN_PASSWORD:-}
       # Read by docker/projection.example.toml (url_env)
       ORDERS_DB_URL: postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable
     depends_on:

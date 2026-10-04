@@ -8,9 +8,10 @@
 //! `serve.py`) is reachable, and no path is resolved on disk. The pages read and write through the REST API on the same origin
 //! (`?source=rest`), so no CORS is needed and none is answered.
 //!
-//! Until step 15 there is no authentication: whoever reaches the port can
-//! use the console, as they can use the API. The config refuses the console
-//! on a non-loopback address unless `[console] public = true`.
+//! The pages themselves are open (they hold no data); everything they read
+//! and write goes through the REST API, behind the server's authentication
+//! (step 15a): the pages show a login, and the session is an HttpOnly,
+//! SameSite=Strict cookie (ADR 0046).
 
 use axum::body::Body;
 use http::{HeaderValue, Method, Response, StatusCode, header};

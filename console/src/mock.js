@@ -244,6 +244,14 @@
    */
   function create(opts = {}) {
     const scenario = opts.scenario || 'calm';
+    // The logged-in mock user, per tab (opts.storage for tests)
+    const storage = opts.storage !== undefined ? opts.storage : (() => { try { return root.sessionStorage || null; } catch (_) { return null; } })();
+    let memory = null;
+    const session = {
+      get: () => { try { return storage ? storage.getItem('iwdb.mock.user') : memory; } catch (_) { return memory; } },
+      set: (v) => { memory = v; try { if (storage) { if (v) storage.setItem('iwdb.mock.user', v); else storage.removeItem('iwdb.mock.user'); } } catch (_) { /* private mode */ } },
+    };
+    const authListeners = new Set();
     const latency = opts.latency || [8, 40];
     const r = prng(99);
     const spaces = [social(), inventory(), orders(), archive()];
@@ -525,10 +533,31 @@
       log: () => server.log.slice(),
       onLog: (f) => { server.listeners.add(f); return () => server.listeners.delete(f); },
       tick,
+      /** The mock's login (step 15a): MOCK_USERS, remembered for the tab (sessionStorage; a mock flag, not a
+       *  credential). Data calls don't check it: the pages show the login until session() answers. */
+      session: () => call('whoami', () => {
+        const name = session.get(); const u = name && MOCK_USERS[name];
+        if (!u) fail('unauthenticated', 'log in: this mock knows ' + Object.keys(MOCK_USERS).map((k) => `${k} / ${MOCK_USERS[k].password}`).join(', '));
+        return { authEnabled: true, user: { name, admin: u.admin, grants: clone(u.grants) } };
+      }),
+      login: (name, password) => call('login', () => {
+        const u = MOCK_USERS[name];
+        if (!u || u.password !== password) { emit('WARN', `failed login for user ${JSON.stringify(name)}`); fail('unauthenticated', 'wrong user or password'); }
+        session.set(name); emit('INFO', `user ${JSON.stringify(name)} logged in`);
+        return { authEnabled: true, user: { name, admin: u.admin, grants: clone(u.grants) } };
+      }),
+      logout: () => call('logout', () => { session.set(null); authListeners.forEach((f) => f(null)); return {}; }),
+      onAuth: (f) => { authListeners.add(f); return () => authListeners.delete(f); },
     };
   }
 
-  const api = { create, parsePattern, checkFilter, test, plain, valueOf, kindOf, SourceError };
+  /** The mock's users: name -> {password, admin, grants}. */
+  const MOCK_USERS = {
+    admin: { password: 'admin', admin: true, grants: {} },
+    reader: { password: 'reader', admin: false, grants: { social: 'read' } },
+  };
+
+  const api = { create, parsePattern, checkFilter, test, plain, valueOf, kindOf, SourceError, MOCK_USERS };
   root.IW = root.IW || {}; root.IW.mock = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -221,5 +221,5 @@
       palette && h(U.Palette, { items, onClose: () => setPalette(false) }));
   }
 
-  ReactDOM.createRoot(document.getElementById('root')).render(h(Status));
+  ReactDOM.createRoot(document.getElementById('root')).render(h(IW.ui.AuthGate, null, h(Status)));
 })();

@@ -483,3 +483,67 @@ fn the_rest_client_reports_a_missing_server_as_unavailable() {
     assert_eq!(e.code(), iwdb_query::Code::Unavailable, "{}", e);
     assert!(iwdb_server::client::RestRemote::connect("grpc://x").is_err());
 }
+
+/// The console's session over REST (step 15a, ADR 0046): login with
+/// `cookie: true` sets an HttpOnly, SameSite=Strict cookie and returns no
+/// token; the cookie authenticates reads, and writes only with the CSRF
+/// header; logout clears it. Health, the OpenAPI document and the console's
+/// pages need no credentials.
+#[test]
+fn the_console_session_is_a_cookie_with_a_csrf_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), options()).unwrap();
+    store.users().with_params(support::FAST).create("ann", &iwdb::Secret::new("ann-password"), true).unwrap();
+    let db = Embedded::new(store, QueryConfig::default()).unwrap().with_auth(support::auth_settings());
+    let server = Running::start_built(db, |s| s.auth(iwdb_server::auth::AuthMode { enabled: true }).console(true));
+    let http = client(false);
+    // Open by design
+    for path in ["/v1/health/live", "/v1/health/ready", "/v1/openapi.json"] {
+        assert_eq!(send(&server, &http, Method::GET, path, None, &[]).status, StatusCode::OK, "{}", path);
+    }
+    if cfg!(feature = "console") {
+        assert_eq!(send(&server, &http, Method::GET, "/console/index.html", None, &[]).status, StatusCode::OK);
+    }
+    let r = send(&server, &http, Method::GET, "/v1/namespaces", None, &[]);
+    assert_eq!((r.status, r.code().as_str()), (StatusCode::UNAUTHORIZED, "unauthenticated"));
+    // A wrong password: 401, nothing set
+    let wrong = json!({"user": "ann", "password": "nope-nope", "cookie": true});
+    let r = send(&server, &http, Method::POST, "/v1/auth/login", Some(&wrong), &[]);
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    assert!(r.headers.get(header::SET_COOKIE).is_none());
+    // Login with a cookie
+    let r = send(&server, &http, Method::POST, "/v1/auth/login", Some(&json!({"user": "ann", "password": "ann-password", "cookie": true})), &[]);
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.json()["token"].as_str().unwrap_or_default().is_empty(), "no token in the body: {}", r.json());
+    let set = r.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap().to_owned();
+    for part in ["iwdb_session=iwdb_", "HttpOnly", "SameSite=Strict", "Path=/", "Max-Age="] {
+        assert!(set.contains(part), "{} in {}", part, set);
+    }
+    assert!(!set.contains("Secure"), "not Secure until TLS (step 15b): {}", set);
+    assert_eq!(r.headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
+    let cookie = set.split(';').next().unwrap().to_owned();
+    // Reads with the cookie alone; writes need the CSRF header too
+    let r = send(&server, &http, Method::GET, "/v1/namespaces", None, &[("cookie", &cookie)]);
+    assert_eq!(r.status, StatusCode::OK);
+    let commit = json!({"mutations": [{"upsertNode": {"id": "a"}}]});
+    let r = send(&server, &http, Method::POST, "/v1/namespaces/default/commit", Some(&commit), &[("cookie", &cookie)]);
+    assert_eq!((r.status, r.code().as_str()), (StatusCode::FORBIDDEN, "permission_denied"));
+    assert!(r.json()["message"].as_str().unwrap().contains("x-iwdb-csrf"));
+    let r = send(&server, &http, Method::POST, "/v1/namespaces/default/commit", Some(&commit), &[("cookie", &cookie), ("x-iwdb-csrf", "1")]);
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json());
+    // A cross-site form (no JSON, no CSRF header): refused before the body is read
+    let r = send(&server, &http, Method::PUT, "/v1/namespaces/evil", None, &[("cookie", &cookie), ("content-type", "application/x-www-form-urlencoded")]);
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    let who = send(&server, &http, Method::GET, "/v1/auth/whoami", None, &[("cookie", &cookie)]);
+    assert_eq!((who.json()["user"]["name"].as_str(), who.json()["authEnabled"].as_bool()), (Some("ann"), Some(true)));
+    // Logout clears the cookie and ends the session
+    let r = send(&server, &http, Method::POST, "/v1/auth/logout", None, &[("cookie", &cookie), ("x-iwdb-csrf", "1")]);
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap().contains("Max-Age=0"));
+    let r = send(&server, &http, Method::GET, "/v1/namespaces", None, &[("cookie", &cookie)]);
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    // A malformed header is refused without echoing it
+    let r = send(&server, &http, Method::GET, "/v1/namespaces", None, &[("authorization", "Basic c2VjcmV0")]);
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    assert!(!String::from_utf8_lossy(&r.body).contains("c2VjcmV0"));
+}
