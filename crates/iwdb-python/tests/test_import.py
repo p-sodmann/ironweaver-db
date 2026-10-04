@@ -20,6 +20,7 @@ caption "LEMON test digraph"
 """
 
 
+@pytest.mark.embedded
 def test_an_export_imports_back(store, tmp_path):
     with store.transaction() as tx:
         tx.upsert_node("a", labels=["Person"], attr={"name": "Ann", "tags": [1, "x", None]}, meta={"m": 1})
@@ -45,6 +46,7 @@ def test_an_export_imports_back(store, tmp_path):
     assert store.namespace("from_json").status()["seq"] == 1
 
 
+@pytest.mark.embedded
 def test_lgf_files_and_errors(store, tmp_path):
     lgf = tmp_path / "graph.lgf"
     lgf.write_text(LEMON)
@@ -84,6 +86,7 @@ def test_an_import_survives_reopening(path, tmp_path):
         assert store.status()["recovery"]["namespaces"]["lemon"]["finished_import"] is False
 
 
+@pytest.mark.embedded
 def test_a_merge_upserts_into_an_existing_namespace(store, tmp_path):
     with store.transaction() as tx:
         tx.upsert_node("0", labels=["Old"], attr={"size": 1, "extra": True})

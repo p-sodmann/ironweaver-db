@@ -82,7 +82,7 @@ def test_seqs_older_than_the_wal_are_not_retained(path):
         for i in range(60):
             commit(store, id=f"n{i}", attr={"pad": "x" * 100})
         store.checkpoint()
-        with pytest.raises(iwdb.Error, match="no longer retained"):
+        with pytest.raises(iwdb.NotRetainedError, match="no longer retained"):
             store.changes(1)
     with iwdb.Store.open(path, retain_records=1000, **options) as store:
         for i in range(60):
