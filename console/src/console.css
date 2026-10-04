@@ -83,6 +83,8 @@ html, body { background: var(--surface-000); color: var(--ink); }
 .cs-spark__now { fill: var(--signal-mark); }
 .cs-spark__x { stroke: var(--signal-mark); stroke-width: 1; }
 .cs-ns { grid-column: 1 / -1; }
+.cs-kpisec { grid-column: 1 / -1; }
+.cs-later { margin: 0; }
 .cs-ns tr.is-problem td { border-bottom: 0; }
 .cs-why td { height: auto; padding-bottom: 6px; color: var(--danger); white-space: normal; }
 .cs-ops { grid-column: span 7; }

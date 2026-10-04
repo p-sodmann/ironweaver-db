@@ -5,18 +5,28 @@ A web interface for operators of an Ironweaver DB server (step 16a, [ADR 0037](.
 - **Explore** (`index.html`): walk through a graph like Neo4j's browser, and browse and edit a namespace like phpMyAdmin. The schema (namespaces, labels, edge types, indexes, constraints) is on the left; the result of the query line is in the middle as a graph, a table, a plan or the namespace's structure; the inspector opens with a selection. Hover a node to peek at its neighbours, double-click to bring them in. Edits (a property in the inspector, connecting or detaching on the canvas) are staged and committed together (`⌘S`).
 - **Status** (`status.html`): the server at one glance. Health and problems, commits, latencies, memory and active requests over the last minute and a half, every namespace's state, latency by operation, active requests (with cancel), change-stream consumers, jobs and index builds, and the log.
 
-**It runs on mock data.** Nothing talks to a server yet: `src/mock.js` generates four namespaces and simulates a running server. The rail says `MOCK DATA`. `?scenario=degraded` shows how problems look (a read-only namespace, a failed checkpoint, memory near the limit). Hooking it up is a later step: a Source over the REST API with the methods in `src/source.js`, served by `iwdb-server`.
+It runs against a real server through `serve.py`, or on mock data on its own.
 
-## Open it
+## Against a server (Docker)
 
-Open `index.html` or `status.html` in a browser, from the file system or any static server:
+`serve.py` is a small Flask app: it serves the pages and passes `/v1/...` through to the server, so the pages and the API share one origin. (The server answers no CORS preflight on purpose, so a page on another origin can't call it; the proxy keeps that guard.)
 
 ```sh
-open console/index.html                      # macOS; or xdg-open
-python3 -m http.server -d console 8000       # then http://localhost:8000
+docker compose up --build                      # iwdb-server on 127.0.0.1:7600
+node console/tools/seed.mjs                    # optional: the sample namespaces (social, inventory, orders, archive_2025)
+uv run --with flask console/serve.py           # or: pip install flask && python console/serve.py
+open http://127.0.0.1:8000/
 ```
 
-No build step is needed to run it: React, the design system's bundle and the console's scripts are committed. The fonts come from Google Fonts; offline, the pages fall back to Helvetica and the system's monospace.
+`IWDB_URL` (or `--upstream`) points it at another server, `--port` changes its port. `seed.mjs` skips namespaces that exist; `--replace` drops them first.
+
+On a server, the explorer works fully: reads, edits and commits, index creation. The status page shows every namespace's state. Until step 16 adds the server's status views and metrics, it says so in place of the metrics, active requests, consumers and the log (it shows its own requests instead). The schema navigator's counts come from the first 2 000 nodes of a namespace, and a `find` doesn't know its total, so the pager counts pages as it goes.
+
+## On mock data
+
+Open `index.html` or `status.html` from the file system (or `?source=mock` on `serve.py`): `src/mock.js` generates the four namespaces and simulates a running server, and the rail says `MOCK DATA`. `?scenario=degraded` shows how problems look (a read-only namespace, a failed checkpoint, memory near the limit).
+
+No build step is needed either way: React, the design system's bundle and the console's scripts are committed. The fonts come from Google Fonts; offline, the pages fall back to Helvetica and the system's monospace.
 
 ## The query line
 
@@ -42,6 +52,9 @@ Hold `⌥` to see each key next to its control; `?` lists them. `⌘K` goes to a
 | `index.html`, `status.html` | The pages: classic scripts, so they work from `file://` |
 | `src/source.js` | The Source contract: every read and write the pages make |
 | `src/mock.js` | The mock Source |
+| `src/rest.js` | The REST Source (`?source=rest`, which `serve.py` opens) |
+| `serve.py` | Flask: serves the pages, passes `/v1` through to the server |
+| `tools/seed.mjs` | Loads the sample namespaces into a server |
 | `src/query.js` | The query line: commands, plan rows |
 | `src/shared.js` | Formatting, values as text, label colours, the theme, the palette, the layout of results |
 | `src/explorer.js`, `src/status.js` | The pages |
@@ -49,7 +62,7 @@ Hold `⌥` to see each key next to its control; `?` lists them. `⌘K` goes to a
 | `design-system/` | The vendored design system and the console's changes to it ([README](design-system/README.md)) |
 | `vendor/` | React 18.3.1 (UMD, production, MIT) |
 | `tools/build.mjs` | Generates `design-system/tokens.css` and `design-system/bundle.js` |
-| `test/` | `node --test` tests of the mock, the query line and the helpers |
+| `test/` | `node --test` tests of both Sources, the query line and the helpers; pytest tests of `serve.py` |
 
 ## Develop
 
@@ -59,6 +72,7 @@ npm ci                 # esbuild, only to rebuild the bundle
 npm run build          # after changing design-system/src/index.jsx or tokens.json
 npm run check          # what CI runs: the committed generated files are up to date
 npm test
+uv run --with flask --with pytest pytest console/test   # from the repository root
 ```
 
 Rules: no build step for the pages themselves; no dependencies at run time beyond `vendor/`; colours, type, spacing and motion only from the design system's tokens; a component the design system has is used, not rebuilt; the pages read and write only through the Source.

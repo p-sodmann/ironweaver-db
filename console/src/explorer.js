@@ -42,6 +42,7 @@
         status.readOnly && h('div', { className: 'cs-struct__alert' }, h('span', { className: 'iw-state is-failed' }, '✕ READ-ONLY'), h('span', { className: 'iw-small' }, ' ' + status.readOnly)),
         status.checkpointFailure && h('div', { className: 'cs-struct__alert' }, h('span', { className: 'iw-state is-failed' }, '✕ CHECKPOINT FAILED'), h('span', { className: 'iw-small' }, ' ' + status.checkpointFailure))),
       h('section', null, h('h2', { className: 'iw-cap' }, 'LABELS AND THEIR KEYS'),
+        schema.sampled && h('p', { className: 'iw-small iw-muted cs-struct__note' }, `Counted from the first ${U.num(schema.sample)} nodes: the server has no schema read yet (step 16).`),
         T([['LABEL'], ['KEY'], ['VALUES'], ['PRESENT', true], ['INDEX'], ['']],
           schema.labels.flatMap((l) => {
             const keys = Object.entries(l.keys).sort(([a], [b]) => (a < b ? -1 : 1));
@@ -107,7 +108,7 @@
     useEffect(() => {
       src.log().forEach((e) => setLog((l) => l.concat(e)));
       const off = src.onLog((e) => setLog((l) => l.concat({ ...e, fresh: true }).slice(-200)));
-      const poll = () => src.server().then(setServer, () => {});
+      const poll = () => src.server().then(setServer, (e) => setServer((s) => (s ? { ...s, ready: false, error: e } : null)));
       poll(); const t1 = setInterval(() => src.tick(), 1000); const t2 = setInterval(poll, 5000);
       src.namespaces().then((list) => { setNss(list); const want = U.params().get('ns'); setNs((list.find((x) => x.name === want) || list[0]).name); });
       return () => { off(); clearInterval(t1); clearInterval(t2); };
@@ -163,10 +164,12 @@
         remember(res.nodes);
         const sub = await src.subgraph(name, res.nodes.map((n) => n.id));
         const elapsed = performance.now() - t0; const t = tableOfNodes(res.nodes);
-        const e = ex.explain;
+        // The server reports no match count: on a first page with no more, the page is it
+        const e = { ...ex.explain, matched: ex.explain.matched ?? (res.total != null ? res.total : !cursor && !res.meta.next ? res.nodes.length : undefined) };
+        const counted = res.total != null ? `${U.num(res.total)} node${res.total === 1 ? '' : 's'} match` : `${U.num(res.nodes.length)} node${res.nodes.length === 1 ? '' : 's'} on this page${res.meta.next ? ', more on the next' : ''}`;
         return {
           kind: 'find', filter: c.filter, limit, graph: graphOf(res.nodes, sub.edges), ...t, total: res.total, next: res.meta.next,
-          footer: `${U.num(res.total)} node${res.total === 1 ? '' : 's'} match · ${U.num(res.meta.work.visited)} candidates checked · seq ${U.num(res.meta.seq)} · ${U.ms(elapsed)}`,
+          footer: `${counted} · ${U.num(res.meta.work.visited)} candidates checked · seq ${U.num(res.meta.seq)} · ${U.ms(elapsed)}`,
           plan: Q.planRows(e, c.filter, elapsed),
           summary: [['EST. CANDIDATES', U.num(e.estimatedCandidates)], ['CANDIDATES', U.num(e.candidates)], ['MATCH', U.num(e.matched)], ['NODES', U.num(e.nodes)], ['PLAN', Object.keys(e.plan)[0].toUpperCase()]],
           scanPath: e.plan.scan ? Q.firstPath(c.filter) : null,
@@ -336,7 +339,7 @@
     /* ---------------------------------------------------------------- render */
     const page = result && result.kind === 'find' ? result : null;
     const pager = page && {
-      page: page.page, pages: Math.max(1, Math.ceil(page.total / page.limit)),
+      page: page.page, pages: page.total != null ? Math.max(1, Math.ceil(page.total / page.limit)) : page.page + (page.next ? 1 : 0),
       onPrev: () => { const cs = page.cursors; run(query, { cursor: cs[page.page - 2], page: page.page - 1, cursors: cs, view: 'table' }).catch(() => {}); },
       onNext: () => { if (!page.next) return; const cs = page.cursors.slice(0, page.page).concat(page.next); run(query, { cursor: page.next, page: page.page + 1, cursors: cs, view: 'table' }).catch(() => {}); },
     };
@@ -356,7 +359,7 @@
       h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'SEQ'), h('span', { className: 'iw-mono-s' }, U.num(status.seq))),
       h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'UNSYNCED'), h('span', { className: 'iw-mono-s' }, status.syncedSeq == null ? 'fsync off' : U.num(status.seq - status.syncedSeq))),
       h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'SINCE CHECKPOINT'), h('span', { className: 'iw-mono-s' }, lag == null ? '—' : U.num(lag) + ' commits')),
-      server && h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'COMMIT P99'), h('span', { className: 'iw-mono-s' }, U.ms(server.series.commitP99.slice(-1)[0]))),
+      server && server.series && h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'COMMIT P99'), h('span', { className: 'iw-mono-s' }, U.ms(server.series.commitP99.slice(-1)[0]))),
     ].filter(Boolean);
     const health = server ? (server.ready ? server.health : 'danger') : 'off';
     const nsBad = status && (status.readOnly || status.checkpointFailure);
@@ -367,7 +370,7 @@
         key: ns, db: ns || '…', tx: status ? status.seq : undefined, activity: busy, txOpen: pending.length, health: nsBad ? 'warn' : health,
         word: server ? (busy ? 'Writing' : !server.ready ? 'Recovering' : nsBad ? (status.readOnly ? 'Read-only' : 'Degraded') : server.health === 'ok' ? 'Healthy' : 'Degraded') : 'Connecting',
         open: instr, onToggle: setInstr, onCommand: () => setPalette({}), onHelp: () => setSheet(true), onDb: () => setPalette({ initial: '' }),
-        drawer, footer: server ? `mock · gRPC ${server.endpoints.grpc} · REST ${server.endpoints.rest} · v${server.version}` : '',
+        drawer, footer: server ? (src.kind === 'mock' ? `mock · gRPC ${server.endpoints.grpc} · REST ${server.endpoints.rest} · v${server.version}` : `server ${server.endpoints.rest}${server.version ? ' · API ' + server.version : ''}`) : '',
       }, h(U.RailLinks, { page: 'explore' })),
       h('div', { className: 'iw-wb__nav' }, h(I.SchemaNavigator, { key: ns, sections, onSelect: (it) => onNav(it, false), onActivate: (it) => onNav(it, true) })),
       h('main', { className: 'iw-wb__main' },

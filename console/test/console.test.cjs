@@ -223,3 +223,54 @@ test('the layout is deterministic and keeps nodes apart', () => {
   for (let i = 0; i < p.length; i++) for (let j = i + 1; j < p.length; j++) if (Math.hypot(p[i].x - p[j].x, p[i].y - p[j].y) < 20) close++;
   assert.equal(close, 0);
 });
+
+/* ------------------------------------------------------------------ the REST Source, on a fake server */
+const rest = require('../src/rest.js');
+function fakeServer(routes) {
+  const calls = [];
+  const fetch = async (url, init) => {
+    calls.push({ url, method: init.method, body: init.body && JSON.parse(init.body), headers: init.headers });
+    const key = init.method + ' ' + url; const r = routes[key];
+    if (!r) return { ok: false, status: 404, text: async () => JSON.stringify({ code: 'invalid_argument', message: 'no route ' + key }) };
+    const [status, body] = typeof r === 'function' ? r(calls[calls.length - 1].body) : r;
+    return { ok: status < 300, status, text: async () => JSON.stringify(body), json: async () => body };
+  };
+  return { fetch, calls };
+}
+
+test('the REST Source implements the contract', () => {
+  const s = rest.create({ fetch: async () => ({ ok: true, status: 200, text: async () => '{}' }) });
+  for (const m of METHODS) assert.equal(typeof s[m], 'function', m);
+});
+
+test('REST answers become the contract\'s shapes: numbers, absent defaults, paths', async () => {
+  const { fetch, calls } = fakeServer({
+    'GET /v1/namespaces/s': [200, { status: { id: '2', name: 's', createdMicros: '17', seq: '5', syncedSeq: '5', nodes: '2', edges: '1', memoryBytes: '300', indexes: [{ path: { keys: ['age'] }, declared: true, size: { entries: '1', distinctKeys: '1', memoryBytes: '9' }, ready: {} }, { path: { keys: ['x'] }, building: { scanned: '1', total: '2' } }], constraints: '1', recovery: {} } }],
+    'POST /v1/namespaces/s/subgraph': (b) => [200, { nodes: [{ id: 'ann', labels: ['P'], version: '1' }, { id: 'bob', version: '1' }], edges: [{ from: 'ann', to: 'bob', type: 'K', version: '1' }, { id: '3', from: 'bob', to: 'ann', version: '1' }], meta: { seq: '5' } }],
+    'POST /v1/namespaces/s/match': [200, { rows: [{ nodes: ['ann', 'bob'], edges: [{ ids: ['0'] }] }], meta: { seq: '5', next: 'c' } }],
+    'POST /v1/namespaces/s/explain': [200, { explain: { plan: { index: { path: { keys: ['age'] }, lookup: 'LOOKUP_RANGE' } }, estimatedCandidates: '4', nodes: '9' } }],
+    'POST /v1/namespaces/s/find': (b) => [400, { code: 'invalid_argument', message: 'bad filter' }],
+  });
+  const s = rest.create({ fetch });
+  const st = await s.namespaceStatus('s');
+  assert.equal(st.seq, 5); assert.equal(st.checkpoint, null); assert.deepEqual(st.indexes[0].path, ['age']); assert.equal(st.indexes[0].size.entries, 1);
+  assert.deepEqual(st.indexes[1].building, { scanned: 1, total: 2 }); assert.equal(st.recovery.checkpoint, null);
+  const nb = await s.neighbours('s', 'ann');
+  assert.deepEqual(nb.nodes.map((x) => x.id), ['bob']); assert.deepEqual(nb.edges.map((e) => e.id), [0, 3], 'an absent id is edge 0');
+  assert.deepEqual(calls.at(-1).body, { seeds: ['ann'], depth: 1, direction: 'DIRECTION_BOTH', options: { limits: { maxVisited: 5000 }, partial: true } });
+  const m = await s.matchPattern('s', '(a)-[k:K]->(b)', { limit: 1 });
+  assert.deepEqual(m.columns.map((c) => c.name), ['a', 'b', 'k']); assert.deepEqual(m.rows[0].edges, [[0]]); assert.equal(m.meta.truncated, true);
+  const ex = (await s.explain('s', { Label: 'P' }, { analyze: true })).explain;
+  assert.deepEqual(ex.plan, { index: { path: ['age'], op: 'Range' } }); assert.equal(ex.candidates, undefined);
+  await rejects(s.find('s', { Bogus: 1 }), 'invalid_argument');
+  assert.equal(calls.find((c) => c.method === 'POST').headers['content-type'], 'application/json', 'bodies are JSON, or the server refuses them (415)');
+  assert.ok(s.log().some((e) => e.level === 'WARN' && e.msg.includes('400')));
+  await rejects(s.cancel('req-1'), 'unavailable');
+});
+
+test('a server that doesn\'t answer is unavailable', async () => {
+  const s = rest.create({ fetch: async () => { throw new Error('connection refused'); } });
+  await rejects(s.namespaces(), 'unavailable');
+  const p = rest.create({ fetch: async () => ({ ok: false, status: 502, text: async () => '<html>bad gateway</html>' }) });
+  await rejects(p.namespaces(), 'unavailable');
+});

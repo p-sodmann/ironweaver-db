@@ -117,18 +117,18 @@
 
   /* ------------------------------------------------------------------ the console's source */
   function params() { try { return new URLSearchParams(root.location.search); } catch (_) { return new URLSearchParams(); } }
-  /** The Source the pages read (contract: source.js). Only the mock exists so far; `?scenario=degraded` shows
-   *  how problems look. */
+  /** The Source the pages read (contract: source.js): `?source=rest` is the server, through serve.py (rest.js);
+   *  otherwise the mock, where `?scenario=degraded` shows how problems look. */
   function source() {
     if (IW._source) return IW._source;
     const p = params();
-    IW._source = IW.mock.create({ scenario: p.get('scenario') || 'calm' });
+    IW._source = p.get('source') === 'rest' && IW.rest ? IW.rest.create({ base: '' }) : IW.mock.create({ scenario: p.get('scenario') || 'calm' });
     return IW._source;
   }
   /** Links between the pages keep the source's parameters. */
   function href(page, extra) {
     const p = params(); const keep = new URLSearchParams();
-    if (p.get('scenario')) keep.set('scenario', p.get('scenario'));
+    ['source', 'scenario'].forEach((k) => { if (p.get(k)) keep.set(k, p.get(k)); });
     Object.entries(extra || {}).forEach(([k, v]) => v != null && keep.set(k, v));
     const q = keep.toString(); return page + (q ? '?' + q : '');
   }
@@ -141,7 +141,7 @@
     /** The page links and the mock marker, for the rail's children. */
     function RailLinks({ page }) {
       return h('span', { className: 'cs-links' },
-        h('span', { className: 'cs-mockword', title: 'This console runs on generated data. Nothing here is read from or written to a server yet.' }, 'MOCK DATA'),
+        source().kind === 'mock' && h('span', { className: 'cs-mockword', title: 'This console runs on generated data. Nothing here is read from or written to a server. Serve it with serve.py for a real server.' }, 'MOCK DATA'),
         h('nav', { className: 'cs-pages', 'aria-label': 'Pages' },
           [['explore', 'EXPLORE', 'index.html'], ['status', 'STATUS', 'status.html']].map(([id, label, file]) =>
             h('a', { key: id, href: href(file), className: 'cs-page' + (page === id ? ' is-on' : ''), 'aria-current': page === id ? 'page' : undefined }, label))));
@@ -189,6 +189,13 @@
 
     /** Pages and theme, for every palette. */
     function commonItems(page) {
+      const file = page === 'status' ? 'status.html' : 'index.html';
+      if (source().kind !== 'mock') return [
+        { group: 'Page', title: 'Explore the graph', detail: 'index.html', run: () => { if (page !== 'explore') root.location.href = href('index.html'); } },
+        { group: 'Page', title: 'Server status', detail: 'status.html', run: () => { if (page !== 'status') root.location.href = href('status.html'); } },
+        { group: 'Command', title: 'Switch theme', detail: 'system → light → dark', run: cycleTheme },
+        { group: 'Command', title: 'Use mock data', detail: '?source=mock', run: () => { root.location.href = href(file, { source: 'mock' }); } },
+      ];
       return [
         { group: 'Page', title: 'Explore the graph', detail: 'index.html', run: () => { if (page !== 'explore') root.location.href = href('index.html'); } },
         { group: 'Page', title: 'Server status', detail: 'status.html', run: () => { if (page !== 'status') root.location.href = href('status.html'); } },

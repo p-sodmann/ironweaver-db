@@ -93,8 +93,8 @@
   function planRows(explain, filter, elapsedMs) {
     const rows = []; let id = 0;
     const est = explain.estimatedCandidates; const cands = explain.candidates; const matched = explain.matched;
-    rows.push({ id: ++id, depth: 0, op: 'Find', detail: filterText(filter), est, rows: matched ?? 0, hits: 0, ms: elapsedMs || 0 });
-    rows.push({ id: ++id, depth: 1, op: 'Filter', detail: 'every candidate is checked', est, rows: matched ?? 0, hits: cands ?? est, ms: 0 });
+    rows.push({ id: ++id, depth: 0, op: 'Find', detail: filterText(filter), est, rows: matched ?? cands ?? est, hits: 0, ms: elapsedMs || 0 });
+    rows.push({ id: ++id, depth: 1, op: 'Filter', detail: 'every candidate is checked', est, rows: matched ?? cands ?? est, hits: cands ?? est, ms: 0 });
     const walk = (p, depth) => {
       const k = Object.keys(p)[0], b = p[k];
       if (k === 'empty') rows.push({ id: ++id, depth, op: 'Empty', detail: 'the filter is false: nothing to read', est: 0, rows: 0, hits: 0, ms: 0 });

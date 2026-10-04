@@ -47,6 +47,9 @@
     h('thead', null, h('tr', null, cols.map(([name, numeric], i) => h('th', { key: i, className: numeric ? 'is-num' : undefined }, h('span', { className: 'cs-th iw-cap' }, name))))),
     h('tbody', null, rows.length ? rows : h('tr', null, h('td', { colSpan: cols.length, className: 'iw-small iw-muted' }, empty))))));
   const Num = (v) => h('td', { className: 'is-num iw-mono-s' }, v);
+  /** A section the server can't fill yet: what it will show, and which step brings it. */
+  const Later = ({ title, className, what }) => h(Section, { title, className },
+    h('p', { className: 'iw-small iw-muted cs-later' }, what + ' The server reports this once step 16 adds its status views and metrics.'));
 
   function nsState(s) {
     if (s.readOnly) return ['failed', '✕ READ-ONLY', s.readOnly];
@@ -70,7 +73,7 @@
     useEffect(() => {
       const read = () => src.server().then((x) => { setS(x); setNow(Date.now()); }, () => {});
       read(); if (!live) return undefined;
-      const t = setInterval(() => { src.tick(); read(); }, 1000);
+      const t = setInterval(() => { src.tick(); read(); }, src.kind === 'mock' ? 1000 : 3000);
       return () => clearInterval(t);
     }, [live]);
     useEffect(() => {
@@ -90,8 +93,8 @@
       const out = [];
       if (!s.ready) out.push('recovery is running: the server is not ready');
       s.namespaces.forEach((n) => { if (n.readOnly) out.push(`${n.name} is read-only: ${n.readOnly}`); if (n.checkpointFailure) out.push(`${n.name}: the last checkpoint failed: ${n.checkpointFailure}`); });
-      const f = s.memory.usedBytes / s.memory.limitBytes;
-      if (f >= s.memory.warnAt) out.push(`memory at ${U.pct(f)} of the limit: writes are refused at ${U.pct(s.memory.refuseWritesAt)}`);
+      const f = s.memory ? s.memory.usedBytes / s.memory.limitBytes : 0;
+      if (s.memory && f >= s.memory.warnAt) out.push(`memory at ${U.pct(f)} of the limit: writes are refused at ${U.pct(s.memory.refuseWritesAt)}`);
       return out;
     }, [s]);
 
@@ -99,10 +102,10 @@
     const sr = s.series; const tick = s.tickMs;
     const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
     const maxOf = (a) => (a.length ? Math.max(...a) : 0);
-    const memF = s.memory.usedBytes / s.memory.limitBytes;
-    const uptime = (now * 1000 - s.startedMicros) / 1e6;
+    const memF = s.memory ? s.memory.usedBytes / s.memory.limitBytes : 0;
+    const uptime = s.startedMicros ? (now * 1000 - s.startedMicros) / 1e6 : null;
     const word = !s.ready ? 'Recovering' : problems.length ? 'Degraded' : 'Healthy';
-    const p99max = Math.max(...s.operations.map((o) => o.p99));
+    const p99max = s.operations ? Math.max(...s.operations.map((o) => o.p99)) : 1;
     const items = [
       ...s.namespaces.map((n) => ({ group: 'Namespace', title: n.name, detail: 'explore', mono: true, run: () => { window.location.href = U.href('index.html', { ns: n.name }); } })),
       { group: 'Command', title: live ? 'Pause live updates' : 'Resume live updates', detail: 'Space', run: () => setLive((x) => !x) },
@@ -114,7 +117,7 @@
         db: 'server', health: !s.ready ? 'danger' : problems.length ? 'warn' : 'ok', word, open: drawer, onToggle: setDrawer, onCommand: () => setPalette(true), onHelp: () => setSheet(true),
         onDb: () => setPalette(true),
         drawer: problems.length ? [h('span', { className: 'iw-state is-failed' }, '✕ ' + problems.length + ' PROBLEM' + (problems.length > 1 ? 'S' : '')), h('span', { className: 'iw-small cs-problems' }, problems.join(' · '))] : [h('span', { className: 'iw-state is-online' }, 'NO PROBLEMS'), h('span', { className: 'iw-small iw-muted' }, 'Every namespace is writable and checkpointing.')],
-        footer: `mock · v${s.version}`,
+        footer: src.kind === 'mock' ? `mock · v${s.version}` : `server ${s.endpoints.rest}`,
       }, h(U.RailLinks, { page: 'status' })),
       h('main', { className: 'cs-status' },
         /* The server */
@@ -122,14 +125,14 @@
           h('div', { className: 'cs-server__id' },
             h(I.Led, { state: !s.ready ? 'danger' : problems.length ? 'warn' : 'ok' }, s.ready ? 'READY' : 'RECOVERING'),
             h('span', { className: 'iw-title' }, word),
-            h('span', { className: 'iw-mono-s iw-muted' }, 'up ' + U.span(uptime) + ' · v' + s.version + ' · fsync ' + s.fsync + ' · ' + s.dataDir)),
+            h('span', { className: 'iw-mono-s iw-muted' }, [uptime != null && 'up ' + U.span(uptime), s.version && (src.kind === 'mock' ? 'v' : 'API ') + s.version, s.fsync && 'fsync ' + s.fsync, s.dataDir].filter(Boolean).join(' · ') || 'reachable')),
           h('div', { className: 'cs-server__ends iw-mono-s' }, Object.entries(s.endpoints).map(([k, v]) => h('span', { key: k }, h('span', { className: 'iw-cap' }, k.toUpperCase()), ' ', v))),
           h('div', { className: 'cs-server__live' },
-            h(I.Led, { state: live ? 'ok' : 'off' }, live ? 'LIVE · 1 s' : 'PAUSED'),
+            h(I.Led, { state: live ? 'ok' : 'off' }, live ? (src.kind === 'mock' ? 'LIVE · 1 s' : 'LIVE · 3 s') : 'PAUSED'),
             h(I.Button, { variant: 'ghost', kbd: 'Space', onClick: () => setLive((x) => !x), title: live ? 'Pause' : 'Resume' }, live ? 'PAUSE' : 'RESUME')),
           problems.length > 0 && h('ul', { className: 'cs-server__problems' }, problems.map((p) => h('li', { key: p }, h('span', { className: 'iw-state is-failed' }, '✕'), ' ', h('span', { className: 'iw-small' }, p))))),
         /* The last minute and a half */
-        h('div', { className: 'cs-kpis' },
+        !s.series ? h(Later, { title: 'THE LAST MINUTE AND A HALF', className: 'cs-kpisec', what: 'Commits per second, commit and fsync p99, query p99, active requests and memory.' }) : h('div', { className: 'cs-kpis' },
           h(Tile, { caption: 'COMMITS / S', values: sr.commitsPerSec, format: (v) => U.num(v), tickMs: tick, note: 'avg ' + U.num(avg(sr.commitsPerSec), 1) + ' · max ' + U.num(maxOf(sr.commitsPerSec)) }),
           h(Tile, { caption: 'COMMIT P99', values: sr.commitP99, format: U.ms, tickMs: tick, note: 'p50 ' + U.ms(sr.commitP50.slice(-1)[0]) + ' · max ' + U.ms(maxOf(sr.commitP99)), state: sr.commitP99.slice(-1)[0] > 20 ? 'warn' : null }),
           h(Tile, { caption: 'FSYNC P99', values: sr.fsyncP99, format: U.ms, tickMs: tick, note: 'max ' + U.ms(maxOf(sr.fsyncP99)) + ' · policy ' + s.fsync }),
@@ -157,7 +160,7 @@
             empty: 'No namespaces. An empty server, technically valid.',
           })),
         /* Operations */
-        h(Section, { title: 'LATENCY BY OPERATION', meta: 'since start', className: 'cs-ops' },
+        !s.operations ? h(Later, { title: 'LATENCY BY OPERATION', className: 'cs-ops', what: 'Calls, errors, p50 and p99 per operation.' }) : h(Section, { title: 'LATENCY BY OPERATION', meta: 'since start', className: 'cs-ops' },
           h(Table, {
             cols: [['OPERATION'], ['CALLS', 1], ['ERRORS', 1], ['P50', 1], ['P99', 1], ['']],
             rows: s.operations.slice().sort((a, b) => b.calls - a.calls).map((o) => h('tr', { key: o.op },
@@ -166,7 +169,7 @@
             empty: '',
           })),
         /* Resources */
-        h(Section, { title: 'MEMORY AND DISK', className: 'cs-res' },
+        !s.memory ? h(Later, { title: 'MEMORY AND DISK', className: 'cs-res', what: 'Memory against the limit, WAL, checkpoints and free disk, rejected and timed-out requests.' }) : h(Section, { title: 'MEMORY AND DISK', className: 'cs-res' },
           h('div', { className: 'cs-res__body' },
             h('div', { className: 'cs-res__mem' },
               h(I.Meter, { caption: 'MEMORY', value: s.memory.usedBytes, max: s.memory.limitBytes, warnAt: s.memory.warnAt, width: 220, readout: U.bytes(s.memory.usedBytes) + ' / ' + U.bytes(s.memory.limitBytes) }),
@@ -176,7 +179,7 @@
                 .map(([k, v]) => h('div', { key: k }, h('dt', { className: 'iw-cap' }, k), h('dd', { className: 'iw-mono' }, v)))),
             h('div', { className: 'cs-res__wal' }, h('span', { className: 'iw-cap' }, 'WAL SIZE'), h(Spark, { values: sr.walBytes, format: U.bytes, tickMs: tick }), h('span', { className: 'iw-small iw-muted' }, 'Drops at each checkpoint.')))),
         /* Active requests */
-        h(Section, { title: 'ACTIVE REQUESTS', meta: String(s.active.length), className: 'cs-act' },
+        !s.active ? h(Later, { title: 'ACTIVE REQUESTS', className: 'cs-act', what: 'The requests running now, with cancel.' }) : h(Section, { title: 'ACTIVE REQUESTS', meta: String(s.active.length), className: 'cs-act' },
           h(Table, {
             cols: [['REQUEST'], ['OPERATION'], ['NAMESPACE'], ['CLIENT'], ['RUNNING', 1], ['VISITED', 1], ['']],
             rows: s.active.map((q) => h('tr', { key: q.id },
@@ -186,7 +189,7 @@
             empty: 'Nothing running. Suspiciously calm.',
           })),
         /* Change streams */
-        h(Section, { title: 'CHANGE STREAM CONSUMERS', meta: String(s.consumers.length), className: 'cs-con' },
+        !s.consumers ? h(Later, { title: 'CHANGE STREAM CONSUMERS', className: 'cs-con', what: 'Who follows a change stream, and how far behind.' }) : h(Section, { title: 'CHANGE STREAM CONSUMERS', meta: String(s.consumers.length), className: 'cs-con' },
           h(Table, {
             cols: [['CONSUMER'], ['NAMESPACE'], ['CLIENT'], ['AT SEQ', 1], ['BEHIND', 1]],
             rows: s.consumers.map((c) => h('tr', { key: c.name },
@@ -195,9 +198,13 @@
             empty: 'No one is following a change stream.',
           })),
         /* The log */
-        h(Section, { title: 'LOG', className: 'cs-logsec' }, h(I.LogStream, { entries: log, follow: live })),
+        h(Section, { title: src.kind === 'mock' ? 'LOG' : 'THIS PAGE\'S REQUESTS', meta: src.kind === 'mock' ? null : 'the server log comes with step 16', className: 'cs-logsec' }, h(I.LogStream, { entries: log, follow: live })),
         /* Jobs and builds */
-        h(Section, { title: 'JOBS AND INDEX BUILDS', className: 'cs-jobs' },
+        !s.jobs ? h(Section, { title: 'INDEX BUILDS', className: 'cs-jobs' }, h(Table, {
+          cols: [['INDEX'], ['NAMESPACE'], ['PROGRESS']],
+          rows: s.namespaces.flatMap((n) => n.indexes.filter((x) => x.building).map((x) => h('tr', { key: n.name + x.path.join('.') }, h('td', { className: 'iw-mono' }, '[' + x.path.join('.') + ']'), h('td', { className: 'iw-mono-s' }, n.name), h('td', null, h(I.Meter, { value: x.building.scanned, max: Math.max(1, x.building.total), warnAt: 2, width: 96, readout: U.num(x.building.scanned) + ' / ' + U.num(x.building.total) }))))),
+          empty: 'No index is being built. Analytics jobs are listed once step 16 manages them.',
+        })) : h(Section, { title: 'JOBS AND INDEX BUILDS', className: 'cs-jobs' },
           h(Table, {
             cols: [['WHAT'], ['NAMESPACE'], ['STATE'], ['PROGRESS']],
             rows: s.jobs.map((j) => h('tr', { key: j.id },

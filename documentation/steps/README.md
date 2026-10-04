@@ -25,7 +25,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [14b](step_14b.md) | Benchmarks | M3 | done |
 | [15](step_15.md) | Security | M4 | todo |
 | [16](step_16.md) | Operability | M4 | todo |
-| [16a](step_16a.md) | Operator console (on mock data) | M4 | done |
+| [16a](step_16a.md) | Operator console | M4 | done |
 | [17](step_17.md) | Release 1.0 | M4 | todo |
 | [18](step_18.md) | Replication and high availability | M5 | todo |
 

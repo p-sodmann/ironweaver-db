@@ -91,8 +91,9 @@ jobs:
 
   console:
     # Step 16a (ADR 0037): the operator console's generated files
-    # (tokens.css, bundle.js) are what their sources build to, and the
-    # tests of its mock Source, query line and helpers pass
+    # (tokens.css, bundle.js) are what their sources build to, the tests
+    # of its Sources, query line and helpers pass, and so do those of
+    # serve.py, the Flask server that connects it to an iwdb-server
     name: operator console
     runs-on: ubuntu-latest
     defaults:
@@ -103,9 +104,13 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - run: npm ci
       - run: npm run check
       - run: npm test
+      - run: pip install flask pytest && pytest -q test
 
   docker:
     # Step 13a: the image builds, with and without the default features,

@@ -1,8 +1,7 @@
 /* Ironweaver DB operator console: the Source contract (step 16a, ADR 0037).
  *
- * Every read and write of the console goes through one Source object; the pages never call anything else. Today
- * the only Source is the mock (mock.js). Hooking the console up means writing a Source over the REST API
- * (documentation/api/rest.md) with these methods, and nothing in the pages changes. All methods return
+ * Every read and write of the console goes through one Source object; the pages never call anything else. There
+ * are two: the mock (mock.js) and the REST API (rest.js, through serve.py); the pages don't know which they have. All methods return
  * Promises; a failure rejects with an Error carrying `code`, one of documentation/api/errors.md
  * (`invalid_argument`, `not_found`, `read_only`, `constraint_violation`, ...).
  *
