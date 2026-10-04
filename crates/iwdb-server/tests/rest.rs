@@ -526,6 +526,8 @@ fn the_console_session_is_a_cookie_with_a_csrf_header() {
     for part in ["iwdb_session=iwdb_", "HttpOnly", "SameSite=Strict", "Path=/", "Max-Age="] {
         assert!(set.contains(part), "{} in {}", part, set);
     }
+    // Plaintext: not Secure, or a browser would drop it (over TLS it is, tests/tls.rs)
+    assert!(!set.contains("Secure"), "{}", set);
     assert!(!set.contains("Secure"), "not Secure until TLS (step 15b): {}", set);
     assert_eq!(r.headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
     let cookie = set.split(';').next().unwrap().to_owned();

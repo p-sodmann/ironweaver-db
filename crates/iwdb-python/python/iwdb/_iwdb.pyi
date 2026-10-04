@@ -217,6 +217,9 @@ class Store(_Graph):
         token: Optional[str] = None,
         user: Optional[str] = None,
         password: Optional[str] = None,
+        ca: Optional[Path] = None,
+        cert: Optional[Path] = None,
+        key: Optional[Path] = None,
     ) -> "Store": ...
     @staticmethod
     def open(

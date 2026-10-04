@@ -1,5 +1,6 @@
 //! `iwctl shell` (step 14a) against a server on an ephemeral port: a
-//! session piped through stdin, in tables and in JSON, and its exit codes.
+//! session piped through stdin, in tables and in JSON, and its exit codes;
+//! over TLS with a client certificate (step 15b).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -31,6 +32,16 @@ const FAST: HashParams = HashParams { memory_kib: 64, iterations: 1, parallelism
 /// With `auth`: authentication on, users `root` (admin, password
 /// `root-password`) and `ann` (read on default, `ann-password`).
 fn serve_with(auth: bool) -> Running {
+    serve_on(auth, false)
+}
+
+/// A test certificate or key (test-only, public).
+fn fixture(name: &str) -> String {
+    format!("{}/../../tests/fixtures/tls/{}", env!("CARGO_MANIFEST_DIR"), name)
+}
+
+/// With `tls`: over TLS, with client certificates of the test CA optional.
+fn serve_on(auth: bool, tls: bool) -> Running {
     let dir = tempfile::tempdir().unwrap();
     let mut options = StoreOptions::default();
     options.wal.fsync = iwdb::FsyncPolicy::Off;
@@ -46,8 +57,18 @@ fn serve_with(auth: bool) -> Running {
     let db = Embedded::new(store, QueryConfig::default()).unwrap().with_auth(settings);
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let server = Server::new(Arc::new(db)).auth(AuthMode { enabled: auth });
+    let scheme = if tls { "https" } else { "http" };
+    let endpoint = format!("{}://{}", scheme, listener.local_addr().unwrap());
+    let tls = tls.then(|| {
+        let files = iwdb_server::tls::TlsFiles {
+            cert: fixture("server.pem").into(),
+            key: fixture("server.key").into(),
+            client_ca: Some(fixture("ca.pem").into()),
+            client_auth: iwdb_server::config::ClientAuth::Optional,
+        };
+        Arc::new(iwdb_server::tls::ServerTls::load(files).unwrap())
+    });
+    let server = Server::new(Arc::new(db)).auth(AuthMode { enabled: auth }).tls(tls);
     runtime.spawn(async move {
         let never = std::future::pending::<()>();
         let _ = server.serve(listener, never, || async { tokio::time::sleep(Duration::ZERO).await }).await;
@@ -238,4 +259,38 @@ fn users_and_tokens_on_a_server() {
         .unwrap();
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert!(stdout(&o).contains("bob: default=admin"), "{}", stdout(&o));
+}
+
+/// Over TLS (step 15b): `--tls-ca` trusts the test CA; a client
+/// certificate (`--tls-cert`, `--tls-key`) logs in as the user it names,
+/// with that user's roles; another CA is refused.
+#[test]
+fn the_shell_speaks_tls_and_a_certificate_logs_in() {
+    let server = serve_on(true, true);
+    let (ca, cert, key) = (fixture("ca.pem"), fixture("client-ann.pem"), fixture("client-ann.key"));
+    let tls = ["--tls-ca", ca.as_str(), "--tls-cert", cert.as_str(), "--tls-key", key.as_str()];
+    let mut args = vec![server.endpoint.as_str()];
+    args.extend(tls);
+    let o = shell(&args, "\\whoami\nnode x\nupsert-node x\n");
+    let (out, err) = (stdout(&o), stderr(&o));
+    assert!(out.contains("ann: default=read"), "{}\n{}", out, err);
+    assert!(err.contains("error (permission_denied)"), "{}", err);
+    // A login over TLS, trusting the CA only
+    let o = shell(&[&server.endpoint, "--tls-ca", &ca, "--user", "root"], "root-password\n\\whoami\n");
+    assert!(stdout(&o).contains("root (admin)"), "{}\n{}", stdout(&o), stderr(&o));
+    // User commands with --server, by certificate
+    let mut args = vec!["user", "list", "--server", server.endpoint.as_str()];
+    args.extend(tls);
+    let o = Command::new(env!("CARGO_BIN_EXE_iwctl")).args(&args).output().unwrap();
+    assert_eq!(o.status.code(), Some(4), "{}", stdout(&o));
+    assert!(stderr(&o).contains("permission_denied") && stderr(&o).contains("'ann'"), "{}", stderr(&o));
+    // Another CA: no answer from the server
+    let other = fixture("other-ca.pem");
+    let o = shell(&[&server.endpoint, "--tls-ca", &other], "namespaces\n");
+    assert_eq!(o.status.code(), Some(4));
+    assert!(stderr(&o).contains("UnknownIssuer"), "{}", stderr(&o));
+    // TLS settings with http:// are a usage error
+    let plain = server.endpoint.replace("https://", "http://");
+    let o = shell(&[&plain, "--tls-ca", &ca], "namespaces\n");
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
 }

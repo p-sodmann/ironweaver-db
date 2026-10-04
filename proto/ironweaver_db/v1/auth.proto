@@ -15,8 +15,8 @@
 // namespace and manages users, grants and namespaces.
 //
 // Passwords and tokens are never logged, echoed or put in an error
-// message. Until step 15b they cross the network in clear: keep the
-// server on loopback or a trusted network.
+// message. The server speaks TLS unless its operator turned it off
+// (step 15b); a client certificate (mTLS) can stand in for a token.
 
 syntax = "proto3";
 

@@ -13,6 +13,10 @@ listen = "0.0.0.0:7600"
 [server]
 drain_timeout_secs = 8
 
+[tls]
+cert = "/etc/iwdb/tls/server.pem"
+key = "/etc/iwdb/tls/server.key"
+
 [[projection]]
 name = "orders"
 namespace = "default"

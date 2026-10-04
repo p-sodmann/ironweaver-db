@@ -6,14 +6,16 @@
 #   docker build -t iwdb .                                # gRPC, REST, Postgres projections, console
 #   docker build --build-arg FEATURES="" -t iwdb:grpc .   # gRPC only
 #   docker run -p 127.0.0.1:7600:7600 -v iwdb-data:/var/lib/iwdb \
-#     -e IWDB_SERVER_PLAINTEXT_PUBLIC=true -e IWDB_AUTH_BOOTSTRAP_PASSWORD=... iwdb
+#     -v "$PWD/docker/tls:/etc/iwdb/tls:ro" -e IWDB_AUTH_BOOTSTRAP_PASSWORD=... iwdb
 #
 # FEATURES are iwdb-server's cargo features (rest, postgres, console), space
 # separated. The console is compiled in but off: IWDB_CONSOLE_ENABLED=true
-# turns it on. The container listens on 0.0.0.0, which needs
-# IWDB_SERVER_PLAINTEXT_PUBLIC=true until TLS (step 15b): publish the port on
-# localhost or a private network only. Authentication is on: the first start
-# needs IWDB_AUTH_BOOTSTRAP_PASSWORD (the user admin; no default password).
+# turns it on. The server speaks TLS only (step 15b): mount the certificate
+# and key at /etc/iwdb/tls/server.pem and server.key (docker/dev-cert.sh makes
+# a pair for development). The image holds no certificate or key. Plaintext
+# needs IWDB_TLS_ENABLED=false and IWDB_SERVER_PLAINTEXT_PUBLIC=true.
+# Authentication is on: the first start needs IWDB_AUTH_BOOTSTRAP_PASSWORD
+# (the user admin; no default password).
 
 ARG RUST_VERSION=1.99
 ARG DEBIAN=trixie
@@ -50,9 +52,11 @@ EXPOSE 7600
 # drain of the image's config (8 s)
 STOPSIGNAL SIGTERM
 # Ready once recovery has finished (step 16b, ADR 0040); the probe asks
-# /v1/health/ready over HTTP/1.1, so the image needs no curl. A long
-# recovery stays within the start period
+# /v1/health/ready over HTTP/1.1, so the image needs no curl. It reads the
+# config (and the container's IWDB_* variables) for the port and whether to
+# speak TLS (step 15b); it doesn't verify the certificate and sends no
+# credentials. A long recovery stays within the start period
 HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
-    CMD ["iwdb-server", "--probe", "127.0.0.1:7600"]
+    CMD ["iwdb-server", "--probe", "--config", "/etc/iwdb/iwdb.toml"]
 ENTRYPOINT ["iwdb-server"]
 CMD ["--config", "/etc/iwdb/iwdb.toml"]

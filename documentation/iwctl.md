@@ -55,7 +55,9 @@ iwctl token list <dir> <user>
 
 On a **data directory** (the server stopped: a store holds the directory's lock) they need no credentials: whoever can open the directory owns the store, as for every other command here. That is how the first admin of a store is made without a default password (or with `IWDB_AUTH_BOOTSTRAP_PASSWORD` on the server's first start, [config.md](api/config.md#authentication-and-the-first-admin)).
 
-On a **server**, put `--server <endpoint>` where the directory goes, with credentials: `--token <token>` (or `IWDB_TOKEN`), or `--user <name>` (a password prompt, then a login). The server checks the caller's roles: managing users and grants needs the server-wide admin role; users can change their own password and manage their own tokens.
+On a **server**, put `--server <endpoint>` where the directory goes (`https://host:port`, step 15b), with credentials: `--token <token>` (or `IWDB_TOKEN`), or `--user <name>` (a password prompt, then a login), or a client certificate (below). The server checks the caller's roles: managing users and grants needs the server-wide admin role; users can change their own password and manage their own tokens.
+
+**TLS** (step 15b, [ADR 0048](adr/0048-tls-and-mtls.md)), for `--server` and `shell`: `--tls-ca <file>` is the CA (PEM) the server's certificate is verified against (default: the system's trust store); `--tls-cert <file>` and `--tls-key <file>` are a client certificate and its key (PEM), which authenticate as the user the certificate names on a server with `[tls] client_ca`, without a token or password. An `http://` endpoint reaches a server whose TLS is off; `--tls-*` with one is a usage error (exit 2).
 
 Passwords are read without echo from a terminal (a new one twice), or one line each from stdin when it isn't a terminal (with `--user`, the login's password first). They never go on the command line, in the output or in an error. Roles: `read` (every read, the change stream, the catalog, the status), `write` (and commits), `admin` (and catalog changes and dropping the namespace); [ADR 0043](adr/0043-users-and-roles-in-the-system-namespace.md).
 
@@ -64,21 +66,24 @@ $ iwctl user create /var/lib/iwdb root --admin
 password for the new user root:
 again:
 created user root (admin): no grants
-$ export IWDB_TOKEN=$(iwctl --json token create --server http://127.0.0.1:7600 --user root root cli | jq -r .token)
-$ iwctl user create --server http://127.0.0.1:7600 ann
-$ iwctl user grant --server http://127.0.0.1:7600 ann social write
+$ S="--server https://127.0.0.1:7600 --tls-ca docker/tls/ca.pem"
+$ export IWDB_TOKEN=$(iwctl --json token create $S --user root root cli | jq -r .token)
+$ iwctl user create $S ann
+$ iwctl user grant $S ann social write
 ann: social=write
+$ sh docker/dev-cert.sh --client root      # a client certificate for root: no token needed
+$ iwctl user list $S --tls-cert docker/tls/client-root.pem --tls-key docker/tls/client-root.key
 ```
 
 ## Query shell
 
 ```
-iwctl shell <endpoint> [-n <namespace>] [--json] [--token <token> | --user <name>]
+iwctl shell <endpoint> [-n <namespace>] [--json] [--token <token> | --user <name>] [--tls-ca <file>] [--tls-cert <file> --tls-key <file>]
 ```
 
 Against a server with authentication on, log in with `--token` (or `IWDB_TOKEN`), with `--user` (a password prompt), or with `\login <user>` in the session; when stdin isn't a terminal, the password is the next line of input. `\logout` ends the session, `\whoami` shows the user and its roles.
 
-Connects to the `iwdb-server` at `<endpoint>` (`http://host:port`) and reads one command per line from stdin, so it works interactively and piped from a script. The prompt (`social> `) goes to stderr, and only when stdin is a terminal. For line editing and history, run it under `rlwrap`. Each command is one call of the `Database` trait over gRPC, bounded like any other read.
+Connects to the `iwdb-server` at `<endpoint>` (`https://host:port`; `http://` for a server whose TLS is off; `--tls-*` as above) and reads one command per line from stdin, so it works interactively and piped from a script. The prompt (`social> `) goes to stderr, and only when stdin is a terminal. For line editing and history, run it under `rlwrap`. Each command is one call of the `Database` trait over gRPC, bounded like any other read.
 
 | Command | What it does |
 |---|---|
@@ -100,7 +105,7 @@ Connects to the `iwdb-server` at `<endpoint>` (`http://host:port`) and reads one
 An error prints `error (<code>): <message>` ([codes](api/errors.md)) to stderr (in JSON mode `{"error": {"code", "message"}}` to stdout) and the shell goes on. The exit code is 0 if every command succeeded, 4 if one failed, 2 for an invalid endpoint.
 
 ```
-$ iwctl shell http://127.0.0.1:7600 -n social
+$ iwctl shell https://127.0.0.1:7600 --tls-ca docker/tls/ca.pem -n social
 social> match (a:Person)-[k:KNOWS]->(b)
 a     | b     | k
 ------+-------+--

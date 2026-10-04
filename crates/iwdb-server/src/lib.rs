@@ -18,6 +18,8 @@
 //! - [`health`]: liveness and readiness (ADR 0040); [`launch`] binds first
 //!   and serves health while the store opens.
 //! - [`logging`]: structured logs (ADR 0042).
+//! - [`tls`]: TLS and mTLS (step 15b, ADR 0048): the server's certificate,
+//!   reloadable; the user of a client certificate; what clients trust.
 //! - `console` (feature `console`): the operator console's pages, served
 //!   at `/console/` when the config turns it on (ADR 0041).
 //! - [`proto`]: the generated messages (with their proto3 JSON serde),
@@ -52,12 +54,13 @@ pub mod rest;
 mod serve;
 mod service;
 pub mod status;
+pub mod tls;
 
 #[cfg(feature = "client")]
 pub mod client;
 
 pub use ops::CHUNK_BYTES;
-pub use serve::{Drain, LaunchOptions, Launched, launch};
+pub use serve::{Drain, HANDSHAKE_TIMEOUT, LaunchOptions, Launched, launch};
 pub use service::{Adapter, DEFAULT_MAX_MESSAGE_BYTES, Server};
 
 /// The generated messages and services of `ironweaver_db.v1`, and (with

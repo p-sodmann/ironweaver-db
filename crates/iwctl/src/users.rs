@@ -16,7 +16,7 @@ use std::time::Duration;
 use iwdb::{Embedded, QueryConfig, Role, Secret, Store, StoreOptions};
 use iwdb_query::exec::block_on;
 use iwdb_query::{Accounts, Error, TokenInfo, UserInfo};
-use iwdb_server::client::Remote;
+use iwdb_server::client::{ClientTls, Remote};
 use serde_json::{Value, json};
 
 use crate::output::Out;
@@ -46,11 +46,13 @@ pub enum TokenAction {
 pub enum Target {
     Dir(PathBuf),
     /// A server, with the caller's credentials: `--token` (or
-    /// `IWDB_TOKEN`), or `--user` and a password prompt.
+    /// `IWDB_TOKEN`), or `--user` and a password prompt, or a client
+    /// certificate (`--tls-cert`); and what to trust (`--tls-ca`).
     Server {
         endpoint: String,
         token: Option<String>,
         user: Option<String>,
+        tls: ClientTls,
     },
 }
 
@@ -115,8 +117,8 @@ fn new_password(prompt: &str) -> Result<Secret, String> {
 pub fn run(action: &Action, target: &Target, options: StoreOptions, out: &Out) -> u8 {
     match target {
         Target::Dir(dir) => offline(action, dir, options, out),
-        Target::Server { endpoint, token, user } => {
-            let remote = match connect(endpoint, token.as_deref(), user.as_deref()) {
+        Target::Server { endpoint, token, user, tls } => {
+            let remote = match connect(endpoint, tls, token.as_deref(), user.as_deref()) {
                 Ok(remote) => remote,
                 Err(e) => return report(out, &e),
             };
@@ -125,9 +127,10 @@ pub fn run(action: &Action, target: &Target, options: StoreOptions, out: &Out) -
     }
 }
 
-/// A client of `endpoint` with the caller's credentials.
-pub fn connect(endpoint: &str, token: Option<&str>, user: Option<&str>) -> Result<Remote, Error> {
-    let remote = Remote::connect(endpoint)?;
+/// A client of `endpoint` (over TLS for `https://`, with `tls`) with the
+/// caller's credentials.
+pub fn connect(endpoint: &str, tls: &ClientTls, token: Option<&str>, user: Option<&str>) -> Result<Remote, Error> {
+    let remote = Remote::connect_tls(endpoint, tls)?;
     let token = token.map(str::to_owned).or_else(|| std::env::var("IWDB_TOKEN").ok().filter(|t| !t.is_empty()));
     if let Some(token) = token {
         remote.set_token(Some(Secret::new(token)));

@@ -1,15 +1,19 @@
 # Ironweaver DB in Docker (step 13a, ADR 0034).
 #
+#   sh docker/dev-cert.sh                          # once: a development CA and certificate in docker/tls
 #   IWDB_ADMIN_PASSWORD=... docker compose up --build
-#                                                  # iwdb-server on 127.0.0.1:7600, the console at
-#                                                  # http://127.0.0.1:7600/console/ (log in as admin)
+#                                                  # iwdb-server on 127.0.0.1:7600 over TLS, the console at
+#                                                  # https://127.0.0.1:7600/console/ (log in as admin; trust
+#                                                  # docker/tls/ca.pem, or accept the browser's warning)
 #   IWDB_CONFIG=projection.example.toml docker compose --profile postgres up --build
 #                                                  # plus Postgres and a projection from it
 #
 # Authentication is on (step 15a): the first start needs IWDB_ADMIN_PASSWORD,
 # which creates the user admin; later starts ignore it (unset it then). There
-# is no default password. The server has no TLS until step 15b, so the port
-# is published on localhost only.
+# is no default password. TLS (step 15b) uses the certificate of
+# docker/dev-cert.sh, mounted read-only; the image holds none. Clients trust
+# docker/tls/ca.pem: iwctl --tls-ca, iwdb.connect(ca=...), curl --cacert.
+# SIGHUP reloads the certificate: docker compose kill -s HUP iwdb.
 
 services:
   iwdb:
@@ -23,12 +27,11 @@ services:
     volumes:
       - iwdb-data:/var/lib/iwdb
       - ./docker/${IWDB_CONFIG:-iwdb.toml}:/etc/iwdb/iwdb.toml:ro
+      # The development certificate and key (sh docker/dev-cert.sh)
+      - ./docker/tls:/etc/iwdb/tls:ro
     environment:
       # The operator console (ADR 0041), behind the server's login
       IWDB_CONSOLE_ENABLED: "true"
-      # The container listens on 0.0.0.0, which needs the explicit plaintext
-      # flag until TLS (step 15b); the port is published on localhost only
-      IWDB_SERVER_PLAINTEXT_PUBLIC: "true"
       # The first admin, on the first start only (empty: unset)
       IWDB_AUTH_BOOTSTRAP_PASSWORD: ${IWDB_ADMIN_PASSWORD:-}
       # Read by docker/projection.example.toml (url_env)

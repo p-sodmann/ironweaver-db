@@ -176,7 +176,7 @@ rows = store.match("(a:Person)-[:KNOWS]->(b)", where={"b": attr("name") == "Bob"
 
 | Function | Returns |
 |---|---|
-| `iwdb.connect(endpoint, *, token=None, user=None, password=None) -> Store` | a client of a server ([The remote client](#the-remote-client)) |
+| `iwdb.connect(endpoint, *, token=None, user=None, password=None, ca=None, cert=None, key=None) -> Store` | a client of a server ([The remote client](#the-remote-client)) |
 | `iwdb.verify(path) -> dict` | check a data directory, backup or archive and change nothing: `{"ok": bool, "kind", "problems": [{"path", "message"}], "notes": [...], "seq", "last_seq", "records", "checkpoints", "segments", "namespaces": [{"id", "name", "seq", "records", ...}], ...}` (single-namespace fields are those of the one namespace, `None` when there are several; [ADR 0011](adr/0011-verify.md)) |
 | `iwdb.restore(dest, *, backup=None, archive=None, seq=None, time=None, namespaces=None) -> dict` | restore a store into a new or empty directory from a backup and/or an archive: every namespace that existed at the target (or just the names in `namespaces`), each to the latest it reaches, or to the last commit at or before `time` (an aware `datetime`). `seq` is one namespace's seq, so it needs exactly one namespace to restore (give `namespaces=["name"]`, or restore a store that has just one): otherwise `iwdb.InvalidError`. Returns `{"path", "history", "source_history", "namespaces": [{"id", "name", "seq", "time", "checkpoint", "replayed", ...}]}` and the fields of `"default"` at the top |
 
@@ -199,14 +199,16 @@ Values convert as in [Values](#values). A filter has no truth value: `and`, `or`
 
 ## The remote client
 
-`iwdb.connect(endpoint, *, token=None, user=None, password=None) -> Store` (`endpoint`: `"http://host:port"` of an `iwdb-server`; no TLS until step 15b) returns a store with this API, served over gRPC ([ADR 0035](adr/0035-python-remote-client.md)). It connects on the first call and again after a lost connection; without a server, calls raise `iwdb.UnavailableError`. `close()`, `closed` and `with` work as for an embedded store.
+`iwdb.connect(endpoint, *, token=None, user=None, password=None, ca=None, cert=None, key=None) -> Store` (`endpoint`: `"https://host:port"` of an `iwdb-server`, or `"http://host:port"` of one whose TLS is off) returns a store with this API, served over gRPC ([ADR 0035](adr/0035-python-remote-client.md)). It connects on the first call and again after a lost connection; without a server, calls raise `iwdb.UnavailableError`. `close()`, `closed` and `with` work as for an embedded store.
 
 - **Credentials** (step 15a). A server checks credentials unless its `[auth] enabled` is off. Pass an API token (`token=`), or `user=` and `password=`: that logs in during `connect` (`iwdb.UnauthenticatedError` for a wrong user or password, or too many failed logins) and keeps the session's token. A session ends after the server's `session_lifetime_secs`, at a password change or a server restart; calls then raise `iwdb.UnauthenticatedError`, and you connect again. A call the user's roles don't allow raises `iwdb.PermissionDeniedError`. Users, grants and tokens are managed with `iwctl user` and `iwctl token` ([iwctl.md](iwctl.md#users-and-tokens)) or the REST API.
 
   ```python
-  store = iwdb.connect("http://127.0.0.1:7600", user="ann", password=os.environ["IWDB_PASSWORD"])
-  store = iwdb.connect("http://127.0.0.1:7600", token=os.environ["IWDB_TOKEN"])
+  store = iwdb.connect("https://127.0.0.1:7600", user="ann", password=os.environ["IWDB_PASSWORD"], ca="ca.pem")
+  store = iwdb.connect("https://db.example.com:7600", token=os.environ["IWDB_TOKEN"])   # a public CA
   ```
+
+- **TLS** (step 15b, [ADR 0048](adr/0048-tls-and-mtls.md)). `ca` is the PEM file of the CA the server's certificate is verified against (default: the system's trust store). `cert` and `key` are PEM files of a client certificate: on a server with `[tls] client_ca`, it authenticates as the user its common name names, with no token or password (`iwdb.connect(url, ca="ca.pem", cert="ann.pem", key="ann.key")`). A server whose certificate isn't trusted, or that refuses the client's, makes calls raise `iwdb.UnavailableError` with the reason; files that can't be read, a certificate without its key, or TLS files with an `http://` endpoint raise `iwdb.InvalidError` from `connect`.
 
 - **Embedded only.** These need the store's directory and raise `iwdb.InvalidError` on a remote store: `sync`, `checkpoint`, `checkpoint_all`, `history`, `status` (the store's; `namespace.status()` works), `backup`, `import_namespace`, `import_file`, `export` (and their `Namespace` forms). `verify` and `restore` act on directories.
 - **Read-your-writes.** The client remembers the seq of its last commit (data or catalog) per namespace, and a read without `min_seq` waits for it, so a client always sees its own commits. Pass `result["seq"]` as `min_seq` to another client to let it see them too. Creating or dropping a namespace through the client forgets the namespace's seq.
@@ -215,10 +217,10 @@ Values convert as in [Values](#values). A filter has no truth value: `and`, `or`
 
 ## asyncio
 
-`iwdb.aio` wraps both kinds of store: `await iwdb.aio.open(path, **options)` and `await iwdb.aio.connect(endpoint, token=..., user=..., password=...)` return an `AsyncStore` whose methods are coroutines with the same arguments, results and exceptions; `await store.namespace(name)` an `AsyncNamespace`. Each call runs in a worker thread (`asyncio.to_thread`) and releases the GIL in Rust, so calls run concurrently with the event loop and each other. `async with store:` closes it. A transaction collects mutations with plain calls; `await tx.commit()`, or `async with store.transaction() as tx:` commits when the block ends, as `with` does.
+`iwdb.aio` wraps both kinds of store: `await iwdb.aio.open(path, **options)` and `await iwdb.aio.connect(endpoint, token=..., user=..., password=..., ca=..., cert=..., key=...)` return an `AsyncStore` whose methods are coroutines with the same arguments, results and exceptions; `await store.namespace(name)` an `AsyncNamespace`. Each call runs in a worker thread (`asyncio.to_thread`) and releases the GIL in Rust, so calls run concurrently with the event loop and each other. `async with store:` closes it. A transaction collects mutations with plain calls; `await tx.commit()`, or `async with store.transaction() as tx:` commits when the block ends, as `with` does.
 
 ```python
-store = await iwdb.aio.connect("http://127.0.0.1:7600")
+store = await iwdb.aio.connect("https://127.0.0.1:7600", user="ann", password="...", ca="ca.pem")
 async with store:
     async with store.transaction() as tx:
         tx.upsert_node("alice", labels=["Person"])

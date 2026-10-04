@@ -22,3 +22,7 @@ console/node_modules/
 console/test/
 console/tools/
 console/design-system/src/
+# Certificates and keys (step 15b): the test ones and docker/dev-cert.sh's.
+# None goes into the image; mount them (compose.yaml)
+tests/fixtures/tls/
+docker/tls/

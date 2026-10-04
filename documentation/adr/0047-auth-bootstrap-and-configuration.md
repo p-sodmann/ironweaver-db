@@ -29,3 +29,7 @@ Authentication (ADRs 0043 to 0046) has to be turned on somehow, and the first us
 - An upgrade of a server that ran without authentication fails at its first start until an admin exists: the release notes and `config.md` say how (either way above, or `IWDB_AUTH_ENABLED=false`).
 - A server on a non-loopback address that ran fine in step 16b now needs the plaintext flag; step 15b turns the default into TLS.
 - The test harnesses (Rust binary tests, the Python fixture) bootstrap an admin and log in; the in-process `Server` of the Rust tests chooses with `Server::auth`.
+
+## Update (step 15b)
+
+TLS came with step 15b and is on by default ([ADR 0048](0048-tls-and-mtls.md)). `[server] plaintext_public` stays, with a narrower meaning: plaintext on a non-loopback address, which also needs `[tls] enabled = false`; with TLS on it has no effect and a warning says so. The image's config expects a mounted certificate instead of the plaintext flag, and CI's docker job checks that the image refuses to start without one.

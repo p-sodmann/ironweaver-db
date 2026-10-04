@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use iwdb::import::{ExportFormat, ImportFormat};
 use iwdb::{CommitTime, ConstraintKind, FsyncPolicy, RestoreTarget};
+use iwdb_server::client::ClientTls;
 
 pub const USAGE: &str = "\
 usage: iwctl [--json] <command> [options]
@@ -65,7 +66,7 @@ stopped) or, with --server <endpoint> instead of <dir>, on a running server:
 
 query shell (a server, over gRPC):
   shell <endpoint> [-n <ns>]    an interactive client of the iwdb-server at <endpoint>
-                                (http://host:port): match patterns, lookups, commits and
+                                (https://host:port, or http:// without TLS): match patterns, lookups, commits and
                                 catalog commands, one per line from stdin (\\help lists
                                 them); with --json, one JSON object per answer; log in
                                 with --token, --user (a password prompt) or \\login
@@ -87,6 +88,11 @@ options:
   --token <token>               the API or session token to send (shell, --server); also
                                 IWDB_TOKEN
   --user <name>                 log in as <name> (shell, --server); prompts for the password
+  --tls-ca <file>               the CA (PEM) to verify the server against (shell, --server;
+                                default: the system's trust store)
+  --tls-cert <file>             a client certificate (PEM) for mTLS (shell, --server): it
+                                authenticates as the user it names, without a token
+  --tls-key <file>              the client certificate's private key (PEM)
   --admin                       user create: a server-wide admin
   --expires <seconds>           token create: the token expires after this long
 
@@ -134,6 +140,8 @@ pub struct Parsed {
     pub token: Option<String>,
     /// `--user` (shell).
     pub user: Option<String>,
+    /// `--tls-ca`, `--tls-cert`, `--tls-key` (shell).
+    pub tls: ClientTls,
 }
 
 fn dotted(path: &str) -> Vec<String> {
@@ -159,6 +167,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
     let (mut server, mut token, mut user, mut expires): (Option<String>, Option<String>, Option<String>, Option<u64>) =
         (None, None, None, None);
     let mut admin = false;
+    let mut tls = ClientTls::default();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| args.next().cloned().ok_or_else(|| format!("{} needs a value", flag));
@@ -171,6 +180,9 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
             "--server" => server = Some(value("--server")?),
             "--token" => token = Some(value("--token")?),
             "--user" => user = Some(value("--user")?),
+            "--tls-ca" => tls.ca = Some(PathBuf::from(value("--tls-ca")?)),
+            "--tls-cert" => tls.cert = Some(PathBuf::from(value("--tls-cert")?)),
+            "--tls-key" => tls.key = Some(PathBuf::from(value("--tls-key")?)),
             "--expires" => {
                 expires =
                     Some(value("--expires")?.parse().map_err(|_| "--expires needs a number of seconds".to_owned())?)
@@ -212,7 +224,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
         Ok(())
     };
     if name == "user" || name == "token" {
-        let command = accounts(name, rest, server, token, user, admin, expires)?;
+        let command = accounts(name, rest, server, Credentials { token, user, tls }, admin, expires)?;
         if format.is_some() || merge || backup.is_some() || seq.is_some() || time.is_some() || key.is_some() {
             return Err(format!("{} takes none of --format, --merge, --backup, --seq, --time, --key", name));
         }
@@ -231,13 +243,14 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
             no_archive,
             token: None,
             user: None,
+            tls: ClientTls::default(),
         });
     }
     if admin || expires.is_some() || server.is_some() {
         return Err(format!("{} takes none of --admin, --expires, --server", name));
     }
-    if (token.is_some() || user.is_some()) && name != "shell" {
-        return Err(format!("{} takes no --token or --user", name));
+    if (token.is_some() || user.is_some() || tls.is_set()) && name != "shell" {
+        return Err(format!("{} takes no --token, --user or --tls-*", name));
     }
     let command = match name.as_str() {
         "help" => Command::Help,
@@ -287,11 +300,12 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
                 no_archive,
                 token: None,
                 user: None,
+                tls: ClientTls::default(),
             });
         }
         "shell" => {
             expect(1)?;
-            Command::Shell { endpoint: rest.first().cloned().ok_or("shell needs an endpoint (http://host:port)")? }
+            Command::Shell { endpoint: rest.first().cloned().ok_or("shell needs an endpoint (https://host:port)")? }
         }
         "verify" => {
             expect(1)?;
@@ -390,7 +404,14 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
     if key.is_some() && !takes_key {
         return Err(format!("{} takes no --key", name));
     }
-    Ok(Parsed { command, json, fsync, keep, archive, no_verify, namespaces, key, no_archive, token, user })
+    Ok(Parsed { command, json, fsync, keep, archive, no_verify, namespaces, key, no_archive, token, user, tls })
+}
+
+/// `--token`, `--user` and `--tls-*`: how to reach a server and log in.
+struct Credentials {
+    token: Option<String>,
+    user: Option<String>,
+    tls: ClientTls,
 }
 
 /// `user ...` and `token ...`: the action and where it acts.
@@ -398,8 +419,7 @@ fn accounts(
     name: &str,
     rest: &[String],
     server: Option<String>,
-    token: Option<String>,
-    user: Option<String>,
+    credentials: Credentials,
     admin: bool,
     expires: Option<u64>,
 ) -> Result<Command, String> {
@@ -407,11 +427,12 @@ fn accounts(
     let Some((action, rest)) = rest.split_first() else {
         return Err(format!("{} needs an action (see --help)", name));
     };
+    let Credentials { token, user, tls } = credentials;
     let (target, args) = match server {
-        Some(endpoint) => (Target::Server { endpoint, token, user }, rest),
+        Some(endpoint) => (Target::Server { endpoint, token, user, tls }, rest),
         None => {
-            if token.is_some() || user.is_some() {
-                return Err("--token and --user go with --server".into());
+            if token.is_some() || user.is_some() || tls.is_set() {
+                return Err("--token, --user and --tls-* go with --server".into());
             }
             let (dir, args) =
                 rest.split_first().ok_or_else(|| format!("{} {} needs a directory or --server", name, action))?;
@@ -540,7 +561,12 @@ mod tests {
                     namespace: "social".into(),
                     role: Role::Write
                 }),
-                target: Target::Server { endpoint: "http://h:1".into(), token: Some("t".into()), user: None }
+                target: Target::Server {
+                    endpoint: "http://h:1".into(),
+                    token: Some("t".into()),
+                    user: None,
+                    tls: ClientTls::default()
+                }
             }
         );
         let p = parse_words("token create d ann ci --expires 60").expect("parse");
@@ -566,6 +592,17 @@ mod tests {
         }
         let p = parse_words("shell http://h:1 --user ann").expect("parse");
         assert_eq!(p.user.as_deref(), Some("ann"));
+        let p = parse_words("shell https://h:1 --tls-ca ca.pem --tls-cert c.pem --tls-key k.pem").expect("parse");
+        let tls = ClientTls { ca: Some("ca.pem".into()), cert: Some("c.pem".into()), key: Some("k.pem".into()) };
+        assert_eq!(p.tls, tls);
+        let p = parse_words("user list --server https://h:1 --tls-ca ca.pem").expect("parse");
+        assert_matches!(
+            p.command,
+            Command::Accounts { target: Target::Server { tls: ClientTls { ca: Some(_), .. }, .. }, .. }
+        );
+        for bad in ["status d --tls-ca ca.pem", "user list d --tls-cert c.pem", "shell https://h:1 --tls-key"] {
+            assert!(parse_words(bad).is_err(), "{}", bad);
+        }
         assert_eq!(parse_words("status d --version").expect("parse").command, Command::Version);
     }
 }

@@ -12,7 +12,8 @@ makes them fail.
 
 The servers run with authentication on (step 15a): the first start makes
 the admin `ADMIN` from `IWDB_AUTH_BOOTSTRAP_PASSWORD`, and the clients log
-in as it (`Server.connect`).
+in as it (`Server.connect`). And over TLS (step 15b), with the test-only
+certificates of `tests/fixtures/tls`: the clients trust its CA (`CA`).
 """
 
 import json
@@ -30,6 +31,9 @@ import iwdb
 REPO = Path(__file__).resolve().parents[3]
 # The servers' first admin: user, password
 ADMIN = ("admin", "admin-password-for-tests")
+# The test certificates (test-only, public keys)
+TLS = REPO / "tests" / "fixtures" / "tls"
+CA = TLS / "ca.pem"
 
 
 def pytest_configure(config):
@@ -59,10 +63,11 @@ def serving_address(line):
 
 class Server:
     """An iwdb-server on a free port, serving `data_dir`, with
-    authentication on and the admin `ADMIN`; `auth` adds lines to the
-    config's `[auth]` section."""
+    authentication on and the admin `ADMIN`, over TLS with the test
+    certificate; `auth` and `tls` add lines to the config's `[auth]` and
+    `[tls]` sections."""
 
-    def __init__(self, data_dir, config_dir, auth=""):
+    def __init__(self, data_dir, config_dir, auth="", tls=""):
         binary = server_binary()
         if binary is None:
             message = "no iwdb-server binary (cargo build -p iwdb-server, or set IWDB_SERVER)"
@@ -70,9 +75,11 @@ class Server:
                 pytest.fail(message)
             pytest.skip(message)
         config = Path(config_dir) / "iwdb.toml"
+        quoted = lambda p: '"{}"'.format(str(p).replace("\\", "\\\\"))  # noqa: E731
         config.write_text(
-            'data_dir = "{}"\nlisten = "127.0.0.1:0"\n\n[store]\nfsync = "off"\n\n[auth]\n{}\n'.format(
-                str(data_dir).replace("\\", "\\\\"), auth
+            "data_dir = {}\nlisten = \"127.0.0.1:0\"\n\n[store]\nfsync = \"off\"\n\n[auth]\n{}\n\n"
+            "[tls]\ncert = {}\nkey = {}\n{}\n".format(
+                quoted(data_dir), auth, quoted(TLS / "server.pem"), quoted(TLS / "server.key"), tls
             )
         )
         self.stderr = []
@@ -86,7 +93,7 @@ class Server:
             self.stderr.append(line)
             address = serving_address(line)
             if address:
-                self.endpoint = "http://" + address
+                self.endpoint = "https://" + address
                 break
         else:
             self.process.wait()
@@ -98,7 +105,12 @@ class Server:
         """A client, logged in as the admin unless given credentials."""
         if not credentials:
             credentials = {"user": ADMIN[0], "password": ADMIN[1]}
-        return iwdb.connect(self.endpoint, **credentials)
+        return self.client(**credentials)
+
+    def client(self, **options):
+        """A client that trusts the test CA, with `options` (credentials,
+        a client certificate) as given."""
+        return iwdb.connect(self.endpoint, **dict({"ca": CA}, **options))
 
     def _drain(self):
         for line in self.process.stderr:

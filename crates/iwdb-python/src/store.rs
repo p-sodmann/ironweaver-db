@@ -16,7 +16,7 @@ use iwdb::{
 };
 use iwdb_query::exec::block_on;
 use iwdb_query::{ChangesRequest, Database, LimitConfig, QueryOptions, Secret};
-use iwdb_server::client::Remote;
+use iwdb_server::client::{ClientTls, Remote};
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
@@ -220,27 +220,38 @@ impl PyStore {
         })
     }
 
-    /// A client of the server at `endpoint` (`http://host:port`): a store
-    /// with the same API, minus the calls that need the store's directory
-    /// (ADR 0035). It connects on the first call, and again after a lost
-    /// connection.
+    /// A client of the server at `endpoint` (`https://host:port`, or
+    /// `http://host:port` without TLS): a store with the same API, minus
+    /// the calls that need the store's directory (ADR 0035). It connects on
+    /// the first call, and again after a lost connection.
+    ///
+    /// TLS (step 15b): `ca` (a PEM file) is what the server's certificate
+    /// is verified against (default: the system's trust store); `cert` and
+    /// `key` (PEM files) are a client certificate, which authenticates as
+    /// the user it names when the server verifies client certificates.
     ///
     /// Credentials (step 15a): a `token` (a session's or an API token), or a
     /// `user` and `password`, which log in now and keep the session's token.
     /// Errors: `UnauthenticatedError` for a wrong user or password;
-    /// `InvalidError` for both kinds of credentials, or a user without a
-    /// password.
+    /// `InvalidError` for both kinds of credentials, a user without a
+    /// password, TLS files that can't be read or used, or TLS files with an
+    /// `http://` endpoint.
     #[staticmethod]
-    #[pyo3(signature = (endpoint, token = None, user = None, password = None))]
+    #[pyo3(signature = (endpoint, token = None, user = None, password = None, ca = None, cert = None, key = None))]
+    #[allow(clippy::too_many_arguments)]
     fn connect(
         py: Python<'_>,
         endpoint: &str,
         token: Option<String>,
         user: Option<String>,
         password: Option<String>,
+        ca: Option<PathBuf>,
+        cert: Option<PathBuf>,
+        key: Option<PathBuf>,
     ) -> PyResult<Self> {
         guard(|| {
-            let remote = py.detach(|| Remote::connect(endpoint)).map_err(query_to_py)?;
+            let tls = ClientTls { ca, cert, key };
+            let remote = py.detach(|| Remote::connect_tls(endpoint, &tls)).map_err(query_to_py)?;
             match (token, user, password) {
                 (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
                     return Err(invalid("give a token, or a user and a password, not both"));

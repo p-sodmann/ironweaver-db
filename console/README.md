@@ -11,28 +11,31 @@ It runs on a real server, served by `iwdb-server` itself or through `serve.py`, 
 
 A server built with the `console` feature serves the pages at `/console/` when `[console] enabled = true` (`IWDB_CONSOLE_ENABLED=true`), on its own port, with the REST API on the same origin ([ADR 0041](../documentation/adr/0041-console-served-by-the-server.md)). The pages are compiled into the binary.
 
-**Logging in** (step 15a, [ADR 0046](../documentation/adr/0046-the-console-session.md)). With the server's authentication on (the default), the pages open with a login: a server account (`iwctl user create`, or the first admin from `IWDB_AUTH_BOOTSTRAP_PASSWORD`). The session is an HttpOnly, SameSite=Strict cookie the server sets: no script can read it, and the pages send `X-Iwdb-Csrf` with every request. When it ends (expiry, logout, a password change, a restart), the next call shows the login over the page, and nothing staged is lost. The rail shows the user and LOG OUT. The roles are the user's: a `read` user can browse but not commit. There is no TLS until step 15b, so off localhost the password crosses the network in clear (the login says so).
+**Logging in** (step 15a, [ADR 0046](../documentation/adr/0046-the-console-session.md)). With the server's authentication on (the default), the pages open with a login: a server account (`iwctl user create`, or the first admin from `IWDB_AUTH_BOOTSTRAP_PASSWORD`). The session is an HttpOnly, SameSite=Strict cookie the server sets: no script can read it, and the pages send `X-Iwdb-Csrf` with every request. When it ends (expiry, logout, a password change, a restart), the next call shows the login over the page, and nothing staged is lost. The rail shows the user and LOG OUT. The roles are the user's: a `read` user can browse but not commit.
+
+**HTTPS** (step 15b, [ADR 0048](../documentation/adr/0048-tls-and-mtls.md)). The server speaks TLS, so the console is at `https://`, and the session cookie is `Secure` there. `compose.yaml` uses the development certificate of `docker/dev-cert.sh`: trust `docker/tls/ca.pem` in the browser (or accept its warning once). A server whose TLS was turned off serves the console over plain HTTP; off localhost the login then says that the password crosses the network in clear.
 
 ```sh
+sh docker/dev-cert.sh                                 # once: docker/tls/ca.pem and the server's certificate
 IWDB_ADMIN_PASSWORD=... docker compose up --build    # iwdb-server on 127.0.0.1:7600, console on, user admin
-IWDB_USER=admin IWDB_PASSWORD=... node console/tools/seed.mjs   # optional: the sample namespaces
-open http://127.0.0.1:7600/console/
+IWDB_USER=admin IWDB_PASSWORD=... NODE_EXTRA_CA_CERTS=docker/tls/ca.pem node console/tools/seed.mjs   # optional: the sample namespaces
+open https://127.0.0.1:7600/console/
 ```
 
-Or without Docker: `cargo run -p iwdb-server --features console` with `IWDB_DATA_DIR=data IWDB_CONSOLE_ENABLED=true IWDB_AUTH_BOOTSTRAP_PASSWORD=...`.
+Or without Docker: `cargo run -p iwdb-server --features console` with `IWDB_DATA_DIR=data IWDB_CONSOLE_ENABLED=true IWDB_TLS_CERT=docker/tls/server.pem IWDB_TLS_KEY=docker/tls/server.key IWDB_AUTH_BOOTSTRAP_PASSWORD=...`.
 
 ## Through the Flask proxy (development)
 
 `serve.py` serves the pages from disk, so editing them needs no rebuild. It is a small Flask app: it serves the pages and passes `/v1/...` through to the server, so the pages and the API share one origin. (The server answers no CORS preflight on purpose, so a page on another origin can't call it; the proxy keeps that guard.)
 
 ```sh
-IWDB_ADMIN_PASSWORD=... docker compose up --build   # iwdb-server on 127.0.0.1:7600
-IWDB_USER=admin IWDB_PASSWORD=... node console/tools/seed.mjs   # optional: the sample namespaces (social, inventory, orders, archive_2025)
+IWDB_ADMIN_PASSWORD=... docker compose up --build   # iwdb-server on https://127.0.0.1:7600
+IWDB_USER=admin IWDB_PASSWORD=... NODE_EXTRA_CA_CERTS=docker/tls/ca.pem node console/tools/seed.mjs   # optional: the sample namespaces (social, inventory, orders, archive_2025)
 uv run --with flask console/serve.py           # or: pip install flask && python console/serve.py
 open http://127.0.0.1:8000/
 ```
 
-`IWDB_URL` (or `--upstream`) points it at another server, `--port` changes its port. It passes the `Authorization` and `Cookie` headers and the console's `X-Iwdb-Csrf` through, and the server's `Set-Cookie` back, so the login works as on `/console/`. `seed.mjs` skips namespaces that exist; `--replace` drops them first.
+`IWDB_URL` (or `--upstream`) points it at another server (default `https://127.0.0.1:7600`), `--port` changes its port. It verifies the server against `--ca` (`IWDB_CA`; by default `docker/tls/ca.pem` when it exists, else the system's trust store). It passes the `Authorization` and `Cookie` headers and the console's `X-Iwdb-Csrf` through, and the server's `Set-Cookie` back (without `Secure`: the proxy's page is plain HTTP on localhost, and the cookie travels to the server over TLS from the proxy), so the login works as on `/console/`. `seed.mjs` skips namespaces that exist; `--replace` drops them first.
 
 On a server, the explorer works fully: reads, edits and commits, index creation. The status page shows every namespace's state. It shows the server's readiness (step 16b). Until step 16c adds the server's status views and metrics, it says so in place of the metrics, active requests, consumers and the log (it shows its own requests instead). The schema navigator's counts come from the first 2 000 nodes of a namespace, and a `find` doesn't know its total, so the pager counts pages as it goes.
 

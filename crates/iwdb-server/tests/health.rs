@@ -154,7 +154,7 @@ fn not_ready_until_recovery_has_finished() {
         assert_eq!(status, 503);
         assert!(body.contains(r#""code":"unavailable""#), "{}", body);
     }
-    assert!(iwdb_server::health::probe(&addr.to_string(), Duration::from_secs(2)).is_err());
+    assert!(iwdb_server::health::probe(&addr.to_string(), false, Duration::from_secs(2)).is_err());
 
     // Recovery finishes: ready, and every committed record is there at the
     // first ready answer
@@ -168,7 +168,7 @@ fn not_ready_until_recovery_has_finished() {
     assert_eq!((status.nodes, status.seq), (NODES, NODES as u64));
     assert_eq!(get(addr, "/v1/health/ready"), (200, r#"{"state":"HEALTH_STATE_READY","ready":true}"#.into()));
     assert_eq!(server.runtime.block_on(grpc_health(addr, "")), ServingStatus::Serving);
-    iwdb_server::health::probe(&addr.to_string(), Duration::from_secs(2)).unwrap();
+    iwdb_server::health::probe(&addr.to_string(), false, Duration::from_secs(2)).unwrap();
     // An unknown service is the protocol's NOT_FOUND
     let unknown = server.runtime.block_on(async {
         let channel = tonic::transport::Endpoint::from_shared(format!("http://{}", addr)).unwrap().connect().await;

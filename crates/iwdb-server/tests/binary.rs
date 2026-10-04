@@ -3,8 +3,9 @@
 //! the next open replays nothing), refuses a bad command line or
 //! configuration with every problem, logs JSON lines, and becomes ready
 //! only once recovery has finished. Authentication is on (the default): the
-//! tests bootstrap an admin and log in; one checks that no secret reaches
-//! the logs.
+//! tests bootstrap an admin and log in; one checks that no secret (nor a
+//! private key) reaches the logs. TLS is on (the default, step 15b) with
+//! the test certificate of `tests/fixtures/tls`; SIGHUP reloads it.
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -17,22 +18,40 @@ use std::time::Duration;
 use iwdb::{Mutation, Store};
 use iwdb_query::exec::block_on;
 use iwdb_query::{Accounts, Code, CommitOptions, Database, Secret};
-use iwdb_server::client::Remote;
+use iwdb_server::client::{ClientTls, Remote};
 
 const BIN: &str = env!("CARGO_BIN_EXE_iwdb-server");
+
+/// A test certificate or key (test-only, public).
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tls").join(name)
+}
+
+/// The server's certificate and key: the test ones.
+fn tls(command: &mut Command) -> &mut Command {
+    command.env("IWDB_TLS_CERT", fixture("server.pem")).env("IWDB_TLS_KEY", fixture("server.key"))
+}
+
+/// A client of the server at `address` over TLS, trusting the test CA.
+fn client(address: &str) -> Remote {
+    let tls = ClientTls { ca: Some(fixture("ca.pem")), ..ClientTls::default() };
+    Remote::connect_tls(&format!("https://{}", address), &tls).unwrap()
+}
 /// The bootstrap admin's password of these tests.
 const ADMIN_PASSWORD: &str = "admin-password-for-tests";
 
-/// The command with the first admin from the bootstrap variable.
+/// The command with the first admin from the bootstrap variable, over
+/// TLS.
 fn bin() -> Command {
     let mut command = Command::new(BIN);
     command.env("IWDB_AUTH_BOOTSTRAP_PASSWORD", ADMIN_PASSWORD);
+    tls(&mut command);
     command
 }
 
 /// A client of `address`, logged in as the bootstrap admin.
 fn admin(address: &str) -> Remote {
-    let remote = Remote::connect(&format!("http://{}", address)).unwrap();
+    let remote = client(address);
     block_on(remote.login("admin", Secret::new(ADMIN_PASSWORD))).unwrap();
     remote
 }
@@ -98,15 +117,24 @@ fn serves_its_data_directory_and_shuts_down_on_sigterm() {
     assert!(event(&seen[0])["message"].as_str().unwrap().starts_with("listening"), "{:?}", seen);
     assert!(seen.iter().any(|l| event(l)["message"] == "recovery finished"), "{:?}", seen);
 
-    let anonymous = Remote::connect(&format!("http://{}", address)).unwrap();
+    let anonymous = client(&address);
     let e = block_on(anonymous.commit("default", vec![node("a")], CommitOptions::default())).unwrap_err();
     assert_eq!(e.code(), Code::Unauthenticated);
     let remote = admin(&address);
     let seq = block_on(remote.commit("default", vec![node("a")], CommitOptions::default())).unwrap().seq;
     assert_eq!(seq, 1);
-    iwdb_server::health::probe(&address, Duration::from_secs(5)).unwrap();
-    let probe = Command::new(BIN).arg("--probe").arg(&address).output().unwrap();
+    iwdb_server::health::probe(&address, true, Duration::from_secs(5)).unwrap();
+    let probe = Command::new(BIN).arg("--probe").arg(format!("https://{}", address)).output().unwrap();
     assert!(probe.status.success(), "{:?}", probe);
+    // The configuration's server: TLS as configured
+    let probe = tls(Command::new(BIN).arg("--probe").env("IWDB_DATA_DIR", "unused").env("IWDB_LISTEN", &address))
+        .output()
+        .unwrap();
+    assert!(probe.status.success(), "{:?}", probe);
+    let plain = Command::new(BIN).arg("--probe").arg(format!("http://{}", address)).output().unwrap();
+    assert_eq!(plain.status.code(), Some(1), "{:?}", plain);
+    let bare = Command::new(BIN).arg("--probe").arg(&address).output().unwrap();
+    assert_eq!(bare.status.code(), Some(2), "{:?}", bare);
 
     let killed = Command::new("kill").arg("-TERM").arg(child.id().to_string()).status().unwrap();
     assert!(killed.success());
@@ -306,11 +334,7 @@ fn check_config_prints_the_effective_settings() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("server.toml");
     std::fs::write(&config, "data_dir = \"/var/lib/iwdb\"\n[store]\nretain_records = 7\n").unwrap();
-    let out = Command::new(BIN)
-        .arg("--check-config")
-        .arg("--config")
-        .arg(&config)
-        .env("IWDB_STORE_FSYNC", "off")
+    let out = tls(Command::new(BIN).arg("--check-config").arg("--config").arg(&config).env("IWDB_STORE_FSYNC", "off"))
         .output()
         .unwrap();
     assert!(out.status.success(), "{:?}", out);
@@ -319,6 +343,7 @@ fn check_config_prints_the_effective_settings() {
     assert!(line("fsync").contains("\"off\"") && line("fsync").ends_with("# IWDB_STORE_FSYNC"), "{}", text);
     assert!(line("retain_records").ends_with("# file"), "{}", text);
     assert!(line("listen").ends_with("# default"), "{}", text);
+    assert!(line("cert").contains("server.pem") && line("cert").ends_with("# IWDB_TLS_CERT"), "{}", text);
     let back = iwdb_server::config::Config::parse(&text).unwrap();
     assert_eq!(back.store.fsync, iwdb_server::config::Fsync::Off);
     assert_eq!(back.store.retain_records, 7);
@@ -355,7 +380,7 @@ fn ready_only_after_a_large_recovery() {
     let address = listening["address"].as_str().unwrap().to_owned();
     let mut not_ready = 0;
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
-    while iwdb_server::health::probe(&address, Duration::from_secs(5)).is_err() {
+    while iwdb_server::health::probe(&address, true, Duration::from_secs(5)).is_err() {
         not_ready += 1;
         assert!(std::time::Instant::now() < deadline, "never ready");
     }
@@ -380,7 +405,7 @@ fn ready_only_after_a_large_recovery() {
 fn a_store_without_users_refuses_to_start() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
-    let out = Command::new(BIN).env("IWDB_DATA_DIR", &data).env("IWDB_LISTEN", "127.0.0.1:0").output().unwrap();
+    let out = tls(Command::new(BIN).env("IWDB_DATA_DIR", &data).env("IWDB_LISTEN", "127.0.0.1:0")).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let text = String::from_utf8_lossy(&out.stderr);
     assert!(text.contains("has no users") && text.contains("iwctl user create"), "{}", text);
@@ -399,19 +424,21 @@ fn a_store_without_users_refuses_to_start() {
         "{:?}",
         seen
     );
-    let remote = Remote::connect(&format!("http://{}", address)).unwrap();
+    let remote = client(&address);
     assert_eq!(block_on(remote.login("admin", Secret::new(ADMIN_PASSWORD))).unwrap_err().code(), Code::Unauthenticated);
     block_on(remote.login("root", Secret::new("root-password"))).unwrap();
     sigterm(&child);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
-    // Off, no users are needed
+    // Off, no users are needed (and in plaintext on loopback, which needs
+    // one flag)
     let empty = dir.path().join("empty");
     let (mut child, lines, reader) = spawn(
         Command::new(BIN)
             .env("IWDB_DATA_DIR", &empty)
             .env("IWDB_LISTEN", "127.0.0.1:0")
             .env("IWDB_AUTH_ENABLED", "false")
+            .env("IWDB_TLS_ENABLED", "false")
             .env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "5"),
     );
     let address = ready_address(&lines, &mut Vec::new());
@@ -422,17 +449,40 @@ fn a_store_without_users_refuses_to_start() {
     reader.join().unwrap();
 }
 
-/// No password or token reaches the logs (step 15a): the server logs at
-/// `debug` through logins, failed logins, a token, a password change and a
-/// failed password change, and no line holds any of the secrets.
+/// Send SIGHUP to the server, and wait for its log line that contains
+/// `expected`.
+fn hangup(child: &std::process::Child, lines: &mpsc::Receiver<String>, seen: &mut Vec<String>, expected: &str) {
+    let sent = Command::new("kill").arg("-HUP").arg(child.id().to_string()).status().unwrap();
+    assert!(sent.success());
+    loop {
+        let line =
+            lines.recv_timeout(Duration::from_secs(30)).unwrap_or_else(|_| panic!("no {:?}: {:?}", expected, seen));
+        let found = line.contains(expected);
+        seen.push(line);
+        if found {
+            return;
+        }
+    }
+}
+
+/// No password, token or private key reaches the logs (steps 15a and
+/// 15b): the server logs at `debug` through logins, failed logins, a token,
+/// a password change, a failed password change, and reloads of a key that
+/// fail (another certificate's key, a cut-off one), and no line holds any
+/// of the secrets.
 #[test]
 fn no_secret_reaches_the_logs() {
     let dir = tempfile::tempdir().unwrap();
+    let (cert, key) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+    std::fs::copy(fixture("server.pem"), &cert).unwrap();
+    std::fs::copy(fixture("server.key"), &key).unwrap();
     let (mut child, lines, reader) = spawn(
         bin()
             .env("IWDB_DATA_DIR", dir.path().join("data"))
             .env("IWDB_LISTEN", "127.0.0.1:0")
             .env("IWDB_LOG_LEVEL", "debug")
+            .env("IWDB_TLS_CERT", &cert)
+            .env("IWDB_TLS_KEY", &key)
             .env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "5"),
     );
     let mut seen = Vec::new();
@@ -443,7 +493,7 @@ fn no_secret_reaches_the_logs() {
     secrets.push("ann-secret-password".into());
     let token = block_on(remote.create_token("ann", "ci", None)).unwrap();
     secrets.push(token.token.expose().to_owned());
-    let ann = Remote::connect(&format!("http://{}", address)).unwrap();
+    let ann = client(&address);
     for wrong in ["wrong-password-one", "wrong-password-two"] {
         assert_eq!(block_on(ann.login("ann", Secret::new(wrong))).unwrap_err().code(), Code::Unauthenticated);
         secrets.push(wrong.into());
@@ -457,23 +507,136 @@ fn no_secret_reaches_the_logs() {
     block_on(ann.set_password("ann", Secret::new("new-ann-password"), Some(Secret::new("ann-secret-password"))))
         .unwrap();
     // A garbage bearer token and the right one, over REST too
-    let bad = Remote::connect(&format!("http://{}", address)).unwrap().with_token(Secret::new("iwdb_not-a-real-token"));
+    let bad = client(&address).with_token(Secret::new("iwdb_not-a-real-token"));
     assert_eq!(block_on(bad.namespaces()).unwrap_err().code(), Code::Unauthenticated);
     secrets.push("iwdb_not-a-real-token".into());
     #[cfg(feature = "rest")]
     {
-        let rest = iwdb_server::client::RestRemote::connect(&format!("http://{}", address)).unwrap();
+        let tls = ClientTls { ca: Some(fixture("ca.pem")), ..ClientTls::default() };
+        let rest = iwdb_server::client::RestRemote::connect_tls(&format!("https://{}", address), &tls).unwrap();
         assert!(block_on(rest.login("ann", Secret::new("wrong-password-rest"))).is_err());
         secrets.push("wrong-password-rest".into());
     }
+    // Private keys: reloads that fail, then one that works
+    let (own, other) =
+        (std::fs::read_to_string(&key).unwrap(), std::fs::read_to_string(fixture("client-ann.key")).unwrap());
+    std::fs::write(&key, &other).unwrap();
+    hangup(&child, &lines, &mut seen, "reloading TLS failed");
+    std::fs::write(&key, &own[..own.len() / 2]).unwrap();
+    hangup(&child, &lines, &mut seen, "reloading TLS failed");
+    std::fs::write(&key, &own).unwrap();
+    hangup(&child, &lines, &mut seen, "reloaded the TLS certificate");
+    for pem in [&own, &other] {
+        // The base64 lines of the keys (long enough not to match by chance)
+        secrets.extend(pem.lines().filter(|l| !l.starts_with("-----") && l.len() >= 16).map(str::to_owned));
+    }
+    // A failed TLS handshake (a client of another CA) is logged at debug
+    let other_ca = ClientTls { ca: Some(fixture("other-ca.pem")), ..ClientTls::default() };
+    let stranger = Remote::connect_tls(&format!("https://{}", address), &other_ca).unwrap();
+    assert_eq!(block_on(stranger.namespaces()).unwrap_err().code(), Code::Unavailable);
     sigterm(&child);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
     seen.extend(lines.try_iter());
     assert!(seen.iter().any(|l| l.contains("failed login") && l.contains("ann")), "failed logins are logged");
+    assert!(seen.iter().any(|l| l.contains("TLS handshake failed")), "failed handshakes are logged");
     for line in &seen {
         for secret in &secrets {
             assert!(!line.contains(secret.as_str()), "a secret in the log: {}", line);
         }
     }
+}
+
+/// The certificate a TLS server at `address` presents.
+fn presented(address: &str) -> Vec<u8> {
+    let tls = ClientTls { ca: Some(fixture("ca.pem")), ..ClientTls::default() };
+    let config = std::sync::Arc::new(tls.rustls_config(&[b"h2"]).unwrap());
+    let name = rustls_pki_types::ServerName::try_from("localhost").unwrap();
+    let mut connection = rustls::ClientConnection::new(config, name).unwrap();
+    let mut tcp = std::net::TcpStream::connect(address).unwrap();
+    while connection.is_handshaking() {
+        connection.complete_io(&mut tcp).unwrap();
+    }
+    connection.peer_certificates().unwrap()[0].to_vec()
+}
+
+fn der(name: &str) -> Vec<u8> {
+    use rustls_pki_types::pem::PemObject;
+    rustls_pki_types::CertificateDer::from_pem_file(fixture(name)).unwrap().to_vec()
+}
+
+/// SIGHUP reloads the certificate (ADR 0048): new connections get the new
+/// one, a reload that fails keeps it, and the server goes on serving.
+#[test]
+fn sighup_reloads_the_certificate() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cert, key) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+    std::fs::copy(fixture("server.pem"), &cert).unwrap();
+    std::fs::copy(fixture("server.key"), &key).unwrap();
+    let (mut child, lines, reader) = spawn(
+        bin()
+            .env("IWDB_DATA_DIR", dir.path().join("data"))
+            .env("IWDB_LISTEN", "127.0.0.1:0")
+            .env("IWDB_TLS_CERT", &cert)
+            .env("IWDB_TLS_KEY", &key)
+            .env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "5"),
+    );
+    let mut seen = Vec::new();
+    let address = ready_address(&lines, &mut seen);
+    assert!(seen.iter().any(|l| event(l)["scheme"] == "TLS"), "{:?}", seen);
+    assert_eq!(presented(&address), der("server.pem"));
+    let remote = admin(&address);
+    std::fs::copy(fixture("server-renewed.pem"), &cert).unwrap();
+    std::fs::copy(fixture("server-renewed.key"), &key).unwrap();
+    hangup(&child, &lines, &mut seen, "reloaded the TLS certificate");
+    assert_eq!(presented(&address), der("server-renewed.pem"));
+    std::fs::write(&cert, "garbage").unwrap();
+    hangup(&child, &lines, &mut seen, "reloading TLS failed");
+    assert_eq!(presented(&address), der("server-renewed.pem"));
+    block_on(remote.commit("default", vec![node("after")], CommitOptions::default())).unwrap();
+    admin(&address);
+    sigterm(&child);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+}
+
+/// TLS is the default: without a certificate the server doesn't start;
+/// plaintext needs `[tls] enabled = false`, and on a non-loopback address
+/// also `[server] plaintext_public` (ADR 0048). A certificate that can't
+/// be used stops it before the store opens.
+#[test]
+fn plaintext_needs_explicit_flags_and_tls_needs_a_certificate() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let run = |vars: &[(&str, &str)]| {
+        let mut command = Command::new(BIN);
+        command.env("IWDB_DATA_DIR", &data).env("IWDB_AUTH_BOOTSTRAP_PASSWORD", ADMIN_PASSWORD);
+        for (k, v) in vars {
+            command.env(k, v);
+        }
+        let out = command.output().unwrap();
+        (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let (code, text) = run(&[("IWDB_LISTEN", "127.0.0.1:0")]);
+    assert_eq!(code, Some(2), "{}", text);
+    assert!(text.contains("[tls] cert and [tls] key are not set, and TLS is on"), "{}", text);
+    for public in ["0.0.0.0:0", "[::]:0"] {
+        let (code, text) = run(&[("IWDB_LISTEN", public), ("IWDB_TLS_ENABLED", "false")]);
+        assert_eq!(code, Some(2), "{}", text);
+        assert!(text.contains("not a loopback address, and TLS is off"), "{}", text);
+        assert!(text.contains("IWDB_SERVER_PLAINTEXT_PUBLIC"), "{}", text);
+        // The second flag alone isn't enough
+        let (code, text) = run(&[("IWDB_LISTEN", public), ("IWDB_SERVER_PLAINTEXT_PUBLIC", "true")]);
+        assert_eq!(code, Some(2), "{}", text);
+        assert!(text.contains("TLS is on"), "{}", text);
+    }
+    let missing = dir.path().join("missing.pem");
+    let (code, text) = run(&[
+        ("IWDB_LISTEN", "127.0.0.1:0"),
+        ("IWDB_TLS_CERT", missing.to_str().unwrap()),
+        ("IWDB_TLS_KEY", fixture("server.key").to_str().unwrap()),
+    ]);
+    assert_eq!(code, Some(2), "{}", text);
+    assert!(text.contains("can't read the TLS certificate") && text.contains("missing.pem"), "{}", text);
+    assert!(!data.exists(), "the store was opened");
 }

@@ -1,8 +1,11 @@
 // Loads the console's sample data (the mock's namespaces) into a running iwdb-server over REST (step 16a), so the
 // console has something to explore there:
 //
-//   IWDB_USER=admin IWDB_PASSWORD=... node console/tools/seed.mjs     # http://127.0.0.1:7600
-//   IWDB_TOKEN=iwdb_... node console/tools/seed.mjs http://host:7600 --replace
+//   IWDB_USER=admin IWDB_PASSWORD=... NODE_EXTRA_CA_CERTS=docker/tls/ca.pem node console/tools/seed.mjs
+//                                                           # https://127.0.0.1:7600, compose's dev certificate
+//   IWDB_TOKEN=iwdb_... node console/tools/seed.mjs https://host:7600 --replace
+//
+// The server speaks TLS (step 15b): Node trusts the CAs of NODE_EXTRA_CA_CERTS besides its own.
 //
 // With authentication on (the server's default, step 15a) it needs a token (IWDB_TOKEN) or a user and password
 // (IWDB_USER, IWDB_PASSWORD; it logs in), as a server-wide admin: it creates namespaces.
@@ -15,7 +18,7 @@ const require = createRequire(import.meta.url);
 const mock = require('../src/mock.js');
 
 const args = process.argv.slice(2);
-const base = (args.find((a) => !a.startsWith('--')) || process.env.IWDB_URL || 'http://127.0.0.1:7600').replace(/\/$/, '');
+const base = (args.find((a) => !a.startsWith('--')) || process.env.IWDB_URL || 'https://127.0.0.1:7600').replace(/\/$/, '');
 const replace = args.includes('--replace');
 const BATCH = 500;
 

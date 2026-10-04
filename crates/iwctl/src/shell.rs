@@ -107,8 +107,15 @@ struct Shell {
 
 /// Run the shell on stdin until `\quit` or the end of input. Exit code 0
 /// if every command succeeded, 4 if one failed, 2 for an invalid endpoint.
-pub fn run(endpoint: &str, namespace: &str, json: bool, token: Option<&str>, user: Option<&str>) -> u8 {
-    let db = match crate::users::connect(endpoint, token, user) {
+pub fn run(
+    endpoint: &str,
+    namespace: &str,
+    json: bool,
+    tls: &iwdb_server::client::ClientTls,
+    token: Option<&str>,
+    user: Option<&str>,
+) -> u8 {
+    let db = match crate::users::connect(endpoint, tls, token, user) {
         Ok(db) => db,
         Err(e) if e.code() == iwdb_query::Code::InvalidArgument => {
             eprintln!("iwctl: {}", e.message());
