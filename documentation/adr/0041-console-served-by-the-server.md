@@ -20,3 +20,7 @@ The operator console (step 16a, ADR 0037) reaches a server through a Flask proxy
 - One process and one port for the API and the console; no Python needed to use it.
 - The pages are part of the binary: changing them needs a rebuild of a server with the feature.
 - Step 15 puts the console behind authentication (the console's requests carry the same credentials as any REST client) and can drop the `public` switch.
+
+## Update (step 15a)
+
+The console is behind the server's authentication now ([ADR 0046](0046-the-console-session.md)): its pages stay open (they hold no data), every read and write needs a session, held in an HttpOnly, SameSite=Strict cookie, with a CSRF header on writes. `[console] public` is gone: what remains to opt into is the lack of TLS, for the whole server, `[server] plaintext_public` ([ADR 0047](0047-auth-bootstrap-and-configuration.md)); `[console] public` and `IWDB_CONSOLE_PUBLIC` are refused with a message that names it. `compose.yaml` sets `IWDB_SERVER_PLAINTEXT_PUBLIC` and the first admin's password instead of `IWDB_CONSOLE_PUBLIC`.
