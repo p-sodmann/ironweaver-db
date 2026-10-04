@@ -134,6 +134,8 @@ Each is its own commit, and returns the same result dict (with empty `edge_ids` 
 |---|---|
 | `sync() -> None` | fsync every commit so far (whatever the policy) |
 | `checkpoint() -> dict` | `{"seq", "written", "removed_checkpoints", "removed_segments"}` (of `"default"`; `namespace.checkpoint()` for another; `store.checkpoint_all()` returns `{name: {...}}` for every namespace) |
+| `import_namespace(name, path, *, format=None) -> dict` | create the namespace `name` from a graph file (core JSON or binary, or LGF; `format` `"json"`, `"binary"` or `"lgf"`, detected by default), as one checkpoint at seq 1, all or nothing: `{"id", "name", "time", "format", "seq", "nodes", "edges", "indexes", "dropped", "bytes_read", "checkpoint_bytes"}` ([api/import-export.md](api/import-export.md)). Take a backup afterwards if you rely on backups |
+| `export(path, *, format=None) -> dict` | write `"default"`'s graph to `path` as a core file (JSON for `.json`, binary otherwise, or `format`), atomically: `{"format", "seq", "nodes", "edges", "bytes"}`; `namespace.export(...)` for another |
 | `backup(dest) -> dict` | an online backup of every namespace into a new or empty directory: `{"path", "history", "bytes", "namespaces": [{"id", "name", "seq", "time", "checkpoints", "segments"}, ...]}`, and `"seq"`, `"time"`, `"checkpoints"`, `"segments"` of `"default"` ([backup.md](formats/backup.md)) |
 
 ## Module functions

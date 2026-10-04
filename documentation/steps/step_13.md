@@ -1,6 +1,6 @@
 # Step 13: Change stream, projection mode and bulk import/export
 
-Status: in progress
+Status: done
 Milestone: M3 Network access
 Depends on: step 12
 
@@ -14,7 +14,7 @@ The step has three parts that build on each other, done in this order, each in i
 
 1. **Change stream** (refined below, [ADR 0031](../adr/0031-change-stream.md)).
 2. **Projection mode** (uses the commit pipeline and idempotent high-water marks). Refined below, [ADR 0032](../adr/0032-projection-mode.md).
-3. **Bulk import/export** (uses checkpoints). Refined when part 2 is done.
+3. **Bulk import/export** (uses checkpoints). Refined below, [ADR 0033](../adr/0033-bulk-import-export.md).
 
 ## Decisions (part 1)
 
@@ -73,17 +73,37 @@ Refined while writing the code:
 
 ### Part 3: bulk import/export
 
-- [ ] Bulk import/export: ironweaver JSON/binary files, LGF, CSV edge lists, GraphML; streaming with progress; import produces one consistent checkpoint instead of millions of WAL records. *(Since core `d15a7ec` (upstream #54), ironweaver 0.1 binary files can't be imported: the core refuses them with a message saying how to convert them. 0.1 JSON files still load and are migrated by the core.)* *(Parquet was dropped (decision of 2026-10-03): it would bring the `arrow`/`parquet` dependency tree for one import format.)*
+The original task, "bulk import/export: ironweaver JSON/binary files, LGF, CSV edge lists, GraphML; streaming with progress; import produces one consistent checkpoint instead of millions of WAL records", refined ([ADR 0033](../adr/0033-bulk-import-export.md)). Formats: import of the core's JSON and binary files and of LGF, nothing more (decision of 2026-10-04: CSV edge lists and GraphML were dropped to keep it small; Parquet was dropped on 2026-10-03, it would bring the `arrow`/`parquet` dependency tree for one format). Export writes the core's JSON and binary files. *(Since core `d15a7ec` (upstream #54), ironweaver 0.1 binary files can't be imported: the core refuses them with a message saying how to convert them. 0.1 JSON files still load and are migrated by the core.)*
+
+- [x] **Import creates a namespace** from one checkpoint at seq 1 (no WAL records): `Store::import_namespace(name, format, reader, progress)`, `import_file` (format detected from the first bytes). The namespace must not exist. All or nothing across crashes: the checkpoint is staged as `ns/import-*.tmp`, moved into the new namespace directory as `checkpoints/import.staged` (not a checkpoint, so a crash leaves a directory without data), the create event is the commit point, then it becomes checkpoint 1; recovery finishes a staged import whose event is logged. Part of layout 5 (unreleased), `verify` knows the staged file.
+- [x] **Core files** (`iwdb-engine`, plain files): nodes, edges with ids, labels, types, attributes, meta, the indexes as catalog indexes; versions 1; reserved keys refused; graph meta dropped and reported. Binary files stream.
+- [x] **LGF** (`iwdb::import::lgf`): `@nodes` (by `label`), `@arcs` / `@edges` (directed, in the order written), values typed by their look, LEMON escapes; `@attributes` dropped and reported; `@red_nodes` / `@blue_nodes` refused; errors name the line.
+- [x] Imported namespaces are checked like recovered ones (`invariants::check`) before anything is written; `InvalidImport` (`invalid_argument`).
+- [x] **Export**: `Ns::export(out, format, progress)` / `export_file` (atomic), a plain core file of the graph at its seq (versions, constraints, keys and marks not in it), under the namespace's read lock.
+- [x] Progress callbacks (phase, bytes) for both.
+- [x] Python `Store.import_namespace` and `Namespace.export`; `iwctl import` and `iwctl export`.
+- [x] Tests: the acceptance criterion below; every file operation of an import failing leaves the namespace fully there or fully gone (and the store opens and verifies); export and re-import give the same graph; files of the Ironweaver library (JSON v1 and v2, binary v2) import; LGF files (LEMON's examples, quoting, escapes, errors with lines); bad imports change nothing; the change stream of an imported namespace (`not_retained` at seq 1); backup and restore of an imported namespace.
+- [x] Docs: ADR 0033, `api/import-export.md`, data-dir.md (the staged import), guarantees.md (import atomicity, take a backup after an import), errors.md, iwctl usage, the design doc.
+
+Refined while writing the code:
+
+- **Reserved graph meta is refused, not dropped**: otherwise an empty database checkpoint (whose only `iwdb.*` keys are in its graph meta) imported as an empty namespace.
+- **Recovery finishes a staged import in `read_namespace`**, so the store's own import path and recovery share it; `RecoveryReport::finished_import` says when it did (also in the proto, Python and `iwctl`).
+- **Python**: `NamespaceExists` from the store's own calls is now `ConflictError`, as it already was through the `Database` trait.
+- **Fixtures**: the core's sample files (`tests/fixtures/import/`: version 1 JSON and binary, version 2 JSON, binary and half-float binary) are imported by the tests, so files of the Ironweaver library stay importable.
+- **Tests**: the crash test was checked to fail when recovery doesn't finish a staged import.
 
 ## Notes for parts 2 and 3
 
 - **Postgres tests run against [PGlite](https://pglite.dev)** (decision of 2026-10-03): Postgres compiled to WebAssembly, served over the wire protocol by `@electric-sql/pglite-socket`, so a developer machine and CI need only Node, no Postgres and no Docker. `scripts/pglite.sh` starts it and prints the URL to put in `IWDB_TEST_POSTGRES_URL`; without the variable the Postgres tests are skipped. PGlite is a single Postgres session: concurrent transactions (a lower id committed after a higher one) can't be produced there, so the gap handling is tested with explicit ids, which is the same situation as seen by the reader.
-- **Formats.** The core reads and writes only its own JSON and binary files. LGF, GraphML and CSV are ours to parse (in `iwdb`, not upstream: they are import formats, not the core's file format).
+- **Formats.** The core reads and writes only its own JSON and binary files. LGF is ours to parse (in `iwdb`, not upstream: it is an import format, not the core's file format).
 
 ## Acceptance criteria
 
 - [x] A consumer resumes the change stream after a restart without gaps or duplicates (`a_consumer_resumes_after_restarts_without_gaps_or_duplicates` and `an_os_crash_under_group_commit_takes_back_no_streamed_commit` in `crates/iwdb/tests/changes.rs`; the conformance cases over embedded, gRPC and REST).
 - [x] Projection mode survives crashes without applying an event twice (`a_projection_survives_crashes_without_applying_an_event_twice` and `an_os_crash_under_group_commit_loses_events_and_their_marks_together` in `crates/iwdb/tests/projection.rs`).
+
+- [x] An import creates its namespace from one checkpoint without WAL records, all or nothing across crashes, and an export imports back to the same graph (`an_import_creates_its_namespace_from_one_checkpoint_and_an_export_imports_back` and `every_file_operation_of_an_import_can_fail` in `crates/iwdb/tests/import.rs`).
 
 ## Non-goals
 

@@ -6,7 +6,7 @@ The engine's and the storage layer's errors are mapped to codes in one place (`c
 
 | Code | Meaning | Retry? | Python exception | gRPC | HTTP |
 |---|---|---|---|---|---|
-| `invalid_argument` | The request is invalid: a bad argument or name, a limit of 0, a filter or pattern the core rejects, an invalid transaction (reserved key, empty, value too deep, ambiguous edge, record too large), a seq of another history, a cursor that isn't one or belongs to another request | no, fix the request | `InvalidError` | `INVALID_ARGUMENT` | 400 |
+| `invalid_argument` | The request is invalid: a bad argument or name, a limit of 0, a filter or pattern the core rejects, an invalid transaction (reserved key, empty, value too deep, ambiguous edge, record too large), a seq of another history, a cursor that isn't one or belongs to another request, a file an import refuses (`InvalidImport`) | no, fix the request | `InvalidError` | `INVALID_ARGUMENT` | 400 |
 | `not_found` | A namespace doesn't exist (or was dropped); in a mutation, a node or edge; an index or constraint to drop; the start or end of a path | no | `NotFoundError` | `NOT_FOUND` | 404 |
 | `conflict` | A version conflict (`expected_version`), a namespace, index or constraint that exists already, an idempotency key reused for another request, a projection's mark moved by another writer. Nothing changed | after re-reading | `ConflictError` | `ABORTED` | 409 |
 | `constraint_violation` | A commit would violate a unique or required constraint. Nothing changed | no | `ConstraintError` | `FAILED_PRECONDITION` | 409 |

@@ -159,6 +159,16 @@ A projection ([api/projections.md](api/projections.md), [ADR 0032](adr/0032-proj
 - **One writer per mark**: a commit with a stale mark fails with `conflict` and changes nothing.
 - **Postgres holes**: positions are read as dense; a hole is waited for up to `gap_timeout`, then skipped. An event whose transaction commits later than that is missed: set the timeout above your longest writing transaction.
 
+## Import and export (step 13)
+
+An import ([api/import-export.md](api/import-export.md), [ADR 0033](adr/0033-bulk-import-export.md)) creates a namespace from a file as one checkpoint at seq 1, without WAL records:
+
+- **All or nothing across crashes**: the namespace is there with all the file's data, or not at all. The create event in the namespace log is the commit point; a checkpoint staged before it is finished by the next open (`every_file_operation_of_an_import_can_fail` in `crates/iwdb/tests/import.rs` fails every file operation in turn, reopens and verifies; checked to fail when recovery doesn't finish the staged import).
+- **Checked before anything is written**: the graph is checked like a recovered namespace; a file that is invalid, or breaks an invariant, creates nothing (`invalid_argument`).
+- **Not in the WAL**: the change stream of an imported namespace starts at seq 2 (seq 1 is `not_retained`), and the WAL archive doesn't hold the import. A restore from a backup taken before the import plus the archive can't rebuild the namespace (it fails with missing records once the archive holds later segments of it, and gives an empty namespace while it holds none). **Take a backup after an import**; a backup taken after it restores it (`an_imported_namespace_is_backed_up_and_restored_but_not_from_the_archive_alone`).
+- **Round trip**: an export imports back to the same graph; re-exported, to the same bytes (`an_import_creates_its_namespace_from_one_checkpoint_and_an_export_imports_back`). Versions restart at 1; constraints, idempotency keys and marks are not exported.
+- An export reads the namespace at one seq; commits to the namespace wait while it writes.
+
 ## Platforms (step 7)
 
 Linux and macOS. **Windows is not supported yet**: there the directory fsync is a no-op, so after an OS crash a rotation, a checkpoint, a backup or a restore can lose a directory entry, and none of this is tested on Windows. No Windows wheel is shipped (ADR 0013).
