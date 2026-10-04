@@ -16,3 +16,5 @@ build/
 # The image's toolchain builds; rust-toolchain.toml would make rustup
 # download the current stable inside the build
 rust-toolchain.toml
+# The operator console is static files, not served by the image yet (step 16)
+console/

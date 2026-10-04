@@ -25,6 +25,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [14b](step_14b.md) | Benchmarks | M3 | done |
 | [15](step_15.md) | Security | M4 | todo |
 | [16](step_16.md) | Operability | M4 | todo |
+| [16a](step_16a.md) | Operator console (on mock data) | M4 | done |
 | [17](step_17.md) | Release 1.0 | M4 | todo |
 | [18](step_18.md) | Replication and high availability | M5 | todo |
 
@@ -40,5 +41,5 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | M1 Embedded durable | 4–7 | done, except the PyPI publish of 0.1.0 (prepared; the owner publishes) |
 | M2 Service | 8–10 | done |
 | M3 Network access | 11–14b | done |
-| M4 Production 1.0 | 15–17 | todo |
+| M4 Production 1.0 | 15–17 | todo (16a done) |
 | M5 HA | 18 | todo |

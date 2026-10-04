@@ -89,6 +89,24 @@ jobs:
             exit 1
           fi
 
+  console:
+    # Step 16a (ADR 0037): the operator console's generated files
+    # (tokens.css, bundle.js) are what their sources build to, and the
+    # tests of its mock Source, query line and helpers pass
+    name: operator console
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+
   docker:
     # Step 13a: the image builds, with and without the default features,
     # serves, and shuts down cleanly on docker stop

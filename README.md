@@ -31,6 +31,7 @@ docker compose up --build
 - [Guarantees](documentation/guarantees.md): what is durable when, and what each failure does
 - [On-disk formats](documentation/formats/): the WAL, the data directory, backups and archives
 - [Python API](documentation/python-api.md), [iwctl](documentation/iwctl.md), [releasing](documentation/releasing.md)
+- [Operator console](console/README.md): explore a graph and see the server's status in a browser (on mock data for now)
 - [Architecture decision records](documentation/adr/)
 - [Implementation steps](documentation/steps/README.md): the ordered task list
 - [AGENTS.md](AGENTS.md): working rules for contributors and coding agents
