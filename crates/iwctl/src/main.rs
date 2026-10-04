@@ -135,6 +135,33 @@ fn run(parsed: &Parsed, out: &Out) -> Result<u8, Error> {
             out.namespace_result("dropped", &result);
             Ok(exit::OK)
         }
+        Command::Import { dir, name, file, format, merge } => {
+            let store = Store::open(dir, store_options(parsed))?;
+            let mut progress = Progress::new(parsed.json);
+            let mut show = |p| progress.show(p);
+            if *merge {
+                let report = store.namespace(name)?.import_file(file, *format, Some(&mut show))?;
+                progress.done();
+                store.close()?;
+                out.merge(name, &report);
+            } else {
+                let report = store.import_file(name, file, *format, Some(&mut show))?;
+                progress.done();
+                store.close()?;
+                out.import(&report);
+            }
+            Ok(exit::OK)
+        }
+        Command::Export { dir, file, format } => {
+            let store = Store::open(dir, store_options(parsed))?;
+            let mut progress = Progress::new(parsed.json);
+            let report =
+                store.namespace(one_namespace(parsed))?.export_file(file, *format, Some(&mut |p| progress.show(p)))?;
+            progress.done();
+            store.close()?;
+            out.export(file, &report);
+            Ok(exit::OK)
+        }
         Command::Indexes { dir } => {
             let store = Store::open(dir, store_options(parsed))?;
             let ns = store.namespace(one_namespace(parsed))?;
@@ -196,6 +223,38 @@ fn verify_after(parsed: &Parsed, out: &Out, dir: &std::path::Path) -> Result<u8,
 
 fn iwdb_engine_error(e: iwdb::CatalogError) -> Error {
     Error::Engine(e.into())
+}
+
+/// Progress of an import or export on stderr, at most once a second, if
+/// stderr is a terminal and the output isn't JSON.
+struct Progress {
+    on: bool,
+    last: Option<std::time::Instant>,
+}
+
+impl Progress {
+    fn new(json: bool) -> Self {
+        use std::io::IsTerminal;
+        Progress { on: !json && std::io::stderr().is_terminal(), last: None }
+    }
+
+    fn show(&mut self, p: iwdb::import::Progress) {
+        if !self.on || self.last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1)) {
+            return;
+        }
+        self.last = Some(std::time::Instant::now());
+        match p.phase {
+            iwdb::import::Phase::Reading => eprint!("\r{:.1} MiB read   ", p.bytes as f64 / (1 << 20) as f64),
+            iwdb::import::Phase::Writing => eprint!("\r{:.1} MiB written   ", p.bytes as f64 / (1 << 20) as f64),
+            iwdb::import::Phase::Committing => eprint!("\r{} mutations committed   ", p.mutations),
+        }
+    }
+
+    fn done(&self) {
+        if self.on && self.last.is_some() {
+            eprintln!();
+        }
+    }
 }
 
 fn one_namespace(parsed: &Parsed) -> &str {

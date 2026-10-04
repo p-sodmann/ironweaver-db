@@ -119,6 +119,6 @@ fn every_rpc_has_a_route() {
     let rpcs: BTreeSet<&str> =
         proto.lines().filter_map(|l| l.trim().strip_prefix("rpc ")).filter_map(|l| l.split('(').next()).collect();
     let routed: BTreeSet<&str> = ROUTES.iter().filter_map(|r| r.rpc).collect();
-    assert_eq!(rpcs.len(), 19);
+    assert_eq!(rpcs.len(), 21);
     assert_eq!(routed, rpcs);
 }

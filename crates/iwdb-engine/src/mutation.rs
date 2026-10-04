@@ -37,7 +37,7 @@ use ironweaver_core::{Attrs, EdgeId, Op, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{Constraint, IndexDef};
-use crate::{CommitTime, DbRecord, Keyed};
+use crate::{CommitTime, DbRecord, Keyed, Mark};
 
 /// Deepest nesting of an attribute or meta value a mutation may carry, the
 /// core's [`MAX_DEPTH`](ironweaver_core::format::MAX_DEPTH): a value is
@@ -212,12 +212,15 @@ pub struct CommitRecord {
     /// Set for a commit made with an idempotency key (WAL format 3, step
     /// 8): the key and the result, which replay puts into the key table.
     pub keyed: Option<Keyed>,
+    /// Set for a commit that moved a mark (WAL format 4, step 13): replay
+    /// sets the mark to its position.
+    pub mark: Option<Mark>,
 }
 
 impl CommitRecord {
-    /// A record without an idempotency key.
+    /// A record without an idempotency key or mark.
     pub fn new(seq: u64, change: Change) -> Self {
-        CommitRecord { seq, change, keyed: None }
+        CommitRecord { seq, change, keyed: None, mark: None }
     }
 }
 

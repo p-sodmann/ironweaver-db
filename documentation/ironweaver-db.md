@@ -47,7 +47,7 @@ Ironweaver DB is a **separate project** that turns `ironweaver-core` into a dura
 | Embedded Python (`iwdb-python`) | Python apps and tests | Same API shape as the remote client, so code can switch |
 | gRPC | Services, other languages | Canonical contract in `proto/` ([api/grpc.md](api/grpc.md), step 11); values and filters as the core's serde in postcard (ADR 0023); large answers streamed in chunks (ADR 0025); the change stream (step 13) |
 | REST/JSON | Browsers, scripts, curl | Same message shapes as the protos (via `pbjson`), on the gRPC port; OpenAPI generated; streamed answers as one message or NDJSON; SSE for the change stream (step 13) |
-| Change stream | Caches, indexers, replicas | Resume from any retained `seq` |
+| Change stream | Caches, indexers, replicas | Resume from any retained `seq`: durable commits only, as logged; gRPC `Watch`, SSE, polling, embedded ([api/changes.md](api/changes.md), ADR 0031, step 13) |
 | `iwctl` | Operators | Admin commands plus an interactive query shell |
 
 ## Workstreams
@@ -82,9 +82,9 @@ Ironweaver DB is a **separate project** that turns `ironweaver-core` into a dura
 - `Database` service trait; embedded facade; Python bindings; gRPC server; REST gateway; `iwctl` shell.
 
 ### 7. Change data capture and integration
-- Change stream from any retained `seq`.
-- Projection mode: follow an external ordered event log (e.g. a Postgres outbox table), storing the high-water mark in the same transaction.
-- Bulk import/export: ironweaver JSON/binary, LGF, CSV/Parquet edge lists, GraphML.
+- Change stream from any retained `seq` (step 13, [ADR 0031](adr/0031-change-stream.md)): a bounded, long-polling `changes` read on the trait over the WAL, followed by gRPC `Watch` and SSE; WAL retention for it.
+- Projection mode (step 13, [ADR 0032](adr/0032-projection-mode.md), [api/projections.md](api/projections.md)): follow an external ordered event log (first a Postgres table, tested against PGlite), mapped by declarative rules; the high-water mark is a namespace's *mark*, moved in the same commit (WAL format 4, data-dir layout 5).
+- Bulk import and export (step 13, [ADR 0033](adr/0033-bulk-import-export.md), [api/import-export.md](api/import-export.md)): an import creates a namespace from a core JSON or binary file or an LGF file as one checkpoint, all or nothing; an export writes a namespace's graph as a core file. Embedded, Python and `iwctl`; CSV, GraphML and Parquet were dropped.
 
 ### 8. Security
 - TLS by default, API tokens and mTLS (OIDC later), roles per namespace, resource limits per client and namespace, audit log, `SECURITY.md`.

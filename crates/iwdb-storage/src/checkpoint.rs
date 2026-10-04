@@ -13,11 +13,12 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use iwdb_engine::Namespace;
 use iwdb_engine::catalog::{IndexChanges, NamespaceName};
 use iwdb_engine::codec::{self, Loaded};
+use iwdb_engine::{CommitTime, Namespace};
 
 use crate::archive::ArchiveHandle;
+use crate::changes::{self, WalRetention};
 use crate::io::LogFs;
 use crate::layout::NsPaths;
 use crate::{Error, WalReader, reader};
@@ -186,7 +187,9 @@ pub struct CheckpointOutcome {
 ///    damaged checkpoints are removed once they fall behind), then syncs;
 /// 4. removes the WAL segments whose records all lie at or below the
 ///    oldest kept checkpoint (a segment ends where the next begins; the
-///    last segment is never removed), then syncs. So recovery can always
+///    last segment is never removed), and that the [`WalRetention`]
+///    ([`set_retention`](Self::set_retention)) doesn't keep for the change
+///    stream, then syncs. So recovery can always
 ///    fall back to any kept checkpoint and replay the WAL from there. With
 ///    an [`ArchiveHandle`] ([`set_archive`](Self::set_archive)), the segments are
 ///    first copied into the archive and the archive directory synced, so
@@ -220,6 +223,7 @@ pub struct Checkpointer<F: LogFs> {
     bad: BTreeSet<u64>,
     disabled: Option<String>,
     archive: Option<ArchiveHandle<F>>,
+    retention: WalRetention,
 }
 
 impl<F: LogFs> std::fmt::Debug for Checkpointer<F> {
@@ -258,7 +262,14 @@ impl<F: LogFs> Checkpointer<F> {
             bad: bad.into_iter().collect(),
             disabled: None,
             archive: None,
+            retention: WalRetention::default(),
         }
+    }
+
+    /// Keep WAL segments for the change stream after checkpoints no longer
+    /// need them (ADR 0031).
+    pub fn set_retention(&mut self, retention: WalRetention) {
+        self.retention = retention;
     }
 
     /// Archive WAL segments into `archive` before removing them (see the
@@ -308,6 +319,7 @@ impl<F: LogFs> Checkpointer<F> {
         self.newest = Some(seq);
         self.bad.remove(&seq);
         let (cutoff, removed_checkpoints) = self.remove_old_checkpoints(seq)?;
+        let cutoff = cutoff.min(seq.saturating_sub(self.retention.records));
         let removed_segments = self.remove_segments(cutoff)?;
         Ok(CheckpointOutcome { seq, written: true, removed_checkpoints, removed_segments })
     }
@@ -374,9 +386,18 @@ impl<F: LogFs> Checkpointer<F> {
     fn remove_segments(&mut self, cutoff: u64) -> Result<Vec<u64>, Error> {
         let segments = self.guard(reader::list_segments(&self.wal))?;
         let mut removable = Vec::new();
-        for [(first_seq, path), (next_first, _)] in segments.array_windows() {
+        let oldest_kept = self.retention.age.map(|age| CommitTime::now().micros().saturating_sub(micros(age)));
+        for [(first_seq, path), (next_first, next_path)] in segments.array_windows() {
             if *next_first > cutoff.saturating_add(1) {
                 break;
+            }
+            // A segment's commits are at most as old as the next one's
+            // first. Unknown (no time, a record being written) keeps it
+            if let Some(oldest_kept) = oldest_kept {
+                let time = changes::first_record_time(next_path, *next_first).ok().flatten();
+                if !time.is_some_and(|t| t.micros() < oldest_kept) {
+                    break;
+                }
             }
             removable.push((*first_seq, path.clone()));
         }
@@ -417,6 +438,11 @@ impl<F: LogFs> Checkpointer<F> {
         }
         result
     }
+}
+
+/// A duration in microseconds, saturating.
+fn micros(d: std::time::Duration) -> i64 {
+    i64::try_from(d.as_micros()).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

@@ -271,7 +271,9 @@ fn restore_namespace(input: &Input, target: RestoreTarget) -> Result<(NamespaceR
             (namespace, checkpoint, replayed, time)
         }
         RestoreTarget::Time(at) => {
-            let seq = seq_at_time(&log, at, &input.info, !input.checkpoints.is_empty())?;
+            let imported = input.checkpoints.iter().any(|(s, _)| *s == crate::import::IMPORT_SEQ)
+                && log.first().is_none_or(|(first, _)| *first == crate::import::IMPORT_SEQ + 1);
+            let seq = seq_at_time(&log, at, &input.info, !input.checkpoints.is_empty(), imported)?;
             let (mut namespace, checkpoint) = load_base(&input.checkpoints, seq, name, &mut skipped);
             let (replayed, time) = replay(&log, &mut namespace, seq, false)?;
             (namespace, checkpoint, replayed, time)
@@ -309,6 +311,13 @@ fn input_of(opened: &Opened, info: NamespaceInfo) -> Result<Input, Error> {
     }
     if let Some(archive) = &opened.archive {
         input.archive_segments = archive_segments(&archive.dir, archive.version, input.info.id)?;
+        // An imported namespace's base (ADR 0033); the backup's copy wins
+        for (seq, path) in crate::archive::archive_checkpoints(&archive.dir, archive.version, input.info.id)? {
+            if !input.checkpoints.iter().any(|(s, _)| *s == seq) {
+                input.checkpoints.push((seq, path));
+            }
+        }
+        input.checkpoints.sort_unstable();
     }
     Ok(input)
 }
@@ -514,11 +523,14 @@ fn seq_at_time(
     at: CommitTime,
     info: &NamespaceInfo,
     has_checkpoints: bool,
+    imported: bool,
 ) -> Result<u64, Error> {
     let known_empty = info.created != CommitTime(0) && info.created <= at;
+    // An imported namespace holds its import from its creation on (seq 1)
+    let base = if imported { crate::import::IMPORT_SEQ } else { 0 };
     let Some(&(first, _)) = log.first() else {
-        return if known_empty && !has_checkpoints {
-            Ok(0)
+        return if known_empty && (imported || !has_checkpoints) {
+            Ok(base)
         } else {
             Err(Error::NoCommitAtOrBefore { time: at, first: None })
         };
@@ -536,7 +548,7 @@ fn seq_at_time(
     }
     match found {
         Some(seq) => Ok(seq),
-        None if known_empty && first == 1 => Ok(0),
+        None if known_empty && first == base + 1 => Ok(base),
         None => Err(Error::NoCommitAtOrBefore { time: at, first: earliest }),
     }
 }

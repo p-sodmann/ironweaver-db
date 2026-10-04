@@ -110,6 +110,8 @@ def test_status_per_namespace(store):
     assert by_name["a"]["indexes"][0]["state"] == "ready"
     assert by_name["a"]["memory_bytes"] > by_name["default"]["memory_bytes"]
     assert a.status()["seq"] == 6
+    # No projection has moved a mark (step 13)
+    assert a.status()["marks"] == {}
 
 
 def test_namespaces_survive_a_reopen(path):

@@ -14,6 +14,8 @@
 //! - [`layout`]: the data directory, its marker and lock
 //!   (`documentation/formats/data-dir.md`).
 //! - [`checkpoint`]: checkpoint files and the [`Checkpointer`].
+//! - [`changes`]: reading the WAL from a seq for the change stream
+//!   ([`OffsetIndex`]), and [`WalRetention`] (ADR 0031).
 //! - [`recover`]: open a data directory and rebuild its namespace.
 //! - [`backup`]: a consistent copy of a data directory up to a synced seq,
 //!   with a manifest (`documentation/formats/backup.md`).
@@ -22,6 +24,8 @@
 //! - [`restore`](mod@restore): a new data directory at a seq or time from a backup
 //!   and/or an archive.
 //! - [`verify`](mod@verify): every file and invariant, checked without writing.
+//! - [`import`](mod@import): the files of an import, a namespace made from one
+//!   checkpoint (ADR 0033).
 //! - [`inspect`]: a quick, read-only look at a directory.
 //! - [`HistoryId`] and [`CommitTime`]: which history a directory holds, and
 //!   when a commit was appended (ADR 0009, ADR 0010).
@@ -48,12 +52,14 @@ pub(crate) use default_deref;
 
 pub mod archive;
 pub mod backup;
+pub mod changes;
 pub mod checkpoint;
 mod error;
 #[cfg(feature = "failpoints")]
 pub mod failpoint;
 pub mod format;
 mod history;
+pub mod import;
 mod inspect;
 pub mod io;
 pub mod layout;
@@ -66,6 +72,7 @@ pub mod verify;
 mod writer;
 
 pub use backup::{BackupReport, NamespaceBackup};
+pub use changes::{BatchLimits, ChangeBatch, ChangeRecord, OffsetIndex, WalRetention};
 pub use checkpoint::{CheckpointOutcome, Checkpointer, SkippedCheckpoint};
 pub use error::Error;
 pub use history::HistoryId;

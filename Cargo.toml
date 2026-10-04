@@ -60,6 +60,10 @@ http = "1"
 http-body-util = "0.1"
 bytes = "1"
 tower-service = "0.3"
+# Projection mode's Postgres source (step 13, iwdb feature `postgres`): the
+# sync client of rust-postgres, with `jsonb` as serde_json values; no TLS
+# until step 15
+postgres = { version = "0.19", default-features = false, features = ["with-serde_json-1"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

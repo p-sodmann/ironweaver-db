@@ -153,6 +153,8 @@ impl<D: Database + 'static> Server<D> {
             }
         }
         drop(listener);
+        // The change streams never finish on their own: end them now
+        self.stopping.send_replace(true);
         let complete = tokio::select! {
             () = graceful.shutdown() => true,
             () = drain() => false,

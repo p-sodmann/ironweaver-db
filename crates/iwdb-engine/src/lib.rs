@@ -10,6 +10,9 @@
 //! - [`Namespace`]: a graph changed only through the commit pipeline.
 //! - [`idempotency`]: idempotency keys and the table of recent keyed
 //!   commits.
+//! - [`mark`]: named high-water marks, moved by commits (projections).
+//! - [`plain`]: plain graph files (the core's format without the
+//!   database's keys), for import and export.
 //! - [`CommitTime`]: when the WAL appended a commit.
 //! - [`invariants`]: the invariants every namespace keeps, checked from
 //!   scratch (for `verify`).
@@ -23,8 +26,10 @@ mod error;
 pub mod failpoint;
 pub mod idempotency;
 pub mod invariants;
+pub mod mark;
 pub mod mutation;
 mod namespace;
+pub mod plain;
 mod record;
 pub mod reserved;
 mod resolve;
@@ -33,6 +38,7 @@ mod time;
 
 pub use error::{Entity, Error};
 pub use idempotency::{IdempotencyKey, KeyTable, Keyed};
+pub use mark::{Mark, MarkName, MarkTable, MarkUpdate};
 pub use mutation::{CatalogChange, Change, CommitRecord, CommitResult, EdgeKey, Mutation, Target};
 pub use namespace::{IndexBuild, Namespace, Prepare, Prepared};
 pub use record::DbRecord;

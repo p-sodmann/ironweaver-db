@@ -10,6 +10,23 @@ use ironweaver_core::{Direction, EdgeId, Expr};
 use crate::cursor::Fingerprint;
 use crate::model::{Edge, Node};
 
+/// A batch of the change stream ([`Database::changes`](crate::Database::changes),
+/// ADR 0031).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChangesRequest {
+    /// The first seq to return (0 is read as 1). To resume, pass the
+    /// `next_seq` of the last batch, or the seq of the last commit
+    /// processed plus one.
+    pub from_seq: u64,
+    /// If no commit from `from_seq` on is streamable yet, wait for one
+    /// (a long poll) instead of answering with an empty batch at once.
+    pub wait: bool,
+}
+
+/// About how many bytes of WAL payload a batch of the change stream holds
+/// at most (always at least one commit, which can be up to 64 MiB).
+pub const CHANGES_BATCH_BYTES: usize = 4 << 20;
+
 /// Nodes matching a filter ([`Database::find`](crate::Database::find)).
 #[derive(Clone, Debug, PartialEq)]
 pub struct FindRequest {

@@ -22,8 +22,9 @@ ironweaver-core.workspace = true
 iwdb-engine = { path = "../iwdb-engine" }
 iwdb-storage = { path = "../iwdb-storage" }
 iwdb-query = { path = "../iwdb-query" }
-# The binary serves an embedded store (`Embedded`) and closes it on shutdown
-iwdb = { path = "../iwdb" }
+# The binary serves an embedded store (`Embedded`) and closes it on shutdown;
+# its projections read Postgres tables (step 13)
+iwdb = { path = "../iwdb", features = ["postgres"] }
 tonic.workspace = true
 tonic-prost.workspace = true
 prost.workspace = true
@@ -65,6 +66,8 @@ tempfile.workspace = true
 # act on itself (grpc-timeout) or bytes `Remote` refuses to send
 hyper-util = { workspace = true, features = ["client-legacy", "http2"] }
 serde_json = { workspace = true, features = ["unbounded_depth"] }
+# Fills the table a projection reads, in PGlite (step 13)
+postgres.workspace = true
 
 [lints]
 workspace = true

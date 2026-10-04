@@ -23,6 +23,7 @@ pub fn options(keep: usize) -> StoreOptions {
         checkpoint: CheckpointOptions { wal_size: None, interval: None, on_close: true, keep, background: false },
         create_if_missing: true,
         archive: None,
+        retention: Default::default(),
     }
 }
 

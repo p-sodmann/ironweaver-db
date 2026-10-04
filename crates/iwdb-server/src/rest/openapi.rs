@@ -18,7 +18,7 @@ use prost_types::field_descriptor_proto::{Label, Type};
 use prost_types::{DescriptorProto, FileDescriptorSet, MethodDescriptorProto};
 use serde_json::{Map, Value as Json, json};
 
-use super::{Input, NDJSON, OPTION_PARAMETERS, ROUTES, Route};
+use super::{CHANGES_PARAMETERS, EVENT_STREAM, Input, NDJSON, OPTION_PARAMETERS, ROUTES, Route};
 use crate::proto::DESCRIPTORS;
 
 const PACKAGE: &str = "ironweaver_db.v1";
@@ -265,12 +265,25 @@ impl Protos {
                 json!({ "name": name, "in": "path", "required": true, "schema": schema, "description": description }),
             );
         }
-        if route.input == Input::Options {
-            for (name, kind, description) in OPTION_PARAMETERS {
-                parameters.push(
-                    json!({ "name": name, "in": "query", "schema": { "type": kind }, "description": description }),
-                );
+        let query = match route.input {
+            Input::Options => OPTION_PARAMETERS.iter().collect(),
+            Input::Changes { stream } => {
+                CHANGES_PARAMETERS.iter().filter(|(name, ..)| !stream || *name != "wait").collect()
             }
+            _ => Vec::new(),
+        };
+        for (name, kind, description) in query {
+            parameters
+                .push(json!({ "name": name, "in": "query", "schema": { "type": kind }, "description": description }));
+        }
+        if route.input == (Input::Changes { stream: true }) {
+            parameters.push(json!({
+                "name": "Last-Event-ID",
+                "in": "header",
+                "schema": { "type": "string", "pattern": "^[0-9]+$" },
+                "description": "Resume after this seq (what `EventSource` sends when it reconnects); \
+                                overrides `from_seq`.",
+            }));
         }
         if !parameters.is_empty() {
             operation.insert("parameters".into(), parameters.into());
@@ -311,7 +324,13 @@ impl Protos {
         let response = reference(short(rpc.output_type()));
         let mut content = json!({ "application/json": { "schema": response } });
         let mut answer = "The answer.".to_owned();
-        if rpc.server_streaming() && route.input != Input::Options {
+        if route.input == (Input::Changes { stream: true }) {
+            content = json!({ EVENT_STREAM: { "schema": { "type": "string" } } });
+            answer = "Server-Sent Events: a `change` event per commit, its `id` the seq and its `data` a \
+                      `ChangeEvent` in JSON; a comment line as heartbeat; an `error` event with an `Error` \
+                      before the stream ends on an error."
+                .to_owned();
+        } else if rpc.server_streaming() && route.input != Input::Options {
             content[NDJSON] = json!({ "schema": response });
             answer.push_str(
                 " With `Accept: application/x-ndjson`, the answer's chunks, one per line, `meta` in the last; \

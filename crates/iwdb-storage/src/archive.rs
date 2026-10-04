@@ -9,12 +9,14 @@
 //!   NAMESPACES                    a copy of the store's namespace log, kept up to date
 //!   ns/<id, 20 digits>/
 //!     <first seq, 20 digits>.wal  archived segments of namespace <id>, byte for byte
-//!     <name>.wal.tmp              a segment being archived
+//!     <seq, 20 digits>.ckpt       the checkpoint an imported namespace starts from (format 3)
+//!     <name>.tmp                  a segment or checkpoint being archived
 //! ```
 //!
 //! A format 1 archive (steps 7 and 8, one namespace) has its segments at
 //! the top and no `NAMESPACES`: they are namespace 1's. A store that
-//! archives into one upgrades it ([`Archive::open`]).
+//! archives into one upgrades it ([`Archive::open`]). Format 2 (step 9) is
+//! format 3 without checkpoints; it is upgraded by rewriting its marker.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
@@ -33,10 +35,10 @@ use crate::{Error, WalReader, format, reader};
 pub const ARCHIVE_MARKER_NAME: &str = "IWDBARCH";
 /// The first 8 bytes of the archive marker.
 pub const ARCHIVE_MAGIC: [u8; 8] = *b"IWDBARC\n";
-/// The archive format this version writes. Format 1 (one namespace, the
-/// segments at the top) is read, and upgraded when a store archives into
-/// it.
-pub const ARCHIVE_VERSION: u32 = 2;
+/// The archive format this version writes. Formats 1 (one namespace, the
+/// segments at the top) and 2 (no checkpoints) are read, and upgraded when
+/// a store archives into them.
+pub const ARCHIVE_VERSION: u32 = 3;
 /// Length of the archive marker.
 pub const ARCHIVE_MARKER_LEN: usize = 32;
 
@@ -97,6 +99,16 @@ pub fn archive_segments(dir: &Path, version: u32, id: u64) -> Result<Vec<(u64, P
     }
     let ns_dir = dir.join(NS_DIR).join(ns_dir_name(id));
     if ns_dir.is_dir() { reader::list_segments(&ns_dir) } else { Ok(Vec::new()) }
+}
+
+/// The checkpoints of namespace `id` in the archive `dir` (format 3: the
+/// checkpoints imported namespaces start from), by seq.
+pub fn archive_checkpoints(dir: &Path, version: u32, id: u64) -> Result<Vec<(u64, PathBuf)>, Error> {
+    let ns_dir = dir.join(NS_DIR).join(ns_dir_name(id));
+    if version < 3 || !ns_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    crate::checkpoint::list_checkpoints(&ns_dir)
 }
 
 /// The ids of the namespaces that have a directory in the format 2 archive
@@ -163,6 +175,12 @@ impl<F: LogFs> Archive<F> {
                 return Err(Error::ArchiveMismatch { path: dir.to_path_buf(), expected: history, found });
             }
             Some((1, _)) => archive.upgrade_v1()?,
+            // Format 3 adds files only: the marker says that it may have them
+            Some((2, _)) => {
+                let marker = encode_archive_marker(history);
+                crate::io::write_atomic(&archive.fs, &dir.join(ARCHIVE_MARKER_NAME), &marker)?;
+                crate::io::sync_dir(&archive.fs, dir)?;
+            }
             Some(_) => {}
             None => {
                 for entry in fs::read_dir(dir).map_err(|e| Error::io("list", dir, e))? {
@@ -252,6 +270,25 @@ impl<F: LogFs> Archive<F> {
             self.fs.rename(&tmp, &target).map_err(|e| Error::io("rename", &tmp, e))?;
         }
         Ok(())
+    }
+
+    /// Copy the checkpoint file `source` at `seq` of namespace `id` into the
+    /// archive's `ns/<id>/` (as [`copy`](Self::copy) copies segments: a
+    /// `.tmp` file, fsynced, renamed; one that is there already must have
+    /// the same bytes), and sync the directory. For the checkpoint an
+    /// imported namespace starts from, which no WAL record holds (ADR 0033).
+    pub fn copy_checkpoint(&self, id: u64, seq: u64, source: &Path) -> Result<(), Error> {
+        self.ensure_dir(id)?;
+        let dir = self.dir.join(NS_DIR).join(ns_dir_name(id));
+        let name = crate::checkpoint::checkpoint_name(seq);
+        let target = dir.join(&name);
+        if target.exists() && !same_content(source, &target)? {
+            return Err(Error::ArchiveConflict { path: target });
+        }
+        let tmp = dir.join(format!("{}{}", name, TEMP_SUFFIX));
+        copy_file(&self.fs, source, &tmp)?;
+        self.fs.rename(&tmp, &target).map_err(|e| Error::io("rename", &tmp, e))?;
+        self.sync(id)
     }
 
     /// Make namespace `id`'s directory in the archive, and sync its
@@ -412,6 +449,7 @@ pub fn verify_archive(dir: &Path) -> Result<VerifyReport, Error> {
             .map_or_else(|| format!("#{}", id), |e| e.name.to_string());
         let mut sub = VerifyReport::new(dir, Kind::Archive);
         verify_namespace_segments(&mut sub, dir, version, id)?;
+        verify_namespace_checkpoints(&mut sub, dir, version, id, table.as_ref())?;
         report.merge(id, &name, version >= 2, sub);
     }
     report.summarize();
@@ -426,9 +464,10 @@ fn verify_namespace_segments(report: &mut VerifyReport, dir: &Path, version: u32
         for entry in fs::read_dir(&ns_dir).map_err(|e| Error::io("list", &ns_dir, e))? {
             let entry = entry.map_err(|e| Error::io("list", &ns_dir, e))?;
             let name = entry.file_name().to_string_lossy().into_owned();
+            let checkpoint = version >= 3 && crate::checkpoint::parse_checkpoint_name(&name).is_some();
             if name.ends_with(TEMP_SUFFIX) {
-                report.note(Some(&entry.path()), "a segment being archived (a temporary file)");
-            } else if format::parse_segment_name(&name).is_none() {
+                report.note(Some(&entry.path()), "a file being archived (a temporary file)");
+            } else if format::parse_segment_name(&name).is_none() && !checkpoint {
                 report.note(Some(&entry.path()), "not a file of the archive (ignored)");
             }
         }
@@ -466,6 +505,37 @@ fn verify_namespace_segments(report: &mut VerifyReport, dir: &Path, version: u32
                 last.valid_len, torn.damage
             ),
         );
+    }
+    Ok(())
+}
+
+/// The checkpoints of one namespace of a format 3 archive, into `report`:
+/// each must load as a checkpoint of its namespace at its seq, and the
+/// segments must go on from it.
+fn verify_namespace_checkpoints(
+    report: &mut VerifyReport,
+    dir: &Path,
+    version: u32,
+    id: u64,
+    table: Option<&crate::namespaces::NamespaceTable>,
+) -> Result<(), Error> {
+    let checkpoints = archive_checkpoints(dir, version, id)?;
+    report.checkpoints = checkpoints.len();
+    let name = table.and_then(|t| t.events().iter().find(|e| e.id == id && e.kind == EventKind::Create));
+    for (seq, path) in &checkpoints {
+        match name {
+            Some(event) => {
+                if let Err(e) = crate::checkpoint::load_checkpoint(path, *seq, &event.name) {
+                    report.problem(Some(path), e.to_string());
+                }
+            }
+            None => report.note(Some(path), "a checkpoint of a namespace the archive's log doesn't list"),
+        }
+        if let Some(first) = report.first_seq
+            && first > seq + 1
+        {
+            report.problem(Some(path), format!("the archived records start at {}, after the checkpoint", first));
+        }
     }
     Ok(())
 }

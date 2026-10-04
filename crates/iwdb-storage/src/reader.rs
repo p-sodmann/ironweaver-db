@@ -548,8 +548,13 @@ mod tests {
     fn segment_version(version: u32, first_seq: u64, frames: &[(u64, u64, u8, &[u8])]) -> Vec<u8> {
         let mut bytes = encode_segment_header_version(first_seq, version).to_vec();
         for &(seq, synced_seq, kind, payload) in frames {
-            // An empty op list; format 3 puts the key's `None` before it
-            let payload = if version >= 3 && payload == EMPTY { &[0, 0][..] } else { payload };
+            // An empty op list; format 3 puts the key's `None` before it,
+            // format 4 the mark's too
+            let payload = match version {
+                4.. if payload == EMPTY => &[0, 0, 0][..],
+                3 if payload == EMPTY => &[0, 0][..],
+                _ => payload,
+            };
             let time = seq as i64 * 10;
             encode_frame(&mut bytes, version, FrameHeader { seq, synced_seq, time, kind }, payload);
         }
@@ -557,7 +562,7 @@ mod tests {
     }
 
     /// An empty op list, in format 1 and 2 (`segment_version` adds the
-    /// key's byte for format 3).
+    /// key's byte for format 3, and the mark's for format 4).
     const EMPTY: &[u8] = &[0];
 
     #[test]

@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! <backup>/
-//!   IWDB           the source's marker: layout 4, the source's history id
+//!   IWDB           the source's marker: its layout (4 or later), the source's history id
 //!   BACKUP         the manifest: history, time, every namespace's seq, every file with its length and CRC32C
 //!   NAMESPACES     the source's namespace log, up to the moment of the backup
 //!   ns/<id>/

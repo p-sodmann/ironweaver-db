@@ -69,6 +69,7 @@ pub fn child_options(policy: Policy, keep: usize, archive: Option<&Path>) -> Sto
         },
         create_if_missing: true,
         archive: archive.map(Path::to_path_buf),
+        retention: Default::default(),
     }
 }
 
@@ -80,6 +81,7 @@ pub fn check_options(policy: Policy, keep: usize, archive: Option<&Path>) -> Sto
         checkpoint: CheckpointOptions { wal_size: None, interval: None, on_close: true, keep, background: false },
         create_if_missing: true,
         archive: archive.map(Path::to_path_buf),
+        retention: Default::default(),
     }
 }
 

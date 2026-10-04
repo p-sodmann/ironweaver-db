@@ -2,9 +2,10 @@
 
 use std::path::Path;
 
+use iwdb::import::{ExportReport, ImportReport, MergeReport};
 use iwdb::{
-    BackupReport, CheckpointOutcome, CommitTime, Finding, FsyncPolicy, IndexState, IndexStatus, Kind, NamespaceStatus,
-    RecoveryReport, RestoreReport, StoreRecovery, StoreStatus, VerifyReport,
+    BackupReport, CheckpointOutcome, CommitTime, Finding, FsyncPolicy, IndexState, IndexStatus, Kind, MarkStatus,
+    NamespaceStatus, RecoveryReport, RestoreReport, StoreRecovery, StoreStatus, VerifyReport,
 };
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
@@ -63,6 +64,59 @@ fn ns_recovery(py: Python<'_>, r: &RecoveryReport) -> PyResult<Py<PyAny>> {
             ("replayed", to(py, r.replayed)?),
             ("torn_tail", torn),
             ("seq", to(py, r.seq)?),
+            ("finished_import", to(py, r.finished_import)?),
+        ],
+    )
+}
+
+/// What an import did.
+pub fn import(py: Python<'_>, r: &ImportReport) -> PyResult<Py<PyAny>> {
+    dict(
+        py,
+        vec![
+            ("id", to(py, r.event.id)?),
+            ("name", to(py, r.event.name.as_str())?),
+            ("time", commit_time(py, Some(r.event.time))?),
+            ("format", to(py, r.format.name())?),
+            ("seq", to(py, r.seq)?),
+            ("nodes", to(py, r.nodes)?),
+            ("edges", to(py, r.edges)?),
+            ("indexes", to(py, r.indexes.iter().map(|p| p.keys().to_vec()).collect::<Vec<_>>())?),
+            ("dropped", to(py, r.dropped.clone())?),
+            ("bytes_read", to(py, r.bytes_read)?),
+            ("checkpoint_bytes", to(py, r.checkpoint_bytes)?),
+        ],
+    )
+}
+
+/// What a merge did.
+pub fn merge(py: Python<'_>, r: &MergeReport) -> PyResult<Py<PyAny>> {
+    dict(
+        py,
+        vec![
+            ("format", to(py, r.format.name())?),
+            ("nodes", to(py, r.nodes)?),
+            ("edges", to(py, r.edges)?),
+            ("created_indexes", to(py, r.created_indexes.iter().map(|p| p.keys().to_vec()).collect::<Vec<_>>())?),
+            ("dropped", to(py, r.dropped.clone())?),
+            ("bytes_read", to(py, r.bytes_read)?),
+            ("commits", to(py, r.commits)?),
+            ("first_seq", to(py, r.first_seq)?),
+            ("last_seq", to(py, r.last_seq)?),
+        ],
+    )
+}
+
+/// What an export did.
+pub fn export(py: Python<'_>, r: &ExportReport) -> PyResult<Py<PyAny>> {
+    dict(
+        py,
+        vec![
+            ("format", to(py, r.format.name())?),
+            ("seq", to(py, r.seq)?),
+            ("nodes", to(py, r.nodes)?),
+            ("edges", to(py, r.edges)?),
+            ("bytes", to(py, r.bytes)?),
         ],
     )
 }
@@ -127,8 +181,19 @@ pub fn namespace_status(py: Python<'_>, n: &NamespaceStatus) -> PyResult<Py<PyAn
             ("constraints", to(py, n.constraints)?),
             ("indexes", indexes(py, &n.indexes)?.into_bound(py)),
             ("recovery", ns_recovery(py, &n.recovery)?.into_bound(py)),
+            ("marks", marks(py, &n.marks)?.into_bound(py)),
         ],
     )
+}
+
+/// The marks as `{name: {"position": int, "seq": int}}`.
+fn marks(py: Python<'_>, marks: &[MarkStatus]) -> PyResult<Py<PyAny>> {
+    let out = PyDict::new(py);
+    for m in marks {
+        let entry = dict(py, vec![("position", to(py, m.position)?), ("seq", to(py, m.seq)?)])?;
+        out.set_item(&m.name, entry)?;
+    }
+    Ok(out.into_any().unbind())
 }
 
 pub fn store_status(py: Python<'_>, s: &StoreStatus) -> PyResult<Py<PyAny>> {

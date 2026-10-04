@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use iwdb::import::{ExportReport, ImportReport, MergeReport};
 use iwdb::{
     BackupReport, CheckpointOutcome, CommitTime, Error, Finding, FsyncPolicy, HistoryId, IndexState, Kind,
     NamespaceResult, NamespaceStatus, RecoveryReport, RestoreReport, Status, StoreRecovery, StoreStatus, VerifyReport,
@@ -71,6 +72,7 @@ fn ns_recovery_json(r: &RecoveryReport) -> Value {
             "path": path(&t.path), "valid_len": t.valid_len, "file_len": t.file_len, "discarded_frames": t.discarded_frames,
         })),
         "seq": r.seq,
+        "finished_import": r.finished_import,
     })
 }
 
@@ -328,6 +330,71 @@ impl Out {
         self.print(value, &text);
     }
 
+    pub fn import(&self, r: &ImportReport) {
+        let e = &r.event;
+        let indexes: Vec<String> = r.indexes.iter().map(|p| p.to_string()).collect();
+        let value = json!({
+            "imported": {
+                "id": e.id, "name": e.name.as_str(), "event": e.seq, "time": e.time.to_string(),
+                "format": r.format.name(), "seq": r.seq, "nodes": r.nodes, "edges": r.edges, "indexes": indexes,
+                "dropped": r.dropped, "bytes_read": r.bytes_read, "checkpoint_bytes": r.checkpoint_bytes,
+            }
+        });
+        let mut text = format!(
+            "imported namespace '{}' (id {}) from a {} file: {} nodes, {} edges",
+            e.name, e.id, r.format, r.nodes, r.edges
+        );
+        if !indexes.is_empty() {
+            text += &format!(", indexes {}", indexes.join(", "));
+        }
+        if !r.dropped.is_empty() {
+            text += &format!("\nleft out (a namespace has no place for them): {}", r.dropped.join(", "));
+        }
+        self.print(value, &text);
+    }
+
+    pub fn merge(&self, name: &str, r: &MergeReport) {
+        let created: Vec<String> = r.created_indexes.iter().map(|p| p.to_string()).collect();
+        let value = json!({
+            "merged": {
+                "namespace": name, "format": r.format.name(), "nodes": r.nodes, "edges": r.edges,
+                "created_indexes": created, "dropped": r.dropped, "bytes_read": r.bytes_read,
+                "commits": r.commits, "first_seq": r.first_seq, "last_seq": r.last_seq,
+            }
+        });
+        let seqs = match (r.first_seq, r.last_seq) {
+            (Some(a), Some(b)) => format!(", seqs {} to {}", a, b),
+            _ => String::new(),
+        };
+        let mut text = format!(
+            "merged a {} file into namespace '{}': {} nodes, {} edges in {} commits{}",
+            r.format, name, r.nodes, r.edges, r.commits, seqs
+        );
+        if !created.is_empty() {
+            text += &format!(", created indexes {}", created.join(", "));
+        }
+        if !r.dropped.is_empty() {
+            text += &format!("\nleft out (a namespace has no place for them): {}", r.dropped.join(", "));
+        }
+        self.print(value, &text);
+    }
+
+    pub fn export(&self, file: &Path, r: &ExportReport) {
+        let value = json!({
+            "exported": {"path": path(file), "format": r.format.name(), "seq": r.seq, "nodes": r.nodes, "edges": r.edges, "bytes": r.bytes}
+        });
+        let text = format!(
+            "exported seq {} ({} nodes, {} edges) to {} ({}, {} bytes)",
+            r.seq,
+            r.nodes,
+            r.edges,
+            file.display(),
+            r.format,
+            r.bytes
+        );
+        self.print(value, &text);
+    }
+
     pub fn commit(&self, what: &str, seq: u64, deduplicated: bool) {
         let value = json!({"catalog_change": what, "seq": seq, "deduplicated": deduplicated});
         let text = format!("{} at seq {}{}", what, seq, if deduplicated { " (a retry: nothing changed)" } else { "" });
@@ -447,6 +514,7 @@ fn ns_status_json(n: &NamespaceStatus) -> Value {
             "state": match &i.state { IndexState::Ready => "ready", IndexState::Building { .. } => "building" },
             "declared": i.declared, "unique": i.unique,
         })).collect::<Vec<_>>(),
+        "marks": n.marks.iter().map(|m| json!({"name": m.name, "position": m.position, "seq": m.seq})).collect::<Vec<_>>(),
     })
 }
 
@@ -464,6 +532,9 @@ fn ns_status_text(n: &NamespaceStatus) -> String {
     );
     if let Some(cause) = &n.read_only {
         text += &format!(" (read-only: {})", cause);
+    }
+    for m in &n.marks {
+        text += &format!("\n  mark {:?} at {} (seq {})", m.name, m.position, m.seq);
     }
     text
 }

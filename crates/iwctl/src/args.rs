@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use iwdb::import::{ExportFormat, ImportFormat};
 use iwdb::{CommitTime, ConstraintKind, FsyncPolicy, RestoreTarget};
 
 pub const USAGE: &str = "\
@@ -35,6 +36,16 @@ for status, which then shows what the files say):
                                 <path> is an attribute path with dots: address.city
   add-constraint <dir> unique|required <label> <path> [-n <ns>] [--key <k>]
   drop-constraint <dir> unique|required <label> <path> [-n <ns>] [--key <k>]
+  import <dir> <name> <file> [--format json|binary|lgf] [--merge]
+                                create the namespace <name> from a graph file (a core JSON
+                                or binary file, or LGF; detected unless --format) as one
+                                checkpoint (with --archive, archived too; otherwise the
+                                store's next open with its archive does it); with --merge,
+                                upsert the file's nodes and edges into the existing
+                                namespace <name> through commits
+  export <dir> <file> [-n <ns>] [--format json|binary]
+                                write a namespace's graph to <file> as a core file (JSON for
+                                a .json file, binary otherwise, unless --format)
   help, --help                  this text
   --version                     the version
 
@@ -46,6 +57,8 @@ options:
                                 given; restore: only those given)
   --key <k>                     an idempotency key (1 to 255 bytes) for the change
   --no-verify                   don't verify after backup or restore
+  --format <f>                  the file format of import or export
+  --merge                       import into an existing namespace
 
 exit codes: 0 ok, 1 damage found, 2 usage error, 3 locked (a store has the
 directory open), 4 any other failure";
@@ -65,6 +78,8 @@ pub enum Command {
     DropIndex { dir: PathBuf, path: Vec<String> },
     AddConstraint { dir: PathBuf, kind: ConstraintKind, label: String, path: Vec<String> },
     DropConstraint { dir: PathBuf, kind: ConstraintKind, label: String, path: Vec<String> },
+    Import { dir: PathBuf, name: String, file: PathBuf, format: Option<ImportFormat>, merge: bool },
+    Export { dir: PathBuf, file: PathBuf, format: Option<ExportFormat> },
     Help,
     Version,
 }
@@ -99,11 +114,12 @@ fn constraint_kind(word: &str) -> Result<ConstraintKind, String> {
 
 pub fn parse(args: &[String]) -> Result<Parsed, String> {
     let mut words = Vec::new();
-    let (mut json, mut no_verify, mut no_archive) = (false, false, false);
+    let (mut json, mut no_verify, mut no_archive, mut merge) = (false, false, false, false);
     let mut fsync = FsyncPolicy::Always;
     let mut keep = 2;
     let (mut archive, mut backup, mut seq, mut time) = (None, None, None, None);
     let (mut namespaces, mut key): (Vec<String>, Option<String>) = (Vec::new(), None);
+    let mut format: Option<String> = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| args.next().cloned().ok_or_else(|| format!("{} needs a value", flag));
@@ -111,6 +127,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
             "--json" => json = true,
             "--no-verify" => no_verify = true,
             "--no-archive" => no_archive = true,
+            "--merge" => merge = true,
             "--help" | "-h" => words.insert(0, "help".to_owned()),
             "--version" | "-V" => words.insert(0, "version".to_owned()),
             "--fsync" => {
@@ -130,6 +147,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
             }
             "-n" | "--namespace" => namespaces.push(value("--namespace")?),
             "--key" => key = Some(value("--key")?),
+            "--format" => format = Some(value("--format")?),
             "--archive" => archive = Some(PathBuf::from(value("--archive")?)),
             "--backup" => backup = Some(PathBuf::from(value("--backup")?)),
             "--seq" => seq = Some(value("--seq")?.parse::<u64>().map_err(|_| "--seq needs a number".to_owned())?),
@@ -178,6 +196,9 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
             let command = Command::Restore { dest: path(0, "a destination")?, backup, archive: archive.take(), target };
             if seq.is_some() && namespaces.len() > 1 {
                 return Err("restore --seq takes one namespace".into());
+            }
+            if format.is_some() {
+                return Err("restore takes no --format".into());
             }
             return Ok(Parsed { command, json, fsync, keep, archive: None, no_verify, namespaces, key, no_archive });
         }
@@ -228,14 +249,38 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
                 Command::DropConstraint { dir, kind, label, path }
             }
         }
+        "import" => {
+            expect(3)?;
+            Command::Import {
+                dir: path(0, "a directory")?,
+                name: rest.get(1).cloned().ok_or("import needs a namespace name")?,
+                file: path(2, "a file")?,
+                format: format.take().map(|f| f.parse::<ImportFormat>()).transpose()?,
+                merge: std::mem::take(&mut merge),
+            }
+        }
+        "export" => {
+            expect(2)?;
+            Command::Export {
+                dir: path(0, "a directory")?,
+                file: path(1, "a file")?,
+                format: format.take().map(|f| f.parse::<ExportFormat>()).transpose()?,
+            }
+        }
         other => return Err(format!("unknown command '{}'", other)),
     };
+    if format.is_some() {
+        return Err(format!("{} takes no --format", name));
+    }
+    if merge {
+        return Err(format!("{} takes no --merge", name));
+    }
     if backup.is_some() || seq.is_some() || time.is_some() {
         return Err(format!("{} takes no --backup, --seq or --time", name));
     }
     let takes_namespace = matches!(
         name.as_str(),
-        "checkpoint" | "indexes" | "create-index" | "drop-index" | "add-constraint" | "drop-constraint"
+        "checkpoint" | "indexes" | "create-index" | "drop-index" | "add-constraint" | "drop-constraint" | "export"
     );
     if !namespaces.is_empty() && !takes_namespace {
         return Err(format!("{} takes no --namespace", name));

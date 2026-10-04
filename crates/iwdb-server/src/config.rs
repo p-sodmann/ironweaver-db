@@ -9,6 +9,8 @@
 //! group_max_delay_ms = 10           # group commit: fsync at least this often
 //! group_max_batch = 64              # ... or after this many commits
 //! checkpoint_on_shutdown = true
+//! retain_records = 0                # keep the WAL of the last N commits for the change stream
+//! retain_age_secs = 0               # ... and of commits younger than this (0: none)
 //!
 //! [server]
 //! drain_timeout_secs = 30           # how long running calls may finish on shutdown
@@ -29,6 +31,33 @@
 //! timeout_ms = 300000
 //! ```
 //!
+//! Projections (step 13, ADR 0032; `documentation/api/projections.md`):
+//! each `[[projection]]` follows a source and commits its events into a
+//! namespace, with its high-water mark in the same commit. They start with
+//! the server and stop when it shuts down.
+//!
+//! ```toml
+//! [[projection]]
+//! name = "orders"                   # the mark's name: unique in its namespace
+//! namespace = "default"             # must exist
+//! batch = 100                       # events per commit
+//! poll_ms = 500                     # how often to look for new events when caught up
+//! on_error = "stop"                 # stop | skip: an event that fails to map or commit
+//!
+//! [projection.source]
+//! kind = "postgres"
+//! url_env = "ORDERS_DB_URL"         # or url = "postgresql://..." (no TLS until step 15)
+//! table = "public.order_events"
+//! position = "id"                   # a bigint that increases with every event
+//! gap_timeout_ms = 5000             # how long a hole in the positions is waited for
+//!
+//! [[projection.rule]]
+//! when = { kind = "order_placed" }
+//! mutations = [
+//!   { upsert_node = { id = "order:${id}", labels = ["Order"], attr = { total = "${payload.total}" } } },
+//! ]
+//! ```
+//!
 //! Environment overrides come with step 16. TLS and authentication with
 //! step 15: until then the server listens on plain TCP, so bind it to
 //! localhost or a private network.
@@ -37,7 +66,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use iwdb::{CheckpointOptions, FsyncPolicy, QueryConfig, StoreOptions};
+use iwdb::projection::postgres::{PostgresConfig, PostgresSource};
+use iwdb::projection::{OnError, Projection, ProjectionHandle, ProjectionOptions, Rules};
+use iwdb::{CheckpointOptions, FsyncPolicy, MarkName, QueryConfig, Store, StoreOptions, WalRetention};
 use iwdb_query::{Bounds, LimitConfig};
 use serde::Deserialize;
 
@@ -56,7 +87,7 @@ pub enum ConfigError {
 }
 
 /// The server's configuration (see the module docs for the file).
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// The store's data directory, created if missing.
@@ -69,6 +100,70 @@ pub struct Config {
     pub server: ServerSection,
     #[serde(default)]
     pub limits: LimitsSection,
+    /// `[[projection]]` sections (ADR 0032).
+    #[serde(default, rename = "projection")]
+    pub projections: Vec<ProjectionSection>,
+}
+
+/// A projection the server runs (ADR 0032).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectionSection {
+    /// The name of its mark, unique in its namespace.
+    pub name: String,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+    pub source: SourceSection,
+    #[serde(default = "default_batch")]
+    pub batch: usize,
+    #[serde(default = "default_poll_ms")]
+    pub poll_ms: u64,
+    #[serde(default)]
+    pub on_error: OnErrorSection,
+    /// The mapping: `[[projection.rule]]`.
+    #[serde(default, rename = "rule")]
+    pub rules: Rules,
+}
+
+/// Where a projection reads.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum SourceSection {
+    Postgres {
+        /// The connection string, or `url_env`: the environment variable
+        /// that holds it (so a password needn't be in the file).
+        url: Option<String>,
+        url_env: Option<String>,
+        table: String,
+        position: String,
+        columns: Option<Vec<String>>,
+        #[serde(default = "default_gap_timeout_ms")]
+        gap_timeout_ms: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnErrorSection {
+    #[default]
+    Stop,
+    Skip,
+}
+
+fn default_namespace() -> String {
+    iwdb::NAMESPACE.to_owned()
+}
+
+fn default_batch() -> usize {
+    ProjectionOptions::default().batch
+}
+
+fn default_poll_ms() -> u64 {
+    ProjectionOptions::default().poll.as_millis() as u64
+}
+
+fn default_gap_timeout_ms() -> u64 {
+    5000
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -78,11 +173,23 @@ pub struct StoreSection {
     pub group_max_delay_ms: u64,
     pub group_max_batch: u32,
     pub checkpoint_on_shutdown: bool,
+    /// WAL retention for the change stream (ADR 0031): the last this many
+    /// commits ...
+    pub retain_records: u64,
+    /// ... and commits younger than this many seconds (0: none).
+    pub retain_age_secs: u64,
 }
 
 impl Default for StoreSection {
     fn default() -> Self {
-        StoreSection { fsync: Fsync::Always, group_max_delay_ms: 10, group_max_batch: 64, checkpoint_on_shutdown: true }
+        StoreSection {
+            fsync: Fsync::Always,
+            group_max_delay_ms: 10,
+            group_max_batch: 64,
+            checkpoint_on_shutdown: true,
+            retain_records: 0,
+            retain_age_secs: 0,
+        }
     }
 }
 
@@ -169,11 +276,26 @@ impl Config {
         if config.server.max_message_bytes < 1024 {
             return Err("[server] max_message_bytes must be at least 1024".into());
         }
+        let mut names = std::collections::BTreeSet::new();
+        for p in &config.projections {
+            let at = format!("[[projection]] {:?}", p.name);
+            MarkName::new(p.name.as_str()).map_err(|e| format!("{}: {}", at, e))?;
+            if !names.insert((p.namespace.as_str(), p.name.as_str())) {
+                return Err(format!("{}: the name is used twice in namespace {:?}", at, p.namespace));
+            }
+            if p.batch == 0 {
+                return Err(format!("{}: batch must be at least 1", at));
+            }
+            let SourceSection::Postgres { url, url_env, .. } = &p.source;
+            if url.is_some() == url_env.is_some() {
+                return Err(format!("{}: the source needs one of url and url_env", at));
+            }
+        }
         Ok(config)
     }
 
-    /// The store's options: the defaults, with the fsync policy and
-    /// checkpoint on shutdown from the file.
+    /// The store's options: the defaults, with the fsync policy, checkpoint
+    /// on shutdown and WAL retention from the file.
     pub fn store_options(&self) -> StoreOptions {
         let mut options = StoreOptions::default();
         options.wal.fsync = match self.store.fsync {
@@ -185,6 +307,10 @@ impl Config {
             Fsync::Off => FsyncPolicy::Off,
         };
         options.checkpoint = CheckpointOptions { on_close: self.store.checkpoint_on_shutdown, ..options.checkpoint };
+        options.retention = WalRetention {
+            records: self.store.retain_records,
+            age: (self.store.retain_age_secs > 0).then(|| Duration::from_secs(self.store.retain_age_secs)),
+        };
         options
     }
 
@@ -208,6 +334,66 @@ impl Config {
 
     pub fn drain_timeout(&self) -> Duration {
         Duration::from_secs(self.server.drain_timeout_secs)
+    }
+
+    /// The projections of the file, ready to run: a source each (its URL
+    /// read from the environment now, for `url_env`) and its rules, with
+    /// the namespace to run in.
+    pub fn projections(&self) -> Result<Vec<(String, Projection)>, String> {
+        let mut out = Vec::new();
+        for p in &self.projections {
+            let at = format!("[[projection]] {:?}", p.name);
+            let SourceSection::Postgres { url, url_env, table, position, columns, gap_timeout_ms } = &p.source;
+            let url = match (url, url_env) {
+                (Some(url), _) => url.clone(),
+                (None, Some(var)) => {
+                    std::env::var(var).map_err(|_| format!("{}: the environment variable {} is not set", at, var))?
+                }
+                (None, None) => return Err(format!("{}: the source needs one of url and url_env", at)),
+            };
+            let config = PostgresConfig {
+                url,
+                table: table.clone(),
+                position: position.clone(),
+                columns: columns.clone(),
+                gap_timeout: Duration::from_millis(*gap_timeout_ms),
+            };
+            let source = PostgresSource::new(config).map_err(|e| format!("{}: {}", at, e))?;
+            let options = ProjectionOptions {
+                batch: p.batch,
+                poll: Duration::from_millis(p.poll_ms),
+                on_error: match p.on_error {
+                    OnErrorSection::Stop => OnError::Stop,
+                    OnErrorSection::Skip => OnError::Skip,
+                },
+                ..ProjectionOptions::default()
+            };
+            let name = MarkName::new(p.name.as_str()).map_err(|e| format!("{}: {}", at, e))?;
+            out.push((p.namespace.clone(), Projection::new(name, source, p.rules.clone(), options)));
+        }
+        Ok(out)
+    }
+
+    /// Start the file's projections on `store` (each on a thread of its
+    /// own; closing the store stops them). Fails, starting none, if one
+    /// can't be made or its namespace doesn't exist.
+    pub fn start_projections<F>(&self, store: &Store<F>) -> Result<Vec<ProjectionHandle>, String>
+    where
+        F: iwdb::LogFs + Clone + Send + Sync + 'static,
+        F::File: Send,
+    {
+        let projections = self.projections()?;
+        for (namespace, p) in &projections {
+            if store.namespace(namespace).is_err() {
+                return Err(format!("[[projection]] {:?}: there is no namespace {:?}", p.name().as_str(), namespace));
+            }
+        }
+        let mut handles = Vec::new();
+        for (namespace, p) in projections {
+            let name = p.name().as_str().to_owned();
+            handles.push(store.project(&namespace, p).map_err(|e| format!("[[projection]] {:?}: {}", name, e))?);
+        }
+        Ok(handles)
     }
 }
 
@@ -239,6 +425,15 @@ mod tests {
             .map(|l| l.trim_start_matches("//!").trim_start().to_owned() + "\n")
             .collect();
         let config = Config::parse(&example).unwrap();
+        // The projection example, after the first block
+        let second: String = doc
+            .lines()
+            .skip_while(|l| !l.starts_with("//! [[projection]]"))
+            .take_while(|l| !l.starts_with("//! ```"))
+            .map(|l| l.trim_start_matches("//!").trim_start().to_owned() + "\n")
+            .collect();
+        let projections = Config::parse(&format!("data_dir = \"d\"\n{}", second)).unwrap().projections;
+        assert_eq!((projections.len(), projections[0].rules.0.len(), projections[0].poll_ms), (1, 1, 500));
         let minimal = Config::parse("data_dir = \"/var/lib/iwdb\"").unwrap();
         // The example shows the defaults
         assert_eq!((&config.store, &config.server), (&minimal.store, &minimal.server));
@@ -267,6 +462,40 @@ mod tests {
         let options = config.store_options();
         assert_matches!(options.wal.fsync, FsyncPolicy::Group { max_batch: 64, .. });
         assert!(!options.checkpoint.on_close);
+        let config = Config::parse("data_dir = \"d\"\n[store]\nretain_records = 500\nretain_age_secs = 3600").unwrap();
+        let retention = WalRetention { records: 500, age: Some(Duration::from_secs(3600)) };
+        assert_eq!(config.store_options().retention, retention);
+    }
+
+    #[test]
+    fn projections_are_checked() {
+        let base = "data_dir = \"d\"\n";
+        let section = |extra: &str| {
+            format!(
+                "{}[[projection]]\nname = \"p\"\n{}\n[projection.source]\nkind = \"postgres\"\nurl = \"host=x\"\ntable = \"t\"\nposition = \"id\"\n",
+                base, extra
+            )
+        };
+        let config = Config::parse(&section("")).unwrap();
+        let p = &config.projections[0];
+        assert_eq!((p.namespace.as_str(), p.batch, p.on_error), ("default", 100, OnErrorSection::Stop));
+        assert!(p.rules.0.is_empty());
+        assert_eq!(config.projections().unwrap()[0].1.name().as_str(), "p");
+        for (text, why) in [
+            (section("batch = 0"), "batch"),
+            (section("on_error = \"retry\""), "retry"),
+            (section("color = 1"), "color"),
+            (format!("{}{}", section(""), &section("")[base.len()..]), "twice"),
+            (section("").replace("url = \"host=x\"\n", ""), "url_env"),
+            (section("").replace("kind = \"postgres\"", "kind = \"kafka\""), "kafka"),
+            (section("").replace("name = \"p\"", "name = \"\""), "mark name"),
+        ] {
+            let e = Config::parse(&text).unwrap_err();
+            assert!(e.contains(why), "{}: {}", why, e);
+        }
+        let from_env = section("").replace("url = \"host=x\"", "url_env = \"IWDB_TEST_UNSET_VARIABLE\"");
+        let e = Config::parse(&from_env).unwrap().projections().err().unwrap();
+        assert!(e.contains("IWDB_TEST_UNSET_VARIABLE"), "{}", e);
     }
 
     #[test]

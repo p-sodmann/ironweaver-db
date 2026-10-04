@@ -133,6 +133,22 @@ pub enum Error {
     /// A saved idempotency key table (`iwdb.keys`) that is invalid.
     #[error("invalid idempotency key table: {reason}")]
     InvalidKeyTable { reason: String },
+
+    // Marks (step 13, ADR 0032)
+    /// An invalid mark name, or a position that doesn't move the mark
+    /// forward or is above [`MAX_POSITION`](crate::mark::MAX_POSITION).
+    #[error("invalid mark: {reason}")]
+    InvalidMark { reason: String },
+    /// A commit expected a mark at another position (`None`: not set): another
+    /// writer moved it. Nothing changed.
+    #[error("mark {name} is at {found:?}, not at {expected:?}")]
+    MarkConflict { name: crate::MarkName, expected: Option<u64>, found: Option<u64> },
+    /// A commit would add a mark beyond [`MAX_MARKS`](crate::mark::MAX_MARKS).
+    #[error("mark {name} would be one more than the {} a namespace holds", crate::mark::MAX_MARKS)]
+    TooManyMarks { name: crate::MarkName },
+    /// A saved mark table (`iwdb.marks`) that is invalid.
+    #[error("invalid mark table: {reason}")]
+    InvalidMarkTable { reason: String },
 }
 
 /// Which part of a saved graph an error is about.

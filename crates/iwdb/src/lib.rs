@@ -23,7 +23,8 @@
 //! method uses: bounded reads, pattern matching, analytics, the catalog
 //! and namespaces, with stable error codes.
 //!
-//! Operations: [`Store::backup`] (an online backup), continuous WAL
+//! Operations: [`Store::import_namespace`] and [`Ns::export`] (bulk
+//! import and export, [`import`]), [`Store::backup`] (an online backup), continuous WAL
 //! archiving ([`StoreOptions::archive`]), [`restore`] (point-in-time
 //! recovery from a backup and/or an archive), [`verify`] (every file and
 //! invariant, without writing) and [`status`].
@@ -37,8 +38,10 @@
 //! `documentation/formats/data-dir.md`.
 
 mod embedded;
+pub mod import;
 mod ops;
 mod options;
+pub mod projection;
 mod request;
 mod store;
 
@@ -51,15 +54,19 @@ pub use iwdb_engine::catalog::{
     AttrPath, CatalogError, Constraint, ConstraintKind, IndexDef, Label, NamespaceCatalog, NamespaceName,
 };
 pub use iwdb_engine::{
-    CatalogChange, CommitResult, CommitTime, EdgeKey, IdempotencyKey, KeyTable, Mutation, Namespace, Target,
+    CatalogChange, CommitResult, CommitTime, EdgeKey, IdempotencyKey, KeyTable, MarkName, MarkUpdate, Mutation,
+    Namespace, Target,
 };
-pub use iwdb_query::{CommitOptions, Edge, IndexSize, IndexState, IndexStatus, NamespaceStatus, Node, ProjectionSpec};
+pub use iwdb_query::{
+    CommitOptions, Edge, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus, Node, ProjectionSpec,
+};
 pub use iwdb_storage::io::{LogFs, StdFs};
 pub use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 pub use iwdb_storage::{
-    BackupReport, CheckpointOutcome, CutTail, DirStatus, Error, Finding, FsyncPolicy, HistoryId, Kind, LockStats,
-    NamespaceBackup, NamespaceFiles, NamespaceRestore, NamespaceVerify, RecoveryReport, RestoreReport, RestoreSources,
-    RestoreTarget, SkippedCheckpoint, StoreRecovery, VerifyReport, WalOptions,
+    BackupReport, BatchLimits, ChangeBatch, ChangeRecord, CheckpointOutcome, CutTail, DirStatus, Error, Finding,
+    FsyncPolicy, HistoryId, Kind, LockStats, NamespaceBackup, NamespaceFiles, NamespaceRestore, NamespaceVerify,
+    RecoveryReport, RestoreReport, RestoreSources, RestoreTarget, SkippedCheckpoint, StoreRecovery, VerifyReport,
+    WalOptions, WalRetention,
 };
 pub use ops::{Status, restore, restore_namespaces, restore_with, restore_with_only, status, verify};
 pub use options::{CheckpointOptions, StoreOptions};

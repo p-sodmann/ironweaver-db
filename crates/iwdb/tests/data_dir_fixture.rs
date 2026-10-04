@@ -15,6 +15,10 @@
 //! - `tests/fixtures/data-dir-v4/`: layout 4, written by step 9: three
 //!   namespaces (one of them with keyed commits before and after its
 //!   checkpoint, an index and constraints), and one that was dropped.
+//!   Opening a copy upgrades it to layout 5 (a new marker);
+//! - `tests/fixtures/data-dir-v5/`: layout 5, written by step 13 (WAL
+//!   format 4): the same, and marks moved by commits before and after the
+//!   checkpoint of `people` (in its graph meta and in WAL records).
 //!
 //! A new layout version gets a new fixture next to these, written by:
 //!
@@ -40,9 +44,9 @@ fn fixture(version: u32) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/data-dir-v{}", version))
 }
 
-/// The expected state as text: the canonical graph, the catalog, the seq
-/// and (from layout 3, when it has entries) the idempotency key table,
-/// with commit times.
+/// The expected state as text: the canonical graph, the catalog, the seq,
+/// (from layout 3, when it has entries) the idempotency key table, with
+/// commit times, and (from layout 5, when it has some) the marks.
 fn describe(ns: &Namespace) -> String {
     let mut out = String::new();
     for line in iwdb_engine::testutil::canonical(ns.graph()) {
@@ -52,6 +56,9 @@ fn describe(ns: &Namespace) -> String {
     out.push_str(&format!("catalog {:?}\nseq {}\n", ns.catalog(), ns.seq()));
     for entry in ns.keys().entries() {
         out.push_str(&format!("key {:?}\n", entry));
+    }
+    for (name, entry) in ns.marks().iter() {
+        out.push_str(&format!("mark {} {:?}\n", name, entry));
     }
     out
 }
@@ -69,12 +76,28 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
+/// Copy the store of the fixture of layout `version` to `to`. Git doesn't
+/// keep empty directories, so a namespace's `checkpoints/` or `wal/` that
+/// is empty (`scratch` has no checkpoint) is made again in the copy.
+fn copy_fixture(version: u32, to: &Path) {
+    copy_dir(&fixture(version).join("store"), to);
+    if let Ok(entries) = fs::read_dir(to.join("ns")) {
+        for ns in entries {
+            let ns = ns.unwrap().path();
+            fs::create_dir_all(ns.join("checkpoints")).unwrap();
+            fs::create_dir_all(ns.join("wal")).unwrap();
+        }
+    }
+}
+
 /// Writes the fixture of the current layout, if it doesn't exist yet.
 ///
 /// Layout 4: the default namespace as in layout 3, then `people` (a
 /// unique constraint, an index, keyed commits before and after its
 /// checkpoint), `scratch` (commits, no checkpoint) and `gone` (created
-/// with a key, filled, dropped with a key). `expected.txt` is the default
+/// with a key, filled, dropped with a key). Layout 5: commits of `people`
+/// move the marks `feed` and `audit`, before and after its checkpoint,
+/// with mutations and alone. `expected.txt` is the default
 /// namespace's description and `history`, then a `namespace <name> <id>`
 /// line and the description of each other live namespace, and a `dropped
 /// <name> <id>` line.
@@ -82,7 +105,7 @@ fn copy_dir(from: &Path, to: &Path) {
 #[ignore = "writes the fixture"]
 fn generate_fixture() {
     use iwdb::{AttrPath, CatalogChange, CommitOptions, Constraint, ConstraintKind, IdempotencyKey, IndexDef, Label};
-    use iwdb::{Mutation, Value};
+    use iwdb::{MarkName, MarkUpdate, Mutation, Value};
     let dir = fixture(LAYOUT_VERSION);
     if dir.exists() {
         return;
@@ -125,10 +148,17 @@ fn generate_fixture() {
     for i in 0..6 {
         people.commit_with(&[person(i)], &keyed(&format!("person-{}", i))).unwrap();
     }
+    let mark = |name: &str, expected, position| MarkUpdate { name: MarkName::new(name).unwrap(), expected, position };
+    let plain = CommitOptions::default();
+    people.commit_marked(&[person(20)], &mark("feed", None, 10), &plain).unwrap();
+    people.commit_marked(&[], &mark("feed", Some(10), 12), &plain).unwrap();
+    people.commit_marked(&[person(21)], &mark("audit", None, 1), &keyed("audited-1")).unwrap();
     people.checkpoint().unwrap();
     for i in 6..9 {
         people.commit_with(&[person(i)], &keyed(&format!("person-{}", i))).unwrap();
     }
+    people.commit_marked(&[person(22), person(23)], &mark("feed", Some(12), 15), &plain).unwrap();
+    people.commit_marked(&[], &mark("audit", Some(1), 2), &plain).unwrap();
     let scratch = store.namespace("scratch").unwrap();
     for i in 0..5 {
         scratch.commit(&[person(100 + i)]).unwrap();
@@ -156,7 +186,7 @@ fn generate_fixture() {
 /// Open a copy of the fixture of layout `version`; check its state.
 fn open_fixture(version: u32) -> (tempfile::TempDir, Store, String) {
     let dir = tempfile::tempdir().unwrap();
-    copy_dir(&fixture(version).join("store"), dir.path());
+    copy_fixture(version, dir.path());
     let before = snapshot(&fixture(version));
     let store = Store::open(dir.path(), options(2)).unwrap();
     let expected = fs::read_to_string(fixture(version).join("expected.txt")).unwrap();
@@ -225,10 +255,10 @@ fn the_v3_fixture_opens_recovers_its_state_keys_and_history_and_is_upgraded() {
 #[test]
 fn a_failed_marker_upgrade_fails_the_open_and_the_next_one_finishes_it() {
     use common::{Action, Call, Rule, TestFs, When};
-    for version in [1, 2, 3] {
+    for version in [1, 2, 3, 4] {
         for when in [When::Before, When::Midway, When::After] {
             let dir = tempfile::tempdir().unwrap();
-            copy_dir(&fixture(version).join("store"), dir.path());
+            copy_fixture(version, dir.path());
             let fs = TestFs::default();
             fs.add(Rule::new(Call::WriteAtomic, when, Action::Fail).path("IWDB"));
             let error = Store::open_with(fs, dir.path(), options(2)).unwrap_err();
@@ -241,7 +271,7 @@ fn a_failed_marker_upgrade_fails_the_open_and_the_next_one_finishes_it() {
             let text = fs::read_to_string(fixture(version).join("expected.txt")).unwrap();
             let (state, rest) = text.split_at(text.find("history ").unwrap_or(text.len()));
             assert_eq!(store.read(describe), state);
-            if let Some(history) = rest.trim().strip_prefix("history ") {
+            if let Some(history) = rest.lines().next().and_then(|l| l.strip_prefix("history ")) {
                 assert_eq!(store.history(), history.parse::<HistoryId>().unwrap());
             }
             drop(store);
@@ -251,15 +281,56 @@ fn a_failed_marker_upgrade_fails_the_open_and_the_next_one_finishes_it() {
 }
 
 /// The layout 4 fixture: every namespace comes back with its state and
-/// keys, the dropped one stays dropped, and its id isn't reused.
+/// keys, the dropped one stays dropped, and its id isn't reused. It is
+/// upgraded to layout 5, without marks.
 #[test]
-fn the_v4_fixture_opens_with_all_its_namespaces() {
-    let dir = tempfile::tempdir().unwrap();
-    copy_dir(&fixture(4).join("store"), dir.path());
-    let before = snapshot(&fixture(4));
+fn the_v4_fixture_opens_with_all_its_namespaces_and_is_upgraded() {
+    let (dir, store) = open_namespaces_fixture(4);
+    assert_eq!(store.recovery().upgraded_from, Some(4));
+    assert!(store.namespaces().iter().all(|n| store.namespace(n.name.as_str()).unwrap().marks().is_empty()));
+    let history = store.history();
+    drop(store);
+    let marker = read_marker(dir.path()).unwrap().unwrap();
+    assert_eq!((marker.version, marker.history), (LAYOUT_VERSION, Some(history)));
     let store = Store::open(dir.path(), options(2)).unwrap();
-    assert_eq!(snapshot(&fixture(4)), before, "the fixture itself is unchanged");
-    let expected = fs::read_to_string(fixture(4).join("expected.txt")).unwrap();
+    assert_eq!(store.recovery().upgraded_from, None);
+}
+
+/// The layout 5 fixture: as layout 4, and the marks of `people` come back
+/// from its checkpoint and its WAL, and still move compare-and-set.
+#[test]
+fn the_v5_fixture_opens_with_all_its_namespaces_and_marks() {
+    let (_dir, store) = open_namespaces_fixture(5);
+    assert_eq!(store.recovery().upgraded_from, None);
+    let people = store.namespace("people").unwrap();
+    let name = |n: &str| iwdb::MarkName::new(n).unwrap();
+    assert_eq!((people.mark(&name("feed")), people.mark(&name("audit"))), (Some(15), Some(2)));
+    // The checkpoint holds the first marks (`iwdb.marks`), the WAL moves them on
+    let checkpoints = fixture(5).join("store/ns/00000000000000000002/checkpoints");
+    let (seq, path) = iwdb_storage::checkpoint::list_checkpoints(&checkpoints).unwrap().pop().unwrap();
+    let people_name = iwdb::NamespaceName::new("people").unwrap();
+    let saved = iwdb_storage::checkpoint::load_checkpoint(&path, seq, &people_name).unwrap().meta.marks;
+    let at = |n: &str| saved.get(&name(n)).map(|e| e.position);
+    assert_eq!((at("feed"), at("audit")), (Some(12), Some(1)));
+    assert!(people.status().recovery.replayed >= 3);
+    let stale = iwdb::MarkUpdate { name: name("feed"), expected: Some(12), position: 16 };
+    let error = people.commit_marked(&[], &stale, &Default::default()).unwrap_err();
+    assert_matches!(error, iwdb::Error::Engine(iwdb_engine::Error::MarkConflict { found: Some(15), .. }));
+    let next = iwdb::MarkUpdate { expected: Some(15), ..stale };
+    people.commit_marked(&[], &next, &Default::default()).unwrap();
+    assert_eq!(people.mark(&name("feed")), Some(16));
+}
+
+/// Open a copy of the fixture of layout `version` (4 or later) and check
+/// every namespace against `expected.txt`, the dropped one, keys of
+/// namespace operations, and that ids aren't reused.
+fn open_namespaces_fixture(version: u32) -> (tempfile::TempDir, Store) {
+    let dir = tempfile::tempdir().unwrap();
+    copy_fixture(version, dir.path());
+    let before = snapshot(&fixture(version));
+    let store = Store::open(dir.path(), options(2)).unwrap();
+    assert_eq!(snapshot(&fixture(version)), before, "the fixture itself is unchanged");
+    let expected = fs::read_to_string(fixture(version).join("expected.txt")).unwrap();
     // Split into the default's part and one part per `namespace` line
     let mut parts: Vec<(String, String)> = Vec::new();
     let mut history = String::new();
@@ -307,5 +378,5 @@ fn the_v4_fixture_opens_with_all_its_namespaces() {
     // Ids aren't reused
     let next = store.create_namespace("fresh", None).unwrap();
     assert_eq!(next.event.id, 5);
-    assert_eq!(store.recovery().upgraded_from, None);
+    (dir, store)
 }

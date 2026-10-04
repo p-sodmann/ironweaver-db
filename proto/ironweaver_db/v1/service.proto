@@ -13,6 +13,7 @@ package ironweaver_db.v1;
 
 import "ironweaver_db/v1/analytics.proto";
 import "ironweaver_db/v1/catalog.proto";
+import "ironweaver_db/v1/changes.proto";
 import "ironweaver_db/v1/mutations.proto";
 import "ironweaver_db/v1/query.proto";
 
@@ -36,6 +37,10 @@ service DatabaseService {
   rpc Subgraph(SubgraphRequest) returns (stream SubgraphResponse);
   rpc MatchPattern(MatchPatternRequest) returns (stream MatchPatternResponse);
   rpc Analyze(AnalyzeRequest) returns (stream AnalyzeResponse);
+
+  // The change stream (changes.proto): one batch, or follow it.
+  rpc GetChanges(GetChangesRequest) returns (GetChangesResponse);
+  rpc Watch(WatchRequest) returns (stream WatchResponse);
 
   rpc GetCatalog(GetCatalogRequest) returns (GetCatalogResponse);
   rpc GetNamespaceStatus(GetNamespaceStatusRequest) returns (GetNamespaceStatusResponse);

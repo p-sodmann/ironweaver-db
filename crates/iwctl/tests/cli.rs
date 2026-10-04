@@ -201,3 +201,73 @@ fn usage_errors_and_other_failures() {
     assert_eq!(code(&out), 4);
     assert!(json(&out)["error"].as_str().unwrap().contains("not an Ironweaver DB data directory"));
 }
+
+#[test]
+fn import_and_export() {
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path().join("data");
+    store(&dir, 20, None);
+    let lgf = work.path().join("graph.lgf");
+    fs::write(&lgf, "@nodes\nlabel name\na \"Ann Lee\"\nb Bob\n@arcs\n\t\tweight\na b 2.5\n@attributes\ncaption x\n")
+        .unwrap();
+
+    let out = iwctl(&["import", p(&dir), "people", p(&lgf)]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    assert!(text.contains("imported namespace 'people' (id 2) from a lgf file: 2 nodes, 1 edges"), "{}", text);
+    assert!(text.contains("left out (a namespace has no place for them): @attributes 'caption'"), "{}", text);
+
+    // Exported as JSON by extension, and as binary; both import back
+    let json_file = work.path().join("people.json");
+    let out = iwctl(&["--json", "export", p(&dir), p(&json_file), "-n", "people"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let exported = &json(&out)["exported"];
+    assert_eq!(
+        (exported["format"].as_str(), exported["seq"].as_u64(), exported["nodes"].as_u64()),
+        (Some("json"), Some(1), Some(2))
+    );
+    assert_eq!(exported["bytes"].as_u64(), Some(fs::metadata(&json_file).unwrap().len()));
+    let bin_file = work.path().join("people.out");
+    assert_eq!(code(&iwctl(&["export", p(&dir), p(&bin_file), "-n", "people", "--format", "binary"])), 0);
+    assert!(fs::read(&bin_file).unwrap().starts_with(b"IRONWEAV"));
+    for (name, file) in [("from_json", &json_file), ("from_bin", &bin_file)] {
+        let out = iwctl(&["--json", "import", p(&dir), name, p(file)]);
+        assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(json(&out)["imported"]["edges"].as_u64(), Some(1));
+    }
+    // A merge into an existing namespace, default too
+    let out = iwctl(&["import", p(&dir), "default", p(&lgf), "--merge"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stdout(&out).contains("merged a lgf file into namespace 'default': 2 nodes, 1 edges in 2 commits"),
+        "{}",
+        stdout(&out)
+    );
+    let out = iwctl(&["--json", "import", p(&dir), "people", p(&lgf), "--merge"]);
+    assert_eq!(json(&out)["merged"]["commits"].as_u64(), Some(2));
+    assert_eq!(code(&iwctl(&["import", p(&dir), "nobody", p(&lgf), "--merge"])), 4);
+    assert_eq!(code(&iwctl(&["export", p(&dir), p(&bin_file), "--merge"])), 2);
+
+    // The default namespace exports too
+    let out = iwctl(&["export", p(&dir), p(&work.path().join("default.bin"))]);
+    assert!(stdout(&out).contains("(9 nodes, 1 edges)"), "{}", stdout(&out));
+
+    // Failures: an existing namespace, a bad file, usage errors
+    assert_eq!(code(&iwctl(&["import", p(&dir), "people", p(&lgf)])), 4);
+    let bad = work.path().join("bad.lgf");
+    fs::write(&bad, "@nodes\nlabel\na\n@arcs\nw\na b 1\n").unwrap();
+    let out = iwctl(&["import", p(&dir), "bad", p(&bad)]);
+    assert_eq!(code(&out), 4);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("line 6: no node 'b'"));
+    for args in [
+        vec!["import", p(&dir), "x"],
+        vec!["import", p(&dir), "x", p(&lgf), "--format", "csv"],
+        vec!["export", p(&dir), p(&bin_file), "--format", "lgf"],
+        vec!["status", p(&dir), "--format", "json"],
+    ] {
+        assert_eq!(code(&iwctl(&args)), 2, "{:?}", args);
+    }
+    let out = iwctl(&["--json", "namespaces", p(&dir)]);
+    assert_eq!(code(&out), 0);
+    assert!(iwdb::verify(&dir).unwrap().is_ok());
+}

@@ -143,6 +143,33 @@ The server ([api/grpc.md](api/grpc.md)) gives the guarantees of the store it ser
 - **Errors carry their code** (`iwdb-code`) next to the gRPC status of [errors.md](api/errors.md).
 - A bug in a commit's apply path aborts the whole server (all namespaces), as a crash: run it under a supervisor ([ADR 0028](adr/0028-internal-apply-errors-abort.md)).
 
+## The change stream (step 13)
+
+The change stream ([api/changes.md](api/changes.md), [ADR 0031](adr/0031-change-stream.md)) returns a namespace's commits from a seq on, as logged:
+
+- **Only durable commits**: up to the lower of the applied and the synced seq (the applied seq under `off`). So no crash takes back a commit it returned, and a seq never comes back with other content (`an_os_crash_under_group_commit_takes_back_no_streamed_commit` in `crates/iwdb/tests/changes.rs` cuts the WAL to its last fsync under `group` and checks it). Under `group` it lags behind acknowledged commits by up to `2 * max_delay`.
+- **In order, without gaps**: a consumer that resumes from the seq after the last one it processed sees every commit once, across restarts (`a_consumer_resumes_after_restarts_without_gaps_or_duplicates`).
+- **As long as the WAL holds it**: older seqs fail with `not_retained`. Retention (`WalRetention`) keeps segments that checkpoints no longer need. Damage in the WAL it reads is `corrupt`, never skipped.
+
+## Projection mode (step 13)
+
+A projection ([api/projections.md](api/projections.md), [ADR 0032](adr/0032-projection-mode.md)) moves its mark in the commit that applies its events (compare-and-set), and resumes from it:
+
+- **Exactly once across crashes**: a failure at each point of the commit path (the WAL write before, halfway and after, the fsync before and after) stops it with the outcome unknown; after a restart it finishes, and every event is applied once, checked with a mapping that isn't idempotent (`a_projection_survives_crashes_without_applying_an_event_twice` in `crates/iwdb/tests/projection.rs`; checked to fail when the mark is committed apart from the events). An OS crash under `group` loses events and their marks together (`an_os_crash_under_group_commit_loses_events_and_their_marks_together`).
+- **One writer per mark**: a commit with a stale mark fails with `conflict` and changes nothing.
+- **Postgres holes**: positions are read as dense; a hole is waited for up to `gap_timeout`, then skipped. An event whose transaction commits later than that is missed: set the timeout above your longest writing transaction.
+
+## Import and export (step 13)
+
+An import ([api/import-export.md](api/import-export.md), [ADR 0033](adr/0033-bulk-import-export.md)) creates a namespace from a file as one checkpoint at seq 1, without WAL records:
+
+- **All or nothing across crashes**: the namespace is there with all the file's data, or not at all. The create event in the namespace log is the commit point; a checkpoint staged before it is finished by the next open (`every_file_operation_of_an_import_can_fail` in `crates/iwdb/tests/import.rs` fails every file operation in turn, reopens and verifies; checked to fail when recovery doesn't finish the staged import).
+- **Checked before anything is written**: the graph is checked like a recovered namespace; a file that is invalid, or breaks an invariant, creates nothing (`invalid_argument`).
+- **Not in the WAL, but in the archive**: the change stream of an imported namespace starts at seq 2 (seq 1 is `not_retained`). A store with a WAL archive copies the import's checkpoint there before the import returns (archive format 3), and on every open if it is missing, so the namespace restores from the archive alone, and from a backup taken after the import (`an_imported_namespace_restores_from_a_backup_and_from_the_archive_alone`, `an_open_archives_the_checkpoint_of_an_import`; both checked to fail without the copy). Without an archive, take a backup after an import.
+- **Merges** ([api/import-export.md](api/import-export.md)) are ordinary commits, in batches: durable, streamed and archived like any; a failure leaves the batches before it committed.
+- **Round trip**: an export imports back to the same graph; re-exported, to the same bytes (`an_import_creates_its_namespace_from_one_checkpoint_and_an_export_imports_back`). Versions restart at 1; constraints, idempotency keys and marks are not exported.
+- An export reads the namespace at one seq; commits to the namespace wait while it writes.
+
 ## Platforms (step 7)
 
 Linux and macOS. **Windows is not supported yet**: there the directory fsync is a no-op, so after an OS crash a rotation, a checkpoint, a backup or a restore can lose a directory entry, and none of this is tested on Windows. No Windows wheel is shipped (ADR 0013).

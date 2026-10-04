@@ -82,6 +82,20 @@ impl PyNamespace {
         })
     }
 
+    /// A batch of the change stream (ADR 0031); see `Store.changes`.
+    #[pyo3(signature = (from_seq = 0, *, wait = false, max_results = None, history = None, timeout = None))]
+    fn changes(
+        &self,
+        py: Python<'_>,
+        from_seq: u64,
+        wait: bool,
+        max_results: Option<usize>,
+        history: Option<&str>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.store.get().changes_in(py, &self.name, from_seq, wait, max_results, history, timeout)
+    }
+
     #[pyo3(signature = (*, min_seq = None, timeout = None))]
     fn catalog(&self, py: Python<'_>, min_seq: Option<u64>, timeout: Option<f64>) -> PyResult<Py<PyAny>> {
         self.store.get().catalog_in(py, &self.name, min_seq, timeout)
@@ -145,5 +159,22 @@ impl PyNamespace {
 
     fn checkpoint(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.store.get().checkpoint_in(py, &self.name)
+    }
+
+    /// Merge the graph file `path` (core JSON or binary, or LGF; `format`
+    /// as for `Store.import_namespace`) into this namespace through
+    /// commits: nodes upserted, edges upserted by their ends and type, in
+    /// batches of up to 10 000 mutations. A failure leaves the batches
+    /// before it committed; running it again converges.
+    #[pyo3(signature = (path, *, format = None))]
+    fn import_file(&self, py: Python<'_>, path: std::path::PathBuf, format: Option<&str>) -> PyResult<Py<PyAny>> {
+        self.store.get().merge_in(py, &self.name, path, format)
+    }
+
+    /// Write the namespace's graph to `path` as a core file (see
+    /// `Store.export`).
+    #[pyo3(signature = (path, *, format = None))]
+    fn export(&self, py: Python<'_>, path: std::path::PathBuf, format: Option<&str>) -> PyResult<Py<PyAny>> {
+        self.store.get().export_in(py, &self.name, path, format)
     }
 }

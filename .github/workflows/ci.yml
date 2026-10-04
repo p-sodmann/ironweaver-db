@@ -35,6 +35,18 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Start PGlite for the Postgres tests (step 13, ADR 0032)
+        # Postgres in WebAssembly over the wire protocol: no service
+        # container, the same on Linux and macOS
+        run: |
+          scripts/pglite.sh > "$RUNNER_TEMP/pglite.log" 2>&1 &
+          for i in $(seq 1 120); do grep -q listening "$RUNNER_TEMP/pglite.log" && break; sleep 1; done
+          cat "$RUNNER_TEMP/pglite.log"
+          grep -q listening "$RUNNER_TEMP/pglite.log"
+          echo "IWDB_TEST_POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:55432/postgres?sslmode=disable" >> "$GITHUB_ENV"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked
       - run: cargo test --workspace --all-features --locked

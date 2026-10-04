@@ -1,15 +1,16 @@
-//! [`Namespace`]: a graph with its catalog and commit position, changed
-//! only through the commit pipeline.
+//! [`Namespace`]: a graph with its catalog, commit position, idempotency
+//! keys and marks, changed only through the commit pipeline.
 
 use ironweaver_core::{GraphError, NodeIx, Op};
 
 use crate::catalog::{AttrPath, ConstraintKind, NamespaceCatalog, NamespaceName};
 use crate::idempotency::{IdempotencyKey, KeyEntry, KeyTable, Keyed, fingerprint_catalog, fingerprint_data};
+use crate::mark::{Mark, MarkName, MarkTable, MarkUpdate};
 use crate::mutation::{CatalogChange, Change, CommitRecord, CommitResult, Mutation};
 use crate::{CommitTime, DbGraph, DbRecord, Error, codec, resolve};
 
 /// One namespace in memory: its graph, its catalog, the `seq` of its last
-/// commit and the table of its recent idempotency keys.
+/// commit, the table of its recent idempotency keys and its marks.
 ///
 /// Every change goes through the commit pipeline, and the graph is only
 /// ever lent out immutably ([`graph`](Self::graph)). A commit is
@@ -29,6 +30,9 @@ use crate::{CommitTime, DbGraph, DbRecord, Error, codec, resolve};
 /// the original result ([`Prepare::Duplicate`]) and nothing is applied; a
 /// known key with another request is [`Error::IdempotencyKeyReused`].
 /// Applying a keyed record adds it to the table, so replay rebuilds it.
+/// With a mark ([`prepare_marked`](Self::prepare_marked)), the commit
+/// moves the mark too, compare-and-set ([`MarkTable::check`]), and
+/// applying the record sets it.
 ///
 /// The write-ahead log goes between the two: the record is logged after it
 /// is validated and before it is applied. A commit that fails to prepare changes nothing and uses
@@ -61,6 +65,7 @@ pub struct Namespace {
     graph: DbGraph,
     seq: u64,
     keys: KeyTable,
+    marks: MarkTable,
     poisoned: bool,
 }
 
@@ -122,6 +127,12 @@ impl Prepared {
         &self.result
     }
 
+    /// Carry a mark: the record logs it, and applying it sets the mark.
+    fn with_mark(mut self, update: &MarkUpdate) -> Self {
+        self.record.mark = Some(Mark { name: update.name.clone(), position: update.position });
+        self
+    }
+
     /// Carry an idempotency key: the record logs it with the result.
     fn with_key(mut self, key: IdempotencyKey, fingerprint: u32) -> Self {
         let result = &self.result;
@@ -140,6 +151,7 @@ impl Namespace {
             graph: DbGraph::new(),
             seq: 0,
             keys: KeyTable::new(),
+            marks: MarkTable::new(),
             poisoned: false,
         }
     }
@@ -160,18 +172,20 @@ impl Namespace {
             graph,
             seq: meta.seq,
             keys: meta.keys,
+            marks: meta.marks,
             poisoned: false,
         }
     }
 
     /// The graph meta a checkpoint of this namespace is saved with: its
-    /// name, catalog, seq and idempotency key table.
+    /// name, catalog, seq, idempotency key table and marks.
     pub fn graph_meta(&self) -> codec::GraphMeta {
         codec::GraphMeta {
             namespace: self.name.clone(),
             catalog: self.catalog.clone(),
             seq: self.seq,
             keys: self.keys.clone(),
+            marks: self.marks.clone(),
         }
     }
 
@@ -197,6 +211,16 @@ impl Namespace {
     /// The recent keyed commits.
     pub fn keys(&self) -> &KeyTable {
         &self.keys
+    }
+
+    /// The marks.
+    pub fn marks(&self) -> &MarkTable {
+        &self.marks
+    }
+
+    /// The position of the mark called `name`, if it is set.
+    pub fn mark(&self, name: &MarkName) -> Option<u64> {
+        self.marks.get(name).map(|e| e.position)
     }
 
     /// The handles of every node, for [`scan_index_keys`](Self::scan_index_keys)
@@ -256,12 +280,43 @@ impl Namespace {
     /// The lookup comes first, so a duplicate is found even if the request
     /// would fail validation now. O(request) for the fingerprint.
     pub fn prepare_keyed(&self, mutations: &[Mutation], key: Option<&IdempotencyKey>) -> Result<Prepare, Error> {
-        let Some(key) = key else { return Ok(Prepare::New(self.prepare(mutations)?)) };
-        let fingerprint = fingerprint_data(mutations)?;
-        if let Some(result) = self.duplicate(key, fingerprint)? {
-            return Ok(Prepare::Duplicate(result));
-        }
-        Ok(Prepare::New(self.prepare(mutations)?.with_key(key.clone(), fingerprint)))
+        self.prepare_marked(mutations, key, None)
+    }
+
+    /// [`prepare_keyed`](Self::prepare_keyed) that also moves a mark
+    /// (ADR 0032): the mark must be at `mark.expected`
+    /// ([`Error::MarkConflict`]), and the record carries its new position.
+    /// With a mark, `mutations` may be empty: the commit then only moves
+    /// the mark. A duplicate key is found before the mark is checked, and
+    /// its fingerprint covers the mutations, not the mark.
+    pub fn prepare_marked(
+        &self,
+        mutations: &[Mutation],
+        key: Option<&IdempotencyKey>,
+        mark: Option<&MarkUpdate>,
+    ) -> Result<Prepare, Error> {
+        let keyed = match key {
+            Some(key) => {
+                let fingerprint = fingerprint_data(mutations)?;
+                if let Some(result) = self.duplicate(key, fingerprint)? {
+                    return Ok(Prepare::Duplicate(result));
+                }
+                Some((key, fingerprint))
+            }
+            None => None,
+        };
+        let prepared = match mark {
+            Some(update) => {
+                self.check_usable()?;
+                self.marks.check(update)?;
+                self.prepare_data(mutations, true)?.with_mark(update)
+            }
+            None => self.prepare(mutations)?,
+        };
+        Ok(Prepare::New(match keyed {
+            Some((key, fingerprint)) => prepared.with_key(key.clone(), fingerprint),
+            None => prepared,
+        }))
     }
 
     /// [`prepare_catalog`](Self::prepare_catalog) with an idempotency key,
@@ -291,8 +346,12 @@ impl Namespace {
     /// O(size of the transaction and the entities it touches), plus one
     /// index lookup per unique constraint and written node.
     pub fn prepare(&self, mutations: &[Mutation]) -> Result<Prepared, Error> {
+        self.prepare_data(mutations, false)
+    }
+
+    fn prepare_data(&self, mutations: &[Mutation], may_be_empty: bool) -> Result<Prepared, Error> {
         self.check_usable()?;
-        if mutations.is_empty() {
+        if mutations.is_empty() && !may_be_empty {
             return Err(Error::EmptyTransaction);
         }
         let seq = self.next_seq()?;
@@ -427,6 +486,9 @@ impl Namespace {
         if let Some(Keyed { key, fingerprint, edge_ids, versions }) = record.keyed {
             let result = CommitResult { seq: record.seq, edge_ids, versions, time, deduplicated: false };
             self.keys.insert(KeyEntry { key, fingerprint, result });
+        }
+        if let Some(mark) = record.mark {
+            self.marks.set(mark, record.seq);
         }
         Ok(())
     }

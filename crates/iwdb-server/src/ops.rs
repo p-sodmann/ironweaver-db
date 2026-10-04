@@ -8,9 +8,11 @@
 //! [`CHUNK_BYTES`] at most (one item may be bigger), and only the last has
 //! `meta`.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use iwdb_query::{Database, Error};
+use iwdb_query::{ChangesRequest, Code, Database, Error};
+use tokio::sync::{mpsc, watch};
 
 use crate::convert::*;
 use crate::proto as pb;
@@ -296,6 +298,72 @@ pub(crate) async fn drop_namespace<D: Database>(
     let key = idempotency_key_from_pb(r.idempotency_key)?;
     let result = db.drop_namespace(&r.name, key).await?;
     Ok(pb::DropNamespaceResponse { event: Some(event_to_pb(&result.event)), deduplicated: result.deduplicated })
+}
+
+pub(crate) async fn get_changes<D: Database>(
+    db: &D,
+    r: pb::GetChangesRequest,
+    deadline: Option<Duration>,
+) -> Result<pb::GetChangesResponse, Error> {
+    let options = options_from_pb(r.options, deadline)?;
+    let request = ChangesRequest { from_seq: r.from_seq, wait: r.wait };
+    changes_to_pb(&db.changes(&r.namespace, request, options).await?)
+}
+
+/// Batches of a followed change stream ([`follow`]): it ends after an
+/// error.
+pub(crate) type Follow = mpsc::Receiver<Result<pb::GetChangesResponse, Error>>;
+
+/// Follow the change stream (ADR 0031), for `Watch` and the SSE route: a
+/// first batch without waiting (so that an error, such as `not_retained`,
+/// comes before any event), then `GetChanges` with `wait` in a loop, each
+/// from the `next_seq` of the batch before, with `r.options` (whose
+/// timeout is then how long a round waits; a round that finds nothing
+/// yields an empty batch, a heartbeat). A waiting round that times out
+/// (it had no time left to read) is repeated.
+///
+/// Runs in a task of its own until the receiver is dropped (the client
+/// went away), an error (the last item), or `stopping` turns true (the
+/// server is shutting down: `unavailable`).
+pub(crate) fn follow<D: Database + 'static>(
+    db: Arc<D>,
+    r: pb::WatchRequest,
+    deadline: Option<Duration>,
+    mut stopping: watch::Receiver<bool>,
+) -> Follow {
+    let (tx, rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        let mut from_seq = r.from_seq;
+        let mut wait = false;
+        loop {
+            let request =
+                pb::GetChangesRequest { namespace: r.namespace.clone(), from_seq, wait, options: r.options.clone() };
+            let result = tokio::select! {
+                result = get_changes(&*db, request, deadline) => result,
+                _ = stopping.wait_for(|s| *s) => Err(Error::unavailable("the server is shutting down")),
+                () = tx.closed() => return,
+            };
+            let batch = match result {
+                Ok(batch) => batch,
+                // A round that waited and had no time left to read: again,
+                // after a pause (a tiny timeout mustn't spin)
+                Err(e) if wait && e.code() == Code::Timeout => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+            };
+            from_seq = batch.next_seq;
+            wait = true;
+            if tx.send(Ok(batch)).await.is_err() {
+                return;
+            }
+        }
+    });
+    rx
 }
 
 #[cfg(test)]

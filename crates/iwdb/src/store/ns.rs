@@ -3,17 +3,20 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use ironweaver_core::cancel::{self, Token};
 use ironweaver_core::{EdgeId, GraphError, Projection};
 use iwdb_engine::catalog::{AttrPath, NamespaceCatalog};
-use iwdb_engine::{CatalogChange, CommitResult, Mutation, Namespace};
-use iwdb_query::{CommitOptions, Edge, IndexSize, IndexState, IndexStatus, NamespaceStatus, Node, ProjectionSpec};
+use iwdb_engine::{CatalogChange, CommitResult, MarkName, MarkUpdate, Mutation, Namespace};
+use iwdb_query::{
+    CommitOptions, Edge, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus, Node, ProjectionSpec,
+};
 use iwdb_storage::io::LogFs;
-use iwdb_storage::{CheckpointOutcome, Error, FsyncPolicy, LockStats, LoggedNamespace, Wait};
+use iwdb_storage::{BatchLimits, ChangeBatch, CheckpointOutcome, Error, FsyncPolicy, LockStats, LoggedNamespace, Wait};
 
 use super::background::{abort_if_inconsistent, or_abort, run_checkpoint, target};
-use super::{Analysis, NsState, Store, lock};
+use super::{Analysis, NsState, Shared, Store, StreamableWait, lock};
 use crate::request::{Deadline, ReadOptions, Scheduled};
 
 /// A handle on one namespace of a [`Store`]: its commits, reads, catalog
@@ -72,6 +75,40 @@ where
     pub fn commit_with(&self, mutations: &[Mutation], options: &CommitOptions) -> Result<CommitResult, Error> {
         let key = options.idempotency_key.as_ref();
         self.write(|live| live.commit_keyed(mutations, key))
+    }
+
+    /// [`commit_with`](Self::commit_with) that also moves a mark in the
+    /// same commit (ADR 0032): the high-water mark of a projection, stored
+    /// atomically with the effect of the events up to it. The commit
+    /// applies only if the mark is at `mark.expected` (`None`: not set
+    /// yet); otherwise it fails with [`iwdb_engine::Error::MarkConflict`]
+    /// and nothing changes. `mutations` may be empty (events that change
+    /// nothing). Durable like any commit, per the fsync policy.
+    pub fn commit_marked(
+        &self,
+        mutations: &[Mutation],
+        mark: &MarkUpdate,
+        options: &CommitOptions,
+    ) -> Result<CommitResult, Error> {
+        let key = options.idempotency_key.as_ref();
+        self.write(|live| live.commit_marked(mutations, key, Some(mark)))
+    }
+
+    /// The position of the mark `name`, if it is set (ADR 0032).
+    pub fn mark(&self, name: &MarkName) -> Option<u64> {
+        self.read(|ns| ns.mark(name))
+    }
+
+    /// Every mark, by name: its position and the seq of the commit that
+    /// set it.
+    pub fn marks(&self) -> Vec<MarkStatus> {
+        self.read(|ns| {
+            {
+                let marks = ns.marks().iter();
+                marks.map(|(name, e)| MarkStatus { name: name.as_str().to_owned(), position: e.position, seq: e.seq })
+            }
+            .collect()
+        })
     }
 
     /// Commit a catalog change (an index or a constraint), like
@@ -157,6 +194,62 @@ where
     pub fn wait_for_seq(&self, seq: u64, options: &ReadOptions) -> Result<u64, Error> {
         let options = ReadOptions { min_seq: Some(seq), ..options.clone() };
         self.wait(&options, &options.deadline())
+    }
+
+    /// The streamable seq (ADR 0031): every commit up to it is applied and
+    /// durable, so the change stream can return it. [`synced_seq`](Self::synced_seq)
+    /// capped at [`seq`](Self::seq), or `seq` under `off`. Doesn't wait.
+    pub fn streamable_seq(&self) -> u64 {
+        self.live().streamable_seq()
+    }
+
+    /// The change stream (ADR 0031): the commits from `from_seq` on (0 is
+    /// read as 1), as logged, up to the streamable seq and at most `limits`
+    /// of them. If there is none and `wait` is set, waits for one until the
+    /// deadline of `options`, and then returns an empty batch rather than
+    /// failing. `options.history`, if given, must be the store's, and
+    /// `options.min_seq` is waited for first, as for a read.
+    ///
+    /// Reads the WAL from an offset near `from_seq` ([`OffsetIndex`](iwdb_storage::OffsetIndex)),
+    /// on this thread, holding no lock of the namespace.
+    ///
+    /// Errors: [`Error::NotRetained`] if `from_seq` is older than the
+    /// oldest WAL segment (see [`StoreOptions::retention`](crate::StoreOptions::retention));
+    /// [`Error::OtherHistory`], [`Error::Timeout`] (only for `min_seq`),
+    /// [`Error::Cancelled`], [`Error::NamespaceDropped`]; damage in the WAL
+    /// ([`Error::Corrupt`] and the other reading errors).
+    pub fn changes(
+        &self,
+        from_seq: u64,
+        limits: BatchLimits,
+        wait: bool,
+        options: &ReadOptions,
+    ) -> Result<ChangeBatch, Error> {
+        let from_seq = from_seq.max(1);
+        let deadline = options.deadline();
+        self.wait(options, &deadline)?;
+        let mut until = self.streamable_seq();
+        if wait && until < from_seq {
+            let cancelled = || options.cancel.as_ref().is_some_and(Token::is_cancelled);
+            until = match self.live().wait_for_streamable(from_seq, deadline.at, &cancelled) {
+                Wait::Reached(seq) | Wait::TimedOut(seq) => seq,
+                // Not returned for the streamable seq
+                Wait::ReadOnly(_) => self.streamable_seq(),
+                Wait::Cancelled => return Err(Error::Cancelled),
+                Wait::Dropped => return Err(Error::NamespaceDropped { name: self.name().to_owned() }),
+            };
+        }
+        let read = self.state.offsets.read(&self.state.paths.wal, from_seq, until, limits);
+        if self.live().is_dropped() {
+            return Err(Error::NamespaceDropped { name: self.name().to_owned() });
+        }
+        read
+    }
+
+    /// A future that waits, without a thread, until the streamable seq
+    /// reaches `seq`, `deadline` passes or the namespace is dropped.
+    pub(crate) fn streamable_wait(&self, seq: u64, deadline: Option<Instant>) -> Result<StreamableWait<F>, Error> {
+        Ok(StreamableWait::new(self.state.clone(), seq, deadline, self.store.timer.handle()?))
     }
 
     /// Run an analytics job on a [`Projection`] of the graph (ADR 0014):
@@ -310,6 +403,7 @@ where
             memory_bytes,
             indexes: indexes.into_values().collect(),
             constraints: catalog.constraints().count(),
+            marks: self.marks(),
             recovery: self.state.recovery.clone(),
         }
     }
@@ -332,15 +426,7 @@ where
         &self,
         commit: impl FnOnce(&LoggedNamespace<F>) -> Result<CommitResult, Error>,
     ) -> Result<CommitResult, Error> {
-        let live = self.live();
-        let result = or_abort("a commit", || abort_if_inconsistent(commit(live)))?;
-        let shared = &self.store.shared;
-        let trigger = self.state.size_trigger.load(Ordering::Relaxed);
-        if !result.deduplicated && live.wal().appended_bytes() >= trigger {
-            lock(&shared.signal).checkpoint.insert(self.state.info.id);
-            shared.wake.notify_all();
-        }
-        Ok(result)
+        write_in(&self.store.shared, &self.state, commit)
     }
 
     /// [`wait`](Self::wait), then the cancel token for `what`, which the
@@ -394,4 +480,26 @@ fn stopped(deadline: &Deadline, cancel: Option<&Token>, what: &str) -> Error {
     } else {
         Error::Cancelled
     }
+}
+
+/// Commit to the namespace `state` of the store `shared`: abort on a panic
+/// or an inconsistent namespace (ADR 0008, ADR 0028), and wake the
+/// checkpointer when the WAL has grown past the size trigger. Every commit
+/// goes through here, [`Ns`]'s and the projections'.
+pub(super) fn write_in<F: LogFs + Clone + Send + Sync + 'static>(
+    shared: &Shared<F>,
+    state: &NsState<F>,
+    commit: impl FnOnce(&LoggedNamespace<F>) -> Result<CommitResult, Error>,
+) -> Result<CommitResult, Error>
+where
+    F::File: Send,
+{
+    let live = &state.live;
+    let result = or_abort("a commit", || abort_if_inconsistent(commit(live)))?;
+    let trigger = state.size_trigger.load(Ordering::Relaxed);
+    if !result.deduplicated && live.wal().appended_bytes() >= trigger {
+        lock(&shared.signal).checkpoint.insert(state.info.id);
+        shared.wake.notify_all();
+    }
+    Ok(result)
 }

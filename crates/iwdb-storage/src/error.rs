@@ -89,6 +89,10 @@ pub enum Error {
     /// The log ends before the requested seq: records are missing.
     #[error("the WAL ends before seq {from} (its next seq is {next_seq})")]
     LogEndsBefore { from: u64, next_seq: u64 },
+    /// The change stream was asked for a seq whose WAL segment is no
+    /// longer retained (ADR 0031): the oldest retained seq is `first_seq`.
+    #[error("seq {from} is no longer retained; the oldest retained seq is {first_seq}")]
+    NotRetained { from: u64, first_seq: u64 },
 
     // Data directory (step 5, `documentation/formats/data-dir.md`)
     /// Another store, in this process or another one, has the data
@@ -203,6 +207,11 @@ pub enum Error {
     /// incomplete: files were removed by hand, or the disk lost them.
     #[error("namespace '{name}' (id {id}) is damaged: {reason}")]
     NamespaceDamaged { id: u64, name: String, reason: String },
+
+    /// An import was refused: the file is invalid, or the graph it holds
+    /// breaks an invariant of the database (ADR 0033). Nothing was created.
+    #[error("invalid import: {reason}")]
+    InvalidImport { reason: String },
 
     /// A restore to a seq with several namespaces to restore: seqs belong
     /// to one namespace each, so the restore must name which one (`only`).

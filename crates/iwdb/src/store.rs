@@ -17,17 +17,21 @@ use iwdb_storage::layout::{DataDir, NsPaths, create_ns_dir, remove_ns_dir};
 use iwdb_storage::namespaces::{DEFAULT_NAME, EventKind, NamespaceInfo, NamespaceLog, NamespaceResult, Plan};
 use iwdb_storage::{
     BackupReport, CheckpointOutcome, Checkpointer, Error, FsyncPolicy, HistoryId, LockStats, LoggedNamespace,
-    Recovered, RecoveryReport, StoreRecovery, read_namespace, recover, start_namespace,
+    OffsetIndex, Recovered, RecoveryReport, StoreRecovery, read_namespace, recover, start_namespace,
 };
 
 use crate::StoreOptions;
 use crate::request::{ReadOptions, Timer};
 
 mod background;
+mod import;
 mod ns;
+mod projections;
+mod wait;
 
 use background::{checkpoint_loop, or_abort, run_checkpoint, spawn, sync_loop};
 pub use ns::Ns;
+pub(crate) use wait::StreamableWait;
 
 /// The name of the namespace every store has. It is created with the store
 /// (or by the first open of a store restored without it), and can't be
@@ -89,6 +93,8 @@ struct NsState<F: LogFs> {
     /// The namespace and its WAL: one writer, many readers (ADR 0014).
     live: LoggedNamespace<F>,
     checkpointer: Mutex<Checkpointer<F>>,
+    /// Frame offsets in the WAL, for the change stream (ADR 0031).
+    offsets: OffsetIndex,
     /// The WAL's appended bytes at which the size trigger fires.
     size_trigger: AtomicU64,
     /// The last checkpoint error, cleared by a successful checkpoint.
@@ -114,6 +120,9 @@ struct Shared<F: LogFs> {
     signal: Mutex<Signal>,
     wake: Condvar,
     options: StoreOptions,
+    /// The projections started on the store (ADR 0032), stopped first
+    /// when it stops.
+    projections: Mutex<Vec<Arc<crate::projection::Control>>>,
 }
 
 /// Lock a mutex whatever a panicking holder left. The store's own state
@@ -246,6 +255,14 @@ where
         let size_trigger = options.checkpoint.wal_size.unwrap_or(u64::MAX);
         let mut states = BTreeMap::new();
         for recovered in namespaces {
+            // An imported namespace's checkpoint, if the archive lacks it
+            // (ADR 0033): a crash after the import's create event, or an
+            // archive set up after the import
+            if let Some(archive) = &archive
+                && let Err(e) = iwdb_storage::import::archive_base(archive, recovered.info.id, &recovered.paths)
+            {
+                log::warn!("namespace '{}': its import isn't in the WAL archive: {}", recovered.info.name, e);
+            }
             let state = Arc::new(new_state(
                 &fs,
                 &options,
@@ -266,6 +283,7 @@ where
             signal: Mutex::new(Signal::default()),
             wake: Condvar::new(),
             options,
+            projections: Mutex::new(Vec::new()),
         });
         let mut threads = Vec::new();
         let checkpoint = &shared.options.checkpoint;
@@ -359,9 +377,21 @@ where
             Plan::Duplicate(event) => return Ok(NamespaceResult { event, deduplicated: true }),
             Plan::New { id } => id,
         };
-        let shared = &self.shared;
-        let paths = create_ns_dir(&shared.fs, &shared.root, id)?;
+        let paths = create_ns_dir(&self.shared.fs, &self.shared.root, id)?;
         let event = catalog.log.append(EventKind::Create, id, name, key)?;
+        self.open_created(catalog, name, paths, event)
+    }
+
+    /// Open the namespace `name` whose create event was just logged (its
+    /// directory in `paths`), and add it to the open namespaces.
+    fn open_created(
+        &self,
+        catalog: &mut CatalogState<F>,
+        name: &NamespaceName,
+        paths: NsPaths,
+        event: iwdb_storage::namespaces::Event,
+    ) -> Result<NamespaceResult, Error> {
+        let shared = &self.shared;
         // The namespace exists now. If opening it fails, the namespace log
         // is failed: the next open sorts it out
         let opened = (|| {
@@ -757,11 +787,13 @@ fn new_state<F: LogFs + Clone>(
     if let Some(archive) = archive {
         checkpointer.set_archive(ArchiveHandle::new(archive.clone(), info.id));
     }
+    checkpointer.set_retention(options.retention);
     NsState {
         info,
         paths,
         live,
         checkpointer: Mutex::new(checkpointer),
+        offsets: OffsetIndex::new(),
         size_trigger: AtomicU64::new(size_trigger),
         checkpoint_error: Mutex::new(None),
         recovery,

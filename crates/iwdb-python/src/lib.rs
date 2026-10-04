@@ -7,6 +7,7 @@
 //! or may wait releases the GIL. Python lives only in this crate (design
 //! rule 1).
 
+mod changes;
 mod convert;
 mod errors;
 mod namespace;

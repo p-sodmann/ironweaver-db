@@ -22,6 +22,7 @@ where
 {
     /// Stop and join the background threads.
     pub(super) fn stop(&mut self) {
+        super::projections::stop_all(&self.shared);
         self.timer.stop();
         lock(&self.shared.signal).shutdown = true;
         self.shared.wake.notify_all();

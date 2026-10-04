@@ -28,6 +28,27 @@
         },
         "type": "object"
       },
+      "AddEdgeOp": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/RecordData"
+          },
+          "from": {
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "to": {
+            "type": "string"
+          },
+          "type": {
+            "description": "Missing for an untyped edge.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "AddLabel": {
         "properties": {
           "expectedVersion": {
@@ -38,6 +59,23 @@
           },
           "label": {
             "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "AddNodeOp": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/RecordData"
+          },
+          "id": {
+            "type": "string"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -174,6 +212,126 @@
               }
             ],
             "description": "Remove an index declaration."
+          }
+        },
+        "type": "object"
+      },
+      "ChangeEvent": {
+        "description": "One commit.\n\nAt most one of `data`, `catalog` (`change`).",
+        "properties": {
+          "catalog": {
+            "$ref": "#/components/schemas/CatalogChange"
+          },
+          "data": {
+            "$ref": "#/components/schemas/DataChange"
+          },
+          "idempotencyKey": {
+            "description": "The idempotency key the commit was made with, if any.",
+            "type": "string"
+          },
+          "seq": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "timeMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Int64"
+              }
+            ],
+            "description": "When the WAL appended the commit, in microseconds since 1970 (UTC).\nMissing for commits logged in WAL format 1."
+          }
+        },
+        "type": "object"
+      },
+      "ChangeOp": {
+        "description": "One resolved op of a data commit: the core's `Op`. Applying a commit's\nops in order to the state before it gives the state after it.\n\nAt most one of `addNode`, `removeNode`, `renameNode`, `addLabel`, `removeLabel`, `setNode`, `setNodeAttr`, `setNodeVersion`, `addEdge`, `removeEdge`, `setEdgeType`, `setEdge`, `setEdgeAttr`, `setEdgeVersion` (`kind`).",
+        "properties": {
+          "addEdge": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AddEdgeOp"
+              }
+            ],
+            "description": "Add an edge with its id (ids are never reused)."
+          },
+          "addLabel": {
+            "$ref": "#/components/schemas/NodeLabelOp"
+          },
+          "addNode": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AddNodeOp"
+              }
+            ],
+            "description": "Add a node with labels and a payload (its id is new)."
+          },
+          "removeEdge": {
+            "$ref": "#/components/schemas/RemoveEdgeOp"
+          },
+          "removeLabel": {
+            "$ref": "#/components/schemas/NodeLabelOp"
+          },
+          "removeNode": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RemoveNodeOp"
+              }
+            ],
+            "description": "Remove a node and all of its edges (there is no op per edge)."
+          },
+          "renameNode": {
+            "$ref": "#/components/schemas/RenameNodeOp"
+          },
+          "setEdge": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SetEdgeOp"
+              }
+            ],
+            "description": "Replace an edge's payload."
+          },
+          "setEdgeAttr": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SetEdgeAttrOp"
+              }
+            ],
+            "description": "Set or (without `value`) remove one attribute of an edge."
+          },
+          "setEdgeType": {
+            "$ref": "#/components/schemas/SetEdgeTypeOp"
+          },
+          "setEdgeVersion": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SetEdgeVersionOp"
+              }
+            ],
+            "description": "Set an edge's version."
+          },
+          "setNode": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SetNodeOp"
+              }
+            ],
+            "description": "Replace a node's payload."
+          },
+          "setNodeAttr": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SetNodeAttrOp"
+              }
+            ],
+            "description": "Set or (without `value`) remove one attribute of a node."
+          },
+          "setNodeVersion": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SetNodeVersionOp"
+              }
+            ],
+            "description": "Set a node's version."
           }
         },
         "type": "object"
@@ -416,6 +574,18 @@
           "DAMAGE_CHECKSUM"
         ],
         "type": "string"
+      },
+      "DataChange": {
+        "description": "The ops of a data commit.",
+        "properties": {
+          "ops": {
+            "items": {
+              "$ref": "#/components/schemas/ChangeOp"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
       },
       "DegreeJob": {
         "properties": {
@@ -896,6 +1066,41 @@
         },
         "type": "object"
       },
+      "GetChangesResponse": {
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/ChangeEvent"
+            },
+            "type": "array"
+          },
+          "firstSeq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The oldest seq still retained."
+          },
+          "meta": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AnswerMeta"
+              }
+            ],
+            "description": "`seq` is the streamable seq when the batch was read."
+          },
+          "nextSeq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Where the next batch starts."
+          }
+        },
+        "type": "object"
+      },
       "GetEdgesRequest": {
         "description": "The edges `ids`, in the order asked; at most `max_results` ids.",
         "properties": {
@@ -1231,6 +1436,21 @@
         ],
         "type": "string"
       },
+      "MarkStatus": {
+        "description": "A mark: the position in an external log up to which a projection's\nevents are committed, and the seq of the commit that set it.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "position": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "seq": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
       "MatchPatternRequest": {
         "description": "Every match of a pattern; paginated by row.",
         "properties": {
@@ -1496,6 +1716,13 @@
             },
             "type": "array"
           },
+          "marks": {
+            "description": "The namespace's marks (ADR 0032), by name: how far each projection\nhas committed its source's events.",
+            "items": {
+              "$ref": "#/components/schemas/MarkStatus"
+            },
+            "type": "array"
+          },
           "memoryBytes": {
             "allOf": [
               {
@@ -1641,6 +1868,17 @@
               }
             ],
             "description": "Starts at 1, one more for every commit that wrote the node."
+          }
+        },
+        "type": "object"
+      },
+      "NodeLabelOp": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
           }
         },
         "type": "object"
@@ -1980,6 +2218,28 @@
         },
         "type": "object"
       },
+      "RecordData": {
+        "description": "A node's or edge's payload in an op.",
+        "properties": {
+          "attr": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Value"
+            },
+            "type": "object"
+          },
+          "meta": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Value"
+            },
+            "description": "User meta (without the database's `iwdb.*` keys).",
+            "type": "object"
+          },
+          "version": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
       "RecoveryReport": {
         "description": "What recovery found and did to one namespace.",
         "properties": {
@@ -2004,6 +2264,10 @@
               "$ref": "#/components/schemas/AttrPath"
             },
             "type": "array"
+          },
+          "finishedImport": {
+            "description": "An interrupted import whose create event was logged was finished: its\nstaged checkpoint became checkpoint 1.",
+            "type": "boolean"
           },
           "replayed": {
             "allOf": [
@@ -2054,6 +2318,14 @@
         },
         "type": "object"
       },
+      "RemoveEdgeOp": {
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
       "RemoveLabel": {
         "properties": {
           "expectedVersion": {
@@ -2063,6 +2335,25 @@
             "type": "string"
           },
           "label": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "RemoveNodeOp": {
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "RenameNodeOp": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "newId": {
             "type": "string"
           }
         },
@@ -2097,6 +2388,36 @@
         },
         "type": "object"
       },
+      "SetEdgeAttrOp": {
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Value"
+              }
+            ],
+            "description": "Missing: remove the attribute."
+          }
+        },
+        "type": "object"
+      },
+      "SetEdgeOp": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/RecordData"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
       "SetEdgeType": {
         "description": "Set (present) or clear (missing) an edge's type.",
         "properties": {
@@ -2108,6 +2429,70 @@
           },
           "type": {
             "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SetEdgeTypeOp": {
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "type": {
+            "description": "Missing: untyped.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SetEdgeVersionOp": {
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "version": {
+            "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
+      "SetNodeAttrOp": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Value"
+              }
+            ],
+            "description": "Missing: remove the attribute."
+          }
+        },
+        "type": "object"
+      },
+      "SetNodeOp": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/RecordData"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SetNodeVersionOp": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "$ref": "#/components/schemas/Uint64"
           }
         },
         "type": "object"
@@ -3062,6 +3447,203 @@
           }
         },
         "summary": "Commit a catalog change"
+      }
+    },
+    "/v1/namespaces/{ns}/changes": {
+      "get": {
+        "description": "The change stream (changes.proto): one batch, or follow it.",
+        "operationId": "getChanges",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The first seq to return; resume with the `nextSeq` of the last batch.",
+            "in": "query",
+            "name": "from_seq",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "If there is no commit yet, wait for one for about the timeout (a long poll).",
+            "in": "query",
+            "name": "wait",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Wait until the namespace has applied this seq first.",
+            "in": "query",
+            "name": "min_seq",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The history `from_seq` belongs to (32 hex digits); another one is refused.",
+            "in": "query",
+            "name": "history",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "How long the request may take (for a stream: each round), in milliseconds.",
+            "in": "query",
+            "name": "timeout_ms",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Most commits in a batch.",
+            "in": "query",
+            "name": "max_results",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetChangesResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "A batch of the change stream"
+      }
+    },
+    "/v1/namespaces/{ns}/changes/stream": {
+      "get": {
+        "description": "Follow the change stream: the server answers `GetChanges` with `wait`\nin a loop and sends each batch as a message, from `from_seq` on, until\nthe client cancels, an error ends the stream, or the server shuts down\n(`unavailable`). Each round waits for about `options.timeout_ms`\n(default and cap: the server's); a round that finds nothing sends a\nmessage without events (a heartbeat with `next_seq`).",
+        "operationId": "watchChanges",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The first seq to return; resume with the `nextSeq` of the last batch.",
+            "in": "query",
+            "name": "from_seq",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Wait until the namespace has applied this seq first.",
+            "in": "query",
+            "name": "min_seq",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The history `from_seq` belongs to (32 hex digits); another one is refused.",
+            "in": "query",
+            "name": "history",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "How long the request may take (for a stream: each round), in milliseconds.",
+            "in": "query",
+            "name": "timeout_ms",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Most commits in a batch.",
+            "in": "query",
+            "name": "max_results",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Resume after this seq (what `EventSource` sends when it reconnects); overrides `from_seq`.",
+            "in": "header",
+            "name": "Last-Event-ID",
+            "schema": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Server-Sent Events: a `change` event per commit, its `id` the seq and its `data` a `ChangeEvent` in JSON; a comment line as heartbeat; an `error` event with an `Error` before the stream ends on an error."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Follow the change stream (Server-Sent Events)"
       }
     },
     "/v1/namespaces/{ns}/commit": {

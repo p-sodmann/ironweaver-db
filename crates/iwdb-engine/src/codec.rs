@@ -8,8 +8,10 @@
 //! - the graph meta holds `iwdb.catalog`, the namespace and its catalog
 //!   (ADR 0003), `iwdb.seq`, the seq of the last commit the file reflects
 //!   (an `Int`), and `iwdb.keys`, the idempotency key table (a JSON string,
-//!   step 8; data-dir layout 3), and nothing else. Files written before
-//!   layout 3 have no `iwdb.keys`: their table is empty.
+//!   step 8; data-dir layout 3), and `iwdb.marks`, the marks (a JSON
+//!   string, step 13; layout 5), and nothing else. Files written before
+//!   layout 3 have no `iwdb.keys`: their table is empty; files written
+//!   before layout 5 have no `iwdb.marks`, and no marks.
 //!
 //! So `ironweaver_core::format::from_binary` can read a database file as a
 //! `Record` graph, with the version as a meta entry.
@@ -21,7 +23,7 @@
 //! Loading rejects, with an [`Error`] and never a panic: a node or edge
 //! without a valid `iwdb.version`, unknown `iwdb.*` keys (in meta, or as
 //! top-level attribute keys, which the database reserves too), graph meta other
-//! than the catalog and the seq, a missing or invalid seq, and an invalid
+//! than the database's keys, a missing or invalid seq, and an invalid
 //! catalog. Files written by other tools
 //! (or in format 1) therefore don't load as database files.
 
@@ -34,7 +36,8 @@ use serde::{Serialize, Serializer};
 
 use crate::catalog::{CatalogError, IndexChanges, NamespaceCatalog, NamespaceName};
 use crate::idempotency::KeyTable;
-use crate::reserved::{CATALOG_KEY, KEYS_KEY, SEQ_KEY, VERSION_KEY, is_reserved};
+use crate::mark::MarkTable;
+use crate::reserved::{CATALOG_KEY, KEYS_KEY, MARKS_KEY, SEQ_KEY, VERSION_KEY, is_reserved};
 use crate::{DbGraph, DbRecord, Entity, Error};
 
 /// The graph-level data a database file carries.
@@ -50,6 +53,8 @@ pub struct GraphMeta {
     pub seq: u64,
     /// The namespace's recent idempotency keys.
     pub keys: KeyTable,
+    /// The namespace's marks.
+    pub marks: MarkTable,
 }
 
 impl GraphMeta {
@@ -64,6 +69,7 @@ impl GraphMeta {
             (CATALOG_KEY.to_owned(), self.catalog.to_meta_value(&self.namespace)),
             (SEQ_KEY.to_owned(), seq),
             (KEYS_KEY.to_owned(), self.keys.to_meta_value()),
+            (MARKS_KEY.to_owned(), self.marks.to_meta_value()),
         ]
         .into()
     }
@@ -73,6 +79,7 @@ impl GraphMeta {
         let mut found = None;
         let mut seq = None;
         let mut keys = None;
+        let mut marks = None;
         for (key, value) in meta.iter() {
             if key == CATALOG_KEY {
                 if found.is_some() {
@@ -93,6 +100,11 @@ impl GraphMeta {
                     return Err(Error::InvalidKeyTable { reason: "the key appears twice".into() });
                 }
                 keys = Some(value.to_value());
+            } else if key == MARKS_KEY {
+                if marks.is_some() {
+                    return Err(Error::InvalidMarkTable { reason: "the key appears twice".into() });
+                }
+                marks = Some(value.to_value());
             } else if is_reserved(key) {
                 return Err(Error::UnknownReservedKey { entity: Entity::Graph, key: key.to_owned() });
             } else {
@@ -106,7 +118,11 @@ impl GraphMeta {
             Some(value) => KeyTable::from_meta_value(&value, seq)?,
             None => KeyTable::new(),
         };
-        Ok(GraphMeta { namespace, catalog, seq, keys })
+        let marks = match marks {
+            Some(value) => MarkTable::from_meta_value(&value, seq)?,
+            None => MarkTable::new(),
+        };
+        Ok(GraphMeta { namespace, catalog, seq, keys, marks })
     }
 }
 

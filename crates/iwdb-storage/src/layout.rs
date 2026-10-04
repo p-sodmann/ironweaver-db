@@ -15,7 +15,8 @@
 //!
 //! Layouts 1 to 3 had one namespace, with `checkpoints/` and `wal/` in the
 //! directory itself; they are read as they are and upgraded when a store
-//! opens them (ADR 0017).
+//! opens them (ADR 0017). Layout 4 is layout 5 without marks in its
+//! checkpoints (ADR 0032); its upgrade only rewrites the marker.
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -37,10 +38,13 @@ use iwdb_engine::catalog::NamespaceName;
 pub use lock::{lock_file, lock_shared};
 pub use marker::{MarkerInfo, encode_marker, encode_marker_with, read_marker};
 
-/// The layout version this version writes. It reads layouts 1 to 3 and
+/// The layout version this version writes. It reads layouts 1 to 4 and
 /// upgrades them on open ([`DataDir::open`]; versions in
 /// `documentation/formats/data-dir.md`).
-pub const LAYOUT_VERSION: u32 = 4;
+pub const LAYOUT_VERSION: u32 = 5;
+/// The first layout with namespaces (`ns/`, `NAMESPACES`). Older layouts
+/// are *legacy*: one namespace, in the directory itself.
+pub const NS_LAYOUT: u32 = 4;
 pub const MARKER_NAME: &str = "IWDB";
 pub const LOCK_NAME: &str = "LOCK";
 pub const CHECKPOINT_DIR: &str = "checkpoints";
@@ -53,7 +57,7 @@ pub const BACKUP_NAME: &str = "BACKUP";
 pub const RESTORING_NAME: &str = "RESTORING";
 /// The first 8 bytes of the marker.
 pub const MARKER_MAGIC: [u8; 8] = *b"IWDBDIR\n";
-/// Length of the marker file (layouts 2 to 4).
+/// Length of the marker file (layouts 2 to 5).
 pub const MARKER_LEN: usize = 32;
 /// Length of a layout 1 marker.
 pub const MARKER_LEN_V1: usize = 16;
@@ -182,7 +186,7 @@ impl DataDir {
             dir.initialize(fs)?;
         }
         let damaged = |reason: String| Error::InvalidDataDir { path: root.to_path_buf(), reason };
-        if dir.upgrade_from.is_none() {
+        if !dir.is_legacy() {
             let ns_dir = root.join(NS_DIR);
             if !ns_dir.is_dir() {
                 return Err(damaged(format!("'{}' is missing", ns_dir.display())));
@@ -243,8 +247,21 @@ impl DataDir {
         self.upgrade_from
     }
 
-    /// Upgrade a layout 1 to 3 directory to layout 4, in steps that can
-    /// each be repeated after a crash:
+    /// Whether the directory is in a layout before [`NS_LAYOUT`], with its
+    /// one namespace in the directory itself.
+    pub fn is_legacy(&self) -> bool {
+        self.upgrade_from.is_some_and(|v| v < NS_LAYOUT)
+    }
+
+    /// Upgrade a directory to the current layout. A layout 4 directory
+    /// only gets a new marker (`write_atomic`, then a sync): its files are
+    /// valid in layout 5, which adds marks to the checkpoints it writes
+    /// from now on. Recovery calls this after reading every namespace and
+    /// before writing anything in the new formats, so a failed open leaves
+    /// the old marker.
+    ///
+    /// A layout 1 to 3 directory is upgraded in steps that can each be
+    /// repeated after a crash:
     ///
     /// 1. create `ns/` and `ns/<id>/` for the one namespace (id 1, named
     ///    `default`), and sync;
@@ -252,7 +269,7 @@ impl DataDir {
     ///    and sync both directories;
     /// 3. write the namespace log (`write_atomic`), a single create event
     ///    at time 0, and sync;
-    /// 4. replace the marker with a layout 4 one that holds the history id
+    /// 4. replace the marker with a current one that holds the history id
     ///    (layout 2 and 3) or the one [`open`](Self::open) chose (layout 1),
     ///    then sync. This is the commit point.
     ///
@@ -265,6 +282,11 @@ impl DataDir {
     /// afterwards.
     pub fn upgrade<F: LogFs>(&mut self, fs: &F) -> Result<Option<u32>, Error> {
         let Some(from) = self.upgrade_from else { return Ok(None) };
+        if from >= NS_LAYOUT {
+            self.write_marker(fs)?;
+            self.upgrade_from = None;
+            return Ok(Some(from));
+        }
         let ns_root = self.root.join(NS_DIR);
         match fs.create_dir(&ns_root) {
             Ok(()) => {}
@@ -331,7 +353,7 @@ impl DataDir {
         &self.root
     }
 
-    /// The paths of namespace `id` (layout 4).
+    /// The paths of namespace `id` (layout 4 and later).
     pub fn ns_paths(&self, id: u64) -> NsPaths {
         NsPaths::new(&self.root, id)
     }

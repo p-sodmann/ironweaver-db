@@ -10,9 +10,9 @@ use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 
 use crate::read::Explain;
 use crate::{
-    AnalyticsRequest, Answer, CommitOptions, Edge, Error, ExplainRequest, FindRequest, JobResult, MatchRequest,
-    MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest, QueryOptions, Subgraph, SubgraphRequest,
-    TraverseRequest, WalkRequest,
+    AnalyticsRequest, Answer, Changes, ChangesRequest, CommitOptions, Edge, Error, ExplainRequest, FindRequest,
+    JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest, QueryOptions,
+    Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
 
 /// A graph database: namespaces, commits, bounded reads, analytics and the
@@ -184,6 +184,38 @@ pub trait Database: Send + Sync {
         request: AnalyticsRequest,
         options: QueryOptions,
     ) -> impl Future<Output = Result<Answer<JobResult>, Error>> + Send;
+
+    // ---- the change stream ----
+
+    /// A batch of the change stream (ADR 0031): the commits from
+    /// `request.from_seq` on, in seq order and without gaps, exactly as
+    /// logged. At most `max_results` commits and about
+    /// [`CHANGES_BATCH_BYTES`](crate::CHANGES_BATCH_BYTES) of WAL payload
+    /// (at least one commit if there is one).
+    ///
+    /// Only **durable** commits are returned: those up to the lower of the
+    /// applied and the synced seq (the applied seq under the `off` fsync
+    /// policy, which promises nothing). So a seq, once returned, never
+    /// changes its content, and a consumer that resumes from the seq after
+    /// the last one it processed sees every commit exactly once.
+    /// `options.history` should be the history of that seq: with another
+    /// history (a restored store) the call fails with `invalid_argument`.
+    ///
+    /// If there is no commit yet and `request.wait` is set, it waits for
+    /// one, at most for about the timeout of `options` (leaving time to
+    /// answer), and then answers with an empty batch, not `timeout`. A
+    /// waiting call holds no worker thread.
+    ///
+    /// [`Answer::seq`] is the streamable seq when the batch was read.
+    /// Errors: `not_retained` if `from_seq` is older than the oldest seq in
+    /// the WAL ([`Changes::first_seq`]); `not_found`; `invalid_argument`;
+    /// `corrupt`; `cancelled`.
+    fn changes(
+        &self,
+        namespace: &str,
+        request: ChangesRequest,
+        options: QueryOptions,
+    ) -> impl Future<Output = Result<Answer<Changes>, Error>> + Send;
 
     // ---- catalog and namespaces ----
 

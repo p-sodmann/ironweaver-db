@@ -61,6 +61,17 @@ message NamespaceStatus {
   uint64 constraints = 13;
   // What recovery did to this namespace when the server's store opened.
   RecoveryReport recovery = 14;
+  // The namespace's marks (ADR 0032), by name: how far each projection
+  // has committed its source's events.
+  repeated MarkStatus marks = 15;
+}
+
+// A mark: the position in an external log up to which a projection's
+// events are committed, and the seq of the commit that set it.
+message MarkStatus {
+  string name = 1;
+  uint64 position = 2;
+  uint64 seq = 3;
 }
 
 // One index of a namespace.
@@ -112,6 +123,9 @@ message RecoveryReport {
   CutTail torn_tail = 6;
   // The seq the namespace was recovered to.
   uint64 seq = 7;
+  // An interrupted import whose create event was logged was finished: its
+  // staged checkpoint became checkpoint 1.
+  bool finished_import = 8;
 }
 
 message SkippedCheckpoint {

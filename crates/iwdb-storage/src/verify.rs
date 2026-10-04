@@ -415,7 +415,13 @@ fn verify_namespace(report: &mut VerifyReport, name: &NamespaceName, paths: &NsP
         }
     }
     list_other_files(report, paths)?;
-    let checkpoints = if paths.checkpoints.is_dir() { list_checkpoints(&paths.checkpoints)? } else { Vec::new() };
+    let mut checkpoints = if paths.checkpoints.is_dir() { list_checkpoints(&paths.checkpoints)? } else { Vec::new() };
+    // An import whose create event is logged: the next open makes the
+    // staged file checkpoint 1 if there is none (ADR 0033)
+    let staged = paths.checkpoints.join(crate::import::STAGED_NAME);
+    if checkpoints.is_empty() && staged.is_file() {
+        checkpoints.push((crate::import::IMPORT_SEQ, staged));
+    }
     let segments = if paths.wal.is_dir() { reader::list_segments(&paths.wal)? } else { Vec::new() };
     report.checkpoints = checkpoints.len();
     report.segments = segments.len();
@@ -439,6 +445,8 @@ fn list_other_files(report: &mut VerifyReport, paths: &NsPaths) -> Result<(), Er
                 || (!is_checkpoints && format::parse_segment_name(&name).is_some() && path.is_file());
             if name.ends_with(TEMP_SUFFIX) {
                 report.note(Some(&path), "a temporary file (an interrupted write; the next open removes it)");
+            } else if is_checkpoints && name == crate::import::STAGED_NAME {
+                report.note(Some(&path), "a staged import (an interrupted import; the next open finishes it)");
             } else if !ours {
                 report.note(Some(&path), "not a file of the database (ignored)");
             }
