@@ -69,13 +69,21 @@ impl<D: Database + 'static> Server<D> {
 
     /// The REST routes (ADR 0030), with request bodies up to the message
     /// size limit.
+    #[cfg(feature = "rest")]
     pub fn rest_router(&self) -> axum::Router {
         crate::rest::router(self.db.clone(), self.max_message_bytes, self.stopping.subscribe())
     }
 
     /// gRPC and REST as one service, as [`serve`](Self::serve) serves them.
+    #[cfg(feature = "rest")]
     pub(crate) fn http_service(&self) -> crate::serve::Dispatch<D> {
         crate::serve::Dispatch::new(self.service(), self.rest_router())
+    }
+
+    /// gRPC alone, as [`serve`](Self::serve) serves it without `rest`.
+    #[cfg(not(feature = "rest"))]
+    pub(crate) fn http_service(&self) -> crate::serve::Dispatch<D> {
+        crate::serve::Dispatch::new(self.service())
     }
 }
 

@@ -9,8 +9,15 @@ repository.workspace = true
 publish = false
 
 [features]
-# The Rust clients (`client::Remote` over gRPC, ADR 0024; `client::RestRemote`
-# over REST, ADR 0030); the tests turn it on
+# gRPC is always there; REST and the Postgres source of projections can be
+# left out (ADR 0034): `--no-default-features` builds a gRPC-only server
+default = ["rest", "postgres"]
+# The REST/JSON API (ADR 0030) on the gRPC port, with its OpenAPI document
+rest = ["dep:axum", "dep:pbjson", "dep:pbjson-build", "dep:prost-types", "dep:serde_json", "dep:http-body-util"]
+# `[[projection]]` sources of kind "postgres" (ADR 0032)
+postgres = ["iwdb/postgres"]
+# The Rust clients (`client::Remote` over gRPC, ADR 0024; with `rest`,
+# `client::RestRemote` over REST, ADR 0030); the tests turn it on
 client = ["hyper/client", "hyper/http1", "hyper-util/client-legacy", "hyper-util/http1"]
 
 [[bin]]
@@ -23,8 +30,8 @@ iwdb-engine = { path = "../iwdb-engine" }
 iwdb-storage = { path = "../iwdb-storage" }
 iwdb-query = { path = "../iwdb-query" }
 # The binary serves an embedded store (`Embedded`) and closes it on shutdown;
-# its projections read Postgres tables (step 13)
-iwdb = { path = "../iwdb", features = ["postgres"] }
+# its projections read Postgres tables with the `postgres` feature (step 13)
+iwdb = { path = "../iwdb" }
 tonic.workspace = true
 tonic-prost.workspace = true
 prost.workspace = true
@@ -33,11 +40,12 @@ tokio-stream.workspace = true
 # One port for both APIs: HTTP/2 (gRPC, REST) and HTTP/1.1 (REST)
 hyper = { workspace = true, features = ["http1"] }
 hyper-util = { workspace = true, features = ["http1", "server-auto"] }
-axum.workspace = true
-pbjson.workspace = true
-prost-types.workspace = true
+# REST only (feature `rest`)
+axum = { workspace = true, optional = true }
+pbjson = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
 http.workspace = true
-http-body-util.workspace = true
 bytes.workspace = true
 tower-service.workspace = true
 # Values, filters and patterns on the wire: the core's serde in postcard (ADR 0023)
@@ -45,7 +53,7 @@ postcard.workspace = true
 serde.workspace = true
 # REST bodies; `raw_value` lets a value or filter be read by the core's own
 # JSON reader (ADR 0030), `float_roundtrip` reads every float exactly
-serde_json = { workspace = true, features = ["raw_value", "float_roundtrip"] }
+serde_json = { workspace = true, optional = true, features = ["raw_value", "float_roundtrip"] }
 toml.workspace = true
 thiserror.workspace = true
 log.workspace = true
@@ -53,11 +61,12 @@ log.workspace = true
 [build-dependencies]
 tonic-prost-build.workspace = true
 protox.workspace = true
-pbjson-build.workspace = true
+pbjson-build = { workspace = true, optional = true }
 prost.workspace = true
 
 [dev-dependencies]
-iwdb-server = { path = ".", features = ["client"] }
+# Without the default features, so `--no-default-features` tests a gRPC-only server
+iwdb-server = { path = ".", default-features = false, features = ["client"] }
 iwdb-query = { path = "../iwdb-query", features = ["conformance"] }
 iwdb-storage = { path = "../iwdb-storage", features = ["failpoints"] }
 iwdb-engine = { path = "../iwdb-engine", features = ["testutil"] }

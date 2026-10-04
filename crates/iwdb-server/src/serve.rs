@@ -5,6 +5,8 @@
 //! HTTP/1.1 (detected per connection), and a request whose content type is
 //! `application/grpc...` goes to the gRPC service, every other one to the
 //! REST router.
+//! Without the `rest` feature (ADR 0034) every other request is answered
+//! 404 with an empty body.
 //!
 //! The accept loop is ours rather than tonic's `transport::Server`, for two
 //! reasons: tonic's server wraps every service in a `grpc-timeout` layer
@@ -22,6 +24,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "rest")]
 use axum::body::Body;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::graceful::GracefulShutdown;
@@ -34,22 +37,37 @@ use tower_service::Service;
 use crate::proto::database_service_server::DatabaseServiceServer;
 use crate::{Adapter, Server};
 
+/// A body of either API: axum's with REST, tonic's without.
+#[cfg(not(feature = "rest"))]
+type Body = tonic::body::Body;
+
 /// Both APIs as one service: gRPC by content type, REST otherwise.
 pub(crate) struct Dispatch<D> {
     grpc: DatabaseServiceServer<Adapter<D>>,
+    #[cfg(feature = "rest")]
     rest: axum::Router,
 }
 
 // Not derived: that would require `D: Clone`
 impl<D> Clone for Dispatch<D> {
     fn clone(&self) -> Self {
-        Dispatch { grpc: self.grpc.clone(), rest: self.rest.clone() }
+        Dispatch {
+            grpc: self.grpc.clone(),
+            #[cfg(feature = "rest")]
+            rest: self.rest.clone(),
+        }
     }
 }
 
 impl<D> Dispatch<D> {
+    #[cfg(feature = "rest")]
     pub(crate) fn new(grpc: DatabaseServiceServer<Adapter<D>>, rest: axum::Router) -> Self {
         Dispatch { grpc, rest }
+    }
+
+    #[cfg(not(feature = "rest"))]
+    pub(crate) fn new(grpc: DatabaseServiceServer<Adapter<D>>) -> Self {
+        Dispatch { grpc }
     }
 }
 
@@ -82,9 +100,28 @@ where
                 Ok(response.map(Body::new))
             })
         } else {
-            let mut rest = self.rest.clone();
-            Box::pin(async move { rest.call(request.map(Body::new)).await })
+            self.not_grpc(request)
         }
+    }
+}
+
+impl<D> Dispatch<D> {
+    #[cfg(feature = "rest")]
+    fn not_grpc<B>(&self, request: http::Request<B>) -> BoxFuture<Result<http::Response<Body>, Infallible>>
+    where
+        B: hyper::body::Body<Data = bytes::Bytes> + Send + 'static,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
+    {
+        let mut rest = self.rest.clone();
+        Box::pin(async move { rest.call(request.map(Body::new)).await })
+    }
+
+    /// No REST in this build: nothing but gRPC is found.
+    #[cfg(not(feature = "rest"))]
+    fn not_grpc<B>(&self, _request: http::Request<B>) -> BoxFuture<Result<http::Response<Body>, Infallible>> {
+        let mut response = http::Response::new(Body::empty());
+        *response.status_mut() = http::StatusCode::NOT_FOUND;
+        Box::pin(std::future::ready(Ok(response)))
     }
 }
 

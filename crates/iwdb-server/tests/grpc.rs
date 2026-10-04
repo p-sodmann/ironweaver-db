@@ -347,3 +347,19 @@ fn many_clients_write_and_read_one_namespace() {
     let all = all.unwrap();
     assert_eq!((all.value.len(), all.seq), (200, 200));
 }
+
+/// A server built without `rest` (ADR 0034) serves gRPC only: any other
+/// request, on HTTP/1.1 too, is answered 404 and the connection stays usable.
+#[cfg(not(feature = "rest"))]
+#[test]
+fn without_rest_every_other_request_is_not_found() {
+    use std::io::{Read, Write};
+    let db = fresh();
+    let address = db.server.endpoint().trim_start_matches("http://").to_owned();
+    let mut stream = std::net::TcpStream::connect(&address).unwrap();
+    stream.write_all(b"GET /v1/openapi.json HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 404"), "{}", answer);
+    assert_eq!(block_on(db.namespaces()).unwrap().len(), 1);
+}

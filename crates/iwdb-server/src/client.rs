@@ -37,7 +37,9 @@ use crate::proto as pb;
 use crate::proto::database_service_client::DatabaseServiceClient;
 use crate::status::from_status;
 
+#[cfg(feature = "rest")]
 mod rest;
+#[cfg(feature = "rest")]
 pub use rest::RestRemote;
 
 type Client = DatabaseServiceClient<Channel>;

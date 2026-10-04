@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use iwdb::{CheckpointOptions, Embedded, FsyncPolicy, LogFs, QueryConfig, Store, StoreOptions, WalOptions};
 use iwdb_query::Database;
-use iwdb_server::client::{Remote, RestRemote};
+use iwdb_server::client::Remote;
+#[cfg(feature = "rest")]
+use iwdb_server::client::RestRemote;
 use iwdb_server::{Drain, Server};
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
@@ -73,6 +75,7 @@ impl<D: Database + 'static> Running<D> {
         Remote::connect(&self.endpoint()).unwrap()
     }
 
+    #[cfg(feature = "rest")]
     pub fn rest_client(&self) -> RestRemote {
         RestRemote::connect(&self.endpoint()).unwrap()
     }
@@ -153,6 +156,7 @@ pub fn fresh() -> Fresh {
 }
 
 /// Over REST; streamed answers as NDJSON or as one JSON message.
+#[cfg(feature = "rest")]
 pub fn fresh_rest(ndjson: bool) -> Fresh<RestRemote> {
     let (server, dir) = served();
     Fresh { remote: server.rest_client().ndjson(ndjson), server, _dir: dir }

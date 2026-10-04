@@ -20,10 +20,20 @@ use tokio::sync::watch;
 const USAGE: &str = "usage: iwdb-server --config <file>
 
 Serves an Ironweaver DB data directory over gRPC (proto/ironweaver_db/v1) and
-REST/JSON (/v1/..., OpenAPI at /v1/openapi.json) on one port. The config file
+REST/JSON (/v1/..., OpenAPI at /v1/openapi.json) on one port; --version lists
+what this build has (a build without the rest feature serves gRPC only). The config file
 is TOML; only data_dir is required (see the iwdb_server::config docs or
 documentation/api/grpc.md). SIGINT or SIGTERM shuts down gracefully;
 a second one cancels the calls still running.";
+
+/// What this build serves and reads (ADR 0034), for `--version`.
+const FEATURES: &[&str] = &[
+    "grpc",
+    #[cfg(feature = "rest")]
+    "rest",
+    #[cfg(feature = "postgres")]
+    "postgres",
+];
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -34,7 +44,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         (Some("--version" | "-V"), None, None) => {
-            println!("iwdb-server {}", env!("CARGO_PKG_VERSION"));
+            println!("iwdb-server {} ({})", env!("CARGO_PKG_VERSION"), FEATURES.join(", "));
             return ExitCode::SUCCESS;
         }
         _ => {
