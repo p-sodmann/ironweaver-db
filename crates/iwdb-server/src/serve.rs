@@ -15,6 +15,12 @@
 //! at any time; and database calls only once the store is open. Before
 //! that they fail with `unavailable`.
 //!
+//! With TLS (step 15b, ADR 0048) every connection starts with a rustls
+//! handshake (ALPN `h2` and `http/1.1`, at most [`HANDSHAKE_TIMEOUT`]);
+//! the client certificate it verified, if any, goes to the gate with the
+//! connection. Plaintext connections are served only when the server has
+//! no TLS.
+//!
 //! The accept loop is ours rather than tonic's `transport::Server`, for two
 //! reasons: tonic's server wraps every service in a `grpc-timeout` layer
 //! that would race the database's own deadline and answer `CANCELLED`
@@ -26,7 +32,6 @@
 use std::convert::Infallible;
 use std::future::Future;
 use std::io;
-use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
@@ -44,8 +49,12 @@ use tonic_health::pb::health_server::HealthServer;
 use tower_service::Service;
 use tracing::Instrument;
 
-use crate::auth::{AuthMode, GRPC_AUTH_PREFIX, Served};
+use crate::auth::{AuthMode, Connection, GRPC_AUTH_PREFIX, Served};
 use crate::health::{GRPC_PREFIX, GrpcHealth, Health, LIVE_PATH, Phase, READY_PATH};
+use crate::tls::{ClientCertificate, ServerTls};
+
+/// How long a client has for its TLS handshake.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 use crate::proto::auth_service_server::AuthServiceServer;
 use crate::proto::database_service_server::DatabaseServiceServer;
 use crate::{Adapter, Server};
@@ -174,8 +183,11 @@ type Slot<D> = Arc<OnceLock<Dispatch<D>>>;
 /// The service of every connection: health and the console at any time,
 /// database calls once [`Slot`] holds the database's service.
 pub(crate) struct Gate<D> {
-    /// The connection's peer (set per connection), for the login slowdown.
-    peer: Option<IpAddr>,
+    /// The connection (set per connection): its peer, for the login
+    /// slowdown, and its TLS.
+    connection: Connection,
+    /// Serve TLS only, with this configuration.
+    tls: Option<Arc<ServerTls>>,
     health: Health,
     grpc_health: HealthServer<GrpcHealth>,
     inner: Slot<D>,
@@ -187,7 +199,8 @@ pub(crate) struct Gate<D> {
 impl<D> Clone for Gate<D> {
     fn clone(&self) -> Self {
         Gate {
-            peer: self.peer,
+            connection: self.connection.clone(),
+            tls: self.tls.clone(),
             health: self.health.clone(),
             grpc_health: self.grpc_health.clone(),
             inner: self.inner.clone(),
@@ -197,8 +210,12 @@ impl<D> Clone for Gate<D> {
 }
 
 impl<D> Gate<D> {
-    fn new(health: Health, inner: Slot<D>, console: bool) -> Self {
-        Gate { peer: None, grpc_health: health.grpc_service(), health, inner, console }
+    fn new(health: Health, inner: Slot<D>, console: bool, tls: Option<Arc<ServerTls>>) -> Self {
+        let connection = Connection {
+            certificate_required: tls.as_ref().is_some_and(|t| t.requires_client_certificate()),
+            ..Connection::default()
+        };
+        Gate { connection, tls, grpc_health: health.grpc_service(), health, inner, console }
     }
 }
 
@@ -257,7 +274,7 @@ where
         match self.inner.get() {
             Some(inner) => {
                 let mut inner = inner.clone();
-                let credentials = match crate::auth::credentials(inner.mode, &request, grpc, self.peer) {
+                let credentials = match crate::auth::credentials(inner.mode, &request, grpc, &self.connection) {
                     Ok(credentials) => credentials,
                     Err(e) => return Box::pin(std::future::ready(Ok(refused(grpc, e)))),
                 };
@@ -333,15 +350,42 @@ where
                     // Small answers shouldn't wait for Nagle's algorithm
                     let _ = stream.set_nodelay(true);
                     let mut gate = gate.clone();
-                    gate.peer = Some(peer.ip());
-                    let service = TowerToHyperService::new(gate);
-                    let connection =
-                        graceful.watch(builder.serve_connection(TokioIo::new(stream), service).into_owned());
-                    connections.spawn(async move {
-                        // A connection error (a client that went away)
-                        // concerns that connection only
-                        let _ = connection.await;
-                    });
+                    gate.connection.client = Some(peer.ip());
+                    let (builder, watcher) = (builder.clone(), graceful.watcher());
+                    match gate.tls.as_ref().map(|tls| tls.acceptor()) {
+                        None => {
+                            let service = TowerToHyperService::new(gate);
+                            let connection = watcher.watch(builder.serve_connection(TokioIo::new(stream), service).into_owned());
+                            connections.spawn(async move {
+                                // A connection error (a client that went
+                                // away) concerns that connection only
+                                let _ = connection.await;
+                            });
+                        }
+                        Some(acceptor) => {
+                            connections.spawn(async move {
+                                let stream = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                                    Ok(Ok(stream)) => stream,
+                                    // A client that doesn't trust us, one we
+                                    // don't trust, or not TLS at all: that
+                                    // connection's concern
+                                    Ok(Err(e)) => {
+                                        tracing::debug!(client = %peer, error = %e, "TLS handshake failed");
+                                        return;
+                                    }
+                                    Err(_) => {
+                                        tracing::debug!(client = %peer, "TLS handshake timed out");
+                                        return;
+                                    }
+                                };
+                                let certificate = stream.get_ref().1.peer_certificates().and_then(|c| c.first());
+                                gate.connection.certificate = ClientCertificate::of(certificate.map(|c| c.as_ref()));
+                                gate.connection.tls = true;
+                                let service = TowerToHyperService::new(gate);
+                                let _ = watcher.watch(builder.serve_connection(TokioIo::new(stream), service).into_owned()).await;
+                            });
+                        }
+                    }
                 }
                 Err(e) => {
                     // Out of file descriptors, a connection reset before
@@ -396,7 +440,7 @@ impl<D: Served> Server<D> {
         if self.health.phase() == Phase::Recovering {
             self.health.set(Phase::Ready);
         }
-        let gate = Gate::new(self.health.clone(), slot, self.console);
+        let gate = Gate::new(self.health.clone(), slot, self.console, self.tls.clone());
         let (health, delay) = (self.health.clone(), self.unready_delay);
         let until = async move {
             stop.await;
@@ -450,6 +494,8 @@ pub struct LaunchOptions {
     pub console: bool,
     /// [`Server::auth`].
     pub auth: AuthMode,
+    /// [`Server::tls`]: serve TLS only (`None`: plaintext).
+    pub tls: Option<Arc<ServerTls>>,
     /// What the logs call what is served (the data directory).
     pub name: String,
 }
@@ -461,6 +507,7 @@ impl Default for LaunchOptions {
             unready_delay: Duration::ZERO,
             console: false,
             auth: AuthMode::default(),
+            tls: None,
             name: String::new(),
         }
     }
@@ -505,9 +552,10 @@ where
 {
     let address = listener.local_addr().map_err(|e| e.to_string())?;
     health.set(Phase::Recovering);
-    tracing::info!(address = %address, name = %options.name, "listening; opening the store (recovery)");
+    let scheme = if options.tls.is_some() { "TLS" } else { "plaintext" };
+    tracing::info!(address = %address, name = %options.name, scheme, "listening; opening the store (recovery)");
     let slot: Slot<D> = Arc::new(OnceLock::new());
-    let gate = Gate::new(health.clone(), slot.clone(), options.console);
+    let gate = Gate::new(health.clone(), slot.clone(), options.console, options.tls.clone());
     let opened: Arc<OnceLock<Result<Server<D>, String>>> = Arc::new(OnceLock::new());
     let until = {
         let (health, opened, options) = (health.clone(), opened.clone(), options.clone());
@@ -531,6 +579,7 @@ where
                     .unready_delay(options.unready_delay)
                     .console(options.console)
                     .auth(options.auth)
+                    .tls(options.tls.clone())
                     .with_health(health.clone()),
                 Ok(Err(e)) => {
                     let _ = opened.set(Err(e));

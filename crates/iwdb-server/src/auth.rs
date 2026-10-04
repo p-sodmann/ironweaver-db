@@ -4,10 +4,17 @@
 //!
 //! **Credentials.** `authorization: Bearer <token>` (gRPC metadata or HTTP
 //! header), or over REST the console's session cookie [`SESSION_COOKIE`]
-//! (HttpOnly, SameSite=Strict). A request authenticated by the cookie with
-//! a method other than GET or HEAD must also carry [`CSRF_HEADER`]: a page
-//! of another origin can't send a custom header without a CORS preflight,
-//! which the server doesn't answer (ADR 0046).
+//! (HttpOnly, SameSite=Strict); without either, a verified client
+//! certificate (mTLS, step 15b, ADR 0048) names the user. A REST request
+//! authenticated by an ambient credential (the cookie, or a certificate: a
+//! browser sends both on its own) with a method other than GET or HEAD
+//! must also carry [`CSRF_HEADER`]: a page of another origin can't send a
+//! custom header without a CORS preflight, which the server doesn't answer
+//! (ADR 0046).
+//!
+//! **Client certificates required** (`[tls] client_auth = "required"`):
+//! every request that reaches the gate's credentials needs one, whatever
+//! else it carries; health and the console's pages are answered before.
 //!
 //! **Open by design**: health (gRPC `grpc.health.v1`, `/v1/health/*`),
 //! the console's pages, `Login` (`POST /v1/auth/login`) and the OpenAPI
@@ -17,6 +24,8 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use iwdb_query::{Accounts, Authenticate, Authorized, Code, Database, Error, Principal, Secret};
+
+use crate::tls::ClientCertificate;
 
 /// What the server serves: a database, its users, and logging in.
 /// `iwdb::Embedded` is one.
@@ -37,18 +46,41 @@ pub const GRPC_LOGIN: &str = "/ironweaver_db.v1.AuthService/Login";
 pub const GRPC_AUTH_PREFIX: &str = "/ironweaver_db.v1.AuthService/";
 
 /// The caller of a request, as the gate found it: its principal (`None`
-/// for the open routes), the token it sent, and its address.
+/// for the open routes), the token it sent, its address, and whether it
+/// came over TLS.
 #[derive(Clone, Debug)]
 pub struct Caller {
     pub principal: Option<Arc<Principal>>,
     pub token: Option<Secret>,
     pub client: Option<IpAddr>,
+    /// The request came over TLS (the session cookie is `Secure` then).
+    pub tls: bool,
 }
 
 impl Caller {
     /// A caller of a server without authentication: a server-wide admin.
     pub fn unauthenticated(client: Option<IpAddr>) -> Self {
-        Caller { principal: Some(Arc::new(Principal::unauthenticated())), token: None, client }
+        Caller { principal: Some(Arc::new(Principal::unauthenticated())), token: None, client, tls: false }
+    }
+}
+
+/// What the gate knows of a request's connection.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Connection {
+    pub client: Option<IpAddr>,
+    /// TLS, rather than plaintext.
+    pub tls: bool,
+    /// The client certificate the handshake verified.
+    pub certificate: ClientCertificate,
+    /// Every request past health and the console's pages needs a client
+    /// certificate.
+    pub certificate_required: bool,
+}
+
+impl Connection {
+    /// A caller on this connection, without a principal yet.
+    fn caller(&self, token: Option<Secret>) -> Caller {
+        Caller { principal: None, token, client: self.client, tls: self.tls }
     }
 }
 
@@ -96,53 +128,82 @@ pub(crate) fn open<B>(request: &http::Request<B>, grpc: bool) -> bool {
     if grpc { path == GRPC_LOGIN } else { path == LOGIN_PATH || path == "/v1/openapi.json" }
 }
 
-/// What the gate found in a request's headers: a caller already, or a
-/// token to look up.
+/// What the gate found in a request's headers and connection: a caller
+/// already, a token to look up, or a certificate's user.
 pub(crate) enum Credentials {
     Caller(Caller),
-    Token(Secret, Option<IpAddr>),
+    Token(Secret, Caller),
+    User(String, Caller),
+}
+
+/// A request authenticated by an ambient credential (one a browser sends
+/// on its own) that may change something must carry the CSRF header. A
+/// browser can't make a gRPC request of another origin (its content type
+/// needs a preflight), so `grpc` requests are exempt.
+fn check_csrf<B>(request: &http::Request<B>, grpc: bool, what: &str) -> Result<(), Error> {
+    let safe = matches!(*request.method(), http::Method::GET | http::Method::HEAD);
+    if !grpc && !safe && !request.headers().contains_key(CSRF_HEADER) {
+        return Err(Error::new(
+            Code::PermissionDenied,
+            format!("a request authenticated by {} must carry the {} header", what, CSRF_HEADER),
+        ));
+    }
+    Ok(())
 }
 
 /// Read a request's credentials (once, in the gate). Errors:
-/// `unauthenticated` (none, or malformed), `permission_denied` (a cookie
-/// without the CSRF header on a request that writes).
+/// `unauthenticated` (none, or malformed; no client certificate where one
+/// is required), `permission_denied` (an ambient credential without the
+/// CSRF header on a request that writes).
 pub(crate) fn credentials<B>(
     mode: AuthMode,
     request: &http::Request<B>,
     grpc: bool,
-    client: Option<IpAddr>,
+    connection: &Connection,
 ) -> Result<Credentials, Error> {
+    if connection.certificate_required && connection.certificate == ClientCertificate::None {
+        return Err(unauthenticated("this server requires a client certificate (mTLS)"));
+    }
     if !mode.enabled {
-        return Ok(Credentials::Caller(Caller::unauthenticated(client)));
+        let caller = Caller { tls: connection.tls, ..Caller::unauthenticated(connection.client) };
+        return Ok(Credentials::Caller(caller));
     }
     let found = token(request)?;
     if open(request, grpc) {
-        return Ok(Credentials::Caller(Caller { principal: None, token: found.map(|(t, _)| t), client }));
+        return Ok(Credentials::Caller(connection.caller(found.map(|(t, _)| t))));
     }
-    let Some((token, cookie)) = found else {
-        return Err(unauthenticated(
+    match (found, &connection.certificate) {
+        (Some((token, cookie)), _) => {
+            if cookie {
+                // Over gRPC too, as before mTLS: a cookie is the console's
+                check_csrf(request, false, "the session cookie")?;
+            }
+            Ok(Credentials::Token(token, connection.caller(None)))
+        }
+        (None, ClientCertificate::User(user)) => {
+            check_csrf(request, grpc, "a client certificate")?;
+            Ok(Credentials::User(user.clone(), connection.caller(None)))
+        }
+        (None, ClientCertificate::Unnamed(why)) => Err(unauthenticated(why)),
+        (None, ClientCertificate::None) => Err(unauthenticated(
             "this server needs credentials: log in (POST /v1/auth/login, or the Login RPC) and send \
              'authorization: Bearer <token>'",
-        ));
-    };
-    let safe = matches!(*request.method(), http::Method::GET | http::Method::HEAD);
-    if cookie && !safe && !request.headers().contains_key(CSRF_HEADER) {
-        return Err(Error::new(
-            Code::PermissionDenied,
-            format!("a request authenticated by the session cookie must carry the {} header", CSRF_HEADER),
-        ));
+        )),
     }
-    Ok(Credentials::Token(token, client))
 }
 
-/// The caller of `credentials`: a token's principal looked up. Errors:
-/// `unauthenticated`.
+/// The caller of `credentials`: a token's or a certificate's principal
+/// looked up. Errors: `unauthenticated`.
 pub(crate) async fn authenticate<D: Served>(db: &D, credentials: Credentials) -> Result<Caller, Error> {
     match credentials {
         Credentials::Caller(caller) => Ok(caller),
-        Credentials::Token(token, client) => {
+        Credentials::Token(token, caller) => {
             let principal = db.authenticate(&token).await?;
-            Ok(Caller { principal: Some(Arc::new(principal)), token: Some(token), client })
+            Ok(Caller { principal: Some(Arc::new(principal)), token: Some(token), ..caller })
+        }
+        Credentials::User(user, caller) => {
+            let principal = db.principal_of(&user).await?;
+            Ok(Caller { principal: Some(Arc::new(principal)), ..caller })
         }
     }
 }

@@ -768,11 +768,18 @@ fn same(field: &mut String, path: &str, what: &str) -> Result<(), Failure> {
 }
 
 /// The session cookie (ADR 0046): HttpOnly (no script reads it),
-/// SameSite=Strict (no other site sends it). Not `Secure` until the server
-/// speaks TLS (step 15b): browsers drop Secure cookies over plain HTTP
-/// except on localhost.
-fn session_cookie(token: &str, max_age_secs: u64) -> HeaderValue {
-    let text = format!("{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}", SESSION_COOKIE, token, max_age_secs);
+/// SameSite=Strict (no other site sends it), and `Secure` (sent over
+/// HTTPS only) when the request came over TLS (step 15b): browsers drop
+/// Secure cookies set over plain HTTP, which a server with
+/// `[tls] enabled = false` speaks.
+fn session_cookie(token: &str, max_age_secs: u64, secure: bool) -> HeaderValue {
+    let text = format!(
+        "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
+        SESSION_COOKIE,
+        token,
+        max_age_secs,
+        if secure { "; Secure" } else { "" }
+    );
     HeaderValue::from_str(&text).unwrap_or_else(|_| HeaderValue::from_static("iwdb_session=; Max-Age=0"))
 }
 
@@ -782,11 +789,12 @@ async fn login<D: Served>(State(s): St<D>, caller: Caller_, headers: HeaderMap, 
     let r: pb::LoginRequest = read(&headers, body, s.max_body).await?;
     let cookie = r.cookie;
     let client = caller.as_ref().and_then(|Extension(c)| c.client);
+    let secure = caller.as_ref().is_some_and(|Extension(c)| c.tls);
     let (response, session) = ops::login(&*s.db, r, client).await?;
     let mut answer = unary(Ok(response))?;
     if cookie {
         let max_age = session.expires_ms.saturating_sub(iwdb::auth::now_ms()) / 1000;
-        answer.headers_mut().insert(header::SET_COOKIE, session_cookie(session.token.expose(), max_age));
+        answer.headers_mut().insert(header::SET_COOKIE, session_cookie(session.token.expose(), max_age, secure));
     }
     answer.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(answer)
@@ -796,8 +804,9 @@ async fn login<D: Served>(State(s): St<D>, caller: Caller_, headers: HeaderMap, 
 async fn logout<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
     s.db(&caller)?;
     let token = caller.as_ref().and_then(|Extension(c)| c.token.clone());
+    let secure = caller.as_ref().is_some_and(|Extension(c)| c.tls);
     let mut answer = unary(ops::logout(&*s.db, token.as_ref()).await)?;
-    answer.headers_mut().insert(header::SET_COOKIE, session_cookie("", 0));
+    answer.headers_mut().insert(header::SET_COOKIE, session_cookie("", 0, secure));
     Ok(answer)
 }
 

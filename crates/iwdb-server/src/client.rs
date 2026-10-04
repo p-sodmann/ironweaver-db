@@ -17,6 +17,12 @@
 //! Give it with [`Remote::with_token`], or log in with [`Remote::login`],
 //! which keeps the session's token. It implements
 //! [`Accounts`](iwdb_query::Accounts) too (users, grants, tokens).
+//!
+//! **TLS** (step 15b, ADR 0048): an `https://` endpoint speaks TLS, and
+//! verifies the server against the CA of a [`ClientTls`] (default: the
+//! operating system's trust store); a client certificate and key in it
+//! authenticate the client (mTLS) when the server verifies them. Use
+//! [`Remote::connect_tls`].
 
 use std::future::Future;
 use std::pin::Pin;
@@ -41,7 +47,7 @@ use tonic::Streaming;
 use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
 use crate::DEFAULT_MAX_MESSAGE_BYTES;
 use crate::convert::*;
@@ -49,7 +55,10 @@ use crate::proto as pb;
 use crate::proto::auth_service_client::AuthServiceClient;
 use crate::proto::database_service_client::DatabaseServiceClient;
 use crate::status::from_status;
+pub use crate::tls::ClientTls;
 
+#[cfg(feature = "rest")]
+mod https;
 #[cfg(feature = "rest")]
 mod rest;
 #[cfg(feature = "rest")]
@@ -84,6 +93,43 @@ impl Interceptor for Bearer {
     }
 }
 
+/// Whether `endpoint` speaks TLS (`https://`); TLS settings need it.
+pub(crate) fn https(endpoint: &str, tls: &ClientTls) -> Result<bool, Error> {
+    let https = endpoint.starts_with("https://");
+    if !https && tls.is_set() {
+        return Err(Error::invalid(format!(
+            "a CA or client certificate was given, but '{}' isn't an https:// endpoint",
+            endpoint
+        )));
+    }
+    Ok(https)
+}
+
+fn tls_file(what: &str, path: &std::path::Path) -> Result<Vec<u8>, Error> {
+    std::fs::read(path).map_err(|e| Error::invalid(format!("can't read the {} {}: {}", what, path.display(), e)))
+}
+
+/// tonic's TLS settings from `tls`. The files are checked by our own PEM
+/// reader first, so no error quotes a key.
+fn tonic_tls(tls: &ClientTls) -> Result<ClientTlsConfig, Error> {
+    let invalid = |e: crate::tls::TlsError| Error::invalid(e.to_string());
+    let mut config = ClientTlsConfig::new();
+    config = match &tls.ca {
+        Some(ca) => {
+            crate::tls::certificates("CA certificate", ca).map_err(invalid)?;
+            config.ca_certificate(Certificate::from_pem(tls_file("CA certificate", ca)?))
+        }
+        None => config.with_native_roots(),
+    };
+    if let Some((cert, key)) = tls.identity().map_err(invalid)? {
+        crate::tls::certificates("client certificate", cert).map_err(invalid)?;
+        crate::tls::private_key(key).map_err(invalid)?;
+        config =
+            config.identity(Identity::from_pem(tls_file("client certificate", cert)?, tls_file("private key", key)?));
+    }
+    Ok(config)
+}
+
 /// A database served by an `iwdb-server`, as a [`Database`].
 pub struct Remote {
     client: Client,
@@ -107,22 +153,42 @@ impl Remote {
     /// calls fail with `unavailable`. Errors: `invalid_argument` for an
     /// invalid endpoint, `internal` if the runtime can't start.
     pub fn connect(endpoint: &str) -> Result<Remote, Error> {
+        Remote::connect_tls(endpoint, &ClientTls::default())
+    }
+
+    /// A client of the server at `endpoint` (`https://host:port` with TLS,
+    /// `http://host:port` without), trusting and presenting what `tls`
+    /// says. Errors: also `invalid_argument` for TLS files that can't be
+    /// read or used, and for TLS settings with an `http://` endpoint.
+    pub fn connect_tls(endpoint: &str, tls: &ClientTls) -> Result<Remote, Error> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("iwdb-client")
             .enable_all()
             .build()
             .map_err(|e| Error::internal(format!("can't start the client's runtime: {}", e)))?;
-        let mut remote = Remote::connect_on(runtime.handle().clone(), endpoint)?;
+        let mut remote = Remote::connect_on_tls(runtime.handle().clone(), endpoint, tls)?;
         remote.runtime = Some(runtime);
         Ok(remote)
     }
 
     /// The same, running its calls on `handle`'s runtime.
     pub fn connect_on(handle: Handle, endpoint: &str) -> Result<Remote, Error> {
-        let endpoint = Endpoint::from_shared(endpoint.to_owned())
+        Remote::connect_on_tls(handle, endpoint, &ClientTls::default())
+    }
+
+    /// [`connect_tls`](Self::connect_tls), running its calls on `handle`'s
+    /// runtime.
+    pub fn connect_on_tls(handle: Handle, endpoint: &str, tls: &ClientTls) -> Result<Remote, Error> {
+        let text = endpoint;
+        let mut endpoint = Endpoint::from_shared(endpoint.to_owned())
             .map_err(|e| Error::invalid(format!("invalid endpoint '{}': {}", endpoint, e)))?
             .tcp_nodelay(true);
+        if https(text, tls)? {
+            endpoint = endpoint
+                .tls_config(tonic_tls(tls)?)
+                .map_err(|e| Error::invalid(format!("the TLS settings can't be used: {}", e)))?;
+        }
         let channel = {
             let _runtime = handle.enter();
             endpoint.connect_lazy()
@@ -237,8 +303,28 @@ impl<T> Drop for Call<T> {
     }
 }
 
+/// A call's status as an error. A status with a source error and without
+/// the server's code was made here, by a connection that failed (refused,
+/// a TLS handshake the server or the client refused, a connection that
+/// broke): `unavailable`, with the source's reasons.
 fn status(s: tonic::Status) -> Error {
-    from_status(&s)
+    let local = s.metadata().get(crate::status::CODE_KEY).is_none()
+        && matches!(s.code(), tonic::Code::Internal | tonic::Code::Unknown | tonic::Code::Unavailable);
+    match std::error::Error::source(&s) {
+        Some(source) if local => {
+            let mut message = s.message().to_owned();
+            let mut next = Some(source);
+            while let Some(e) = next {
+                let text = e.to_string();
+                if !message.contains(&text) {
+                    message = format!("{}: {}", message, text);
+                }
+                next = e.source();
+            }
+            Error::unavailable(message)
+        }
+        _ => from_status(&s),
+    }
 }
 
 /// An answer the server shouldn't have sent.

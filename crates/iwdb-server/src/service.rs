@@ -49,6 +49,8 @@ pub struct Server<D> {
     pub(crate) console: bool,
     /// Check credentials (step 15a).
     pub(crate) auth: AuthMode,
+    /// Serve TLS only (step 15b).
+    pub(crate) tls: Option<Arc<crate::tls::ServerTls>>,
 }
 
 impl<D: Served> Server<D> {
@@ -61,7 +63,22 @@ impl<D: Served> Server<D> {
             unready_delay: Duration::ZERO,
             console: false,
             auth: AuthMode::default(),
+            tls: None,
         }
+    }
+
+    /// Serve TLS only, with `tls` (step 15b, ADR 0048); `None` (the
+    /// default for a `Server` made in code): plaintext. The binary turns it
+    /// on per `[tls] enabled`. Reloading `tls` changes the certificate of
+    /// new connections.
+    pub fn tls(mut self, tls: Option<Arc<crate::tls::ServerTls>>) -> Self {
+        self.tls = tls;
+        self
+    }
+
+    /// Whether [`serve`](Self::serve) speaks TLS.
+    pub fn serves_tls(&self) -> bool {
+        self.tls.is_some()
     }
 
     /// Check credentials (step 15a): every call but login and health needs

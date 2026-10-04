@@ -176,7 +176,7 @@ fn hex(bytes: &[u8]) -> String {
 
 /// A user name: the rules of namespace names, so it is safe in logs and
 /// node ids.
-fn check_user_name(name: &str) -> Result<(), Error> {
+pub(crate) fn check_user_name(name: &str) -> Result<(), Error> {
     match NamespaceName::new(name) {
         Ok(n) if !n.is_reserved() => Ok(()),
         _ => Err(Error::invalid(format!(

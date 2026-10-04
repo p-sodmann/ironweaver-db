@@ -140,6 +140,18 @@ where
         Ok(Principal { user: info.name, admin: info.admin, grants: info.grants })
     }
 
+    /// The principal of the user `name` (a client certificate's).
+    fn principal_of_user(&self, name: &str) -> Result<Principal, Error> {
+        let unknown = || Error::new(Code::Unauthenticated, "the client certificate names no user of this server");
+        if crate::auth::check_user_name(name).is_err() {
+            return Err(unknown());
+        }
+        let users = self.store.users();
+        let user = users.record(name)?.ok_or_else(unknown)?;
+        let info = users.info_of(&user);
+        Ok(Principal { user: info.name, admin: info.admin, grants: info.grants })
+    }
+
     /// The store, for what the trait doesn't cover: backups, checkpoints,
     /// syncs, the store's status.
     pub fn store(&self) -> &Store<F> {
@@ -652,5 +664,9 @@ where
 
     fn authenticate(&self, token: &Secret) -> impl Future<Output = Result<Principal, Error>> + Send {
         std::future::ready(self.principal(token))
+    }
+
+    fn principal_of(&self, user: &str) -> impl Future<Output = Result<Principal, Error>> + Send {
+        std::future::ready(self.principal_of_user(user))
     }
 }

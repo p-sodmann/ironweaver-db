@@ -268,6 +268,13 @@ pub trait Authenticate: Send + Sync {
     /// The principal of a session or API token; `unauthenticated` for an
     /// unknown, expired or revoked one.
     fn authenticate(&self, token: &Secret) -> impl Future<Output = Result<Principal, Error>> + Send;
+
+    /// The principal of `user`, whose identity the caller has verified
+    /// itself: the server's gate, for the user a verified client
+    /// certificate names (mTLS, step 15b). `unauthenticated` if there is no
+    /// such user (or the name isn't a valid user name), with the same
+    /// message either way.
+    fn principal_of(&self, user: &str) -> impl Future<Output = Result<Principal, Error>> + Send;
 }
 
 /// What an operation needs of the caller.

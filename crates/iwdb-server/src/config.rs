@@ -20,7 +20,14 @@
 //! workers = 0                       # threads running requests (0: one per CPU)
 //! queue = 1024                      # requests that may wait for a worker
 //! unready_delay_ms = 0              # on shutdown: serve unready this long before draining
-//! plaintext_public = false          # allow a non-loopback listen address without TLS (until step 15b)
+//! plaintext_public = false          # with [tls] enabled = false: allow a non-loopback listen address
+//!
+//! [tls]                             # step 15b
+//! enabled = false                   # true by default: then cert and key are required
+//! # cert = "tls/server.pem"         # PEM: the certificate chain, the server's first
+//! # key = "tls/server.key"          # PEM: its private key (PKCS#8, PKCS#1 or SEC1)
+//! # client_ca = "tls/ca.pem"        # mTLS: verify client certificates against these CAs
+//! client_auth = "optional"          # optional | required: whether a client certificate is required
 //!
 //! [auth]                            # step 15a
 //! enabled = true                    # every call but login and health needs a token
@@ -81,8 +88,8 @@
 //! (`IWDB_LISTEN`, `IWDB_STORE_FSYNC`, `IWDB_LIMITS_MAX_TIMEOUT_MS`). A
 //! variable wins over the file. A variable that starts like a section
 //! (`IWDB_STORE_`, `IWDB_SERVER_`, `IWDB_LIMITS_`, `IWDB_LOG_`,
-//! `IWDB_CONSOLE_`, `IWDB_AUTH_`) but names no setting is an error, so a
-//! typo isn't ignored. With `IWDB_DATA_DIR` set, the file is optional.
+//! `IWDB_CONSOLE_`, `IWDB_AUTH_`, `IWDB_TLS_`) but names no setting is an
+//! error, so a typo isn't ignored. With `IWDB_DATA_DIR` set, the file is optional.
 //!
 //! **Bootstrap** (ADR 0047): `IWDB_AUTH_BOOTSTRAP_PASSWORD` (and
 //! optionally `IWDB_AUTH_BOOTSTRAP_USER`, default `admin`) creates the first
@@ -95,9 +102,12 @@
 //! file stops the file's checks at the first. All of this happens before
 //! the store opens.
 //!
-//! TLS comes with step 15b: until then the server listens on plain TCP, so
-//! passwords and tokens cross the network in clear. A non-loopback listen
-//! address needs `[server] plaintext_public = true`.
+//! **TLS** (step 15b, ADR 0048) is on by default, so `[tls] cert` and
+//! `key` are required unless `[tls] enabled = false`; relative paths from
+//! the file are relative to its directory. Plaintext on a non-loopback
+//! listen address needs a second flag, `[server] plaintext_public = true`.
+//! With `[tls] client_ca`, clients may authenticate with a certificate
+//! (mTLS): its subject's common name is the user.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -152,6 +162,8 @@ pub struct Config {
     pub console: ConsoleSection,
     #[serde(default)]
     pub auth: AuthSection,
+    #[serde(default)]
+    pub tls: TlsSection,
     /// `[[projection]]` sections (ADR 0032).
     #[serde(default, rename = "projection")]
     pub projections: Vec<ProjectionSection>,
@@ -188,6 +200,40 @@ impl Default for AuthSection {
             login_table_size: d.table_size,
         }
     }
+}
+
+/// `[tls]`: TLS and mTLS (step 15b, ADR 0048).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TlsSection {
+    /// Serve TLS only. Off, the server speaks plaintext, which a
+    /// non-loopback listen address also needs `[server] plaintext_public`
+    /// for.
+    pub enabled: bool,
+    /// The certificate chain (PEM), the server's certificate first.
+    pub cert: Option<PathBuf>,
+    /// The certificate's private key (PEM).
+    pub key: Option<PathBuf>,
+    /// The CAs (PEM) that client certificates are verified against: turns
+    /// mTLS on.
+    pub client_ca: Option<PathBuf>,
+    pub client_auth: ClientAuth,
+}
+
+impl Default for TlsSection {
+    fn default() -> Self {
+        TlsSection { enabled: true, cert: None, key: None, client_ca: None, client_auth: ClientAuth::Optional }
+    }
+}
+
+/// Whether a client certificate is required (with `[tls] client_ca`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientAuth {
+    /// A client may present one; one it presents must be valid.
+    Optional,
+    /// Every request but health and the console's pages needs one.
+    Required,
 }
 
 /// The bootstrap variables (ADR 0047): read, but not settings.
@@ -241,6 +287,7 @@ impl Default for Config {
             log: LogSection::default(),
             console: ConsoleSection::default(),
             auth: AuthSection::default(),
+            tls: TlsSection::default(),
             projections: Vec::new(),
             sources: BTreeMap::new(),
             bootstrap: None,
@@ -314,7 +361,7 @@ macro_rules! serde_env {
         }
     )*};
 }
-serde_env!(Fsync, LogFormat);
+serde_env!(Fsync, LogFormat, ClientAuth);
 
 macro_rules! keys {
     ($($key:literal $var:literal => $($field:ident).+;)*) => {
@@ -362,11 +409,20 @@ keys! {
     "auth.login_max_failures" "IWDB_AUTH_LOGIN_MAX_FAILURES" => auth.login_max_failures;
     "auth.login_window_secs" "IWDB_AUTH_LOGIN_WINDOW_SECS" => auth.login_window_secs;
     "auth.login_table_size" "IWDB_AUTH_LOGIN_TABLE_SIZE" => auth.login_table_size;
+    "tls.enabled" "IWDB_TLS_ENABLED" => tls.enabled;
+    "tls.cert" "IWDB_TLS_CERT" => tls.cert;
+    "tls.key" "IWDB_TLS_KEY" => tls.key;
+    "tls.client_ca" "IWDB_TLS_CLIENT_CA" => tls.client_ca;
+    "tls.client_auth" "IWDB_TLS_CLIENT_AUTH" => tls.client_auth;
 }
 
 /// Variables with these prefixes must name a setting.
 const SECTION_PREFIXES: &[&str] =
-    &["IWDB_STORE_", "IWDB_SERVER_", "IWDB_LIMITS_", "IWDB_LOG_", "IWDB_CONSOLE_", "IWDB_AUTH_"];
+    &["IWDB_STORE_", "IWDB_SERVER_", "IWDB_LIMITS_", "IWDB_LOG_", "IWDB_CONSOLE_", "IWDB_AUTH_", "IWDB_TLS_"];
+
+/// The settings that are paths, resolved against the file's directory when
+/// they come from the file.
+const PATH_KEYS: &[&str] = &["data_dir", "tls.cert", "tls.key", "tls.client_ca"];
 
 /// A projection the server runs (ADR 0032).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -527,9 +583,9 @@ pub struct ServerSection {
     /// On shutdown, serve this long with readiness off before draining
     /// (ADR 0040).
     pub unready_delay_ms: u64,
-    /// Allow a non-loopback listen address although the server has no TLS
-    /// yet (step 15b): passwords, tokens and data cross the network in
-    /// clear (ADR 0047).
+    /// With `[tls] enabled = false`, allow a non-loopback listen address:
+    /// passwords, tokens and data cross the network in clear (ADRs 0047
+    /// and 0048).
     pub plaintext_public: bool,
 }
 
@@ -585,6 +641,11 @@ fn lookup<'a>(table: &'a toml::Table, key: &str) -> Option<&'a toml::Value> {
     Some(value)
 }
 
+/// What a setting without a value means: a built-in limit, or nothing.
+fn unset(key: &str) -> &'static str {
+    if key.starts_with("limits.") { "built in" } else { "unset" }
+}
+
 fn default_listen() -> SocketAddr {
     // A constant that parses
     DEFAULT_LISTEN.parse().unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 7600)))
@@ -615,11 +676,23 @@ impl Config {
         let env: Vec<(String, String)> = env.into_iter().collect();
         let mut config = Config::build(text.as_deref(), &env)
             .map_err(|problems| ConfigError::Invalid { path: path.map(Path::to_path_buf), problems })?;
-        if config.source("data_dir") == Source::File
-            && config.data_dir.is_relative()
-            && let Some(dir) = path.and_then(Path::parent)
-        {
-            config.data_dir = dir.join(&config.data_dir);
+        if let Some(dir) = path.and_then(Path::parent) {
+            for key in PATH_KEYS {
+                if config.source(key) != Source::File {
+                    continue;
+                }
+                let field = match *key {
+                    "data_dir" => Some(&mut config.data_dir),
+                    "tls.cert" => config.tls.cert.as_mut(),
+                    "tls.key" => config.tls.key.as_mut(),
+                    _ => config.tls.client_ca.as_mut(),
+                };
+                if let Some(field) = field
+                    && field.is_relative()
+                {
+                    *field = dir.join(&*field);
+                }
+            }
         }
         Ok(config)
     }
@@ -658,7 +731,11 @@ impl Config {
                 continue;
             }
             if var == "IWDB_CONSOLE_PUBLIC" {
-                problems.push(format!("{}: replaced by IWDB_SERVER_PLAINTEXT_PUBLIC (step 15a)", var));
+                problems.push(format!(
+                    "{}: gone since step 15a; the server speaks TLS ([tls] cert and key), and plaintext on a \
+                     non-loopback address needs IWDB_TLS_ENABLED=false and IWDB_SERVER_PLAINTEXT_PUBLIC=true",
+                    var
+                ));
                 continue;
             }
             match KEYS.iter().find(|k| k.var == var) {
@@ -740,22 +817,13 @@ impl Config {
             ));
         }
         if self.console.public.is_some() {
-            problems.push("[console] public: replaced by [server] plaintext_public (step 15a)".to_owned());
+            problems.push(
+                "[console] public: gone since step 15a; the server speaks TLS ([tls] cert and key), and plaintext \
+                 on a non-loopback address needs [tls] enabled = false and [server] plaintext_public = true"
+                    .to_owned(),
+            );
         }
-        if !self.listen.ip().is_loopback() && !self.server.plaintext_public {
-            let exposed = if self.auth.enabled {
-                "passwords, tokens and data would cross the network in clear"
-            } else {
-                "authentication is off, so anyone who reaches the port could read and change everything, in clear"
-            };
-            problems.push(format!(
-                "{} is {}, not a loopback address, and the server has no TLS until step 15b: {}; set \
-                 [server] plaintext_public = true (IWDB_SERVER_PLAINTEXT_PUBLIC) to listen there anyway",
-                self.at("listen"),
-                self.listen,
-                exposed
-            ));
-        }
+        problems.extend(self.check_tls());
         if self.auth.session_lifetime_secs == 0 {
             problems.push(format!("{} must be at least 1", self.at("auth.session_lifetime_secs")));
         }
@@ -802,6 +870,81 @@ impl Config {
         problems
     }
 
+    /// TLS: on, with a certificate and key; or off, and then on a loopback
+    /// address or with the second flag (ADR 0048).
+    fn check_tls(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let tls = &self.tls;
+        if tls.enabled {
+            let missing: Vec<String> = [("tls.cert", tls.cert.is_none()), ("tls.key", tls.key.is_none())]
+                .into_iter()
+                .filter(|(_, missing)| *missing)
+                .map(|(key, _)| self.at(key))
+                .collect();
+            if !missing.is_empty() {
+                problems.push(format!(
+                    "{} {} not set, and TLS is on ({}, the default): give the certificate and its key as PEM \
+                     files ({}; docker/dev-cert.sh makes a pair for development), or set [tls] enabled = false \
+                     (IWDB_TLS_ENABLED=false) to serve plaintext",
+                    missing.join(" and "),
+                    if missing.len() == 1 { "is" } else { "are" },
+                    self.at("tls.enabled"),
+                    "IWDB_TLS_CERT, IWDB_TLS_KEY",
+                ));
+            }
+            if tls.client_auth == ClientAuth::Required && tls.client_ca.is_none() {
+                problems.push(format!(
+                    "{} is required, but {} isn't set: client certificates need the CAs to verify them against",
+                    self.at("tls.client_auth"),
+                    self.at("tls.client_ca")
+                ));
+            }
+        } else {
+            for (key, set) in [("tls.client_ca", tls.client_ca.is_some()), ("tls.cert", tls.cert.is_some())] {
+                if set {
+                    problems.push(format!("{} is set, but {} is false", self.at(key), self.at("tls.enabled")));
+                }
+            }
+            if !self.listen.ip().is_loopback() && !self.server.plaintext_public {
+                let exposed = if self.auth.enabled {
+                    "passwords, tokens and data would cross the network in clear"
+                } else {
+                    "authentication is off, so anyone who reaches the port could read and change everything, in \
+                     clear"
+                };
+                problems.push(format!(
+                    "{} is {}, not a loopback address, and TLS is off ({}): {}; turn TLS on ([tls] cert and key), \
+                     or set [server] plaintext_public = true (IWDB_SERVER_PLAINTEXT_PUBLIC) to listen there in \
+                     plaintext anyway",
+                    self.at("listen"),
+                    self.listen,
+                    self.at("tls.enabled"),
+                    exposed
+                ));
+            }
+        }
+        problems
+    }
+
+    /// Settings that are allowed but probably not meant; the server logs
+    /// them as warnings at start.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if self.tls.enabled && self.server.plaintext_public {
+            warnings.push(format!(
+                "{} is set, but TLS is on, so it has no effect (remove it)",
+                self.at("server.plaintext_public")
+            ));
+        }
+        if !self.tls.enabled {
+            warnings.push(format!(
+                "TLS is off ({}): passwords, tokens and data cross the network in clear",
+                self.at("tls.enabled")
+            ));
+        }
+        warnings
+    }
+
     /// The effective configuration as TOML, each setting with where it
     /// came from (`iwdb-server --check-config`). It parses back to the same
     /// settings; projections are only counted.
@@ -821,7 +964,7 @@ impl Config {
             };
             let line = match (k.get)(self) {
                 Some(value) => format!("{} = {}", name, value),
-                None => format!("# {} = (built in)", name),
+                None => format!("# {} = ({})", name, unset(k.key)),
             };
             out.push_str(&format!("{:<44} # {}\n", line, from));
         }
@@ -880,6 +1023,33 @@ impl Config {
         }
     }
 
+    /// The server's TLS files, if TLS is on (with its certificate and key,
+    /// which the checks made sure of).
+    pub fn tls_files(&self) -> Option<crate::tls::TlsFiles> {
+        match (&self.tls, &self.tls.cert, &self.tls.key) {
+            (tls, Some(cert), Some(key)) if tls.enabled => Some(crate::tls::TlsFiles {
+                cert: cert.clone(),
+                key: key.clone(),
+                client_ca: tls.client_ca.clone(),
+                client_auth: tls.client_auth,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Where `iwdb-server --probe` asks: the listen address (a wildcard
+    /// one as loopback), and whether over TLS.
+    pub fn probe_target(&self) -> (String, bool) {
+        let mut address = self.listen;
+        if address.ip().is_unspecified() {
+            address.set_ip(match address {
+                SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+                SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+            });
+        }
+        (address.to_string(), self.tls.enabled)
+    }
+
     pub fn drain_timeout(&self) -> Duration {
         Duration::from_secs(self.server.drain_timeout_secs)
     }
@@ -925,14 +1095,19 @@ mod tests {
 
     use super::*;
 
+    /// `text` with TLS off: most tests are about other settings.
+    fn plain(text: &str) -> Result<Config, String> {
+        Config::parse(&format!("{}\n[tls]\nenabled = false\n", text))
+    }
+
     #[test]
     fn only_the_data_directory_is_required() {
-        let config = Config::parse("data_dir = \"/tmp/x\"").unwrap();
+        let config = plain("data_dir = \"/tmp/x\"").unwrap();
         assert_eq!(config.listen.to_string(), DEFAULT_LISTEN);
         assert_eq!(config.limit_config(), LimitConfig::default());
         assert_eq!(config.store_options(), StoreOptions::default());
         assert_eq!(config.drain_timeout(), Duration::from_secs(30));
-        assert!(Config::parse("listen = \"127.0.0.1:1\"").is_err());
+        assert!(plain("listen = \"127.0.0.1:1\"").is_err());
     }
 
     #[test]
@@ -946,6 +1121,7 @@ mod tests {
             .map(|l| l.trim_start_matches("//!").trim_start().to_owned() + "\n")
             .collect();
         let config = Config::parse(&example).unwrap();
+        assert!(!config.tls.enabled);
         // The projection example, after the first block
         let second: String = doc
             .lines()
@@ -953,7 +1129,7 @@ mod tests {
             .take_while(|l| !l.starts_with("//! ```"))
             .map(|l| l.trim_start_matches("//!").trim_start().to_owned() + "\n")
             .collect();
-        let projections = Config::parse(&format!("data_dir = \"d\"\n{}", second));
+        let projections = plain(&format!("data_dir = \"d\"\n{}", second));
         #[cfg(feature = "postgres")]
         {
             let projections = projections.unwrap().projections;
@@ -961,13 +1137,12 @@ mod tests {
         }
         #[cfg(not(feature = "postgres"))]
         assert!(projections.unwrap_err().contains("without the postgres feature"));
-        let minimal = Config::parse("data_dir = \"/var/lib/iwdb\"").unwrap();
+        let minimal = plain("data_dir = \"/var/lib/iwdb\"").unwrap();
         // The example shows the defaults
         assert_eq!((&config.store, &config.server), (&minimal.store, &minimal.server));
         assert_eq!(config.limit_config(), minimal.limit_config());
         let partial =
-            Config::parse("data_dir = \"d\"\n[limits.max]\nmax_results = 5\n[limits.default]\nmax_results = 5")
-                .unwrap();
+            plain("data_dir = \"d\"\n[limits.max]\nmax_results = 5\n[limits.default]\nmax_results = 5").unwrap();
         assert_eq!(partial.limit_config().max_limits.max_visited, LimitConfig::MAX_LIMITS.max_visited);
     }
 
@@ -981,15 +1156,14 @@ mod tests {
             ("data_dir = \"d\"\n[limits.default]\nmax_results = 200000", "max_results"),
             ("data_dir = \"d\"\n[store]\nfsync = \"group\"\ngroup_max_batch = 0", "group_max_batch"),
         ] {
-            let e = Config::parse(text).unwrap_err();
+            let e = plain(text).unwrap_err();
             assert!(e.contains(why), "{}: {}", why, e);
         }
-        let config =
-            Config::parse("data_dir = \"d\"\n[store]\nfsync = \"group\"\ncheckpoint_on_shutdown = false").unwrap();
+        let config = plain("data_dir = \"d\"\n[store]\nfsync = \"group\"\ncheckpoint_on_shutdown = false").unwrap();
         let options = config.store_options();
         assert_matches!(options.wal.fsync, FsyncPolicy::Group { max_batch: 64, .. });
         assert!(!options.checkpoint.on_close);
-        let config = Config::parse("data_dir = \"d\"\n[store]\nretain_records = 500\nretain_age_secs = 3600").unwrap();
+        let config = plain("data_dir = \"d\"\n[store]\nretain_records = 500\nretain_age_secs = 3600").unwrap();
         let retention = WalRetention { records: 500, age: Some(Duration::from_secs(3600)) };
         assert_eq!(config.store_options().retention, retention);
     }
@@ -1004,7 +1178,7 @@ mod tests {
                 base, extra
             )
         };
-        let config = Config::parse(&section("")).unwrap();
+        let config = plain(&section("")).unwrap();
         let p = &config.projections[0];
         assert_eq!((p.namespace.as_str(), p.batch, p.on_error), ("default", 100, OnErrorSection::Stop));
         assert!(p.rules.0.is_empty());
@@ -1018,11 +1192,11 @@ mod tests {
             (section("").replace("kind = \"postgres\"", "kind = \"kafka\""), "kafka"),
             (section("").replace("name = \"p\"", "name = \"\""), "mark name"),
         ] {
-            let e = Config::parse(&text).unwrap_err();
+            let e = plain(&text).unwrap_err();
             assert!(e.contains(why), "{}: {}", why, e);
         }
         let from_env = section("").replace("url = \"host=x\"", "url_env = \"IWDB_TEST_UNSET_VARIABLE\"");
-        let e = Config::parse(&from_env).unwrap().projections().err().unwrap();
+        let e = plain(&from_env).unwrap().projections().err().unwrap();
         assert!(e.contains("IWDB_TEST_UNSET_VARIABLE"), "{}", e);
     }
 
@@ -1032,13 +1206,13 @@ mod tests {
     #[test]
     fn a_postgres_source_needs_the_postgres_feature() {
         let text = "data_dir = \"d\"\n[[projection]]\nname = \"p\"\n[projection.source]\nkind = \"postgres\"\nurl = \"host=x\"\ntable = \"t\"\nposition = \"id\"\n";
-        let e = Config::parse(text).unwrap_err();
+        let e = plain(text).unwrap_err();
         assert!(e.contains("[[projection]] \"p\"") && e.contains("postgres feature"), "{}", e);
         // Checked before the feature: a section that is wrong anyway says so
-        let e = Config::parse(&text.replace("url = \"host=x\"\n", "")).unwrap_err();
+        let e = plain(&text.replace("url = \"host=x\"\n", "")).unwrap_err();
         assert!(e.contains("url_env"), "{}", e);
         // A config without projections is fine
-        assert!(Config::parse("data_dir = \"d\"").unwrap().projections().unwrap().is_empty());
+        assert!(plain("data_dir = \"d\"").unwrap().projections().unwrap().is_empty());
     }
 
     fn env(vars: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -1060,6 +1234,7 @@ mod tests {
                 ("IWDB_LOG_FORMAT", "text"),
                 ("IWDB_SERVER_PLAINTEXT_PUBLIC", "true"),
                 ("IWDB_AUTH_ENABLED", "false"),
+                ("IWDB_TLS_ENABLED", "0"),
                 // Not settings: ignored (the test suites' and serve.py's)
                 ("IWDB_SERVER", "target/debug/iwdb-server"),
                 ("IWDB_URL", "http://x"),
@@ -1077,7 +1252,7 @@ mod tests {
         assert_eq!(config.source("server.queue"), Source::File);
         assert_eq!(config.source("server.workers"), Source::Default);
         // Without a file
-        let config = Config::build(None, &env(&[("IWDB_DATA_DIR", "rel/dir")])).unwrap();
+        let config = Config::build(None, &env(&[("IWDB_DATA_DIR", "rel/dir"), ("IWDB_TLS_ENABLED", "false")])).unwrap();
         assert_eq!(config.data_dir, PathBuf::from("rel/dir"));
     }
 
@@ -1102,10 +1277,11 @@ mod tests {
             "[store] group_max_batch must be at least 1",
             "[server] max_message_bytes (from IWDB_SERVER_MAX_MESSAGE_BYTES) must be at least 1024",
             "[log] level",
+            "[tls] cert and [tls] key are not set, and TLS is on",
         ] {
             assert!(all.contains(expected), "{:?} in\n{}", expected, all);
         }
-        assert_eq!(problems.len(), 7, "{}", all);
+        assert_eq!(problems.len(), 8, "{}", all);
         // A file that doesn't parse: its error (with the line), and the
         // variables' problems
         let problems = Config::build(Some("data_dir = 3\n"), &env(&[("IWDB_LISTEN", "x")])).unwrap_err();
@@ -1115,39 +1291,89 @@ mod tests {
 
     #[test]
     fn the_console_needs_its_feature() {
-        let console = Config::parse("data_dir = \"d\"\n[console]\nenabled = true\n");
+        let console = plain("data_dir = \"d\"\n[console]\nenabled = true\n");
         if cfg!(feature = "console") {
             assert!(console.is_ok());
         } else {
             assert!(console.unwrap_err().contains("console feature"));
         }
-        // `public` was replaced by `[server] plaintext_public`
-        let e = Config::parse("data_dir = \"d\"\n[console]\npublic = true\n").unwrap_err();
-        assert!(e.contains("replaced by [server] plaintext_public"), "{}", e);
-        let e = Config::build(None, &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_CONSOLE_PUBLIC", "true")])).unwrap_err();
-        assert!(e.join("").contains("IWDB_SERVER_PLAINTEXT_PUBLIC"), "{:?}", e);
+        // `public` is gone: TLS, or plaintext with two flags
+        let e = plain("data_dir = \"d\"\n[console]\npublic = true\n").unwrap_err();
+        assert!(e.contains("[tls] cert and key") && e.contains("[server] plaintext_public = true"), "{}", e);
+        let e = Config::build(
+            None,
+            &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_TLS_ENABLED", "false"), ("IWDB_CONSOLE_PUBLIC", "true")]),
+        )
+        .unwrap_err();
+        assert!(e.join("").contains("IWDB_TLS_ENABLED=false and IWDB_SERVER_PLAINTEXT_PUBLIC=true"), "{:?}", e);
     }
 
-    /// Until TLS (step 15b), a non-loopback address needs an explicit flag,
-    /// with authentication on or off (ADR 0047).
+    /// TLS is on by default and needs a certificate and key; plaintext is
+    /// one explicit flag on a loopback address, and two elsewhere, with
+    /// authentication on or off (ADRs 0047 and 0048).
     #[test]
-    fn a_non_loopback_address_needs_the_plaintext_flag() {
+    fn tls_is_the_default_and_plaintext_needs_explicit_flags() {
+        let e = Config::parse("data_dir = \"d\"").unwrap_err();
+        assert!(e.contains("[tls] cert and [tls] key are not set") && e.contains("enabled = false"), "{}", e);
+        let e = Config::parse("data_dir = \"d\"\n[tls]\ncert = \"c.pem\"").unwrap_err();
+        assert!(e.contains("[tls] key is not set"), "{}", e);
+        let tls =
+            Config::parse("data_dir = \"d\"\nlisten = \"0.0.0.0:7600\"\n[tls]\ncert = \"c\"\nkey = \"k\"").unwrap();
+        assert!(tls.tls.enabled && tls.warnings().is_empty(), "{:?}", tls.warnings());
         for auth in ["true", "false"] {
             let base = format!("data_dir = \"d\"\nlisten = \"0.0.0.0:7600\"\n[auth]\nenabled = {}\n", auth);
-            let e = Config::parse(&base).unwrap_err();
-            assert!(e.contains("plaintext_public = true"), "{}", e);
+            let e = plain(&base).unwrap_err();
+            assert!(e.contains("plaintext_public = true") && e.contains("TLS is off"), "{}", e);
             let why = if auth == "true" { "passwords, tokens and data" } else { "authentication is off" };
             assert!(e.contains(why), "{}", e);
-            assert!(Config::parse(&format!("{}[server]\nplaintext_public = true\n", base)).is_ok());
+            assert!(plain(&format!("{}[server]\nplaintext_public = true\n", base)).is_ok());
+            // The flag alone isn't enough: TLS is on, without a certificate
+            let e = Config::parse(&format!("{}[server]\nplaintext_public = true\n", base)).unwrap_err();
+            assert!(e.contains("[tls] cert and [tls] key are not set"), "{}", e);
         }
         let ok = "data_dir = \"d\"\nlisten = \"0.0.0.0:7600\"\n[server]\nplaintext_public = true\n";
-        assert!(Config::parse(ok).is_ok());
-        assert!(Config::parse("data_dir = \"d\"\nlisten = \"[::1]:7600\"\n").is_ok());
+        let config = plain(ok).unwrap();
+        assert!(config.warnings().iter().any(|w| w.contains("in clear")), "{:?}", config.warnings());
+        assert!(plain("data_dir = \"d\"\nlisten = \"[::1]:7600\"\n").is_ok());
+        // The flag with TLS on: allowed, with a warning
+        let both = "data_dir = \"d\"\n[server]\nplaintext_public = true\n[tls]\ncert = \"c\"\nkey = \"k\"\n";
+        let warnings = Config::parse(both).unwrap().warnings();
+        assert!(warnings.len() == 1 && warnings[0].contains("no effect"), "{:?}", warnings);
+    }
+
+    #[test]
+    fn mtls_settings_are_checked() {
+        let base = "data_dir = \"d\"\n[tls]\ncert = \"c\"\nkey = \"k\"\n";
+        let config = Config::parse(base).unwrap();
+        assert_eq!((config.tls.client_ca.as_ref(), config.tls.client_auth), (None, ClientAuth::Optional));
+        let e = Config::parse(&format!("{}client_auth = \"required\"\n", base)).unwrap_err();
+        assert!(e.contains("[tls] client_auth is required, but [tls] client_ca isn't set"), "{}", e);
+        let config = Config::parse(&format!("{}client_auth = \"required\"\nclient_ca = \"ca\"\n", base)).unwrap();
+        assert_eq!(config.tls.client_auth, ClientAuth::Required);
+        let e = Config::parse(&format!("{}client_auth = \"sometimes\"\n", base)).unwrap_err();
+        assert!(e.contains("sometimes"), "{}", e);
+        let e = Config::parse("data_dir = \"d\"\n[tls]\nenabled = false\nclient_ca = \"ca\"\n").unwrap_err();
+        assert!(e.contains("[tls] client_ca is set, but [tls] enabled is false"), "{}", e);
+        let config = Config::build(
+            None,
+            &env(&[
+                ("IWDB_DATA_DIR", "d"),
+                ("IWDB_TLS_CERT", "/c"),
+                ("IWDB_TLS_KEY", "/k"),
+                ("IWDB_TLS_CLIENT_CA", "/ca"),
+                ("IWDB_TLS_CLIENT_AUTH", "required"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(config.tls.client_ca, Some(PathBuf::from("/ca")));
+        assert_eq!(config.source("tls.client_auth"), Source::Env("IWDB_TLS_CLIENT_AUTH"));
+        let e = Config::build(None, &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_TLS_CERTS", "/c")])).unwrap_err();
+        assert!(e.join("").contains("IWDB_TLS_CERTS: no such setting"), "{:?}", e);
     }
 
     #[test]
     fn auth_is_on_by_default_and_checked() {
-        let config = Config::parse("data_dir = \"d\"").unwrap();
+        let config = plain("data_dir = \"d\"").unwrap();
         assert!(config.auth.enabled);
         assert_eq!(config.auth_settings().session_lifetime, Duration::from_secs(43200));
         for (text, why) in [
@@ -1156,16 +1382,22 @@ mod tests {
             ("[auth]\nlogin_table_size = 0", "login_table_size"),
             ("[auth]\ncolour = 1", "colour"),
         ] {
-            let e = Config::parse(&format!("data_dir = \"d\"\n{}", text)).unwrap_err();
+            let e = plain(&format!("data_dir = \"d\"\n{}", text)).unwrap_err();
             assert!(e.contains(why), "{}: {}", why, e);
         }
     }
 
     #[test]
     fn the_bootstrap_password_comes_from_the_environment_only_and_is_never_printed() {
-        let config =
-            Config::build(None, &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_AUTH_BOOTSTRAP_PASSWORD", "first-admin-pw")]))
-                .unwrap();
+        let config = Config::build(
+            None,
+            &env(&[
+                ("IWDB_DATA_DIR", "d"),
+                ("IWDB_TLS_ENABLED", "false"),
+                ("IWDB_AUTH_BOOTSTRAP_PASSWORD", "first-admin-pw"),
+            ]),
+        )
+        .unwrap();
         let (user, password) = config.bootstrap.clone().unwrap();
         assert_eq!((user.as_str(), password.expose()), ("admin", "first-admin-pw"));
         assert!(!config.describe().contains("first-admin-pw"));
@@ -1174,6 +1406,7 @@ mod tests {
             None,
             &env(&[
                 ("IWDB_DATA_DIR", "d"),
+                ("IWDB_TLS_ENABLED", "false"),
                 ("IWDB_AUTH_BOOTSTRAP_USER", "root"),
                 ("IWDB_AUTH_BOOTSTRAP_PASSWORD", "first-admin-pw"),
             ]),
@@ -1184,6 +1417,7 @@ mod tests {
             None,
             &env(&[
                 ("IWDB_DATA_DIR", "d"),
+                ("IWDB_TLS_ENABLED", "false"),
                 ("IWDB_AUTH_BOOTSTRAP_USER", "_x"),
                 ("IWDB_AUTH_BOOTSTRAP_PASSWORD", "short"),
             ]),
@@ -1192,9 +1426,16 @@ mod tests {
         .join("\n");
         assert!(problems.contains("8 to 1024 bytes") && problems.contains("invalid user name"), "{}", problems);
         assert!(!problems.contains("short\""), "{}", problems);
-        let empty = Config::build(None, &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_AUTH_BOOTSTRAP_PASSWORD", "")])).unwrap();
+        let empty = Config::build(
+            None,
+            &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_TLS_ENABLED", "false"), ("IWDB_AUTH_BOOTSTRAP_PASSWORD", "")]),
+        )
+        .unwrap();
         assert!(empty.bootstrap.is_none(), "an empty variable is an unset one");
-        let alone = Config::build(None, &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_AUTH_BOOTSTRAP_USER", "root")]));
+        let alone = Config::build(
+            None,
+            &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_TLS_ENABLED", "false"), ("IWDB_AUTH_BOOTSTRAP_USER", "root")]),
+        );
         assert!(alone.unwrap_err().join("").contains("needs IWDB_AUTH_BOOTSTRAP_PASSWORD"));
     }
 
@@ -1202,17 +1443,22 @@ mod tests {
     fn the_described_configuration_reads_back() {
         let config = Config::build(
             Some("data_dir = \"/d\"\n[limits.max]\nmax_results = 50\n[limits.default]\nmax_results = 10\n"),
-            &env(&[("IWDB_LOG_LEVEL", "warn,iwdb_storage=debug")]),
+            &env(&[
+                ("IWDB_LOG_LEVEL", "warn,iwdb_storage=debug"),
+                ("IWDB_TLS_CERT", "/tls/c.pem"),
+                ("IWDB_TLS_KEY", "/tls/k.pem"),
+            ]),
         )
         .unwrap();
         let text = config.describe();
         let back = Config::parse(&text).unwrap();
         assert_eq!(
-            (&back.store, &back.server, &back.log, &back.console, &back.auth),
-            (&config.store, &config.server, &config.log, &config.console, &config.auth)
+            (&back.store, &back.server, &back.log, &back.console, &back.auth, &back.tls),
+            (&config.store, &config.server, &config.log, &config.console, &config.auth, &config.tls)
         );
         assert_eq!(back.limit_config(), config.limit_config());
         assert!(text.contains("# max_visited = (built in)"), "{}", text);
+        assert!(text.contains("# client_ca = (unset)"), "{}", text);
     }
 
     /// `documentation/api/config.md` lists exactly the settings, with their
@@ -1228,20 +1474,28 @@ mod tests {
         let documented: Vec<(&str, &str)> = rows.iter().map(|r| (r[0].as_str(), r[1].as_str())).collect();
         let keys: Vec<(&str, &str)> = KEYS.iter().map(|k| (k.key, k.var)).collect();
         assert_eq!(documented, keys);
-        let defaults = Config::parse("data_dir = \"d\"").unwrap();
+        let defaults = Config::default();
         for (row, k) in rows.iter().zip(KEYS) {
-            let value = (k.get)(&defaults).map(|v| v.to_string()).unwrap_or_else(|| "built in".into());
+            let value = (k.get)(&defaults).map(|v| v.to_string()).unwrap_or_else(|| unset(k.key).into());
             let expected = if k.key == "data_dir" { "required".to_owned() } else { value };
             assert_eq!(row[2], expected, "{}", k.key);
         }
     }
 
     #[test]
-    fn a_relative_data_directory_is_relative_to_the_file() {
+    fn relative_paths_are_relative_to_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("server.toml");
-        std::fs::write(&path, "data_dir = \"data\"").unwrap();
-        assert_eq!(Config::load(&path).unwrap().data_dir, dir.path().join("data"));
+        let text = "data_dir = \"data\"\n[tls]\ncert = \"tls/c.pem\"\nkey = \"/abs/k.pem\"\nclient_ca = \"ca.pem\"\n";
+        std::fs::write(&path, text).unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.data_dir, dir.path().join("data"));
+        assert_eq!(config.tls.cert, Some(dir.path().join("tls/c.pem")));
+        assert_eq!(config.tls.key, Some(PathBuf::from("/abs/k.pem")));
+        assert_eq!(config.tls.client_ca, Some(dir.path().join("ca.pem")));
+        // From a variable: relative to the working directory
+        let config = Config::from_sources(Some(&path), env(&[("IWDB_TLS_CERT", "rel.pem")])).unwrap();
+        assert_eq!(config.tls.cert, Some(PathBuf::from("rel.pem")));
         assert_matches!(Config::load(&dir.path().join("missing.toml")), Err(ConfigError::Read { .. }));
     }
 }

@@ -8,8 +8,8 @@
 //!   `GET /v1/health/ready` (200 when ready, 503 otherwise), with a `Health`
 //!   message as the body. Served in every build, also without the `rest`
 //!   feature, since probes need them.
-//! - [`probe`]: the readiness route over HTTP/1.1, for `iwdb-server --probe`
-//!   (the Docker image's `HEALTHCHECK`).
+//! - [`probe`]: the readiness route over HTTP/1.1, plaintext or TLS, for
+//!   `iwdb-server --probe` (the Docker image's `HEALTHCHECK`).
 //!
 //! Health is the server's, not the [`Database`](iwdb_query::Database)
 //! trait's: while recovery runs there is no database to ask yet.
@@ -185,20 +185,35 @@ pub(crate) fn health_json(phase: Phase) -> String {
     format!(r#"{{"state":"{}"{}}}"#, phase.as_proto_name(), ready)
 }
 
-/// Whether the server at `address` is ready: a `GET /v1/health/ready` over
-/// HTTP/1.1 answered 200 within `timeout`. Errors say why not (no answer,
-/// another status).
-pub fn probe(address: &str, timeout: Duration) -> Result<(), String> {
+/// Whether the server at `address` (`host:port`) is ready: a
+/// `GET /v1/health/ready` over HTTP/1.1, over TLS if `tls`, answered 200
+/// within `timeout`. Errors say why not (no answer, another status).
+///
+/// Over TLS the probe doesn't verify the server's certificate (ADR 0048):
+/// it sends no credentials and reads only readiness, from next to the
+/// server, where the certificate's name needn't match the address. It
+/// presents no client certificate; health needs none.
+pub fn probe(address: &str, tls: bool, timeout: Duration) -> Result<(), String> {
     let addresses: Vec<SocketAddr> = address.to_socket_addrs().map_err(|e| format!("{}: {}", address, e))?.collect();
     let target = addresses.first().ok_or_else(|| format!("{}: no address", address))?;
     let mut stream = TcpStream::connect_timeout(target, timeout).map_err(|e| format!("{}: {}", address, e))?;
     stream.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
     stream.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
     let request = format!("GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", READY_PATH, address);
-    stream.write_all(request.as_bytes()).map_err(|e| format!("{}: {}", address, e))?;
     let mut answer = Vec::new();
-    // A small answer: read until the server closes, at most 4 KiB
-    let _ = stream.take(4096).read_to_end(&mut answer);
+    let failed = |e: std::io::Error| format!("{}: {}", address, e);
+    if tls {
+        let config = crate::tls::unverified_client_config().map_err(|e| e.to_string())?;
+        let name = rustls_pki_types::ServerName::IpAddress(target.ip().into());
+        let connection = rustls::ClientConnection::new(std::sync::Arc::new(config), name).map_err(|e| e.to_string())?;
+        let mut stream = rustls::StreamOwned::new(connection, stream);
+        stream.write_all(request.as_bytes()).map_err(failed)?;
+        // A small answer: read until the server closes, at most 4 KiB
+        let _ = stream.take(4096).read_to_end(&mut answer);
+    } else {
+        stream.write_all(request.as_bytes()).map_err(failed)?;
+        let _ = stream.take(4096).read_to_end(&mut answer);
+    }
     let text = String::from_utf8_lossy(&answer);
     let status = text.lines().next().unwrap_or_default();
     if status.split_whitespace().nth(1) == Some("200") {
@@ -247,7 +262,9 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
         drop(listener);
-        assert!(probe(&address, Duration::from_millis(500)).is_err());
-        assert!(probe("not an address", Duration::from_millis(500)).is_err());
+        for tls in [false, true] {
+            assert!(probe(&address, tls, Duration::from_millis(500)).is_err());
+            assert!(probe("not an address", tls, Duration::from_millis(500)).is_err());
+        }
     }
 }

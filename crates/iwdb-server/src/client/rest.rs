@@ -8,7 +8,9 @@
 //! answers either as one JSON message or, with [`RestRemote::ndjson`], as
 //! NDJSON. Calls run on a tokio runtime as `Remote`'s do; dropping a call's
 //! future closes its connection. Credentials work as `Remote`'s (a token
-//! sent as `authorization: Bearer`, [`RestRemote::login`]).
+//! sent as `authorization: Bearer`, [`RestRemote::login`]), and so does TLS
+//! (`https://`, [`RestRemote::connect_tls`]). Every request carries the
+//! CSRF header, so a client certificate alone can authenticate writes.
 
 use std::future::Future;
 use std::time::Duration;
@@ -17,7 +19,6 @@ use bytes::Bytes;
 use http::{Method, Request, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use ironweaver_core::EdgeId;
 use iwdb_engine::catalog::NamespaceCatalog;
@@ -34,18 +35,20 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::runtime::{Handle, Runtime};
 
-use super::{Call, TokenSlot, bad_answer, read_token, write_token};
+use super::https::Connector;
+use super::{Call, ClientTls, TokenSlot, bad_answer, read_token, write_token};
+use crate::auth::CSRF_HEADER;
 use crate::convert::*;
 use crate::proto as pb;
 use crate::rest::{JSON, NDJSON};
 use crate::status::from_http;
 
-type Http = Client<HttpConnector, Full<Bytes>>;
+type Http = Client<Connector, Full<Bytes>>;
 
 /// A database served by an `iwdb-server`, as a [`Database`], over REST.
 pub struct RestRemote {
     http: Http,
-    /// `http://host:port`, without a trailing slash.
+    /// `http://host:port` or `https://host:port`, without a trailing slash.
     base: String,
     ndjson: bool,
     token: TokenSlot,
@@ -65,26 +68,47 @@ impl RestRemote {
     /// endpoint that isn't `http://...`, `internal` if the runtime can't
     /// start.
     pub fn connect(endpoint: &str) -> Result<RestRemote, Error> {
+        RestRemote::connect_tls(endpoint, &ClientTls::default())
+    }
+
+    /// A client of the server at `endpoint` (`https://host:port` with TLS,
+    /// `http://host:port` without), trusting and presenting what `tls` says
+    /// ([`Remote::connect_tls`](super::Remote::connect_tls)).
+    pub fn connect_tls(endpoint: &str, tls: &ClientTls) -> Result<RestRemote, Error> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("iwdb-rest-client")
             .enable_all()
             .build()
             .map_err(|e| Error::internal(format!("can't start the client's runtime: {}", e)))?;
-        let mut remote = RestRemote::connect_on(runtime.handle().clone(), endpoint)?;
+        let mut remote = RestRemote::connect_on_tls(runtime.handle().clone(), endpoint, tls)?;
         remote.runtime = Some(runtime);
         Ok(remote)
     }
 
     /// The same, running its calls on `handle`'s runtime.
     pub fn connect_on(handle: Handle, endpoint: &str) -> Result<RestRemote, Error> {
+        RestRemote::connect_on_tls(handle, endpoint, &ClientTls::default())
+    }
+
+    /// [`connect_tls`](Self::connect_tls), running its calls on `handle`'s
+    /// runtime.
+    pub fn connect_on_tls(handle: Handle, endpoint: &str, tls: &ClientTls) -> Result<RestRemote, Error> {
         let base = endpoint.trim_end_matches('/');
-        if !base.starts_with("http://") || base.parse::<http::Uri>().is_err() {
-            return Err(Error::invalid(format!("invalid endpoint '{}': expected http://host:port", endpoint)));
+        let scheme = base.starts_with("http://") || base.starts_with("https://");
+        if !scheme || base.parse::<http::Uri>().is_err() {
+            return Err(Error::invalid(format!(
+                "invalid endpoint '{}': expected https://host:port or http://host:port",
+                endpoint
+            )));
         }
-        let mut connector = HttpConnector::new();
-        connector.set_nodelay(true);
-        let http = Client::builder(TokioExecutor::new()).build(connector);
+        let config = if super::https(base, tls)? {
+            let config = tls.rustls_config(&[b"http/1.1"]).map_err(|e| Error::invalid(e.to_string()))?;
+            Some(std::sync::Arc::new(config))
+        } else {
+            None
+        };
+        let http = Client::builder(TokioExecutor::new()).build(Connector::new(config));
         Ok(RestRemote {
             http,
             base: base.to_owned(),
@@ -203,7 +227,8 @@ impl Calls {
     /// Send a request; the answer's body if it succeeded, the error its
     /// status and body stand for otherwise.
     async fn send(&self, method: Method, url: String, body: Option<Vec<u8>>, accept: &str) -> Result<Bytes, Error> {
-        let mut builder = Request::builder().method(method).uri(&url).header(header::ACCEPT, accept);
+        let mut builder =
+            Request::builder().method(method).uri(&url).header(header::ACCEPT, accept).header(CSRF_HEADER, "1");
         if let Some(token) = &self.token {
             builder = builder.header(header::AUTHORIZATION, format!("Bearer {}", token.expose()));
         }
