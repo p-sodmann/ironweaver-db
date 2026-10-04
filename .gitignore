@@ -20,3 +20,6 @@ build/
 *.swp
 *~
 .DS_Store
+
+# Development certificates and keys (docker/dev-cert.sh, step 15b)
+/docker/tls/

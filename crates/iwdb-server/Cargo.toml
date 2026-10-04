@@ -21,7 +21,7 @@ postgres = ["iwdb/postgres"]
 console = ["rest"]
 # The Rust clients (`client::Remote` over gRPC, ADR 0024; with `rest`,
 # `client::RestRemote` over REST, ADR 0030); the tests turn it on
-client = ["hyper/client", "hyper/http1", "hyper-util/client-legacy", "hyper-util/http1"]
+client = ["hyper/client", "hyper/http1", "hyper-util/client-legacy", "hyper-util/http1", "tonic/tls-ring", "tonic/tls-native-roots", "dep:rustls-native-certs"]
 
 [[bin]]
 name = "iwdb-server"
@@ -60,6 +60,12 @@ serde_json = { workspace = true, optional = true, features = ["raw_value", "floa
 toml.workspace = true
 thiserror.workspace = true
 log.workspace = true
+# TLS and mTLS on the one port (step 15b, ADR 0048); the probe's TLS too
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pki-types.workspace = true
+# The clients' trust store when no CA is given (feature `client`)
+rustls-native-certs = { workspace = true, optional = true }
 # Health: grpc.health.v1's generated messages and service (step 16b; the
 # implementation is ours, over the server's phase); structured logs
 tonic-health.workspace = true

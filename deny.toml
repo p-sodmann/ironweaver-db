@@ -19,6 +19,8 @@ allow = [
     "BSD-2-Clause",
     # matchit (axum's router, step 12): "MIT AND BSD-3-Clause"
     "BSD-3-Clause",
+    # ring and rustls-webpki (rustls, step 15b): "Apache-2.0 AND ISC", "ISC"
+    "ISC",
     "Unicode-3.0",
     "Zlib",
 ]
