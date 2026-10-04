@@ -128,6 +128,39 @@ Each is its own commit, and returns the same result dict (with empty `edge_ids` 
 
 **Read-your-writes** (step 8, [ADR 0016](adr/0016-read-your-writes-and-deadlines.md)): with `min_seq` (for example `result["seq"]` of an earlier commit), a read first waits until that commit is applied, so it sees it and everything before it. `timeout` (seconds, default 30; `float("inf")`: none) bounds the wait and, since step 10, the read itself: after it, `iwdb.TimeoutError`. A store that is read-only below `min_seq` raises `iwdb.ReadOnlyError` at once (it can't get there). In the embedded store every commit is applied before it returns, so a thread's own commits are always visible; `min_seq` matters for seqs from other threads, and for the remote client (step 14), which tracks the seq of its last commit and sends it. Reads run concurrently with each other and with commits; they never see part of a transaction.
 
+### Queries
+
+Since step 14 ([ADR 0035](adr/0035-python-remote-client.md)), the reads of the `Database` trait: bounded (design rule 5), on `Store` (namespace `"default"`) and `Namespace`, embedded and remote alike. Semantics, limits and orders are those of the trait ([ADR 0021](adr/0021-bounded-reads-and-cursors.md), [ADR 0022](adr/0022-analytics-jobs.md)).
+
+Every query takes the read options as keywords: `max_results`, `max_visited`, `max_edges` (`None`: the store's or server's defaults: 1 000, 100 000 and 1 000 000; above the caps, the caps; 0 raises `InvalidError`), `partial=False`, `cursor=None`, `min_seq` and `timeout` (as for `node`). `explain` takes only `min_seq` and `timeout`.
+
+Every answer is a dict with the results (below) and `"seq"` (the state the read saw), `"cursor"` (`str`: pass it as `cursor=` with the same request for the next page; `None`: no more), `"truncated"` (with `partial=True`, a limit cut the answer; then there is no cursor) and `"work"` (`{"visited": int, "edges": int}`).
+
+Reaching a limit raises `iwdb.BudgetExceededError`, unless `partial=True`. `max_results` is the page size of the paginated reads (`find`, `neighbourhood`, `match`: more results give a cursor, not an error) and keeps the top rows of `analyze`. A cursor is valid at one seq: after a commit to the namespace, the next page raises `iwdb.CursorExpiredError` (start again without it); a cursor of another request raises `InvalidError`.
+
+| Method | Results |
+|---|---|
+| `find(filter)` | `"nodes"`: node dicts matching the [filter](#filters), sorted by id; uses an index where it can |
+| `explain(filter, *, analyze=False)` | `"plan"` (`{"kind": "index", "path": [...], "lookup": "point" \| "in" \| "range", "values": n}`, `{"kind": "label", "label"}`, `{"kind": "union", "plans": [...]}`, `{"kind": "scan"}`, `{"kind": "empty"}` or `{"kind": "other", "text"}`), `"estimated_candidates"`, `"candidates"` (with `analyze`: exact, `None` otherwise), `"nodes"` (the namespace's node count), `"building"` (paths whose index is being built) |
+| `neighbourhood(seeds, *, depth=1, direction="out", edge_types=None, edge_filter=None, node_filter=None)` | `"nodes"`: the nodes within `depth` edges of `seeds` (an id or a list of ids; missing ones are skipped), sorted by id; `node_filter` selects what is returned, not what is followed |
+| `traverse(start, *, order="bfs", depth=None, direction="out", edge_types=None, edge_filter=None)` | `"ids"`: node ids in BFS or DFS (`"dfs"`) order from `start` |
+| `shortest_path(from_, to, *, method="bfs", weight=None, default_weight=1.0, coords=None, metric="euclidean", direction="out", max_depth=None, max_cost=None)` | `"path"`: `{"nodes": [ids], "cost": float}` or `None`. `method`: `"bfs"` (fewest edges), `"dijkstra"` or `"astar"`, cheapest by the edge attribute `weight` (`default_weight` for edges without it; unweighted if `None`). A* guesses distances from `coords`: an attribute holding a list of numbers (`"pos"`), or one attribute path per dimension (`["x", "y"]`, the default), with `metric` `"euclidean"` or `"manhattan"`. A missing `from_` or `to` raises `NotFoundError` |
+| `random_walks(start, *, max_length, walks=1, min_length=1, allow_revisit=False, seed=None)` | `"walks"`: lists of ids, duplicates removed |
+| `subgraph(seeds, *, depth=1, direction="out", edge_types=None, edge_filter=None)` | `"nodes"` and `"edges"` (edge dicts as from `edge`), both sorted by id |
+| `match(pattern, *, where=None)` | `"rows"`: `{"nodes": [ids], "edges": [[edge ids], ...]}` per match, one id per pattern node and one list of edge ids per pattern edge (a path for a variable-length edge), in the pattern's order; rows sorted. `pattern` is the core's text, `"(a:Person {age: 30})-[:knows*1..3]->(b)"`; `where` maps node variables to filters |
+| `analyze(job, *, params=None, direction="out", weight=None, default_weight=1.0)` | a job on a projection of every node and the edges in `direction`: `"pagerank"` (`params`: `alpha`, `max_iter`, `tol`) and `"degree"` (`incoming`) give `"scores"`, `[[id, float], ...]` highest first; `"weakly_connected_components"`, `"strongly_connected_components"`, `"leiden"` (`resolution`, `randomness`, `max_iter`, `seed`) and `"label_propagation"` (`max_iter`, default 100) give `"groups"`, lists of ids, biggest first; `"core_number"` and `"triangles"` give `"counts"`, `[[id, int], ...]` highest first. Unknown jobs or parameters raise `ValueError`. The projection is collected under the read limits: `max_visited` and `max_edges` must cover the namespace |
+
+`direction` is `"out"`, `"in"` or `"both"`; `edge_types` a list of types to follow (all if `None`).
+
+```python
+from iwdb import attr, label
+
+adults = store.find(label("Person") & (attr("age") >= 18), max_results=100)
+while adults["cursor"]:
+    adults = store.find(label("Person") & (attr("age") >= 18), max_results=100, cursor=adults["cursor"])
+rows = store.match("(a:Person)-[:KNOWS]->(b)", where={"b": attr("name") == "Bob"})["rows"]
+```
+
 ### Operations
 
 | Method | Returns |
@@ -143,10 +176,47 @@ Each is its own commit, and returns the same result dict (with empty `edge_ids` 
 
 | Function | Returns |
 |---|---|
+| `iwdb.connect(endpoint) -> Store` | a client of a server ([The remote client](#the-remote-client)) |
 | `iwdb.verify(path) -> dict` | check a data directory, backup or archive and change nothing: `{"ok": bool, "kind", "problems": [{"path", "message"}], "notes": [...], "seq", "last_seq", "records", "checkpoints", "segments", "namespaces": [{"id", "name", "seq", "records", ...}], ...}` (single-namespace fields are those of the one namespace, `None` when there are several; [ADR 0011](adr/0011-verify.md)) |
 | `iwdb.restore(dest, *, backup=None, archive=None, seq=None, time=None, namespaces=None) -> dict` | restore a store into a new or empty directory from a backup and/or an archive: every namespace that existed at the target (or just the names in `namespaces`), each to the latest it reaches, or to the last commit at or before `time` (an aware `datetime`). `seq` is one namespace's seq, so it needs exactly one namespace to restore (give `namespaces=["name"]`, or restore a store that has just one): otherwise `iwdb.InvalidError`. Returns `{"path", "history", "source_history", "namespaces": [{"id", "name", "seq", "time", "checkpoint", "replayed", ...}]}` and the fields of `"default"` at the top |
 
-The remote client (step 14) has no `Store.open`, `backup`, `verify` or `restore` with local paths; it has the rest with the same shapes, from `iwdb.connect(...)`.
+The remote client (`iwdb.connect`, step 14) has the API above apart from the calls that need the store's directory: see [The remote client](#the-remote-client).
+
+## Filters
+
+`iwdb.attr`, `iwdb.label`, `iwdb.edge_type` and `iwdb.const` build filters (the core's `Expr`), combined with `&` (and), `|` (or) and `~` (not):
+
+| Filter | Holds for |
+|---|---|
+| `attr(path) == v`, `!=`, `<`, `<=`, `>`, `>=` | the attribute at `path` (a `str`, or a list of `str`: a key, then keys into nested dicts) compared with `v`; order comparisons only between two numbers, two strings or two bools |
+| `attr(path).isin(values)` | the attribute equals one of `values` |
+| `attr(path).exists()` | the attribute exists and is not `None` |
+| `label(name)` | nodes with the label (never edges) |
+| `edge_type(name)` | edges of the type (never nodes) |
+| `const(True)`, `const(False)` | everything, nothing |
+
+Values convert as in [Values](#values). A filter has no truth value: `and`, `or`, `not` and chained comparisons (`1 < attr("x") < 3`) raise `TypeError`; write `(attr("x") > 1) & (attr("x") < 3)`. A filter nests at most 100 levels (And, Or and Not around a leaf, which counts as one; the core's limit): deeper ones raise `ValueError`. Anything else where a filter is expected raises `TypeError`.
+
+## The remote client
+
+`iwdb.connect(endpoint) -> Store` (`endpoint`: `"http://host:port"` of an `iwdb-server`; no TLS until step 15) returns a store with this API, served over gRPC ([ADR 0035](adr/0035-python-remote-client.md)). It connects on the first call and again after a lost connection; without a server, calls raise `iwdb.UnavailableError`. `close()`, `closed` and `with` work as for an embedded store.
+
+- **Embedded only.** These need the store's directory and raise `iwdb.InvalidError` on a remote store: `sync`, `checkpoint`, `checkpoint_all`, `history`, `status` (the store's; `namespace.status()` works), `backup`, `import_namespace`, `import_file`, `export` (and their `Namespace` forms). `verify` and `restore` act on directories.
+- **Read-your-writes.** The client remembers the seq of its last commit (data or catalog) per namespace, and a read without `min_seq` waits for it, so a client always sees its own commits. Pass `result["seq"]` as `min_seq` to another client to let it see them too. Creating or dropping a namespace through the client forgets the namespace's seq.
+- **Errors** keep their class: the server sends the error's code and the client raises the class of the [exceptions table](#exceptions).
+- **Limits** are the server's (`[limits]` in its config), timeouts included: `timeout=float("inf")` is the server's maximum.
+
+## asyncio
+
+`iwdb.aio` wraps both kinds of store: `await iwdb.aio.open(path, **options)` and `await iwdb.aio.connect(endpoint)` return an `AsyncStore` whose methods are coroutines with the same arguments, results and exceptions; `await store.namespace(name)` an `AsyncNamespace`. Each call runs in a worker thread (`asyncio.to_thread`) and releases the GIL in Rust, so calls run concurrently with the event loop and each other. `async with store:` closes it. A transaction collects mutations with plain calls; `await tx.commit()`, or `async with store.transaction() as tx:` commits when the block ends, as `with` does.
+
+```python
+store = await iwdb.aio.connect("http://127.0.0.1:7600")
+async with store:
+    async with store.transaction() as tx:
+        tx.upsert_node("alice", labels=["Person"])
+    print(await store.find(iwdb.label("Person")))
+```
 
 ## Values
 
@@ -169,7 +239,7 @@ Anything else raises `TypeError`. Values nest at most 100 levels (a scalar is 1;
 
 ## Exceptions
 
-Every error is an `iwdb.Error` (an `Exception`), with the Rust message as its text, except argument errors, which are Python's own (`TypeError`, `ValueError`, `OverflowError`). Since step 10 the store's reads, commits, catalog and namespace calls go through the `Database` trait (`iwdb::Embedded`), and their exceptions follow its error codes (`documentation/api/errors.md`): `conflict` is `ConflictError`, `not_found` is `NotFoundError`, and so on. Codes without a class of their own here (`budget_exceeded`, `cursor_expired`, `cancelled`, `unavailable`) raise `iwdb.Error`; the query methods that can produce them come with step 14.
+Every error is an `iwdb.Error` (an `Exception`), with the Rust message as its text, except argument errors, which are Python's own (`TypeError`, `ValueError`, `OverflowError`). Since step 10 the store's reads, commits, catalog and namespace calls go through the `Database` trait (`iwdb::Embedded`), and their exceptions follow its error codes (`documentation/api/errors.md`): `conflict` is `ConflictError`, `not_found` is `NotFoundError`, and so on; only `cancelled` has no class of its own (`iwdb.Error`; Python can't cancel a call).
 
 | Exception | Raised for |
 |---|---|
@@ -182,6 +252,10 @@ Every error is an `iwdb.Error` (an `Exception`), with the Rust message as its te
 | `iwdb.IoError` | a file operation failed; for a commit, its outcome is unknown and the store is read-only ([guarantees.md](guarantees.md)) |
 | `iwdb.CorruptError` | damage in the WAL, a checkpoint, a marker, a manifest or the namespace log, or a namespace directory that is missing; recovery refused |
 | `iwdb.TimeoutError` | a read (its `min_seq` wait included) didn't finish within its `timeout`; nothing changed |
+| `iwdb.BudgetExceededError` | a query reached `max_results`, `max_visited` or `max_edges` without `partial=True` (step 14) |
+| `iwdb.CursorExpiredError` | the namespace changed since a paginated query's first page: start again without the cursor (step 14) |
+| `iwdb.NotRetainedError` | `changes` was asked for a seq older than the oldest one still in the WAL |
+| `iwdb.UnavailableError` | a remote store can't reach its server (no connection, shutting down, overloaded): retry with backoff (step 14) |
 | `iwdb.ClosedError` | the store is closed |
 | `iwdb.InternalError` | a bug: a Rust panic outside the commit path |
 

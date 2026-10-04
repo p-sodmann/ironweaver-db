@@ -38,6 +38,7 @@ Option 4.
 - The API, the dicts and the exceptions can't drift between the two modes: they are one implementation. The shared suite checks the transport and the trait's behaviour, not two codebases.
 - No pure-Python install: a remote-only user needs a wheel for their platform (Linux and macOS, x86-64 and arm64; Windows isn't shipped, ADR 0013). If that matters later, a pure-Python package can be added, and it would need options 1 or 2's codec or JSON form. Nothing here prevents it.
 - The wheel grows by tonic, prost and tokio (a few MB), and the bindings depend on the `iwdb-server` crate. ADR 0024's slim `iwdb-client` crate (protos, `convert` and `Remote`) can be split out later without changing the Python side.
+- The sdist now carries `iwdb-server`, whose build script compiles the protos. maturin packs each crate's own files and refuses include patterns outside the Python crate, so `crates/iwdb-server/proto` is a symlink to the workspace's `proto/`: cargo packages its contents, and the build script reads the protos through it. The release workflow builds a wheel from the sdist to keep this working. Windows checkouts need symlinks enabled (`core.symlinks`), which only matters once Windows is supported.
 - A remote `Store` owns a small tokio runtime (two threads) for its calls. Python threads can share it.
 - Forking with an open remote `Store` is unsupported like the embedded one: the child inherits a runtime whose threads don't exist.
 - No authentication or TLS until step 15; `connect` takes `http://` endpoints only.
