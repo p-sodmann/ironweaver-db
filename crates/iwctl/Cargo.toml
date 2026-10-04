@@ -1,6 +1,6 @@
 [package]
 name = "iwctl"
-description = "Ironweaver DB admin CLI: status, checkpoint, backup, restore and verify for local data directories"
+description = "Ironweaver DB admin CLI: status, checkpoint, backup, restore and verify for local data directories, and a query shell for servers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,11 +15,18 @@ path = "src/main.rs"
 [dependencies]
 iwdb = { path = "../iwdb" }
 iwdb-storage = { path = "../iwdb-storage" }
+# The query shell (step 14a): the core's filters and patterns, the
+# Database trait, and the gRPC client (ADR 0024) without REST or Postgres
+ironweaver-core.workspace = true
+iwdb-query = { path = "../iwdb-query" }
+iwdb-server = { path = "../iwdb-server", default-features = false, features = ["client"] }
 # --json output (already in the tree)
 serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The shell's tests serve a store in-process (iwdb_server::Server)
+tokio.workspace = true
 
 [lints]
 workspace = true

@@ -1,11 +1,12 @@
-//! `iwctl`: the admin CLI for local data directories (step 7; the query
-//! shell comes in step 14). It parses arguments, calls the library
-//! (`iwdb`) and prints the result; every operation lives in the library
-//! (design rule 8). `documentation/iwctl.md` describes the commands and
-//! the exit codes.
+//! `iwctl`: the admin CLI for local data directories (step 7), and a query
+//! shell for servers (`iwctl shell`, step 14a). It parses arguments, calls
+//! the library (`iwdb`, or the `Database` trait over gRPC) and prints the
+//! result; every operation lives in the library (design rule 8).
+//! `documentation/iwctl.md` describes the commands and the exit codes.
 
 mod args;
 mod output;
+mod shell;
 
 use std::process::ExitCode;
 
@@ -94,6 +95,7 @@ fn run(parsed: &Parsed, out: &Out) -> Result<u8, Error> {
             println!("iwctl {}", env!("CARGO_PKG_VERSION"));
             Ok(exit::OK)
         }
+        Command::Shell { endpoint } => Ok(shell::run(endpoint, one_namespace(parsed), parsed.json)),
         Command::Status { dir } => {
             let status = iwdb::status(dir, store_options(parsed))?;
             out.status(&status);

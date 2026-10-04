@@ -1,5 +1,5 @@
-//! Command-line parsing, by hand: five commands and a few flags don't need
-//! a parser crate (ADR 0012).
+//! Command-line parsing, by hand: a few commands and flags don't need a
+//! parser crate (ADR 0012).
 
 use std::path::PathBuf;
 
@@ -46,6 +46,13 @@ for status, which then shows what the files say):
   export <dir> <file> [-n <ns>] [--format json|binary]
                                 write a namespace's graph to <file> as a core file (JSON for
                                 a .json file, binary otherwise, unless --format)
+
+query shell (a server, over gRPC):
+  shell <endpoint> [-n <ns>]    an interactive client of the iwdb-server at <endpoint>
+                                (http://host:port): match patterns, lookups, commits and
+                                catalog commands, one per line from stdin (\\help lists
+                                them); with --json, one JSON object per answer
+
   help, --help                  this text
   --version                     the version
 
@@ -80,6 +87,7 @@ pub enum Command {
     DropConstraint { dir: PathBuf, kind: ConstraintKind, label: String, path: Vec<String> },
     Import { dir: PathBuf, name: String, file: PathBuf, format: Option<ImportFormat>, merge: bool },
     Export { dir: PathBuf, file: PathBuf, format: Option<ExportFormat> },
+    Shell { endpoint: String },
     Help,
     Version,
 }
@@ -202,6 +210,10 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
             }
             return Ok(Parsed { command, json, fsync, keep, archive: None, no_verify, namespaces, key, no_archive });
         }
+        "shell" => {
+            expect(1)?;
+            Command::Shell { endpoint: rest.first().cloned().ok_or("shell needs an endpoint (http://host:port)")? }
+        }
         "verify" => {
             expect(1)?;
             Command::Verify { dir: path(0, "a directory")? }
@@ -280,7 +292,14 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
     }
     let takes_namespace = matches!(
         name.as_str(),
-        "checkpoint" | "indexes" | "create-index" | "drop-index" | "add-constraint" | "drop-constraint" | "export"
+        "checkpoint"
+            | "indexes"
+            | "create-index"
+            | "drop-index"
+            | "add-constraint"
+            | "drop-constraint"
+            | "export"
+            | "shell"
     );
     if !namespaces.is_empty() && !takes_namespace {
         return Err(format!("{} takes no --namespace", name));
