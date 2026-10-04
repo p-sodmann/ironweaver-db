@@ -160,10 +160,34 @@ What it guarantees, with `[auth] enabled` (the default):
 
 What it doesn't guarantee:
 
-- **No secrecy on the wire until step 15b.** The server speaks plain TCP: passwords, tokens and data cross the network in clear, so anyone who can see the traffic can take a session. A non-loopback listen address needs `[server] plaintext_public = true`; keep the server on localhost or a trusted network.
+- **No secrecy on the wire with TLS off.** With `[tls] enabled = false` (step 15b, below) the server speaks plain TCP: passwords, tokens and data cross the network in clear, so anyone who can see the traffic can take a session. A non-loopback listen address then also needs `[server] plaintext_public = true`.
 - **No protection of the data directory.** The embedded store, Python's `Store.open` and `iwctl` on a data directory are unauthenticated: whoever can open the directory owns the store, users included. Its file permissions are the boundary. A backup holds the password hashes.
 - **The slowdown is per process**, forgotten at a restart, and can lock a known user out for one window at a time.
 - **A restore brings back the users of its point in time**, passwords included.
+
+## TLS and mTLS (step 15b)
+
+[ADR 0048](adr/0048-tls-and-mtls.md); configuration: [api/config.md](api/config.md#tls-and-mtls).
+
+What it guarantees:
+
+- **A default server speaks only TLS.** Without `[tls] enabled = false` it serves nothing in plaintext, and without a certificate and key it doesn't start. Plaintext on a non-loopback address needs a second flag, `[server] plaintext_public = true`; either flag alone is refused before the store opens (`crates/iwdb-server/tests/binary.rs`, the config tests; CI's docker job for the image).
+- **Clients verify the server.** `Remote`, `RestRemote`, Python's `iwdb.connect`, `iwctl` and `serve.py` refuse a certificate of a CA they don't trust and an expired one: the call is `unavailable`, with the reason (`crates/iwdb-server/tests/tls.rs`, the Python and iwctl suites).
+- **A client certificate is verified before it counts**: an expired one or one of another CA fails the handshake; nothing is served on that connection, not even login.
+- **A client certificate authenticates as the user its subject's common name names**, with that user's roles, checked by the same authorisation point as a token (ADR 0045); a certificate that names no user, or not exactly one common name, is `unauthenticated`. A token or session in the request wins over the certificate. Tested over gRPC and REST for reads, writes and server-admin operations.
+- **With `[tls] client_auth = "required"`, every request without a client certificate is refused** (`unauthenticated`), login and tokens included; only health and the console's pages are answered.
+- **A REST write authenticated by a client certificate alone needs the CSRF header**, as one authenticated by the console's cookie does.
+- **The console's session cookie is `Secure` over TLS** (and `HttpOnly`, `SameSite=Strict`); the console keeps nothing in `localStorage`.
+- **SIGHUP reloads the certificate, key and client CA** for new connections; a reload that fails keeps the ones in use, and the server goes on serving (`sighup_reloads_the_certificate`).
+- **No private key is logged, printed or put in an error message**: `--check-config` prints its path; errors name the file and what is wrong with it. Tested by grepping the server's logs at `debug` through reloads of a mismatched and a cut-off key (`no_secret_reaches_the_logs`), and the errors of mangled keys (`errors_never_quote_a_private_key`).
+- **No certificate or key is in the Docker image**; CI's docker job checks it.
+
+What it doesn't guarantee:
+
+- **The probe doesn't verify the server's certificate** (`iwdb-server --probe`, the image's `HEALTHCHECK`): it sends no credentials and reads only readiness.
+- **No certificate management.** Nothing renews a certificate or checks revocation (no CRL or OCSP); replace the files and send SIGHUP. `docker/dev-cert.sh`'s certificates are for development only.
+- **Open connections keep their certificate** after a reload, until they close.
+- **The Postgres source of projections connects without TLS.**
 
 ## The change stream (step 13)
 

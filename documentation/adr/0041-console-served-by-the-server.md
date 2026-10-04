@@ -24,3 +24,7 @@ The operator console (step 16a, ADR 0037) reaches a server through a Flask proxy
 ## Update (step 15a)
 
 The console is behind the server's authentication now ([ADR 0046](0046-the-console-session.md)): its pages stay open (they hold no data), every read and write needs a session, held in an HttpOnly, SameSite=Strict cookie, with a CSRF header on writes. `[console] public` is gone: what remains to opt into is the lack of TLS, for the whole server, `[server] plaintext_public` ([ADR 0047](0047-auth-bootstrap-and-configuration.md)); `[console] public` and `IWDB_CONSOLE_PUBLIC` are refused with a message that names it. `compose.yaml` sets `IWDB_SERVER_PLAINTEXT_PUBLIC` and the first admin's password instead of `IWDB_CONSOLE_PUBLIC`.
+
+## Update (step 15b)
+
+The server speaks TLS by default ([ADR 0048](0048-tls-and-mtls.md)), so the console is at `https://.../console/` and its session cookie is `Secure` there. The plaintext switch is now two: `[tls] enabled = false`, and on a non-loopback address also `[server] plaintext_public = true`. `[console] public` and `IWDB_CONSOLE_PUBLIC` stay refused; the message names `[tls]` and both flags. `compose.yaml` mounts the certificate of `docker/dev-cert.sh` and no longer sets a plaintext flag. `serve.py` (development) verifies an `https://` server against `--ca` and passes the cookie on without `Secure` to its own plain-HTTP page on localhost.

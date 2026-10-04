@@ -25,7 +25,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [14b](step_14b.md) | Benchmarks | M3 | done |
 | [15](step_15.md) | Security | M4 | in progress (split into 15a to 15d) |
 | [15a](step_15a.md) | Authentication and roles | M4 | done |
-| [15b](step_15b.md) | TLS and mTLS | M4 | todo |
+| [15b](step_15b.md) | TLS and mTLS | M4 | done |
 | [15c](step_15c.md) | Audit log and `SECURITY.md` | M4 | todo |
 | [15d](step_15d.md) | Resource limits per client and namespace | M4 | todo |
 | [16](step_16.md) | Operability | M4 | in progress (split into 16a to 16i) |
@@ -53,5 +53,5 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | M1 Embedded durable | 4–7 | done, except the PyPI publish of 0.1.0 (prepared; the owner publishes) |
 | M2 Service | 8–10 | done |
 | M3 Network access | 11–14b | done |
-| M4 Production 1.0 | 15–17 | todo (15a, 16a, 16b done) |
+| M4 Production 1.0 | 15–17 | todo (15a, 15b, 16a, 16b done) |
 | M5 HA | 18 | todo |

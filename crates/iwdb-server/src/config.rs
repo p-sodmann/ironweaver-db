@@ -71,7 +71,7 @@
 //!
 //! [projection.source]
 //! kind = "postgres"
-//! url_env = "ORDERS_DB_URL"         # or url = "postgresql://..." (no TLS until step 15)
+//! url_env = "ORDERS_DB_URL"         # or url = "postgresql://..." (connects without TLS)
 //! table = "public.order_events"
 //! position = "id"                   # a bigint that increases with every event
 //! gap_timeout_ms = 5000             # how long a hole in the positions is waited for

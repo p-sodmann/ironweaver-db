@@ -10,8 +10,8 @@ Safe to expose on a network: encrypted, authenticated, authorised and resource-l
 
 ## Tasks
 
-- [ ] TLS on by default for gRPC and REST; plaintext only with an explicit flag (15b).
-- [ ] Authentication: users with passwords, API tokens (15a) and mTLS (15b); hooks for OIDC/JWT later.
+- [x] TLS on by default for gRPC and REST; plaintext only with an explicit flag (15b).
+- [x] Authentication: users with passwords, API tokens (15a) and mTLS (15b); hooks for OIDC/JWT later (a principal comes from `Authenticate`, ADRs 0045 and 0048).
 - [x] Authorisation: roles per namespace (read / write / admin), stored durably with one write path (like Postgres roles and GRANT) (15a).
 - [ ] Resource limits per client and namespace: query budgets, rate limits, max memory per namespace (reject writes above it; built on step 16d's memory accounting and process-wide limit) (15d).
 - [ ] Audit log of admin and catalog operations (15c).

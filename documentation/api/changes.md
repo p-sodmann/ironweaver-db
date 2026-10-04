@@ -39,7 +39,7 @@ Following the stream is a loop of long polls, written once in the server for its
 **Server-Sent Events.** Each commit is a `change` event whose `id` is its seq and whose `data` is the `ChangeEvent` message in JSON on one line. A round without commits sends a comment line (`: next seq N`). On an error the stream sends an `error` event with an `Error` body and ends. A browser's `EventSource` reconnects by itself and sends the last `id` it saw as `Last-Event-ID`, and the stream resumes after it. An error in the first batch (no such namespace, `not_retained`, a bad parameter) is the answer's HTTP status instead.
 
 ```sh
-curl -N 'http://127.0.0.1:7600/v1/namespaces/default/changes/stream?from_seq=1'
+curl -N --cacert ca.pem -H "authorization: Bearer $T" 'https://127.0.0.1:7600/v1/namespaces/default/changes/stream?from_seq=1'
 # id: 1
 # event: change
 # data: {"seq":"1","timeMicros":"...","data":{"ops":[{"addNode":{"id":"ann","labels":["Person"],"data":{"attr":{"age":{"Int":30}},"version":"1"}}}, ...]}}

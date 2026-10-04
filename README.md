@@ -15,9 +15,10 @@ with iwdb.Store.open("data") as store:
     print(store.node("alice"))
 ```
 
-The server in Docker (gRPC and REST on port 7600, the console at `/console/`). Authentication is on: the first start makes the user `admin` with the password you give. There is no TLS until step 15b, so keep it on localhost:
+The server in Docker (gRPC and REST on port 7600 over TLS, the console at `https://127.0.0.1:7600/console/`). Authentication is on: the first start makes the user `admin` with the password you give. The image has no certificate; for development, `docker/dev-cert.sh` makes one (clients trust `docker/tls/ca.pem`):
 
 ```
+sh docker/dev-cert.sh
 IWDB_ADMIN_PASSWORD=... docker compose up --build
 ```
 

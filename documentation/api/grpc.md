@@ -8,7 +8,7 @@ Decisions: [ADR 0023](../adr/0023-wire-encoding-of-values-filters-and-patterns.m
 
 ```
 iwdb-server --config server.toml
-IWDB_DATA_DIR=/var/lib/iwdb iwdb-server          # no file: the environment alone
+IWDB_DATA_DIR=/var/lib/iwdb IWDB_TLS_CERT=cert.pem IWDB_TLS_KEY=key.pem iwdb-server   # no file: the environment alone
 ```
 
 Only `data_dir` is required (in the file, relative to it, or as `IWDB_DATA_DIR`); everything else has a default. Every setting can be overridden by an `IWDB_*` variable; [config.md](config.md) lists them all, with the rules, the logs and the health endpoints. `iwdb-server --check-config` validates a configuration and prints the effective settings.
@@ -62,7 +62,8 @@ timeout_ms = 300000
 - **SIGINT / SIGTERM** shut down gracefully (below): readiness turns off first (and with `unready_delay_ms` the server keeps serving that long), then the drain; a second signal cancels the calls still running. Exit codes: 0 after a clean shutdown, 1 if serving or closing the store failed, 2 for a bad command line or configuration.
 - **Logs** are JSON lines on stderr unless it is a terminal ([config.md](config.md#logs)).
 - **Run it under a supervisor** (systemd, Kubernetes). A bug in a commit's apply path (a panic, or `GraphError::Internal` from the core) aborts the whole process, as a crash, so that no reader ever sees part of a transaction (ADR 0008, ADR 0028). The next start recovers every logged commit.
-- **Authentication** is on by default ([Authentication](#authentication)); a store without users refuses to start. **No TLS until step 15b**: a non-loopback `listen` address needs `[server] plaintext_public = true`, and passwords and tokens cross the network in clear.
+- **Authentication** is on by default ([Authentication](#authentication)); a store without users refuses to start.
+- **TLS** is on by default (step 15b, [TLS](#tls), [ADR 0048](../adr/0048-tls-and-mtls.md)): `[tls] cert` and `key` are required; plaintext needs `[tls] enabled = false`, and on a non-loopback address also `[server] plaintext_public = true`. SIGHUP reloads the certificate.
 - Metrics and status views come with step 16c.
 
 ### Features and Docker
@@ -83,7 +84,7 @@ docker build --build-arg FEATURES="" -t iwdb:grpc .   # gRPC only
 docker run -p 127.0.0.1:7600:7600 -v iwdb-data:/var/lib/iwdb iwdb
 ```
 
-The image runs as the user `iwdb` (uid 10001), keeps its data in the volume `/var/lib/iwdb`, and reads `/etc/iwdb/iwdb.toml` ([docker/iwdb.toml](../../docker/iwdb.toml): listens on `0.0.0.0:7600`, drains for 8 s so that `docker stop` ends with a checkpoint). Mount your own config there, or set `IWDB_*` variables (`docker run -e IWDB_STORE_FSYNC=group ...`); if you raise `drain_timeout_secs`, raise `docker stop -t` above it. `compose.yaml` runs it, and with `--profile postgres` a Postgres with an example projection. Run `iwctl` against the volume only while the server is stopped: one process opens a data directory at a time. The image's `HEALTHCHECK` runs `iwdb-server --probe` (ready once recovery has finished). Because the container listens on `0.0.0.0`, the image needs `-e IWDB_SERVER_PLAINTEXT_PUBLIC=true` until TLS (step 15b; publish the port on localhost only), and its first start needs `-e IWDB_AUTH_BOOTSTRAP_PASSWORD=...` (the user `admin`; there is no default password). The console is compiled in but off: `-e IWDB_CONSOLE_ENABLED=true` serves it at `http://127.0.0.1:7600/console/`, behind the login.
+The image runs as the user `iwdb` (uid 10001), keeps its data in the volume `/var/lib/iwdb`, and reads `/etc/iwdb/iwdb.toml` ([docker/iwdb.toml](../../docker/iwdb.toml): listens on `0.0.0.0:7600` over TLS with the certificate and key mounted at `/etc/iwdb/tls/server.pem` and `server.key`, drains for 8 s so that `docker stop` ends with a checkpoint). The image holds no certificate or key, and doesn't start without them: mount yours (`-v /path/to/tls:/etc/iwdb/tls:ro`), or for development the pair `sh docker/dev-cert.sh` makes in `docker/tls`, which `compose.yaml` mounts. Mount your own config there, or set `IWDB_*` variables (`docker run -e IWDB_STORE_FSYNC=group ...`); if you raise `drain_timeout_secs`, raise `docker stop -t` above it. `compose.yaml` runs it, and with `--profile postgres` a Postgres with an example projection. Run `iwctl` against the volume only while the server is stopped: one process opens a data directory at a time. The image's `HEALTHCHECK` runs `iwdb-server --probe --config /etc/iwdb/iwdb.toml` (ready once recovery has finished; over TLS unless it is off, without verifying the certificate). `docker kill --signal HUP` reloads the certificate. Plaintext needs `-e IWDB_TLS_ENABLED=false -e IWDB_SERVER_PLAINTEXT_PUBLIC=true` (the container listens on `0.0.0.0`): only behind a TLS-terminating proxy on a private network. The first start needs `-e IWDB_AUTH_BOOTSTRAP_PASSWORD=...` (the user `admin`; there is no default password). The console is compiled in but off: `-e IWDB_CONSOLE_ENABLED=true` serves it at `https://127.0.0.1:7600/console/`, behind the login.
 
 ## RPCs
 
@@ -200,16 +201,31 @@ On SIGINT or SIGTERM the server stops accepting connections and sends every HTTP
 
 The Rust clients take a token (`Remote::with_token`) or log in (`Remote::login`, which keeps the session's token), and implement `iwdb_query::Accounts` for the user RPCs.
 
+## TLS
+
+The server speaks TLS on its one port (step 15b, [ADR 0048](../adr/0048-tls-and-mtls.md); settings in [config.md](config.md#tls-and-mtls)): ALPN `h2` and `http/1.1`, TLS 1.2 and 1.3 (rustls). A client that speaks plaintext to it, or doesn't trust its certificate, gets no answer; the Rust clients report that as `unavailable` with the reason (`invalid peer certificate: UnknownIssuer`).
+
+**Client certificates (mTLS).** With `[tls] client_ca`, a client may present a certificate of those CAs. Its subject's common name is a user: the call runs with that user's roles, as with a token, without one in the metadata. A certificate that names no user is `UNAUTHENTICATED`; an expired one, or one of another CA, fails the handshake. A token in the metadata wins over the certificate. With `[tls] client_auth = "required"`, every call without a certificate is `UNAUTHENTICATED` (`Login` too); `grpc.health.v1.Health` needs none.
+
+```rust
+use iwdb_server::client::{ClientTls, Remote};
+
+let tls = ClientTls { ca: Some("ca.pem".into()), cert: Some("ann.pem".into()), key: Some("ann.key".into()) };
+let db = Remote::connect_tls("https://db.example.internal:7600", &tls)?;   // as the user ann
+```
+
+Without `ca` the client trusts the operating system's store. `grpcurl -cacert ca.pem -cert ann.pem -key ann.key db.example.internal:7600 ...` works the same way.
+
 ## The Rust client
 
 `iwdb_server::client::Remote` (feature `client`) implements the `Database` trait over gRPC, so code written against the trait runs embedded or remote:
 
 ```rust
 use iwdb_query::{exec::block_on, Database, FindRequest, QueryOptions};
-use iwdb_server::client::Remote;
+use iwdb_server::client::{ClientTls, Remote};
 
-let db = Remote::connect("http://127.0.0.1:7600")?;
+let db = Remote::connect_tls("https://127.0.0.1:7600", &ClientTls { ca: Some("ca.pem".into()), ..Default::default() })?;
 let answer = block_on(db.find("default", FindRequest { filter: ironweaver_core::Expr::Label("Person".into()) }, QueryOptions::default()))?;
 ```
 
-It runs its calls on a small tokio runtime of its own (`Remote::connect_on` takes another one), so any executor can await them; dropping a call's future cancels it. It connects on the first call and reconnects after a lost connection.
+`Remote::connect("http://...")` connects to a server whose TLS is off. It runs its calls on a small tokio runtime of its own (`Remote::connect_on_tls` takes another one), so any executor can await them; dropping a call's future cancels it. It connects on the first call and reconnects after a lost connection.
