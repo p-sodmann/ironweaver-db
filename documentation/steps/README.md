@@ -24,8 +24,16 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [14a](step_14a.md) | Query shell | M3 | done |
 | [14b](step_14b.md) | Benchmarks | M3 | done |
 | [15](step_15.md) | Security | M4 | todo |
-| [16](step_16.md) | Operability | M4 | todo |
+| [16](step_16.md) | Operability | M4 | in progress (split into 16a to 16i) |
 | [16a](step_16a.md) | Operator console | M4 | done |
+| [16b](step_16b.md) | Configuration, health and logs | M4 | todo |
+| [16c](step_16c.md) | Metrics, status views, cancel and the console | M4 | todo |
+| [16d](step_16d.md) | Memory limit | M4 | todo |
+| [16e](step_16e.md) | `iwctl` against a server, archive pruning, backup throttling | M4 | todo |
+| [16f](step_16f.md) | Managed analytics jobs | M4 | todo |
+| [16g](step_16g.md) | OpenTelemetry traces | M4 | todo |
+| [16h](step_16h.md) | Windows | M4 | todo |
+| [16i](step_16i.md) | Operations guide | M4 | todo |
 | [17](step_17.md) | Release 1.0 | M4 | todo |
 | [18](step_18.md) | Replication and high availability | M5 | todo |
 

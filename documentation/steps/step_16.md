@@ -1,6 +1,6 @@
 # Step 16: Operability
 
-Status: todo
+Status: in progress (split into 16b to 16i)
 Milestone: M4 Production 1.0
 Depends on: step 11 (can run in parallel with steps 12 to 15)
 
@@ -27,6 +27,21 @@ Operators can configure, monitor and administer the server without reading the c
 ## Plan change
 
 2026-10-04: the operator console's interface was split off into [step 16a](step_16a.md), built on a mock so its design can be reviewed before the status views exist. Its REST Source and a Flask proxy were added there too; the rest of connecting it stays here (the task above), because it needs the status views and metrics this step adds.
+
+2026-10-04: the rest of step 16 is too big for one PR, so it was split into ordered sub-steps, like step 14 into 14a and 14b. Step 16 is done when they are. The tasks below stay as the overview; each is ticked when its sub-step is done.
+
+| Sub-step | Covers | Why here |
+|---|---|---|
+| [16b](step_16b.md) | config file and environment overrides, health and readiness, JSON logs | Everything else reports through it: metrics and status need the lifecycle (ready, draining), traces build on `tracing`, and the log is what the console's log panel reads. Readiness means moving the store's open behind the listener, which reshapes `main.rs` before others build on it. |
+| [16c](step_16c.md) | metrics, status views, active requests and cancel; the console hookup | Needs 16b's lifecycle and log ring. The request registry and admin reads it adds are what `iwctl`, the memory limit and jobs use. |
+| [16d](step_16d.md) | memory limit | Needs 16c's memory accounting and metrics to warn and refuse on. |
+| [16e](step_16e.md) | `iwctl` against a server, archive pruning, backup throttling | Needs 16c's admin reads and cancel in the trait; `iwctl` only translates. |
+| [16f](step_16f.md) | managed analytics jobs (ADR 0022) | Needs 16c's registry and cancel, 16d's accounting (jobs hold projections) and 16e's `iwctl` to list and cancel. |
+| [16g](step_16g.md) | OpenTelemetry traces | Needs only 16b; can run in parallel with 16c to 16f. Last of the server work because nothing depends on it. |
+| [16h](step_16h.md) | Windows | Storage and CI only; independent, can run in parallel with any of them. |
+| [16i](step_16i.md) | `documentation/operations.md` | Documents what the others built, so it comes last. |
+
+Step 15's "max memory per namespace" builds on 16d's accounting; 16d only sets a process-wide limit.
 
 ## Acceptance criteria
 
