@@ -7,7 +7,7 @@ import pytest
 
 import iwdb
 import iwdb.aio
-from conftest import ADMIN
+from conftest import ADMIN, CA
 
 
 def run(coroutine):
@@ -55,6 +55,6 @@ def test_embedded(path):
 
 def test_remote(server):
     async def main():
-        await exercise(await iwdb.aio.connect(server.endpoint, user=ADMIN[0], password=ADMIN[1]))
+        await exercise(await iwdb.aio.connect(server.endpoint, user=ADMIN[0], password=ADMIN[1], ca=CA))
 
     run(main())

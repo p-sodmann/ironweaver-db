@@ -27,11 +27,15 @@ async def connect(
     token: Optional[str] = None,
     user: Optional[str] = None,
     password: Optional[str] = None,
+    ca: Any = None,
+    cert: Any = None,
+    key: Any = None,
 ) -> "AsyncStore":
     """`iwdb.connect`, for asyncio."""
-    return AsyncStore(
-        await asyncio.to_thread(Store.connect, endpoint, token=token, user=user, password=password)
+    connect = functools.partial(
+        Store.connect, endpoint, token=token, user=user, password=password, ca=ca, cert=cert, key=key
     )
+    return AsyncStore(await asyncio.to_thread(connect))
 
 
 async def open(path: Any, **options: Any) -> "AsyncStore":  # noqa: A001 (like Store.open)

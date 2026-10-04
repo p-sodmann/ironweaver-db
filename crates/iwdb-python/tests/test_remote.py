@@ -3,13 +3,14 @@ calls that need an embedded store, read-your-writes across clients."""
 
 import json
 import socket
+import ssl
 import time
 import urllib.request
 
 import pytest
 
 import iwdb
-from conftest import ADMIN, Server
+from conftest import ADMIN, CA, TLS, Server
 
 
 def free_port():
@@ -128,7 +129,7 @@ def rest(server, method, path, body=None, token=None):
         request.data = json.dumps(body).encode()
     if token:
         request.add_header("authorization", "Bearer " + token)
-    with urllib.request.urlopen(request) as answer:
+    with urllib.request.urlopen(request, context=ssl.create_default_context(cafile=str(CA))) as answer:
         return json.loads(answer.read() or b"{}")
 
 
@@ -137,7 +138,7 @@ def admin_token(server):
 
 
 def test_without_credentials_calls_are_unauthenticated(server):
-    with iwdb.connect(server.endpoint) as store:
+    with server.client() as store:
         with pytest.raises(iwdb.UnauthenticatedError, match="needs credentials"):
             store.node("a")
     assert issubclass(iwdb.UnauthenticatedError, iwdb.Error)
@@ -145,17 +146,17 @@ def test_without_credentials_calls_are_unauthenticated(server):
 
 def test_a_wrong_password_is_unauthenticated(server):
     with pytest.raises(iwdb.UnauthenticatedError, match="wrong user or password") as caught:
-        iwdb.connect(server.endpoint, user=ADMIN[0], password="not the password")
+        server.client(user=ADMIN[0], password="not the password")
     assert "not the password" not in str(caught.value)
     with pytest.raises(iwdb.UnauthenticatedError):
-        iwdb.connect(server.endpoint, user="nobody", password="whatever-password")
+        server.client(user="nobody", password="whatever-password")
 
 
 def test_credentials_are_a_token_or_a_user_and_password(server):
     with pytest.raises(iwdb.InvalidError):
-        iwdb.connect(server.endpoint, user=ADMIN[0])
+        server.client(user=ADMIN[0])
     with pytest.raises(iwdb.InvalidError):
-        iwdb.connect(server.endpoint, token="t", user=ADMIN[0], password=ADMIN[1])
+        server.client(token="t", user=ADMIN[0], password=ADMIN[1])
 
 
 def test_an_expired_session_is_unauthenticated(tmp_path):
@@ -181,7 +182,7 @@ def test_api_tokens_and_roles(server):
     with server.connect() as admin:
         with admin.transaction() as tx:
             tx.upsert_node("a", labels=["P"])
-    with iwdb.connect(server.endpoint, token=ann) as store:
+    with server.client(token=ann) as store:
         assert store.node("a")["labels"] == ["P"]
         with pytest.raises(iwdb.PermissionDeniedError, match="'write' role"):
             with store.transaction() as tx:
@@ -191,6 +192,52 @@ def test_api_tokens_and_roles(server):
         assert [n["name"] for n in store.namespaces()] == ["default"]
     # A revoked token is unauthenticated
     rest(server, "DELETE", "/v1/users/ann/tokens/py", None, token)
-    with iwdb.connect(server.endpoint, token=ann) as store:
+    with server.client(token=ann) as store:
         with pytest.raises(iwdb.UnauthenticatedError):
             store.node("a")
+
+
+# TLS and mTLS (step 15b)
+
+
+def test_the_server_speaks_tls_only(server):
+    plain = server.endpoint.replace("https://", "http://")
+    with iwdb.connect(plain) as store:
+        with pytest.raises(iwdb.UnavailableError):
+            store.node("a", timeout=2)
+    with pytest.raises(iwdb.InvalidError, match="https://"):
+        iwdb.connect(plain, ca=CA)
+
+
+def test_a_server_of_another_ca_is_unavailable(server):
+    with iwdb.connect(server.endpoint, ca=TLS / "other-ca.pem") as store:
+        with pytest.raises(iwdb.UnavailableError, match="UnknownIssuer"):
+            store.node("a", timeout=2)
+    with pytest.raises(iwdb.InvalidError, match="missing.pem"):
+        iwdb.connect(server.endpoint, ca=TLS / "missing.pem")
+
+
+def test_a_client_certificate_logs_in_as_its_user(tmp_path):
+    server = Server(tmp_path / "data", tmp_path, tls='client_ca = "{}"'.format(str(CA).replace("\\", "\\\\")))
+    try:
+        token = admin_token(server)
+        rest(server, "POST", "/v1/users", {"name": "ann", "password": "ann-password"}, token)
+        rest(server, "PUT", "/v1/users/ann/grants/default", {"role": "ROLE_READ"}, token)
+        with server.connect() as admin:
+            with admin.transaction() as tx:
+                tx.upsert_node("a", labels=["P"])
+        ann = {"cert": TLS / "client-ann.pem", "key": TLS / "client-ann.key"}
+        with server.client(**ann) as store:
+            assert store.node("a")["labels"] == ["P"]
+            with pytest.raises(iwdb.PermissionDeniedError, match="user 'ann'"):
+                with store.transaction() as tx:
+                    tx.upsert_node("b")
+        # An expired certificate: no handshake
+        expired = {"cert": TLS / "client-expired.pem", "key": TLS / "client-expired.key"}
+        with server.client(**expired) as store:
+            with pytest.raises(iwdb.UnavailableError):
+                store.node("a", timeout=2)
+        with pytest.raises(iwdb.InvalidError, match="needs its key"):
+            server.client(cert=TLS / "client-ann.pem")
+    finally:
+        assert server.stop() == 0, "".join(server.stderr)
