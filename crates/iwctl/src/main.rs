@@ -1,5 +1,6 @@
-//! `iwctl`: the admin CLI for local data directories (step 7), and a query
-//! shell for servers (`iwctl shell`, step 14a). It parses arguments, calls
+//! `iwctl`: the admin CLI for local data directories (step 7), a query
+//! shell for servers (`iwctl shell`, step 14a), and users, grants and API
+//! tokens on a directory or a server (`iwctl user`, `iwctl token`, step 15a). It parses arguments, calls
 //! the library (`iwdb`, or the `Database` trait over gRPC) and prints the
 //! result; every operation lives in the library (design rule 8).
 //! `documentation/iwctl.md` describes the commands and the exit codes.
@@ -7,6 +8,7 @@
 mod args;
 mod output;
 mod shell;
+mod users;
 
 use std::process::ExitCode;
 
@@ -50,7 +52,7 @@ fn main() -> ExitCode {
 }
 
 /// The exit code of a failed operation.
-fn exit_code(error: &Error) -> u8 {
+pub(crate) fn exit_code(error: &Error) -> u8 {
     match error {
         Error::Locked { .. } => exit::LOCKED,
         Error::Corrupt { .. }
@@ -95,7 +97,14 @@ fn run(parsed: &Parsed, out: &Out) -> Result<u8, Error> {
             println!("iwctl {}", env!("CARGO_PKG_VERSION"));
             Ok(exit::OK)
         }
-        Command::Shell { endpoint } => Ok(shell::run(endpoint, one_namespace(parsed), parsed.json)),
+        Command::Shell { endpoint } => Ok(shell::run(
+            endpoint,
+            one_namespace(parsed),
+            parsed.json,
+            parsed.token.as_deref(),
+            parsed.user.as_deref(),
+        )),
+        Command::Accounts { action, target } => Ok(users::run(action, target, store_options(parsed), out)),
         Command::Status { dir } => {
             let status = iwdb::status(dir, store_options(parsed))?;
             out.status(&status);

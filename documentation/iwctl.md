@@ -1,6 +1,6 @@
 # iwctl
 
-`iwctl` is the admin CLI for local Ironweaver DB directories (step 7). It works on directories that no store has open; a running store is backed up from the program that runs it (`Store::backup`, or `store.backup()` in Python). `iwctl shell` is an interactive client of a server ([below](#query-shell), step 14a). Decisions: [ADR 0012](adr/0012-iwctl.md), [ADR 0036](adr/0036-query-shell.md).
+`iwctl` is the admin CLI for local Ironweaver DB directories (step 7). It works on directories that no store has open; a running store is backed up from the program that runs it (`Store::backup`, or `store.backup()` in Python). `iwctl shell` is an interactive client of a server ([below](#query-shell), step 14a). `iwctl user` and `iwctl token` manage users, grants and API tokens on a directory or a server ([Users and tokens](#users-and-tokens), step 15a). Decisions: [ADR 0012](adr/0012-iwctl.md), [ADR 0036](adr/0036-query-shell.md).
 
 ```
 iwctl [--json] <command> [options]
@@ -38,11 +38,45 @@ Options:
 | `--merge` | `import` into an existing namespace through commits. |
 | `--format <format>` | The file format of `import` (`json`, `binary`, `lgf`) or `export` (`json`, `binary`). |
 
+## Users and tokens
+
+```
+iwctl user create <dir> <name> [--admin]          # prompts for the password
+iwctl user passwd <dir> <name>                    # ends the user's sessions
+iwctl user delete <dir> <name>
+iwctl user admin <dir> <name> on|off              # server-wide admin or not
+iwctl user grant <dir> <name> <namespace> read|write|admin
+iwctl user revoke <dir> <name> <namespace>
+iwctl user list <dir>
+iwctl token create <dir> <user> <name> [--expires <seconds>]   # prints the token once
+iwctl token revoke <dir> <user> <name>
+iwctl token list <dir> <user>
+```
+
+On a **data directory** (the server stopped: a store holds the directory's lock) they need no credentials: whoever can open the directory owns the store, as for every other command here. That is how the first admin of a store is made without a default password (or with `IWDB_AUTH_BOOTSTRAP_PASSWORD` on the server's first start, [config.md](api/config.md#authentication-and-the-first-admin)).
+
+On a **server**, put `--server <endpoint>` where the directory goes, with credentials: `--token <token>` (or `IWDB_TOKEN`), or `--user <name>` (a password prompt, then a login). The server checks the caller's roles: managing users and grants needs the server-wide admin role; users can change their own password and manage their own tokens.
+
+Passwords are read without echo from a terminal (a new one twice), or one line each from stdin when it isn't a terminal (with `--user`, the login's password first). They never go on the command line, in the output or in an error. Roles: `read` (every read, the change stream, the catalog, the status), `write` (and commits), `admin` (and catalog changes and dropping the namespace); [ADR 0043](adr/0043-users-and-roles-in-the-system-namespace.md).
+
+```
+$ iwctl user create /var/lib/iwdb root --admin
+password for the new user root:
+again:
+created user root (admin): no grants
+$ export IWDB_TOKEN=$(iwctl --json token create --server http://127.0.0.1:7600 --user root root cli | jq -r .token)
+$ iwctl user create --server http://127.0.0.1:7600 ann
+$ iwctl user grant --server http://127.0.0.1:7600 ann social write
+ann: social=write
+```
+
 ## Query shell
 
 ```
-iwctl shell <endpoint> [-n <namespace>] [--json]
+iwctl shell <endpoint> [-n <namespace>] [--json] [--token <token> | --user <name>]
 ```
+
+Against a server with authentication on, log in with `--token` (or `IWDB_TOKEN`), with `--user` (a password prompt), or with `\login <user>` in the session; when stdin isn't a terminal, the password is the next line of input. `\logout` ends the session, `\whoami` shows the user and its roles.
 
 Connects to the `iwdb-server` at `<endpoint>` (`http://host:port`) and reads one command per line from stdin, so it works interactively and piped from a script. The prompt (`social> `) goes to stderr, and only when stdin is a terminal. For line editing and history, run it under `rlwrap`. Each command is one call of the `Database` trait over gRPC, bounded like any other read.
 
@@ -60,6 +94,7 @@ Connects to the `iwdb-server` at `<endpoint>` (`http://host:port`) and reads one
 | `\next` | the next page of the last `find` or `match` (shown as `(more: \next)`) |
 | `\limit <n>\|off`, `\partial on\|off`, `\timeout <s>\|off` | read options of the following commands |
 | `\json`, `\table` | output: one JSON object per answer (with `seq`, `cursor`, `truncated`, `work`), or aligned tables |
+| `\login <user>`, `\logout`, `\whoami` | log in (password prompted for, or the next line when piped), end the session, show who the server takes you for |
 | `\help`, `\quit` | also `quit`, `exit`, or the end of input. `--` starts a comment |
 
 An error prints `error (<code>): <message>` ([codes](api/errors.md)) to stderr (in JSON mode `{"error": {"code", "message"}}` to stdout) and the shell goes on. The exit code is 0 if every command succeeded, 4 if one failed, 2 for an invalid endpoint.
