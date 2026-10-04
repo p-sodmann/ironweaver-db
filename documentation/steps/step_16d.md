@@ -24,5 +24,5 @@ The server warns, then refuses writes, before the operating system kills it for 
 
 ## Non-goals
 
-- Per-namespace and per-client memory limits (step 15d builds them on this accounting).
+- Per-namespace and per-client memory limits (step 15 builds them on this accounting).
 - Evicting data to disk.
