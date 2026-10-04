@@ -651,11 +651,7 @@ mod tests {
     use super::*;
 
     fn user(admin: bool, grants: &[(&str, Role)]) -> Principal {
-        Principal {
-            user: "ann".into(),
-            admin,
-            grants: grants.iter().map(|(n, r)| ((*n).to_owned(), *r)).collect(),
-        }
+        Principal { user: "ann".into(), admin, grants: grants.iter().map(|(n, r)| ((*n).to_owned(), *r)).collect() }
     }
 
     #[test]

@@ -8,12 +8,14 @@
 //! [`CHUNK_BYTES`] at most (one item may be bigger), and only the last has
 //! `meta`.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use iwdb_query::{ChangesRequest, Code, Database, Error};
+use iwdb_query::{Accounts, Authenticate, Authorized, ChangesRequest, Code, Database, Error, Secret, Session};
 use tokio::sync::{mpsc, watch};
 
+use crate::auth::AuthMode;
 use crate::convert::*;
 use crate::proto as pb;
 
@@ -364,6 +366,104 @@ pub(crate) fn follow<D: Database + 'static>(
         }
     });
     rx
+}
+
+// ---- authentication, users, grants, tokens (auth.proto, step 15a) ----
+
+/// `Login`: on the database itself (no principal yet).
+pub(crate) async fn login<D: Authenticate>(
+    db: &D,
+    r: pb::LoginRequest,
+    client: Option<IpAddr>,
+) -> Result<(pb::LoginResponse, Session), Error> {
+    if r.user.is_empty() {
+        return Err(Error::invalid("a login needs a user"));
+    }
+    let session = db.login(&r.user, Secret::new(r.password), client).await?;
+    let response = pb::LoginResponse {
+        token: if r.cookie { String::new() } else { session.token.expose().to_owned() },
+        user: Some(user_to_pb(&session.user)),
+        expires_ms: session.expires_ms,
+    };
+    Ok((response, session))
+}
+
+/// `Logout`: end the session of the caller's token.
+pub(crate) async fn logout<D: Authenticate>(db: &D, token: Option<&Secret>) -> Result<pb::LogoutResponse, Error> {
+    if let Some(token) = token {
+        db.logout(token).await?;
+    }
+    Ok(pb::LogoutResponse {})
+}
+
+pub(crate) fn who_am_i<D>(db: &Authorized<D>, mode: AuthMode) -> pb::WhoAmIResponse {
+    pb::WhoAmIResponse { user: Some(user_to_pb(&db.whoami())), auth_enabled: mode.enabled }
+}
+
+pub(crate) async fn list_users<D: Accounts>(db: &D) -> Result<pb::ListUsersResponse, Error> {
+    Ok(pb::ListUsersResponse { users: db.users().await?.iter().map(user_to_pb).collect() })
+}
+
+pub(crate) async fn create_user<D: Accounts>(
+    db: &D,
+    r: pb::CreateUserRequest,
+) -> Result<pb::CreateUserResponse, Error> {
+    let user = db.create_user(&r.name, Secret::new(r.password), r.admin).await?;
+    Ok(pb::CreateUserResponse { user: Some(user_to_pb(&user)) })
+}
+
+pub(crate) async fn set_password<D: Accounts>(
+    db: &D,
+    r: pb::SetPasswordRequest,
+) -> Result<pb::SetPasswordResponse, Error> {
+    db.set_password(&r.name, Secret::new(r.password), r.current_password.map(Secret::new)).await?;
+    Ok(pb::SetPasswordResponse {})
+}
+
+pub(crate) async fn delete_user<D: Accounts>(
+    db: &D,
+    r: pb::DeleteUserRequest,
+) -> Result<pb::DeleteUserResponse, Error> {
+    db.delete_user(&r.name).await?;
+    Ok(pb::DeleteUserResponse {})
+}
+
+pub(crate) async fn set_admin<D: Accounts>(db: &D, r: pb::SetAdminRequest) -> Result<pb::SetAdminResponse, Error> {
+    let user = db.set_admin(&r.name, r.admin).await?;
+    Ok(pb::SetAdminResponse { user: Some(user_to_pb(&user)) })
+}
+
+pub(crate) async fn grant<D: Accounts>(db: &D, r: pb::GrantRequest) -> Result<pb::GrantResponse, Error> {
+    let user = db.grant(&r.name, &r.namespace, role_from_pb(r.role)?).await?;
+    Ok(pb::GrantResponse { user: Some(user_to_pb(&user)) })
+}
+
+pub(crate) async fn revoke<D: Accounts>(db: &D, r: pb::RevokeRequest) -> Result<pb::RevokeResponse, Error> {
+    let user = db.revoke(&r.name, &r.namespace).await?;
+    Ok(pb::RevokeResponse { user: Some(user_to_pb(&user)) })
+}
+
+pub(crate) async fn create_token<D: Accounts>(
+    db: &D,
+    r: pb::CreateTokenRequest,
+) -> Result<pb::CreateTokenResponse, Error> {
+    let token = db.create_token(&r.user, &r.name, r.expires_in_secs.map(Duration::from_secs)).await?;
+    Ok(new_token_to_pb(&token))
+}
+
+pub(crate) async fn revoke_token<D: Accounts>(
+    db: &D,
+    r: pb::RevokeTokenRequest,
+) -> Result<pb::RevokeTokenResponse, Error> {
+    db.revoke_token(&r.user, &r.name).await?;
+    Ok(pb::RevokeTokenResponse {})
+}
+
+pub(crate) async fn list_tokens<D: Accounts>(
+    db: &D,
+    r: pb::ListTokensRequest,
+) -> Result<pb::ListTokensResponse, Error> {
+    Ok(pb::ListTokensResponse { tokens: db.tokens(&r.user).await?.iter().map(token_info_to_pb).collect() })
 }
 
 #[cfg(test)]

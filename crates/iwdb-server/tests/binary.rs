@@ -2,7 +2,9 @@
 //! file or environment, shuts down gracefully on SIGTERM (checkpointing, so
 //! the next open replays nothing), refuses a bad command line or
 //! configuration with every problem, logs JSON lines, and becomes ready
-//! only once recovery has finished.
+//! only once recovery has finished. Authentication is on (the default): the
+//! tests bootstrap an admin and log in; one checks that no secret reaches
+//! the logs.
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -14,10 +16,26 @@ use std::time::Duration;
 
 use iwdb::{Mutation, Store};
 use iwdb_query::exec::block_on;
-use iwdb_query::{CommitOptions, Database};
+use iwdb_query::{Accounts, Code, CommitOptions, Database, Secret};
 use iwdb_server::client::Remote;
 
 const BIN: &str = env!("CARGO_BIN_EXE_iwdb-server");
+/// The bootstrap admin's password of these tests.
+const ADMIN_PASSWORD: &str = "admin-password-for-tests";
+
+/// The command with the first admin from the bootstrap variable.
+fn bin() -> Command {
+    let mut command = Command::new(BIN);
+    command.env("IWDB_AUTH_BOOTSTRAP_PASSWORD", ADMIN_PASSWORD);
+    command
+}
+
+/// A client of `address`, logged in as the bootstrap admin.
+fn admin(address: &str) -> Remote {
+    let remote = Remote::connect(&format!("http://{}", address)).unwrap();
+    block_on(remote.login("admin", Secret::new(ADMIN_PASSWORD))).unwrap();
+    remote
+}
 
 /// A log line's JSON object (stderr isn't a terminal: JSON by default).
 fn event(line: &str) -> serde_json::Value {
@@ -72,14 +90,18 @@ fn serves_its_data_directory_and_shuts_down_on_sigterm() {
     let config = dir.path().join("server.toml");
     std::fs::write(&config, "data_dir = \"data\"\nlisten = \"127.0.0.1:0\"\n[server]\ndrain_timeout_secs = 5\n")
         .unwrap();
-    let (mut child, lines, reader) = spawn(Command::new(BIN).arg("--config").arg(&config));
+    let (mut child, lines, reader) = spawn(bin().arg("--config").arg(&config));
     let mut seen = Vec::new();
     let address = ready_address(&lines, &mut seen);
+    assert!(seen.iter().any(|l| event(l)["message"].as_str().unwrap().starts_with("created the first admin")));
     // Listening (recovering) comes first, then ready
     assert!(event(&seen[0])["message"].as_str().unwrap().starts_with("listening"), "{:?}", seen);
     assert!(seen.iter().any(|l| event(l)["message"] == "recovery finished"), "{:?}", seen);
 
-    let remote = Remote::connect(&format!("http://{}", address)).unwrap();
+    let anonymous = Remote::connect(&format!("http://{}", address)).unwrap();
+    let e = block_on(anonymous.commit("default", vec![node("a")], CommitOptions::default())).unwrap_err();
+    assert_eq!(e.code(), Code::Unauthenticated);
+    let remote = admin(&address);
     let seq = block_on(remote.commit("default", vec![node("a")], CommitOptions::default())).unwrap().seq;
     assert_eq!(seq, 1);
     iwdb_server::health::probe(&address, Duration::from_secs(5)).unwrap();
@@ -163,9 +185,9 @@ mutations = [{ upsert_node = { id = "${who}", labels = ["Person"], attr = { gree
     )
     .unwrap();
     let run = |expected_mark: u64| {
-        let (mut child, lines, reader) = spawn(Command::new(BIN).arg("--config").arg(&config));
+        let (mut child, lines, reader) = spawn(bin().arg("--config").arg(&config));
         let address = ready_address(&lines, &mut Vec::new());
-        let remote = Remote::connect(&format!("http://{}", address)).unwrap();
+        let remote = admin(&address);
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         let marks = loop {
             let status = block_on(remote.namespace_status("default")).unwrap();
@@ -226,7 +248,7 @@ fn runs_from_the_environment_alone() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
     let (mut child, lines, reader) = spawn(
-        Command::new(BIN)
+        bin()
             .env("IWDB_DATA_DIR", &data)
             .env("IWDB_LISTEN", "127.0.0.1:0")
             .env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "5")
@@ -234,7 +256,7 @@ fn runs_from_the_environment_alone() {
             .env("IWDB_LOG_LEVEL", "debug"),
     );
     let address = ready_address(&lines, &mut Vec::new());
-    let remote = Remote::connect(&format!("http://{}", address)).unwrap();
+    let remote = admin(&address);
     block_on(remote.commit("default", vec![node("e")], CommitOptions::default())).unwrap();
     sigterm(&child);
     assert!(child.wait().unwrap().success());
@@ -326,10 +348,7 @@ fn ready_only_after_a_large_recovery() {
         store.close().unwrap();
     }
     let (mut child, lines, reader) = spawn(
-        Command::new(BIN)
-            .env("IWDB_DATA_DIR", &data)
-            .env("IWDB_LISTEN", "127.0.0.1:0")
-            .env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "5"),
+        bin().env("IWDB_DATA_DIR", &data).env("IWDB_LISTEN", "127.0.0.1:0").env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "5"),
     );
     let listening = event(&lines.recv_timeout(Duration::from_secs(30)).unwrap());
     assert!(listening["message"].as_str().unwrap().starts_with("listening"), "{}", listening);
@@ -340,7 +359,7 @@ fn ready_only_after_a_large_recovery() {
         not_ready += 1;
         assert!(std::time::Instant::now() < deadline, "never ready");
     }
-    let remote = Remote::connect(&format!("http://{}", address)).unwrap();
+    let remote = admin(&address);
     let status = block_on(remote.namespace_status("default")).unwrap();
     assert_eq!(status.nodes, BATCHES * BATCH);
     assert_eq!(status.recovery.replayed, BATCHES as u64);
@@ -352,4 +371,109 @@ fn ready_only_after_a_large_recovery() {
     sigterm(&child);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
+}
+
+/// With authentication on, a store without users refuses to start, and the
+/// message says how to make the first admin (ADR 0047). A bootstrap
+/// variable on a store with users is ignored with a warning.
+#[test]
+fn a_store_without_users_refuses_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let out = Command::new(BIN).env("IWDB_DATA_DIR", &data).env("IWDB_LISTEN", "127.0.0.1:0").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(text.contains("has no users") && text.contains("iwctl user create"), "{}", text);
+    assert!(text.contains("IWDB_AUTH_BOOTSTRAP_PASSWORD"), "{}", text);
+    // A user from elsewhere (iwctl, offline): it starts, and ignores the bootstrap
+    let store = Store::open(&data, Default::default()).unwrap();
+    store.users().create("root", &Secret::new("root-password"), true).unwrap();
+    store.close().unwrap();
+    let (mut child, lines, reader) = spawn(
+        bin().env("IWDB_DATA_DIR", &data).env("IWDB_LISTEN", "127.0.0.1:0").env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "5"),
+    );
+    let mut seen = Vec::new();
+    let address = ready_address(&lines, &mut seen);
+    assert!(
+        seen.iter().any(|l| event(l)["level"] == "WARN" && l.contains("IWDB_AUTH_BOOTSTRAP_PASSWORD")),
+        "{:?}",
+        seen
+    );
+    let remote = Remote::connect(&format!("http://{}", address)).unwrap();
+    assert_eq!(block_on(remote.login("admin", Secret::new(ADMIN_PASSWORD))).unwrap_err().code(), Code::Unauthenticated);
+    block_on(remote.login("root", Secret::new("root-password"))).unwrap();
+    sigterm(&child);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    // Off, no users are needed
+    let empty = dir.path().join("empty");
+    let (mut child, lines, reader) = spawn(
+        Command::new(BIN)
+            .env("IWDB_DATA_DIR", &empty)
+            .env("IWDB_LISTEN", "127.0.0.1:0")
+            .env("IWDB_AUTH_ENABLED", "false")
+            .env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "5"),
+    );
+    let address = ready_address(&lines, &mut Vec::new());
+    let remote = Remote::connect(&format!("http://{}", address)).unwrap();
+    block_on(remote.commit("default", vec![node("x")], CommitOptions::default())).unwrap();
+    sigterm(&child);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+}
+
+/// No password or token reaches the logs (step 15a): the server logs at
+/// `debug` through logins, failed logins, a token, a password change and a
+/// failed password change, and no line holds any of the secrets.
+#[test]
+fn no_secret_reaches_the_logs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut child, lines, reader) = spawn(
+        bin()
+            .env("IWDB_DATA_DIR", dir.path().join("data"))
+            .env("IWDB_LISTEN", "127.0.0.1:0")
+            .env("IWDB_LOG_LEVEL", "debug")
+            .env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "5"),
+    );
+    let mut seen = Vec::new();
+    let address = ready_address(&lines, &mut seen);
+    let remote = admin(&address);
+    let mut secrets = vec![ADMIN_PASSWORD.to_owned(), remote.token().unwrap().expose().to_owned()];
+    block_on(remote.create_user("ann", Secret::new("ann-secret-password"), false)).unwrap();
+    secrets.push("ann-secret-password".into());
+    let token = block_on(remote.create_token("ann", "ci", None)).unwrap();
+    secrets.push(token.token.expose().to_owned());
+    let ann = Remote::connect(&format!("http://{}", address)).unwrap();
+    for wrong in ["wrong-password-one", "wrong-password-two"] {
+        assert_eq!(block_on(ann.login("ann", Secret::new(wrong))).unwrap_err().code(), Code::Unauthenticated);
+        secrets.push(wrong.into());
+    }
+    let session = block_on(ann.login("ann", Secret::new("ann-secret-password"))).unwrap();
+    secrets.push(session.token.expose().to_owned());
+    let e = block_on(ann.set_password("ann", Secret::new("new-ann-password"), Some(Secret::new("not-the-current"))))
+        .unwrap_err();
+    assert_eq!(e.code(), Code::Unauthenticated);
+    secrets.extend(["new-ann-password".to_owned(), "not-the-current".to_owned()]);
+    block_on(ann.set_password("ann", Secret::new("new-ann-password"), Some(Secret::new("ann-secret-password"))))
+        .unwrap();
+    // A garbage bearer token and the right one, over REST too
+    let bad = Remote::connect(&format!("http://{}", address)).unwrap().with_token(Secret::new("iwdb_not-a-real-token"));
+    assert_eq!(block_on(bad.namespaces()).unwrap_err().code(), Code::Unauthenticated);
+    secrets.push("iwdb_not-a-real-token".into());
+    #[cfg(feature = "rest")]
+    {
+        let rest = iwdb_server::client::RestRemote::connect(&format!("http://{}", address)).unwrap();
+        assert!(block_on(rest.login("ann", Secret::new("wrong-password-rest"))).is_err());
+        secrets.push("wrong-password-rest".into());
+    }
+    sigterm(&child);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    seen.extend(lines.try_iter());
+    assert!(seen.iter().any(|l| l.contains("failed login") && l.contains("ann")), "failed logins are logged");
+    for line in &seen {
+        for secret in &secrets {
+            assert!(!line.contains(secret.as_str()), "a secret in the log: {}", line);
+        }
+    }
 }

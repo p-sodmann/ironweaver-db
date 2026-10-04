@@ -101,7 +101,8 @@ impl HashParams {
     /// parameters aren't these. A string that isn't an argon2id hash is
     /// `corrupt`.
     pub fn verify(&self, password: &Secret, phc: &str) -> Result<(bool, bool), Error> {
-        let parsed = PasswordHash::new(phc).map_err(|_| Error::new(Code::Corrupt, "a stored password hash is invalid"))?;
+        let parsed =
+            PasswordHash::new(phc).map_err(|_| Error::new(Code::Corrupt, "a stored password hash is invalid"))?;
         let ok = PasswordVerifier::<PasswordHash>::verify_password(
             &Argon2::default(),
             password.expose().as_bytes(),
@@ -197,9 +198,8 @@ fn check_password(password: &Secret) -> Result<(), Error> {
 }
 
 fn check_token_name(name: &str) -> Result<(), Error> {
-    let ok = !name.is_empty()
-        && name.len() <= 64
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b));
+    let ok =
+        !name.is_empty() && name.len() <= 64 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b));
     if ok {
         Ok(())
     } else {
@@ -568,7 +568,8 @@ where
         }
         let mut mutations = vec![Mutation::DeleteNode { id: format!("{}{}", USER_NODE, name), expected_version: None }];
         for token in self.token_records()?.into_iter().filter(|t| t.user == name) {
-            mutations.push(Mutation::DeleteNode { id: format!("{}{}", TOKEN_NODE, token.hash), expected_version: None });
+            mutations
+                .push(Mutation::DeleteNode { id: format!("{}{}", TOKEN_NODE, token.hash), expected_version: None });
         }
         self.commit(mutations)
     }
@@ -588,7 +589,11 @@ where
 
     /// Give `name` `role` on `namespace` (which must exist).
     pub fn grant(&self, name: &str, namespace: &str, role: Role) -> Result<UserInfo, Error> {
-        let id = self.store.namespace(namespace).map_err(|_| Error::not_found(format!("no namespace '{}'", namespace)))?.id();
+        let id = self
+            .store
+            .namespace(namespace)
+            .map_err(|_| Error::not_found(format!("no namespace '{}'", namespace)))?
+            .id();
         let _guard = self.lock();
         let mut user = self.existing(name)?;
         user.grants.insert(id, role);
@@ -598,7 +603,11 @@ where
 
     /// Take `name`'s role on `namespace` away (fine if it has none).
     pub fn revoke(&self, name: &str, namespace: &str) -> Result<UserInfo, Error> {
-        let id = self.store.namespace(namespace).map_err(|_| Error::not_found(format!("no namespace '{}'", namespace)))?.id();
+        let id = self
+            .store
+            .namespace(namespace)
+            .map_err(|_| Error::not_found(format!("no namespace '{}'", namespace)))?
+            .id();
         let _guard = self.lock();
         let mut user = self.existing(name)?;
         if user.grants.remove(&id).is_some() {
@@ -652,7 +661,8 @@ where
             return Err(Error::new(Code::Conflict, format!("user '{}' has a token '{}' already", user, name)));
         }
         let created_ms = now_ms();
-        let expires_ms = expires_in.map(|d| created_ms.saturating_add(u64::try_from(d.as_millis()).unwrap_or(u64::MAX)));
+        let expires_ms =
+            expires_in.map(|d| created_ms.saturating_add(u64::try_from(d.as_millis()).unwrap_or(u64::MAX)));
         let mut attr = Attrs::from([
             ("user".to_owned(), Value::String(user.to_owned())),
             ("name".to_owned(), Value::String(name.to_owned())),
@@ -708,9 +718,8 @@ where
 /// known ones.
 fn dummy_hash(params: &HashParams) -> &'static str {
     static DUMMY: OnceLock<(HashParams, String)> = OnceLock::new();
-    let (made_with, hash) = DUMMY.get_or_init(|| {
-        (*params, params.hash(&Secret::new("not a password: unknown user")).unwrap_or_default())
-    });
+    let (made_with, hash) =
+        DUMMY.get_or_init(|| (*params, params.hash(&Secret::new("not a password: unknown user")).unwrap_or_default()));
     if made_with == params { hash } else { DUMMY_DEFAULT }
 }
 

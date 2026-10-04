@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use iwdb::projection::ProjectionHandle;
 use iwdb::{Embedded, Store};
+use iwdb_server::auth::AuthMode;
 use iwdb_server::config::Config;
 use iwdb_server::health::{Health, Phase};
 use iwdb_server::{LaunchOptions, launch, logging};
@@ -35,6 +36,11 @@ what this build has (a build without the rest feature serves gRPC only).
 
 The configuration is a TOML file, IWDB_* environment variables, or both (a
 variable wins); only data_dir is required, so IWDB_DATA_DIR alone is enough.
+
+Authentication is on by default: every call but login and health needs a
+token. A store without users refuses to start; create the first admin with
+`iwctl user create <dir> <name> --admin`, or start once with
+IWDB_AUTH_BOOTSTRAP_PASSWORD (and IWDB_AUTH_BOOTSTRAP_USER, default admin).
 Settings: documentation/api/config.md. --check-config validates it and prints
 the effective settings with where each came from.
 
@@ -144,6 +150,7 @@ fn run(config: &Config) -> Result<(), String> {
         max_message_bytes: config.server.max_message_bytes,
         unready_delay: config.unready_delay(),
         console: config.console.enabled,
+        auth: AuthMode { enabled: config.auth.enabled },
         name: dir.clone(),
     };
     let served = runtime.block_on(async {
@@ -207,6 +214,7 @@ fn open(config: &Config, projections: &Mutex<Vec<ProjectionHandle>>) -> Result<E
         }
     }
     tracing::info!(data_dir = %dir, took_ms = started.elapsed().as_millis() as u64, "recovery finished");
+    users(config, &store)?;
     let started = config.start_projections(&store)?;
     for p in &started {
         let status = p.status();
@@ -215,7 +223,43 @@ fn open(config: &Config, projections: &Mutex<Vec<ProjectionHandle>>) -> Result<E
     if let Ok(mut list) = projections.lock() {
         list.extend(started);
     }
-    Embedded::new(store, config.query_config()).map_err(|e| e.to_string())
+    Embedded::new(store, config.query_config())
+        .map(|db| db.with_auth(config.auth_settings()))
+        .map_err(|e| e.to_string())
+}
+
+/// The first admin from the bootstrap variables, on a store without users;
+/// and with authentication on, a store must have users (ADR 0047).
+fn users(config: &Config, store: &Store) -> Result<(), String> {
+    let users = store.users();
+    let exist = users.exist().map_err(|e| format!("reading the users: {}", e))?;
+    match (&config.bootstrap, exist) {
+        (Some((name, password)), false) => {
+            users.create(name, password, true).map_err(|e| format!("creating the first admin: {}", e))?;
+            tracing::info!(user = %name, "created the first admin from {}", iwdb_server::config::BOOTSTRAP_PASSWORD_VAR);
+        }
+        (Some(_), true) => tracing::warn!(
+            "{} is set, but the store has users already: ignored (unset it)",
+            iwdb_server::config::BOOTSTRAP_PASSWORD_VAR
+        ),
+        (None, false) if config.auth.enabled => {
+            return Err(format!(
+                "authentication is on ([auth] enabled) and {} has no users, so no one could log in. Create the \
+                 first admin with `iwctl user create {} <name> --admin` while the server is stopped, or start once \
+                 with {} set (and {}, default admin); or turn authentication off with [auth] enabled = false \
+                 (IWDB_AUTH_ENABLED=false)",
+                config.data_dir.display(),
+                config.data_dir.display(),
+                iwdb_server::config::BOOTSTRAP_PASSWORD_VAR,
+                iwdb_server::config::BOOTSTRAP_USER_VAR,
+            ));
+        }
+        _ => {}
+    }
+    if !config.auth.enabled {
+        tracing::warn!("authentication is off: every caller may read and change everything");
+    }
+    Ok(())
 }
 
 /// A counter of the shutdown signals received (SIGINT, and SIGTERM on Unix).

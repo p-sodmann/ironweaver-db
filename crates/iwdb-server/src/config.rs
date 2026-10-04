@@ -20,6 +20,14 @@
 //! workers = 0                       # threads running requests (0: one per CPU)
 //! queue = 1024                      # requests that may wait for a worker
 //! unready_delay_ms = 0              # on shutdown: serve unready this long before draining
+//! plaintext_public = false          # allow a non-loopback listen address without TLS (until step 15b)
+//!
+//! [auth]                            # step 15a
+//! enabled = true                    # every call but login and health needs a token
+//! session_lifetime_secs = 43200     # how long a login's session lasts
+//! login_max_failures = 5            # failed logins per user and per address ...
+//! login_window_secs = 60            # ... within this window, then refused until it has passed
+//! login_table_size = 10000          # users and addresses the slowdown remembers
 //!
 //! [log]
 //! format = "auto"                   # auto (json unless on a terminal) | json | text
@@ -27,7 +35,6 @@
 //!
 //! [console]                         # the operator console at /console/ (feature `console`)
 //! enabled = false
-//! public = false                    # allow it on a non-loopback listen address
 //!
 //! [limits.default]                  # what a read gets if it asks for nothing
 //! max_results = 1000
@@ -74,29 +81,37 @@
 //! (`IWDB_LISTEN`, `IWDB_STORE_FSYNC`, `IWDB_LIMITS_MAX_TIMEOUT_MS`). A
 //! variable wins over the file. A variable that starts like a section
 //! (`IWDB_STORE_`, `IWDB_SERVER_`, `IWDB_LIMITS_`, `IWDB_LOG_`,
-//! `IWDB_CONSOLE_`) but names no setting is an error, so a typo isn't
-//! ignored. With `IWDB_DATA_DIR` set, the file is optional.
+//! `IWDB_CONSOLE_`, `IWDB_AUTH_`) but names no setting is an error, so a
+//! typo isn't ignored. With `IWDB_DATA_DIR` set, the file is optional.
+//!
+//! **Bootstrap** (ADR 0047): `IWDB_AUTH_BOOTSTRAP_PASSWORD` (and
+//! optionally `IWDB_AUTH_BOOTSTRAP_USER`, default `admin`) creates the first
+//! admin on a start that finds no users; with users it is ignored with a
+//! warning. Variables only (a password doesn't belong in a file), never
+//! printed by `--check-config`.
 //!
 //! **Validation.** [`Config::from_sources`] reports every problem at once,
 //! each with the variable it came from; a TOML syntax or type error in the
 //! file stops the file's checks at the first. All of this happens before
 //! the store opens.
 //!
-//! TLS and authentication come with step 15: until then the server listens
-//! on plain TCP, so bind it to localhost or a private network.
+//! TLS comes with step 15b: until then the server listens on plain TCP, so
+//! passwords and tokens cross the network in clear. A non-loopback listen
+//! address needs `[server] plaintext_public = true`.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use iwdb::auth::AuthSettings;
 #[cfg(feature = "postgres")]
 use iwdb::projection::OnError;
 #[cfg(feature = "postgres")]
 use iwdb::projection::postgres::{PostgresConfig, PostgresSource};
 use iwdb::projection::{Projection, ProjectionHandle, ProjectionOptions, Rules};
 use iwdb::{CheckpointOptions, FsyncPolicy, MarkName, QueryConfig, Store, StoreOptions, WalRetention};
-use iwdb_query::{Bounds, LimitConfig};
+use iwdb_query::{Bounds, LimitConfig, Secret};
 use serde::{Deserialize, Serialize};
 
 use crate::DEFAULT_MAX_MESSAGE_BYTES;
@@ -135,13 +150,49 @@ pub struct Config {
     pub log: LogSection,
     #[serde(default)]
     pub console: ConsoleSection,
+    #[serde(default)]
+    pub auth: AuthSection,
     /// `[[projection]]` sections (ADR 0032).
     #[serde(default, rename = "projection")]
     pub projections: Vec<ProjectionSection>,
     /// Where each setting set by the file or the environment came from.
     #[serde(skip)]
     sources: BTreeMap<&'static str, Source>,
+    /// The first admin to create on a start without users
+    /// (`IWDB_AUTH_BOOTSTRAP_USER` and `IWDB_AUTH_BOOTSTRAP_PASSWORD`).
+    #[serde(skip)]
+    pub bootstrap: Option<(String, Secret)>,
 }
+
+/// `[auth]`: authentication (step 15a, ADRs 0044 and 0047).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AuthSection {
+    /// Every call but login and health needs a token. Off, every caller is
+    /// a server-wide admin.
+    pub enabled: bool,
+    pub session_lifetime_secs: u64,
+    pub login_max_failures: u32,
+    pub login_window_secs: u64,
+    pub login_table_size: usize,
+}
+
+impl Default for AuthSection {
+    fn default() -> Self {
+        let d = AuthSettings::default();
+        AuthSection {
+            enabled: true,
+            session_lifetime_secs: d.session_lifetime.as_secs(),
+            login_max_failures: d.max_failures,
+            login_window_secs: d.failure_window.as_secs(),
+            login_table_size: d.table_size,
+        }
+    }
+}
+
+/// The bootstrap variables (ADR 0047): read, but not settings.
+pub const BOOTSTRAP_USER_VAR: &str = "IWDB_AUTH_BOOTSTRAP_USER";
+pub const BOOTSTRAP_PASSWORD_VAR: &str = "IWDB_AUTH_BOOTSTRAP_PASSWORD";
 
 /// Where a setting's value comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,9 +224,10 @@ impl Default for LogSection {
 #[serde(deny_unknown_fields, default)]
 pub struct ConsoleSection {
     pub enabled: bool,
-    /// Allow it on a non-loopback listen address. Until step 15 there is no
-    /// authentication: whoever reaches the port can change the data.
-    pub public: bool,
+    /// Replaced by `[server] plaintext_public` in step 15a; refused with a
+    /// message that says so.
+    #[serde(skip_serializing)]
+    pub public: Option<bool>,
 }
 
 impl Default for Config {
@@ -188,8 +240,10 @@ impl Default for Config {
             limits: LimitsSection::default(),
             log: LogSection::default(),
             console: ConsoleSection::default(),
+            auth: AuthSection::default(),
             projections: Vec::new(),
             sources: BTreeMap::new(),
+            bootstrap: None,
         }
     }
 }
@@ -291,6 +345,7 @@ keys! {
     "server.workers" "IWDB_SERVER_WORKERS" => server.workers;
     "server.queue" "IWDB_SERVER_QUEUE" => server.queue;
     "server.unready_delay_ms" "IWDB_SERVER_UNREADY_DELAY_MS" => server.unready_delay_ms;
+    "server.plaintext_public" "IWDB_SERVER_PLAINTEXT_PUBLIC" => server.plaintext_public;
     "limits.default.max_results" "IWDB_LIMITS_DEFAULT_MAX_RESULTS" => limits.default.max_results;
     "limits.default.max_visited" "IWDB_LIMITS_DEFAULT_MAX_VISITED" => limits.default.max_visited;
     "limits.default.max_edges" "IWDB_LIMITS_DEFAULT_MAX_EDGES" => limits.default.max_edges;
@@ -302,11 +357,16 @@ keys! {
     "log.format" "IWDB_LOG_FORMAT" => log.format;
     "log.level" "IWDB_LOG_LEVEL" => log.level;
     "console.enabled" "IWDB_CONSOLE_ENABLED" => console.enabled;
-    "console.public" "IWDB_CONSOLE_PUBLIC" => console.public;
+    "auth.enabled" "IWDB_AUTH_ENABLED" => auth.enabled;
+    "auth.session_lifetime_secs" "IWDB_AUTH_SESSION_LIFETIME_SECS" => auth.session_lifetime_secs;
+    "auth.login_max_failures" "IWDB_AUTH_LOGIN_MAX_FAILURES" => auth.login_max_failures;
+    "auth.login_window_secs" "IWDB_AUTH_LOGIN_WINDOW_SECS" => auth.login_window_secs;
+    "auth.login_table_size" "IWDB_AUTH_LOGIN_TABLE_SIZE" => auth.login_table_size;
 }
 
 /// Variables with these prefixes must name a setting.
-const SECTION_PREFIXES: &[&str] = &["IWDB_STORE_", "IWDB_SERVER_", "IWDB_LIMITS_", "IWDB_LOG_", "IWDB_CONSOLE_"];
+const SECTION_PREFIXES: &[&str] =
+    &["IWDB_STORE_", "IWDB_SERVER_", "IWDB_LIMITS_", "IWDB_LOG_", "IWDB_CONSOLE_", "IWDB_AUTH_"];
 
 /// A projection the server runs (ADR 0032).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -467,6 +527,10 @@ pub struct ServerSection {
     /// On shutdown, serve this long with readiness off before draining
     /// (ADR 0040).
     pub unready_delay_ms: u64,
+    /// Allow a non-loopback listen address although the server has no TLS
+    /// yet (step 15b): passwords, tokens and data cross the network in
+    /// clear (ADR 0047).
+    pub plaintext_public: bool,
 }
 
 impl Default for ServerSection {
@@ -477,6 +541,7 @@ impl Default for ServerSection {
             workers: 0,
             queue: 1024,
             unready_delay_ms: 0,
+            plaintext_public: false,
         }
     }
 }
@@ -589,6 +654,13 @@ impl Config {
         let mut vars: Vec<&(String, String)> = env.iter().filter(|(var, _)| var.starts_with("IWDB_")).collect();
         vars.sort();
         for (var, value) in vars {
+            if var == BOOTSTRAP_USER_VAR || var == BOOTSTRAP_PASSWORD_VAR {
+                continue;
+            }
+            if var == "IWDB_CONSOLE_PUBLIC" {
+                problems.push(format!("{}: replaced by IWDB_SERVER_PLAINTEXT_PUBLIC (step 15a)", var));
+                continue;
+            }
             match KEYS.iter().find(|k| k.var == var) {
                 Some(k) => match (k.set)(&mut config, value) {
                     Ok(()) => {
@@ -601,6 +673,14 @@ impl Config {
                 }
                 None => {}
             }
+        }
+        let get = |name: &str| env.iter().find(|(var, _)| var == name).map(|(_, v)| v.clone());
+        match (get(BOOTSTRAP_USER_VAR), get(BOOTSTRAP_PASSWORD_VAR)) {
+            (user, Some(password)) => {
+                config.bootstrap = Some((user.unwrap_or_else(|| "admin".into()), Secret::new(password)));
+            }
+            (Some(_), None) => problems.push(format!("{}: needs {} too", BOOTSTRAP_USER_VAR, BOOTSTRAP_PASSWORD_VAR)),
+            (None, None) => {}
         }
         if parsed {
             problems.extend(config.check());
@@ -652,20 +732,50 @@ impl Config {
         if let Err(e) = crate::logging::check_level(&self.log.level) {
             problems.push(format!("{}: {}", self.at("log.level"), e));
         }
-        if self.console.enabled {
-            if cfg!(not(feature = "console")) {
+        if self.console.enabled && cfg!(not(feature = "console")) {
+            problems.push(format!(
+                "{}: this iwdb-server was built without the console feature",
+                self.at("console.enabled")
+            ));
+        }
+        if self.console.public.is_some() {
+            problems.push("[console] public: replaced by [server] plaintext_public (step 15a)".to_owned());
+        }
+        if !self.listen.ip().is_loopback() && !self.server.plaintext_public {
+            let exposed = if self.auth.enabled {
+                "passwords, tokens and data would cross the network in clear"
+            } else {
+                "authentication is off, so anyone who reaches the port could read and change everything, in clear"
+            };
+            problems.push(format!(
+                "{} is {}, not a loopback address, and the server has no TLS until step 15b: {}; set \
+                 [server] plaintext_public = true (IWDB_SERVER_PLAINTEXT_PUBLIC) to listen there anyway",
+                self.at("listen"),
+                self.listen,
+                exposed
+            ));
+        }
+        if self.auth.session_lifetime_secs == 0 {
+            problems.push(format!("{} must be at least 1", self.at("auth.session_lifetime_secs")));
+        }
+        if self.auth.login_max_failures == 0 {
+            problems.push(format!("{} must be at least 1", self.at("auth.login_max_failures")));
+        }
+        if self.auth.login_table_size == 0 {
+            problems.push(format!("{} must be at least 1", self.at("auth.login_table_size")));
+        }
+        if let Some((user, password)) = &self.bootstrap {
+            let n = password.expose().len();
+            if !(iwdb::auth::MIN_PASSWORD_BYTES..=iwdb::auth::MAX_PASSWORD_BYTES).contains(&n) {
                 problems.push(format!(
-                    "{}: this iwdb-server was built without the console feature",
-                    self.at("console.enabled")
+                    "{}: a password must be {} to {} bytes long",
+                    BOOTSTRAP_PASSWORD_VAR,
+                    iwdb::auth::MIN_PASSWORD_BYTES,
+                    iwdb::auth::MAX_PASSWORD_BYTES
                 ));
-            } else if !self.listen.ip().is_loopback() && !self.console.public {
-                problems.push(format!(
-                    "{}: the console has no authentication until step 15, and {} is {}, not a loopback address; \
-                     set [console] public = true (IWDB_CONSOLE_PUBLIC) to serve it there anyway",
-                    self.at("console.enabled"),
-                    self.at("listen"),
-                    self.listen
-                ));
+            }
+            if iwdb::NamespaceName::new(user.as_str()).map_or(true, |n| n.is_reserved()) {
+                problems.push(format!("{}: invalid user name {:?}", BOOTSTRAP_USER_VAR, user));
             }
         }
         let mut names = std::collections::BTreeSet::new();
@@ -746,6 +856,17 @@ impl Config {
             self.limits.default.over(built_in.default_limits, built_in.default_timeout);
         let (max_limits, max_timeout) = self.limits.max.over(built_in.max_limits, built_in.max_timeout);
         LimitConfig { default_limits, max_limits, default_timeout, max_timeout }
+    }
+
+    /// How the embedded database logs in (step 15a).
+    pub fn auth_settings(&self) -> AuthSettings {
+        AuthSettings {
+            session_lifetime: Duration::from_secs(self.auth.session_lifetime_secs),
+            max_failures: self.auth.login_max_failures,
+            failure_window: Duration::from_secs(self.auth.login_window_secs),
+            table_size: self.auth.login_table_size,
+            ..AuthSettings::default()
+        }
     }
 
     /// How the embedded database runs requests.
@@ -936,7 +1057,8 @@ mod tests {
                 ("IWDB_LISTEN", "0.0.0.0:9000"),
                 ("IWDB_LIMITS_MAX_TIMEOUT_MS", "60000"),
                 ("IWDB_LOG_FORMAT", "text"),
-                ("IWDB_CONSOLE_PUBLIC", "true"),
+                ("IWDB_SERVER_PLAINTEXT_PUBLIC", "true"),
+                ("IWDB_AUTH_ENABLED", "false"),
                 // Not settings: ignored (the test suites' and serve.py's)
                 ("IWDB_SERVER", "target/debug/iwdb-server"),
                 ("IWDB_URL", "http://x"),
@@ -948,7 +1070,7 @@ mod tests {
         assert_eq!(config.listen.to_string(), "0.0.0.0:9000");
         assert_eq!(config.limits.max.timeout_ms, Some(60000));
         assert_eq!(config.log.format, LogFormat::Text);
-        assert!(config.console.public);
+        assert!(config.server.plaintext_public && !config.auth.enabled);
         assert_eq!(config.server.queue, 5);
         assert_eq!(config.source("store.fsync"), Source::Env("IWDB_STORE_FSYNC"));
         assert_eq!(config.source("server.queue"), Source::File);
@@ -991,19 +1113,86 @@ mod tests {
     }
 
     #[test]
-    fn the_console_needs_its_feature_and_a_loopback_address_or_public() {
-        let base = "data_dir = \"d\"\n[console]\nenabled = true\n";
-        let local = Config::parse(base);
-        let remote = Config::parse(&format!("listen = \"0.0.0.0:7600\"\n{}", base));
-        let public = Config::parse(&format!("listen = \"0.0.0.0:7600\"\n{}public = true\n", base));
+    fn the_console_needs_its_feature() {
+        let console = Config::parse("data_dir = \"d\"\n[console]\nenabled = true\n");
         if cfg!(feature = "console") {
-            assert!(local.is_ok() && public.is_ok());
-            assert!(remote.unwrap_err().contains("public = true"));
+            assert!(console.is_ok());
         } else {
-            for result in [local, remote, public] {
-                assert!(result.unwrap_err().contains("console feature"));
-            }
+            assert!(console.unwrap_err().contains("console feature"));
         }
+        // `public` was replaced by `[server] plaintext_public`
+        let e = Config::parse("data_dir = \"d\"\n[console]\npublic = true\n").unwrap_err();
+        assert!(e.contains("replaced by [server] plaintext_public"), "{}", e);
+        let e = Config::build(None, &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_CONSOLE_PUBLIC", "true")])).unwrap_err();
+        assert!(e.join("").contains("IWDB_SERVER_PLAINTEXT_PUBLIC"), "{:?}", e);
+    }
+
+    /// Until TLS (step 15b), a non-loopback address needs an explicit flag,
+    /// with authentication on or off (ADR 0047).
+    #[test]
+    fn a_non_loopback_address_needs_the_plaintext_flag() {
+        for auth in ["true", "false"] {
+            let base = format!("data_dir = \"d\"\nlisten = \"0.0.0.0:7600\"\n[auth]\nenabled = {}\n", auth);
+            let e = Config::parse(&base).unwrap_err();
+            assert!(e.contains("plaintext_public = true"), "{}", e);
+            let why = if auth == "true" { "passwords, tokens and data" } else { "authentication is off" };
+            assert!(e.contains(why), "{}", e);
+            assert!(Config::parse(&format!("{}[server]\nplaintext_public = true\n", base)).is_ok());
+        }
+        let ok = "data_dir = \"d\"\nlisten = \"0.0.0.0:7600\"\n[server]\nplaintext_public = true\n";
+        assert!(Config::parse(ok).is_ok());
+        assert!(Config::parse("data_dir = \"d\"\nlisten = \"[::1]:7600\"\n").is_ok());
+    }
+
+    #[test]
+    fn auth_is_on_by_default_and_checked() {
+        let config = Config::parse("data_dir = \"d\"").unwrap();
+        assert!(config.auth.enabled);
+        assert_eq!(config.auth_settings().session_lifetime, Duration::from_secs(43200));
+        for (text, why) in [
+            ("[auth]\nsession_lifetime_secs = 0", "session_lifetime_secs"),
+            ("[auth]\nlogin_max_failures = 0", "login_max_failures"),
+            ("[auth]\nlogin_table_size = 0", "login_table_size"),
+            ("[auth]\ncolour = 1", "colour"),
+        ] {
+            let e = Config::parse(&format!("data_dir = \"d\"\n{}", text)).unwrap_err();
+            assert!(e.contains(why), "{}: {}", why, e);
+        }
+    }
+
+    #[test]
+    fn the_bootstrap_password_comes_from_the_environment_only_and_is_never_printed() {
+        let config =
+            Config::build(None, &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_AUTH_BOOTSTRAP_PASSWORD", "first-admin-pw")]))
+                .unwrap();
+        let (user, password) = config.bootstrap.clone().unwrap();
+        assert_eq!((user.as_str(), password.expose()), ("admin", "first-admin-pw"));
+        assert!(!config.describe().contains("first-admin-pw"));
+        assert!(!format!("{:?}", config).contains("first-admin-pw"));
+        let named = Config::build(
+            None,
+            &env(&[
+                ("IWDB_DATA_DIR", "d"),
+                ("IWDB_AUTH_BOOTSTRAP_USER", "root"),
+                ("IWDB_AUTH_BOOTSTRAP_PASSWORD", "first-admin-pw"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(named.bootstrap.unwrap().0, "root");
+        let problems = Config::build(
+            None,
+            &env(&[
+                ("IWDB_DATA_DIR", "d"),
+                ("IWDB_AUTH_BOOTSTRAP_USER", "_x"),
+                ("IWDB_AUTH_BOOTSTRAP_PASSWORD", "short"),
+            ]),
+        )
+        .unwrap_err()
+        .join("\n");
+        assert!(problems.contains("8 to 1024 bytes") && problems.contains("invalid user name"), "{}", problems);
+        assert!(!problems.contains("short\""), "{}", problems);
+        let alone = Config::build(None, &env(&[("IWDB_DATA_DIR", "d"), ("IWDB_AUTH_BOOTSTRAP_USER", "root")]));
+        assert!(alone.unwrap_err().join("").contains("needs IWDB_AUTH_BOOTSTRAP_PASSWORD"));
     }
 
     #[test]
@@ -1016,8 +1205,8 @@ mod tests {
         let text = config.describe();
         let back = Config::parse(&text).unwrap();
         assert_eq!(
-            (&back.store, &back.server, &back.log, &back.console),
-            (&config.store, &config.server, &config.log, &config.console)
+            (&back.store, &back.server, &back.log, &back.console, &back.auth),
+            (&config.store, &config.server, &config.log, &config.console, &config.auth)
         );
         assert_eq!(back.limit_config(), config.limit_config());
         assert!(text.contains("# max_visited = (built in)"), "{}", text);

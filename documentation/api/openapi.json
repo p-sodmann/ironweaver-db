@@ -529,6 +529,62 @@
         },
         "type": "object"
       },
+      "CreateTokenRequest": {
+        "properties": {
+          "expiresInSecs": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Seconds until it expires; unset: never."
+          },
+          "name": {
+            "description": "Unique per user: 1 to 64 ASCII letters, digits, `_`, `-` or `.`.",
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CreateTokenResponse": {
+        "properties": {
+          "info": {
+            "$ref": "#/components/schemas/TokenInfo"
+          },
+          "token": {
+            "description": "The secret: shown this once, stored only as a hash.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CreateUserRequest": {
+        "properties": {
+          "admin": {
+            "type": "boolean"
+          },
+          "name": {
+            "description": "1 to 64 ASCII letters, digits, `_` or `-`, starting with a letter or\ndigit.",
+            "type": "string"
+          },
+          "password": {
+            "description": "8 to 1024 bytes.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CreateUserResponse": {
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        },
+        "type": "object"
+      },
       "CutTail": {
         "description": "A torn tail cut off the last WAL segment.",
         "properties": {
@@ -617,6 +673,18 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "DeleteUserRequest": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "DeleteUserResponse": {
+        "properties": {},
         "type": "object"
       },
       "Direction": {
@@ -1173,6 +1241,28 @@
         },
         "type": "object"
       },
+      "GrantRequest": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        },
+        "type": "object"
+      },
+      "GrantResponse": {
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        },
+        "type": "object"
+      },
       "Group": {
         "properties": {
           "ids": {
@@ -1447,6 +1537,73 @@
             "type": "array"
           }
         },
+        "type": "object"
+      },
+      "ListTokensResponse": {
+        "properties": {
+          "tokens": {
+            "description": "By name.",
+            "items": {
+              "$ref": "#/components/schemas/TokenInfo"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ListUsersResponse": {
+        "properties": {
+          "users": {
+            "description": "By name.",
+            "items": {
+              "$ref": "#/components/schemas/User"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "LoginRequest": {
+        "properties": {
+          "cookie": {
+            "description": "REST only: set the session as an HttpOnly, SameSite=Strict cookie\n(`iwdb_session`) instead of returning its token (the console does).",
+            "type": "boolean"
+          },
+          "password": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LoginResponse": {
+        "properties": {
+          "expiresMs": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "When the session ends, in milliseconds since 1970 (UTC)."
+          },
+          "token": {
+            "description": "The session's bearer token (empty when it was set as a cookie).",
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        },
+        "type": "object"
+      },
+      "LogoutRequest": {
+        "properties": {},
+        "type": "object"
+      },
+      "LogoutResponse": {
+        "properties": {},
         "type": "object"
       },
       "Lookup": {
@@ -2382,6 +2539,50 @@
         },
         "type": "object"
       },
+      "RevokeRequest": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "RevokeResponse": {
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        },
+        "type": "object"
+      },
+      "RevokeTokenRequest": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "RevokeTokenResponse": {
+        "properties": {},
+        "type": "object"
+      },
+      "Role": {
+        "description": "A role on a namespace.",
+        "enum": [
+          "ROLE_UNSPECIFIED",
+          "ROLE_READ",
+          "ROLE_WRITE",
+          "ROLE_ADMIN"
+        ],
+        "type": "string"
+      },
       "Score": {
         "properties": {
           "id": {
@@ -2389,6 +2590,25 @@
           },
           "score": {
             "$ref": "#/components/schemas/Double"
+          }
+        },
+        "type": "object"
+      },
+      "SetAdminRequest": {
+        "properties": {
+          "admin": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SetAdminResponse": {
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/User"
           }
         },
         "type": "object"
@@ -2518,6 +2738,25 @@
             "$ref": "#/components/schemas/Uint64"
           }
         },
+        "type": "object"
+      },
+      "SetPasswordRequest": {
+        "properties": {
+          "currentPassword": {
+            "description": "The user's current password: required when users change their own\n(a server-wide admin may leave it out).",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SetPasswordResponse": {
+        "properties": {},
         "type": "object"
       },
       "ShortestPathRequest": {
@@ -2671,6 +2910,34 @@
         },
         "type": "object"
       },
+      "TokenInfo": {
+        "description": "An API token, never with its secret.",
+        "properties": {
+          "createdMs": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "When it was made, in milliseconds since 1970 (UTC)."
+          },
+          "expiresMs": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "When it expires, in milliseconds since 1970 (UTC); unset: never."
+          },
+          "name": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "TraverseRequest": {
         "description": "A breadth- or depth-first traversal, in traversal order.",
         "properties": {
@@ -2788,6 +3055,26 @@
               "$ref": "#/components/schemas/Value"
             },
             "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "User": {
+        "description": "A user, never with its password hash.",
+        "properties": {
+          "admin": {
+            "description": "The server-wide admin role.",
+            "type": "boolean"
+          },
+          "grants": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Role"
+            },
+            "description": "Roles by namespace name.",
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
           }
         },
         "type": "object"
@@ -3008,6 +3295,18 @@
         },
         "type": "object"
       },
+      "WhoAmIResponse": {
+        "properties": {
+          "authEnabled": {
+            "description": "Whether the server checks credentials (`[auth] enabled`); if not,\nevery caller is a server-wide admin.",
+            "type": "boolean"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        },
+        "type": "object"
+      },
       "Work": {
         "description": "How much work a read did.",
         "properties": {
@@ -3019,6 +3318,19 @@
           }
         },
         "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "description": "A session token from `POST /v1/auth/login`, or an API token.",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "sessionCookie": {
+        "description": "The console's session (login with `cookie: true`). Requests other than GET and HEAD must also send the `X-Iwdb-Csrf` header.",
+        "in": "cookie",
+        "name": "iwdb_session",
+        "type": "apiKey"
       }
     }
   },
@@ -3033,6 +3345,144 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/auth/login": {
+      "post": {
+        "description": "Check a user's password and start a session. Failed logins are slowed\ndown per user and per client address. Needs no token.",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "security": [],
+        "summary": "Log in: start a session"
+      }
+    },
+    "/v1/auth/logout": {
+      "post": {
+        "description": "End the caller's session.",
+        "operationId": "logout",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogoutRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogoutResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "End the caller's session"
+      }
+    },
+    "/v1/auth/whoami": {
+      "get": {
+        "description": "The caller: its user, whether it is a server-wide admin, its roles.",
+        "operationId": "whoAmI",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmIResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "The caller and its roles"
+      }
+    },
     "/v1/health/live": {
       "get": {
         "description": "The server's state, as the REST health routes answer it: 200 for\n`/v1/health/live` whenever the process answers; for `/v1/health/ready`,\n200 when `ready`, 503 otherwise.",
@@ -3049,6 +3499,7 @@
             "description": "The server's state."
           }
         },
+        "security": [],
         "summary": "Liveness: 200 whenever the server answers"
       }
     },
@@ -3078,6 +3529,7 @@
             "description": "Not ready: recovering or shutting down."
           }
         },
+        "security": [],
         "summary": "Readiness: 200 once recovery has finished, 503 before and while shutting down"
       }
     },
@@ -4759,11 +5211,598 @@
             "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
           }
         },
+        "security": [],
         "summary": "This API's OpenAPI document"
+      }
+    },
+    "/v1/users": {
+      "get": {
+        "description": "Every user (server-wide admin).",
+        "operationId": "listUsers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListUsersResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "List the users"
+      },
+      "post": {
+        "description": "Create a user (server-wide admin).",
+        "operationId": "createUser",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateUserResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Create a user"
+      }
+    },
+    "/v1/users/{user}": {
+      "delete": {
+        "description": "Delete a user with its grants and tokens (server-wide admin).",
+        "operationId": "deleteUser",
+        "parameters": [
+          {
+            "description": "The user.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteUserRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteUserResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Delete a user"
+      }
+    },
+    "/v1/users/{user}/admin": {
+      "put": {
+        "description": "Make a user a server-wide admin or not (server-wide admin).",
+        "operationId": "setAdmin",
+        "parameters": [
+          {
+            "description": "The user.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetAdminRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetAdminResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Make a user a server admin or not"
+      }
+    },
+    "/v1/users/{user}/grants/{ns}": {
+      "delete": {
+        "description": "Take a user's role on a namespace away (server-wide admin).",
+        "operationId": "revoke",
+        "parameters": [
+          {
+            "description": "The user.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevokeRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokeResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Take a user's role on a namespace away"
+      },
+      "put": {
+        "description": "Give a user a role on a namespace (server-wide admin).",
+        "operationId": "grant",
+        "parameters": [
+          {
+            "description": "The user.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrantResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Give a user a role on a namespace"
+      }
+    },
+    "/v1/users/{user}/password": {
+      "put": {
+        "description": "Set a password: a server-wide admin anyone's, a user its own with its\ncurrent password. Ends the user's sessions.",
+        "operationId": "setPassword",
+        "parameters": [
+          {
+            "description": "The user.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetPasswordResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Set a user's password"
+      }
+    },
+    "/v1/users/{user}/tokens": {
+      "get": {
+        "description": "A user's API tokens, without their secrets.",
+        "operationId": "listTokens",
+        "parameters": [
+          {
+            "description": "The user.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListTokensResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "A user's API tokens"
+      },
+      "post": {
+        "description": "Make an API token (a server-wide admin for anyone, a user for itself).",
+        "operationId": "createToken",
+        "parameters": [
+          {
+            "description": "The user.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateTokenResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Make an API token"
+      }
+    },
+    "/v1/users/{user}/tokens/{token}": {
+      "delete": {
+        "description": "Revoke an API token (a server-wide admin for anyone, a user its own).",
+        "operationId": "revokeToken",
+        "parameters": [
+          {
+            "description": "The user.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The API token's name.",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevokeTokenRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokeTokenResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Revoke an API token"
       }
     }
   },
-  "security": [],
+  "security": [
+    {
+      "bearer": []
+    },
+    {
+      "sessionCookie": []
+    }
+  ],
   "servers": [
     {
       "url": "http://127.0.0.1:7600"

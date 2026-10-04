@@ -34,7 +34,7 @@ type Raw = DatabaseServiceClient<hyper_util::client::legacy::Client<HttpConnecto
 
 /// A client without tonic's channel: it sends `grpc-timeout` without
 /// enforcing it, and whatever bytes a test puts in a message.
-fn raw<D: Database + 'static>(server: &Running<D>) -> Raw {
+fn raw<D: iwdb_server::auth::Served>(server: &Running<D>) -> Raw {
     let client =
         hyper_util::client::legacy::Client::builder(TokioExecutor::new()).http2_only(true).build(HttpConnector::new());
     DatabaseServiceClient::with_origin(client, Uri::from_str(&server.endpoint()).unwrap())

@@ -11,6 +11,8 @@
 //! - [`status`]: the error mapping, `Code` to gRPC status and back, with the
 //!   code string in the `iwdb-code` trailer, and to HTTP status
 //!   (`documentation/api/errors.md`).
+//! - [`auth`]: who is calling (step 15a): the gate authenticates once and
+//!   attaches a `Caller`; every call runs through `iwdb_query::Authorized`.
 //! - [`config`]: the `iwdb-server` binary's configuration: a file and
 //!   `IWDB_*` environment overrides (ADR 0039).
 //! - [`health`]: liveness and readiness (ADR 0040); [`launch`] binds first
@@ -37,6 +39,7 @@
 //! Pure Rust (design rule 1). tokio is a dependency of this crate only
 //! (ADR 0020).
 
+pub mod auth;
 pub mod config;
 #[cfg(feature = "console")]
 mod console;

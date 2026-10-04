@@ -63,7 +63,7 @@ fn client(http2: bool) -> Http {
 }
 
 /// Send a request; a JSON body gets `Content-Type: application/json`.
-fn send<D: Database + 'static>(
+fn send<D: iwdb_server::auth::Served>(
     server: &Running<D>,
     http: &Http,
     method: Method,
@@ -87,11 +87,11 @@ fn send<D: Database + 'static>(
     })
 }
 
-fn post<D: Database + 'static>(server: &Running<D>, path: &str, body: Json) -> Reply {
+fn post<D: iwdb_server::auth::Served>(server: &Running<D>, path: &str, body: Json) -> Reply {
     send(server, &client(false), Method::POST, path, Some(&body), &[])
 }
 
-fn get<D: Database + 'static>(server: &Running<D>, path: &str) -> Reply {
+fn get<D: iwdb_server::auth::Served>(server: &Running<D>, path: &str) -> Reply {
     send(server, &client(false), Method::GET, path, None, &[])
 }
 

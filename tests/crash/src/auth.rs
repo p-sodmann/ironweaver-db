@@ -65,7 +65,8 @@ pub fn script() -> Vec<Change> {
 
 /// Every password the script gives anyone: recovery is checked for which
 /// of them each user's hash accepts.
-const PASSWORDS: [&str; 5] = ["root-password-1", "ann-password-1", "ann-password-2", "bob-password-1", "bob-password-2"];
+const PASSWORDS: [&str; 5] =
+    ["root-password-1", "ann-password-1", "ann-password-2", "bob-password-1", "bob-password-2"];
 
 /// What a store's users look like: per user its admin flag, grants by
 /// namespace name, token names and the password its hash accepts.

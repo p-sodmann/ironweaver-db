@@ -4,7 +4,7 @@
 
 - The OpenAPI 3.1 document is [openapi.json](openapi.json). A running server also serves it at `GET /v1/openapi.json`.
 - Decisions are recorded in [ADR 0030](../adr/0030-rest-json-api.md), plus [ADR 0023](../adr/0023-wire-encoding-of-values-filters-and-patterns.md) for values, filters and patterns, and [ADR 0025](../adr/0025-server-streaming.md) for streamed answers.
-- There is no TLS and no authentication yet (step 15). Bind the server to localhost or a private network.
+- Authentication is on by default ([Authentication](#authentication), step 15a). There is no TLS until step 15b: passwords and tokens cross the network in clear, so keep the server on localhost or a trusted network.
 
 ## Routes
 
@@ -36,10 +36,46 @@
 | GET | `/v1/health/live` | – | `Health`: 200 whenever the server answers | – (the server's, [config.md](config.md#health)) |
 | GET | `/v1/health/ready` | – | `Health`: 200 when ready, 503 while recovering or shutting down | – (the server's) |
 | GET | `/v1/openapi.json` | – | the OpenAPI document | – |
+| POST | `/v1/auth/login` | `LoginRequest` | `LoginResponse` (with `cookie: true` the token is set as a cookie instead) | `Authenticate::login` |
+| POST | `/v1/auth/logout` | – | `LogoutResponse` (clears the cookie) | `Authenticate::logout` |
+| GET | `/v1/auth/whoami` | – | `WhoAmIResponse` | – (the caller's principal) |
+| GET | `/v1/users` | – | `ListUsersResponse` | `Accounts::users` |
+| POST | `/v1/users` | `CreateUserRequest` | `CreateUserResponse` | `Accounts::create_user` |
+| DELETE | `/v1/users/{user}` | – | `DeleteUserResponse` | `Accounts::delete_user` |
+| PUT | `/v1/users/{user}/password` | `SetPasswordRequest` | `SetPasswordResponse` | `Accounts::set_password` |
+| PUT | `/v1/users/{user}/admin` | `SetAdminRequest` | `SetAdminResponse` | `Accounts::set_admin` |
+| PUT | `/v1/users/{user}/grants/{ns}` | `GrantRequest` (`role`) | `GrantResponse` | `Accounts::grant` |
+| DELETE | `/v1/users/{user}/grants/{ns}` | – | `RevokeResponse` | `Accounts::revoke` |
+| GET | `/v1/users/{user}/tokens` | – | `ListTokensResponse` | `Accounts::tokens` |
+| POST | `/v1/users/{user}/tokens` | `CreateTokenRequest` | `CreateTokenResponse` (the secret, once) | `Accounts::create_token` |
+| DELETE | `/v1/users/{user}/tokens/{token}` | – | `RevokeTokenResponse` | `Accounts::revoke_token` |
 
 Path parameters are percent-encoded: node `a/b` is `/nodes/a%2Fb`. A test keeps this table equal to the server's route table.
 
 The health routes are served in every build (also without the `rest` feature) and while the store recovers; until recovery has finished every other route answers 503 `unavailable` ([ADR 0040](../adr/0040-health-and-readiness.md)). With the `console` feature and `[console] enabled = true`, the operator console's pages are served at `/console/` on the same port ([ADR 0041](../adr/0041-console-served-by-the-server.md)); they aren't part of this API.
+
+## Authentication
+
+With `[auth] enabled` (the default, [config.md](config.md#authentication-and-the-first-admin)) every route but the health routes, `POST /v1/auth/login` and `/v1/openapi.json` needs credentials; so do the console's API calls (its pages themselves are open). [ADRs 0043 to 0047](../adr/0045-the-authorisation-point.md).
+
+- **Log in** with `POST /v1/auth/login` and `{"user": "...", "password": "..."}`. The answer's `token` is a session token (256 random bits) until `expiresMs`, logout, a password change, the user's deletion or a server restart. Scripts can use an **API token** instead (`POST /v1/users/{user}/tokens`): the same kind of bearer token, with a name, no expiry unless asked for, surviving restarts and password changes, revoked by name.
+- **Send it** as `Authorization: Bearer <token>`.
+- **The console's cookie.** With `"cookie": true` the login sets the session as `iwdb_session`, an `HttpOnly; SameSite=Strict` cookie (no script can read it, no other site sends it), and leaves `token` empty. A request authenticated by the cookie with a method other than GET or HEAD must also send `X-Iwdb-Csrf: 1`: a page of another origin can't send a custom header without a CORS preflight, which the server doesn't answer ([ADR 0046](../adr/0046-the-console-session.md)). The cookie isn't `Secure` until the server has TLS (step 15b).
+- **Errors.** No credentials, or an unknown, expired or revoked token: 401 `unauthenticated`. Credentials whose roles don't allow the operation: 403 `permission_denied`. A wrong user or password, and too many failed logins, are 401 with the same message whether the user exists or not.
+- **Roles** are per namespace: `read` (reads, the change stream, the catalog, the status), `write` (and commits), `admin` (and catalog changes and dropping it); a server-wide admin has every role and manages users, grants and namespaces (creating one needs it). `GET /v1/namespaces` lists the namespaces the caller has a role on. Users change their own password with `currentPassword`, and manage their own tokens.
+
+```sh
+U=http://127.0.0.1:7600/v1
+T=$(curl -s $U/auth/login -H 'content-type: application/json' \
+      -d '{"user": "admin", "password": "..."}' | jq -r .token)
+curl -s $U/namespaces -H "authorization: Bearer $T"
+curl -s -X POST $U/users -H "authorization: Bearer $T" -H 'content-type: application/json' \
+  -d '{"name": "ann", "password": "a long password"}'
+curl -s -X PUT $U/users/ann/grants/default -H "authorization: Bearer $T" -H 'content-type: application/json' \
+  -d '{"role": "ROLE_WRITE"}'
+curl -s -X POST $U/users/ann/tokens -H "authorization: Bearer $T" -H 'content-type: application/json' \
+  -d '{"name": "ci"}'
+```
 
 ## Requests
 
@@ -113,6 +149,7 @@ On SIGINT or SIGTERM the server stops accepting connections. Idle HTTP/1.1 conne
 ## Examples
 
 ```sh
+# With authentication on, add -H "authorization: Bearer $T" to every call (see above)
 B=http://127.0.0.1:7600/v1/namespaces/default
 J='content-type: application/json'
 
@@ -147,4 +184,4 @@ curl -s -X DELETE http://127.0.0.1:7600/v1/namespaces/other
 
 ## The Rust client
 
-`iwdb_server::client::RestRemote` (feature `client`) implements the `Database` trait over REST. It is the client the conformance suite runs over REST, and a reference for clients in other languages. Rust programs should prefer the gRPC `Remote` ([grpc.md](grpc.md#the-rust-client)). `RestRemote::ndjson(true)` reads streamed answers as NDJSON.
+`iwdb_server::client::RestRemote` (feature `client`) implements the `Database` trait over REST. It is the client the conformance suite runs over REST, and a reference for clients in other languages. Rust programs should prefer the gRPC `Remote` ([grpc.md](grpc.md#the-rust-client)). `RestRemote::ndjson(true)` reads streamed answers as NDJSON. Like `Remote` it takes a token (`with_token`) or logs in (`login`), and implements `Accounts`.

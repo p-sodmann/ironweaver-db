@@ -62,11 +62,9 @@ pub use iwdb_engine::{
     Namespace, Target,
 };
 pub use iwdb_query::{
-    NewToken, Role, Secret, TokenInfo, UserInfo,
-};
-pub use iwdb_query::{
     CommitOptions, Edge, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus, Node, ProjectionSpec,
 };
+pub use iwdb_query::{NewToken, Role, Secret, TokenInfo, UserInfo};
 pub use iwdb_storage::io::{LogFs, StdFs};
 pub use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 pub use iwdb_storage::{

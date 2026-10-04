@@ -116,11 +116,15 @@ fn the_document_describes_exactly_the_routes() {
 
 #[test]
 fn every_rpc_has_a_route() {
-    let proto = include_str!("../../../proto/ironweaver_db/v1/service.proto");
+    let proto = [
+        include_str!("../../../proto/ironweaver_db/v1/service.proto"),
+        include_str!("../../../proto/ironweaver_db/v1/auth.proto"),
+    ]
+    .concat();
     let rpcs: BTreeSet<&str> =
         proto.lines().filter_map(|l| l.trim().strip_prefix("rpc ")).filter_map(|l| l.split('(').next()).collect();
     let routed: BTreeSet<&str> = ROUTES.iter().filter_map(|r| r.rpc).collect();
-    assert_eq!(rpcs.len(), 21);
+    assert_eq!(rpcs.len(), 21 + 13);
     assert_eq!(routed, rpcs);
 }
 

@@ -228,7 +228,7 @@ impl PyStore {
     fn connect(py: Python<'_>, endpoint: &str) -> PyResult<Self> {
         guard(|| {
             let remote = py.detach(|| Remote::connect(endpoint)).map_err(query_to_py)?;
-            let backend = Backend::Remote(RemoteDb::new(remote));
+            let backend = Backend::Remote(Box::new(RemoteDb::new(remote)));
             Ok(PyStore { inner: RwLock::new(Some(backend)), location: endpoint.to_owned() })
         })
     }
