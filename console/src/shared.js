@@ -233,7 +233,7 @@
           h('label', { className: 'cs-login__field' }, h('span', { className: 'iw-cap' }, 'Password'),
             h('input', { className: 'cs-input', type: 'password', name: 'password', autoComplete: 'current-password', required: true, value: password, onChange: (e) => setPassword(e.target.value) })),
           error && h('div', { className: 'cs-login__error iw-small', role: 'alert' }, error),
-          plain && h('div', { className: 'cs-login__warn iw-small' }, 'This page is plain HTTP: the password crosses the network in clear until the server has TLS.'),
+          plain && h('div', { className: 'cs-login__warn iw-small' }, 'This page is plain HTTP: the password crosses the network in clear. The server serves HTTPS unless its TLS was turned off; use https://.'),
           h('div', { className: 'cs-login__go' }, h(I.Button, { variant: 'primary', type: 'submit', disabled: busy }, busy ? 'LOGGING IN' : 'LOG IN'))));
     }
 

@@ -1,11 +1,12 @@
 """Tests of serve.py (step 16a): the pages are served, /v1 is passed through with its status, body and
 content type (and, step 15a, the credentials and the session cookie), nothing else under console/ is served,
-and a server that doesn't answer is `unavailable`.
+and a server that doesn't answer is `unavailable`; a server over TLS (step 15b) is verified against the CA.
 
     uv run --with flask --with pytest pytest console/test
 """
 
 import json
+import ssl
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -47,7 +48,7 @@ class Upstream(BaseHTTPRequestHandler):
             data = b'{"user":{"name":"ann"}}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Set-Cookie", "iwdb_session=t0k; Path=/; HttpOnly; SameSite=Strict; Max-Age=60")
+            self.send_header("Set-Cookie", "iwdb_session=t0k; Path=/; HttpOnly; SameSite=Strict; Max-Age=60; Secure")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -90,6 +91,8 @@ def test_credentials_and_the_session_cookie_pass_through(client):
     r = client.post("/v1/auth/login", data='{"user":"ann","password":"pw","cookie":true}', headers={"Content-Type": "application/json"})
     assert r.status_code == 200
     assert r.headers["Set-Cookie"].startswith("iwdb_session=t0k;") and "HttpOnly" in r.headers["Set-Cookie"]
+    # The page is plain HTTP on localhost: no Secure, or the browser would drop the cookie
+    assert "Secure" not in r.headers["Set-Cookie"] and r.headers["Set-Cookie"].endswith("Max-Age=60")
     client.get("/v1/namespaces", headers={"Authorization": "Bearer abc", "Cookie": "iwdb_session=t0k", "X-Iwdb-Csrf": "1"})
     method, path, headers = SEEN[-1]
     assert headers["Authorization"] == "Bearer abc" and headers["Cookie"] == "iwdb_session=t0k" and headers["X-Iwdb-Csrf"] == "1"
@@ -108,3 +111,24 @@ def test_config_and_a_missing_server():
     r = c.get("/v1/namespaces")
     assert r.status_code == 502 and r.json["code"] == "unavailable"
     assert c.get("/console-config.json").json == {"upstream": "http://127.0.0.1:9", "version": None}
+
+
+TLS = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "tls"
+
+
+def test_a_server_over_tls_is_verified_against_the_ca():
+    """The upstream speaks TLS with the test certificate (test-only): the proxy trusts the given CA only."""
+    httpd = HTTPServer(("127.0.0.1", 0), Upstream)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(TLS / "server.pem", TLS / "server.key")
+    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        upstream = f"https://127.0.0.1:{httpd.server_port}"
+        c = serve.create_app(upstream, ca=str(TLS / "ca.pem")).test_client()
+        assert c.get("/v1/namespaces").status_code == 200
+        assert c.get("/console-config.json").json == {"upstream": upstream, "version": "v1"}
+        r = serve.create_app(upstream, ca=str(TLS / "other-ca.pem")).test_client().get("/v1/namespaces")
+        assert r.status_code == 502 and r.json["code"] == "unavailable" and "CERTIFICATE_VERIFY_FAILED" in r.json["message"]
+    finally:
+        httpd.shutdown()
