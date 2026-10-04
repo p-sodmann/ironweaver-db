@@ -106,6 +106,6 @@ Ironweaver DB is a **separate project** that turns `ironweaver-core` into a dura
 | **M0 Foundation** | 1–3 | Transactions commit in memory with versions, resolved ops and `seq`; upstream changes landed |
 | **M1 Embedded durable** | 4–7 | Kill -9 suite green; PITR works; Python embedded wheels on PyPI |
 | **M2 Service** | 8–10 | Concurrent reads, catalog, bounded query layer behind the `Database` trait |
-| **M3 Network access** | 11–14 | gRPC, REST and change stream served; Python remote client passes the same tests as embedded; benchmarks published |
+| **M3 Network access** | 11–14b | gRPC, REST and change stream served; Python remote client passes the same tests as embedded; benchmarks published |
 | **M4 Production 1.0** | 15–17 | Security, operability, full verification suite; 1.0 released |
 | **M5 HA** | 18 | Replicas, failover, Jepsen-style tests |
