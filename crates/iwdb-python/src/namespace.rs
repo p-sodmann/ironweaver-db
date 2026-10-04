@@ -2,8 +2,10 @@
 
 use iwdb::{CatalogChange, IndexDef};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use crate::errors::guard;
+use crate::query::ReadArgs;
 use crate::reports;
 use crate::store::{PyStore, attr_path, constraint};
 use crate::transaction::PyTransaction;
@@ -63,15 +65,15 @@ impl PyNamespace {
     }
 
     fn seq(&self, py: Python<'_>) -> PyResult<u64> {
-        guard(|| self.store.get().with_ns(py, &self.name, |n| Ok(n.seq())))
+        guard(|| Ok(self.store.get().status_of(py, &self.name)?.seq))
     }
 
     fn synced_seq(&self, py: Python<'_>) -> PyResult<Option<u64>> {
-        guard(|| self.store.get().with_ns(py, &self.name, |n| Ok(n.status().synced_seq)))
+        guard(|| Ok(self.store.get().status_of(py, &self.name)?.synced_seq))
     }
 
     fn read_only(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        guard(|| self.store.get().with_ns(py, &self.name, |n| Ok(n.read_only())))
+        guard(|| Ok(self.store.get().status_of(py, &self.name)?.read_only))
     }
 
     /// The namespace's state: counts, indexes, memory.
@@ -151,6 +153,272 @@ impl PyNamespace {
     ) -> PyResult<Py<PyAny>> {
         let change = CatalogChange::DropConstraint(constraint(kind, label, path)?);
         self.store.get().commit_catalog(py, &self.name, change, idempotency_key)
+    }
+
+    // ---- queries (`crate::query`) ----
+
+    /// Nodes matching `filter` (an `iwdb` filter), by index or scan, sorted by id; paginated (`cursor`).
+    #[pyo3(signature = (filter, *, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn find(
+        &self,
+        py: Python<'_>,
+        filter: &Bound<'_, PyAny>,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.store.get().find_in(
+            py,
+            &self.name,
+            filter,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
+    /// How `find` would read `filter`: the index plan and the estimated candidates (with `analyze`, the exact number).
+    #[pyo3(signature = (filter, *, analyze = false, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn explain(
+        &self,
+        py: Python<'_>,
+        filter: &Bound<'_, PyAny>,
+        analyze: bool,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.store.get().explain_in(py, &self.name, filter, analyze, min_seq, timeout)
+    }
+
+    /// The nodes within `depth` edges of `seeds` (an id or a list of ids), sorted by id; paginated (`cursor`).
+    #[pyo3(signature = (seeds, *, depth = 1, direction = "out", edge_types = None, edge_filter = None, node_filter = None, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn neighbourhood(
+        &self,
+        py: Python<'_>,
+        seeds: &Bound<'_, PyAny>,
+        depth: usize,
+        direction: &str,
+        edge_types: Option<Vec<String>>,
+        edge_filter: Option<&Bound<'_, PyAny>>,
+        node_filter: Option<&Bound<'_, PyAny>>,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.store.get().neighbourhood_in(
+            py,
+            &self.name,
+            seeds,
+            depth,
+            direction,
+            edge_types,
+            edge_filter,
+            node_filter,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
+    /// A breadth-first (`order="bfs"`) or depth-first (`"dfs"`) traversal from `start`: node ids in traversal order.
+    #[pyo3(signature = (start, *, order = "bfs", depth = None, direction = "out", edge_types = None, edge_filter = None, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn traverse(
+        &self,
+        py: Python<'_>,
+        start: &str,
+        order: &str,
+        depth: Option<usize>,
+        direction: &str,
+        edge_types: Option<Vec<String>>,
+        edge_filter: Option<&Bound<'_, PyAny>>,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.store.get().traverse_in(
+            py,
+            &self.name,
+            start,
+            order,
+            depth,
+            direction,
+            edge_types,
+            edge_filter,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
+    /// A shortest path from `from_` to `to`: `"bfs"` (fewest edges), `"dijkstra"` or `"astar"` (cheapest by the edge attribute `weight`).
+    #[pyo3(signature = (from_, to, *, method = "bfs", weight = None, default_weight = 1.0, coords = None, metric = "euclidean", direction = "out", max_depth = None, max_cost = None, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn shortest_path(
+        &self,
+        py: Python<'_>,
+        from_: &str,
+        to: &str,
+        method: &str,
+        weight: Option<String>,
+        default_weight: f64,
+        coords: Option<&Bound<'_, PyAny>>,
+        metric: &str,
+        direction: &str,
+        max_depth: Option<usize>,
+        max_cost: Option<f64>,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.store.get().shortest_path_in(
+            py,
+            &self.name,
+            from_,
+            to,
+            method,
+            weight,
+            default_weight,
+            coords,
+            metric,
+            direction,
+            max_depth,
+            max_cost,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
+    /// Up to `walks` random walks of at most `max_length` nodes from `start` (duplicates removed).
+    #[pyo3(signature = (start, *, max_length, walks = 1, min_length = 1, allow_revisit = false, seed = None, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn random_walks(
+        &self,
+        py: Python<'_>,
+        start: &str,
+        max_length: usize,
+        walks: usize,
+        min_length: usize,
+        allow_revisit: bool,
+        seed: Option<u64>,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.store.get().random_walks_in(
+            py,
+            &self.name,
+            start,
+            max_length,
+            walks,
+            min_length,
+            allow_revisit,
+            seed,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
+    /// The nodes within `depth` edges of `seeds` and the edges between them, both sorted by id.
+    #[pyo3(signature = (seeds, *, depth = 1, direction = "out", edge_types = None, edge_filter = None, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn subgraph(
+        &self,
+        py: Python<'_>,
+        seeds: &Bound<'_, PyAny>,
+        depth: usize,
+        direction: &str,
+        edge_types: Option<Vec<String>>,
+        edge_filter: Option<&Bound<'_, PyAny>>,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.store.get().subgraph_in(
+            py,
+            &self.name,
+            seeds,
+            depth,
+            direction,
+            edge_types,
+            edge_filter,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
+    /// Every match of `pattern` (the core's pattern text), with `where` filters per node variable; sorted rows, paginated (`cursor`).
+    #[pyo3(signature = (pattern, *, r#where = None, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn r#match(
+        &self,
+        py: Python<'_>,
+        pattern: &str,
+        r#where: Option<&Bound<'_, PyDict>>,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.store.get().match_in(
+            py,
+            &self.name,
+            pattern,
+            r#where,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
+    }
+
+    /// An analytics job (`"pagerank"`, `"degree"`, `"leiden"`, ...) with its `params`, on a projection of the namespace.
+    #[pyo3(signature = (job, *, params = None, direction = "out", weight = None, default_weight = 1.0, max_results = None, max_visited = None, max_edges = None, partial = false, cursor = None, min_seq = None, timeout = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn analyze(
+        &self,
+        py: Python<'_>,
+        job: &str,
+        params: Option<&Bound<'_, PyDict>>,
+        direction: &str,
+        weight: Option<String>,
+        default_weight: f64,
+        max_results: Option<usize>,
+        max_visited: Option<usize>,
+        max_edges: Option<usize>,
+        partial: bool,
+        cursor: Option<String>,
+        min_seq: Option<u64>,
+        timeout: Option<f64>,
+    ) -> PyResult<Py<PyAny>> {
+        self.store.get().analyze_in(
+            py,
+            &self.name,
+            job,
+            params,
+            direction,
+            weight,
+            default_weight,
+            ReadArgs { max_results, max_visited, max_edges, partial, cursor, min_seq, timeout },
+        )
     }
 
     fn sync(&self, py: Python<'_>) -> PyResult<()> {
