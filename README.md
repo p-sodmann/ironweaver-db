@@ -15,6 +15,14 @@ with iwdb.Store.open("data") as store:
     print(store.node("alice"))
 ```
 
+The server in Docker (gRPC and REST on port 7600; no TLS or authentication yet, so keep it on localhost):
+
+```
+docker compose up --build
+```
+
+`docker build --build-arg FEATURES="" .` builds a gRPC-only image without REST or the Postgres projection source ([details](documentation/api/grpc.md#features-and-docker)).
+
 ## Documentation
 
 - [Design proposal](documentation/ironweaver-db.md): goals, guiding decisions, workstreams and milestones
