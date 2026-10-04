@@ -108,6 +108,7 @@ fn recovery_to_pb(r: &RecoveryReport) -> pb::RecoveryReport {
             removed: t.removed,
         }),
         seq: r.seq,
+        finished_import: r.finished_import,
     }
 }
 
@@ -139,6 +140,7 @@ fn recovery_from_pb(r: Option<pb::RecoveryReport>) -> Result<RecoveryReport, Err
             })
             .transpose()?,
         seq: r.seq,
+        finished_import: r.finished_import,
     })
 }
 

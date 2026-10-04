@@ -23,7 +23,8 @@
 //! method uses: bounded reads, pattern matching, analytics, the catalog
 //! and namespaces, with stable error codes.
 //!
-//! Operations: [`Store::backup`] (an online backup), continuous WAL
+//! Operations: [`Store::import_namespace`] and [`Ns::export`] (bulk
+//! import and export, [`import`]), [`Store::backup`] (an online backup), continuous WAL
 //! archiving ([`StoreOptions::archive`]), [`restore`] (point-in-time
 //! recovery from a backup and/or an archive), [`verify`] (every file and
 //! invariant, without writing) and [`status`].
@@ -37,6 +38,7 @@
 //! `documentation/formats/data-dir.md`.
 
 mod embedded;
+pub mod import;
 mod ops;
 mod options;
 pub mod projection;

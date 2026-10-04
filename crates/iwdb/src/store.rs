@@ -24,6 +24,7 @@ use crate::StoreOptions;
 use crate::request::{ReadOptions, Timer};
 
 mod background;
+mod import;
 mod ns;
 mod projections;
 mod wait;
@@ -368,9 +369,21 @@ where
             Plan::Duplicate(event) => return Ok(NamespaceResult { event, deduplicated: true }),
             Plan::New { id } => id,
         };
-        let shared = &self.shared;
-        let paths = create_ns_dir(&shared.fs, &shared.root, id)?;
+        let paths = create_ns_dir(&self.shared.fs, &self.shared.root, id)?;
         let event = catalog.log.append(EventKind::Create, id, name, key)?;
+        self.open_created(catalog, name, paths, event)
+    }
+
+    /// Open the namespace `name` whose create event was just logged (its
+    /// directory in `paths`), and add it to the open namespaces.
+    fn open_created(
+        &self,
+        catalog: &mut CatalogState<F>,
+        name: &NamespaceName,
+        paths: NsPaths,
+        event: iwdb_storage::namespaces::Event,
+    ) -> Result<NamespaceResult, Error> {
+        let shared = &self.shared;
         // The namespace exists now. If opening it fails, the namespace log
         // is failed: the next open sorts it out
         let opened = (|| {

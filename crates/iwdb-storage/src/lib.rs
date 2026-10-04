@@ -24,6 +24,8 @@
 //! - [`restore`](mod@restore): a new data directory at a seq or time from a backup
 //!   and/or an archive.
 //! - [`verify`](mod@verify): every file and invariant, checked without writing.
+//! - [`import`](mod@import): the files of an import, a namespace made from one
+//!   checkpoint (ADR 0033).
 //! - [`inspect`]: a quick, read-only look at a directory.
 //! - [`HistoryId`] and [`CommitTime`]: which history a directory holds, and
 //!   when a commit was appended (ADR 0009, ADR 0010).
@@ -57,6 +59,7 @@ mod error;
 pub mod failpoint;
 pub mod format;
 mod history;
+pub mod import;
 mod inspect;
 pub mod io;
 pub mod layout;

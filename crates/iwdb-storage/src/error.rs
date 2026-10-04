@@ -208,6 +208,11 @@ pub enum Error {
     #[error("namespace '{name}' (id {id}) is damaged: {reason}")]
     NamespaceDamaged { id: u64, name: String, reason: String },
 
+    /// An import was refused: the file is invalid, or the graph it holds
+    /// breaks an invariant of the database (ADR 0033). Nothing was created.
+    #[error("invalid import: {reason}")]
+    InvalidImport { reason: String },
+
     /// A restore to a seq with several namespaces to restore: seqs belong
     /// to one namespace each, so the restore must name which one (`only`).
     #[error("a restore to a seq must select one namespace; the restore would hold {}", namespaces.join(", "))]

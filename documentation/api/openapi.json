@@ -2265,6 +2265,10 @@
             },
             "type": "array"
           },
+          "finishedImport": {
+            "description": "An interrupted import whose create event was logged was finished: its\nstaged checkpoint became checkpoint 1.",
+            "type": "boolean"
+          },
           "replayed": {
             "allOf": [
               {

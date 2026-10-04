@@ -33,6 +33,9 @@ pub struct RecoveryReport {
     pub torn_tail: Option<CutTail>,
     /// The seq the namespace was recovered to.
     pub seq: u64,
+    /// An import whose create event was logged was finished: its staged
+    /// checkpoint became checkpoint 1 (ADR 0033).
+    pub finished_import: bool,
 }
 
 /// A torn tail cut off the last WAL segment.
@@ -63,9 +66,11 @@ pub struct ReadNamespace {
     index_changes: IndexChanges,
     replayed: u64,
     torn_tail: Option<CutTail>,
+    finished_import: bool,
 }
 
-/// Recover the namespace `name` in `paths`: load the newest checkpoint
+/// Recover the namespace `name` in `paths`: finish an import whose create
+/// event is logged ([`import::finish`](crate::import::finish)), load the newest checkpoint
 /// that loads (falling back to older ones, or to an empty namespace, on a
 /// checksum or format error; the indexes are rebuilt from its catalog),
 /// replay the WAL from the checkpoint's seq + 1 to its end, and cut a torn
@@ -86,6 +91,7 @@ pub struct ReadNamespace {
 ///   (`ApplyFailed`, including `GraphError::Internal`), a bug; report it;
 /// - [`Error::Io`], including a failed truncation.
 pub fn read_namespace<F: LogFs>(fs: &F, paths: &NsPaths, name: &NamespaceName) -> Result<ReadNamespace, Error> {
+    let finished_import = crate::import::finish(fs, paths)?;
     let base = load_newest(&paths.checkpoints, name)?;
     let mut namespace = base.namespace;
     let from = namespace.seq() + 1;
@@ -132,6 +138,7 @@ pub fn read_namespace<F: LogFs>(fs: &F, paths: &NsPaths, name: &NamespaceName) -
         index_changes: base.index_changes,
         replayed,
         torn_tail,
+        finished_import,
     })
 }
 
@@ -143,11 +150,20 @@ pub fn start_namespace<F: LogFs>(
     read: ReadNamespace,
     wal_options: WalOptions,
 ) -> Result<(LoggedNamespace<F>, RecoveryReport), Error> {
-    let ReadNamespace { namespace, next_seq, checkpoint, skipped, index_changes, replayed, torn_tail } = read;
+    let ReadNamespace { namespace, next_seq, checkpoint, skipped, index_changes, replayed, torn_tail, finished_import } =
+        read;
     let seq = namespace.seq();
     let wal = Wal::create_with(fs, &paths.wal, wal_options, next_seq)?;
     let logged = LoggedNamespace::new(namespace, wal)?;
-    let report = RecoveryReport { checkpoint, skipped_checkpoints: skipped, index_changes, replayed, torn_tail, seq };
+    let report = RecoveryReport {
+        checkpoint,
+        skipped_checkpoints: skipped,
+        index_changes,
+        replayed,
+        torn_tail,
+        seq,
+        finished_import,
+    };
     Ok((logged, report))
 }
 
