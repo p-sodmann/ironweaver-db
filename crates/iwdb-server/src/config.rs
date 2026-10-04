@@ -900,10 +900,11 @@ impl Config {
                 ));
             }
         } else {
-            for (key, set) in [("tls.client_ca", tls.client_ca.is_some()), ("tls.cert", tls.cert.is_some())] {
-                if set {
-                    problems.push(format!("{} is set, but {} is false", self.at(key), self.at("tls.enabled")));
-                }
+            // Client certificates were meant to authenticate: not without TLS.
+            // A certificate and key are only ignored (a warning), so that an
+            // image's config with them can run in plaintext by a variable
+            if tls.client_ca.is_some() {
+                problems.push(format!("{} is set, but {} is false", self.at("tls.client_ca"), self.at("tls.enabled")));
             }
             if !self.listen.ip().is_loopback() && !self.server.plaintext_public {
                 let exposed = if self.auth.enabled {
@@ -941,6 +942,11 @@ impl Config {
                 "TLS is off ({}): passwords, tokens and data cross the network in clear",
                 self.at("tls.enabled")
             ));
+            for (key, set) in [("tls.cert", self.tls.cert.is_some()), ("tls.key", self.tls.key.is_some())] {
+                if set {
+                    warnings.push(format!("{} is set, but TLS is off: ignored", self.at(key)));
+                }
+            }
         }
         warnings
     }
@@ -1341,6 +1347,24 @@ mod tests {
         assert!(warnings.len() == 1 && warnings[0].contains("no effect"), "{:?}", warnings);
     }
 
+    /// The image's configs (`docker/`): TLS with the mounted certificate;
+    /// plaintext by two variables, with the certificate ignored.
+    #[test]
+    fn the_images_configs_speak_tls() {
+        let image = include_str!("../../../docker/iwdb.toml");
+        let config = Config::parse(image).unwrap();
+        let files = config.tls_files().unwrap();
+        assert_eq!(files.cert, PathBuf::from("/etc/iwdb/tls/server.pem"));
+        assert_eq!(config.probe_target(), ("127.0.0.1:7600".to_owned(), true));
+        let plaintext = [("IWDB_TLS_ENABLED", "false"), ("IWDB_SERVER_PLAINTEXT_PUBLIC", "true")];
+        let config = Config::build(Some(image), &env(&plaintext)).unwrap();
+        assert_eq!(config.probe_target(), ("127.0.0.1:7600".to_owned(), false));
+        let e = Config::build(Some(image), &env(&plaintext[..1])).unwrap_err().join("\n");
+        assert!(e.contains("IWDB_SERVER_PLAINTEXT_PUBLIC"), "{}", e);
+        #[cfg(feature = "postgres")]
+        assert!(Config::parse(include_str!("../../../docker/projection.example.toml")).unwrap().tls.enabled);
+    }
+
     #[test]
     fn mtls_settings_are_checked() {
         let base = "data_dir = \"d\"\n[tls]\ncert = \"c\"\nkey = \"k\"\n";
@@ -1354,6 +1378,12 @@ mod tests {
         assert!(e.contains("sometimes"), "{}", e);
         let e = Config::parse("data_dir = \"d\"\n[tls]\nenabled = false\nclient_ca = \"ca\"\n").unwrap_err();
         assert!(e.contains("[tls] client_ca is set, but [tls] enabled is false"), "{}", e);
+        // A certificate with TLS off (an image's config, plaintext by a
+        // variable): ignored, with a warning
+        let config = Config::build(Some(base), &env(&[("IWDB_TLS_ENABLED", "false")])).unwrap();
+        let warnings = config.warnings().join("\n");
+        assert!(warnings.contains("[tls] cert is set, but TLS is off: ignored"), "{}", warnings);
+        assert!(warnings.contains("[tls] key is set") && config.tls_files().is_none(), "{}", warnings);
         let config = Config::build(
             None,
             &env(&[

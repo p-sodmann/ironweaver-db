@@ -144,23 +144,50 @@ jobs:
           grep -q "grpc, rest, postgres, console" version.txt
           docker run --rm iwdb-server:ci-grpc --version | tee version.txt
           grep -q "(grpc)" version.txt
-          # Without the plaintext flag the image refuses 0.0.0.0 (step 15a, exit 2)
+          # No certificate or key in the image (step 15b)
+          test -z "$(docker run --rm --entrypoint find iwdb-server:ci / -xdev \( -name '*.pem' -o -name '*.key' \) -not -path '/proc/*' -not -path '/usr/share/*' -not -path '/etc/ssl/*')"
+          # TLS is the default: without a mounted certificate the image doesn't start (exit 2)
           docker run --name refused iwdb-server:ci || test "$(docker inspect -f '{{.State.ExitCode}}' refused)" = 2
-          docker run -d --name iwdb -p 127.0.0.1:7600:7600 \
-            -e IWDB_SERVER_PLAINTEXT_PUBLIC=true -e IWDB_AUTH_BOOTSTRAP_PASSWORD=ci-admin-password iwdb-server:ci
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:7600/v1/health/ready && break; sleep 1; done
-          docker exec iwdb iwdb-server --probe 127.0.0.1:7600
+          docker logs refused 2>&1 | grep -q "can't read the TLS certificate /etc/iwdb/tls/server.pem"
+          # Plaintext on 0.0.0.0 needs both flags (exit 2 with one)
+          docker run --name half -e IWDB_TLS_ENABLED=false iwdb-server:ci || test "$(docker inspect -f '{{.State.ExitCode}}' half)" = 2
+          docker logs half 2>&1 | grep -q IWDB_SERVER_PLAINTEXT_PUBLIC
+          # Over TLS with the development certificate
+          sh docker/dev-cert.sh
+          docker run -d --name iwdb -p 127.0.0.1:7600:7600 -v "$PWD/docker/tls:/etc/iwdb/tls:ro" \
+            -e IWDB_AUTH_BOOTSTRAP_PASSWORD=ci-admin-password iwdb-server:ci
+          CURL="curl --cacert docker/tls/ca.pem"
+          for i in $(seq 1 30); do $CURL -fsS https://127.0.0.1:7600/v1/health/ready && break; sleep 1; done
+          docker exec iwdb iwdb-server --probe --config /etc/iwdb/iwdb.toml
+          docker exec iwdb iwdb-server --probe https://127.0.0.1:7600
+          # The HEALTHCHECK (the probe from the config, over TLS) turns healthy
+          for i in $(seq 1 60); do test "$(docker inspect -f '{{.State.Health.Status}}' iwdb)" = healthy && break; sleep 1; done
+          test "$(docker inspect -f '{{.State.Health.Status}}' iwdb)" = healthy
+          # Plaintext gets no answer
+          ! curl -fsS --max-time 5 http://127.0.0.1:7600/v1/health/ready
           # Authentication is on: no token, 401; log in, then the namespaces
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7600/v1/namespaces)" = 401
-          TOKEN=$(curl -fsS http://127.0.0.1:7600/v1/auth/login -H 'content-type: application/json' \
+          test "$($CURL -s -o /dev/null -w '%{http_code}' https://127.0.0.1:7600/v1/namespaces)" = 401
+          TOKEN=$($CURL -fsS https://127.0.0.1:7600/v1/auth/login -H 'content-type: application/json' \
             -d '{"user": "admin", "password": "ci-admin-password"}' | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
-          curl -fsS http://127.0.0.1:7600/v1/namespaces -H "authorization: Bearer $TOKEN" | tee namespaces.json
+          $CURL -fsS https://127.0.0.1:7600/v1/namespaces -H "authorization: Bearer $TOKEN" | tee namespaces.json
           grep -q default namespaces.json
+          # SIGHUP reloads the certificate
+          docker kill --signal HUP iwdb
+          for i in $(seq 1 10); do docker logs iwdb 2>&1 | grep -q "reloaded the TLS certificate" && break; sleep 1; done
+          docker logs iwdb 2>&1 | grep -q "reloaded the TLS certificate"
           docker stop iwdb
           docker logs iwdb 2>&1 | tee server.log
           test "$(docker inspect -f '{{.State.ExitCode}}' iwdb)" = 0
           grep -q "closed /var/lib/iwdb" server.log
           grep -q '"message":"serving /var/lib/iwdb on' server.log
+          # Plaintext with both flags (the gRPC-only image), and its HEALTHCHECK over HTTP
+          docker run -d --name plain -p 127.0.0.1:7601:7600 -e IWDB_TLS_ENABLED=false \
+            -e IWDB_SERVER_PLAINTEXT_PUBLIC=true -e IWDB_AUTH_BOOTSTRAP_PASSWORD=ci-admin-password iwdb-server:ci-grpc
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:7601/v1/health/ready && break; sleep 1; done
+          docker exec plain iwdb-server --probe --config /etc/iwdb/iwdb.toml
+          for i in $(seq 1 60); do test "$(docker inspect -f '{{.State.Health.Status}}' plain)" = healthy && break; sleep 1; done
+          test "$(docker inspect -f '{{.State.Health.Status}}' plain)" = healthy
+          docker stop plain
 
   python:
     # Step 7: the wheel (abi3, CPython 3.9 and later) built by maturin on

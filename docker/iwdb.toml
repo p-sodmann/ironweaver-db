@@ -2,12 +2,16 @@
 # docs, documentation/api/grpc.md). Replace it by mounting your own file at
 # /etc/iwdb/iwdb.toml.
 #
-# The server listens on every interface of the container. It has no TLS until
-# step 15b, so that needs [server] plaintext_public = true, which this file
-# leaves to you: run with -e IWDB_SERVER_PLAINTEXT_PUBLIC=true and publish
-# the port on localhost or a private network only. Authentication is on: the
-# first start needs IWDB_AUTH_BOOTSTRAP_PASSWORD (the user admin), or a user
-# made with `iwctl user create` (step 15a).
+# The server listens on every interface of the container, over TLS (step
+# 15b): mount the certificate and its key (PEM) at /etc/iwdb/tls/server.pem
+# and /etc/iwdb/tls/server.key; the image has none, and refuses to start
+# without them. docker/dev-cert.sh makes a pair for development
+# (compose.yaml mounts it). SIGHUP reloads them (docker kill --signal HUP).
+# Plaintext needs both -e IWDB_TLS_ENABLED=false and
+# -e IWDB_SERVER_PLAINTEXT_PUBLIC=true (behind a TLS-terminating proxy on a
+# private network). Authentication is on: the first start needs
+# IWDB_AUTH_BOOTSTRAP_PASSWORD (the user admin), or a user made with
+# `iwctl user create` (step 15a).
 
 data_dir = "/var/lib/iwdb"
 listen = "0.0.0.0:7600"
@@ -18,3 +22,9 @@ fsync = "always"
 [server]
 # Below docker stop's default 10 s, so that a stop ends with a checkpoint
 drain_timeout_secs = 8
+
+[tls]
+cert = "/etc/iwdb/tls/server.pem"
+key = "/etc/iwdb/tls/server.key"
+# mTLS: mount the CA of the client certificates and set
+# client_ca = "/etc/iwdb/tls/client-ca.pem" (and client_auth = "required")

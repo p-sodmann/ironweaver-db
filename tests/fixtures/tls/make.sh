@@ -18,8 +18,8 @@ key() { openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$1"
 ca() { # name, subject
     key "$work/$1.key"
     printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n' >"$work/$1.ext"
-    openssl req -new -key "$work/$1.key" -subj "$2" -out "$work/$1.csr"
-    openssl x509 -req -in "$work/$1.csr" -signkey "$work/$1.key" -extfile "$work/$1.ext" \
+    openssl req -new -sha256 -key "$work/$1.key" -subj "$2" -out "$work/$1.csr"
+    openssl x509 -req -sha256 -in "$work/$1.csr" -signkey "$work/$1.key" -extfile "$work/$1.ext" \
         -not_before 20260101000000Z -not_after 21250101000000Z -set_serial 0x$(openssl rand -hex 8) -out "$1.pem" 2>/dev/null
 }
 
@@ -31,8 +31,8 @@ cert() {
     else
         printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n' >"$work/$1.ext"
     fi
-    openssl req -new -key "$1.key" -subj "$2" -out "$work/$1.csr"
-    openssl x509 -req -in "$work/$1.csr" -CA "$3.pem" -CAkey "$work/$3.key" -extfile "$work/$1.ext" \
+    openssl req -new -sha256 -key "$1.key" -subj "$2" -out "$work/$1.csr"
+    openssl x509 -req -sha256 -in "$work/$1.csr" -CA "$3.pem" -CAkey "$work/$3.key" -extfile "$work/$1.ext" \
         -not_before "$5" -not_after "$6" -set_serial 0x$(openssl rand -hex 8) -out "$1.pem" 2>/dev/null
 }
 
