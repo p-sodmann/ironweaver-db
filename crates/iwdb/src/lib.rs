@@ -18,6 +18,9 @@
 //! # }
 //! ```
 //!
+//! **Users** ([`Store::users`], [`auth`]): users, grants and API tokens in
+//! the store's system namespace (step 15a, ADR 0043).
+//!
 //! **The `Database` trait**: [`Embedded`] serves a store
 //! through [`iwdb_query::Database`], the service interface every access
 //! method uses: bounded reads, pattern matching, analytics, the catalog
@@ -37,6 +40,7 @@
 //! `documentation/guarantees.md`, the directory layout in
 //! `documentation/formats/data-dir.md`.
 
+pub mod auth;
 mod embedded;
 pub mod import;
 mod ops;
@@ -56,6 +60,9 @@ pub use iwdb_engine::catalog::{
 pub use iwdb_engine::{
     CatalogChange, CommitResult, CommitTime, EdgeKey, IdempotencyKey, KeyTable, MarkName, MarkUpdate, Mutation,
     Namespace, Target,
+};
+pub use iwdb_query::{
+    NewToken, Role, Secret, TokenInfo, UserInfo,
 };
 pub use iwdb_query::{
     CommitOptions, Edge, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus, Node, ProjectionSpec,

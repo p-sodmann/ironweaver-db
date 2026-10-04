@@ -7,7 +7,7 @@ use std::path::Path;
 
 use std::collections::HashMap;
 
-use iwdb_engine::catalog::{AttrPath, IndexDef, NamespaceName};
+use iwdb_engine::catalog::{AttrPath, IndexDef};
 use iwdb_engine::{CatalogChange, EdgeKey, Mutation};
 use iwdb_storage::Error;
 use iwdb_storage::import as files;
@@ -153,7 +153,7 @@ where
         progress: Option<OnProgress<'_>>,
         what: &Path,
     ) -> Result<ImportReport, Error> {
-        let name = NamespaceName::new(name).map_err(iwdb_engine::Error::from)?;
+        let name = super::public_name(name)?;
         if lock(&self.shared.catalog).log.table().get(&name).is_some() {
             return Err(Error::NamespaceExists { name: name.to_string() });
         }
