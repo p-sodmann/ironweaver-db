@@ -1,0 +1,21 @@
+{
+  "_comment": "The CI gate on the 100k set (step 14b): loadgen --nodes 100000 --clients 4 --seconds 3. Set from two runs on an Apple M4 Pro (documentation/benchmarks.md) with room for shared runners: throughput at least 1/5 of it, p99 latency at most 10x, the graph's own memory estimate at most ~40% above it. Not gated: commit.always (fsync cost depends on the runner's disk) and resident memory (allocator and OS noise).",
+  "load.nodes_per_s": {"min": 90000},
+  "load.edges_per_s": {"min": 65000},
+  "import.entities_per_s": {"min": 90000},
+  "memory.graph_bytes_per_entity": {"max": 400},
+  "read.get_node.ops_per_s": {"min": 6000},
+  "read.get_node.p99_ms": {"max": 2},
+  "read.neighbourhood_depth_2.ops_per_s": {"min": 4000},
+  "read.neighbourhood_depth_2.p99_ms": {"max": 3},
+  "read.shortest_path.ops_per_s": {"min": 4000},
+  "read.shortest_path.p99_ms": {"max": 3},
+  "read.find_indexed_100.ops_per_s": {"min": 800},
+  "read.find_indexed_100.p99_ms": {"max": 12},
+  "read.match_two_hops_from_id_100.ops_per_s": {"min": 5000},
+  "read.match_two_hops_from_id_100.p99_ms": {"max": 2.5},
+  "analytics.pagerank_s": {"max": 0.2},
+  "commit.group.ops_per_s": {"min": 1000},
+  "commit.off.ops_per_s": {"min": 6000},
+  "commit.off.p99_ms": {"max": 2}
+}

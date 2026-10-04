@@ -192,6 +192,31 @@ jobs:
           path: ${{ runner.temp }}/iwdb-crash
           if-no-files-found: ignore
 
+  bench:
+    # Step 14b: the regression gate. The load generator loads the 100k set
+    # and measures it over gRPC; a metric outside its target (set with a
+    # wide margin for shared runners) fails the job. The metrics are kept
+    # as an artifact. documentation/benchmarks.md has the full numbers.
+    name: benchmark gate (100k)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p iwdb-server --example loadgen
+      - name: Load 100k nodes and check the targets
+        run: >
+          ./target/release/examples/loadgen --nodes 100000 --clients 4 --seconds 3
+          --dir "$RUNNER_TEMP/loadgen" --json bench-100k.json
+          --check crates/iwdb-server/benches/targets-100k.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-100k
+          path: bench-100k.json
+          if-no-files-found: ignore
+
   msrv:
     name: Rust 1.99 (MSRV)
     runs-on: ubuntu-latest

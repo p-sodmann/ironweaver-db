@@ -77,6 +77,12 @@ hyper-util = { workspace = true, features = ["client-legacy", "http2"] }
 serde_json = { workspace = true, features = ["unbounded_depth"] }
 # Fills the table a projection reads, in PGlite (step 13)
 postgres.workspace = true
+# Benchmarks (step 14b)
+criterion.workspace = true
+
+[[bench]]
+name = "graph"
+harness = false
 
 [lints]
 workspace = true
