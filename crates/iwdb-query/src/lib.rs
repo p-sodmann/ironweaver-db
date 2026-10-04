@@ -11,10 +11,13 @@
 //! - [`Error`], [`Code`]: stable error codes (`documentation/api/errors.md`).
 //! - [`exec`]: a worker pool and `block_on`, to run the synchronous engine
 //!   behind async methods without an async runtime (ADR 0020).
+//! - [`auth`]: principals, roles, the operation table and [`Authorized`],
+//!   the one place that authorises (step 15a, ADR 0045).
 //! - `conformance` (feature): the conformance suite for implementations.
 //!
 //! Pure Rust (design rule 1): no Python, no protocol types.
 
+pub mod auth;
 mod cursor;
 mod error;
 pub mod exec;
@@ -27,6 +30,10 @@ mod service;
 #[cfg(feature = "conformance")]
 pub mod conformance;
 
+pub use auth::{
+    Accounts, Authenticate, Authorized, NewToken, Operation, Principal, Requirement, Role, Secret, Session, TokenInfo,
+    UserInfo,
+};
 pub use cursor::Cursor;
 pub use error::{Code, Error};
 pub use model::{
