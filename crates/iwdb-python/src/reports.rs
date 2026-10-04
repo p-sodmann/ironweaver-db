@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use iwdb::import::{ExportReport, ImportReport};
 use iwdb::{
     BackupReport, CheckpointOutcome, CommitTime, Finding, FsyncPolicy, IndexState, IndexStatus, Kind, MarkStatus,
     NamespaceStatus, RecoveryReport, RestoreReport, StoreRecovery, StoreStatus, VerifyReport,
@@ -63,6 +64,41 @@ fn ns_recovery(py: Python<'_>, r: &RecoveryReport) -> PyResult<Py<PyAny>> {
             ("replayed", to(py, r.replayed)?),
             ("torn_tail", torn),
             ("seq", to(py, r.seq)?),
+            ("finished_import", to(py, r.finished_import)?),
+        ],
+    )
+}
+
+/// What an import did.
+pub fn import(py: Python<'_>, r: &ImportReport) -> PyResult<Py<PyAny>> {
+    dict(
+        py,
+        vec![
+            ("id", to(py, r.event.id)?),
+            ("name", to(py, r.event.name.as_str())?),
+            ("time", commit_time(py, Some(r.event.time))?),
+            ("format", to(py, r.format.name())?),
+            ("seq", to(py, r.seq)?),
+            ("nodes", to(py, r.nodes)?),
+            ("edges", to(py, r.edges)?),
+            ("indexes", to(py, r.indexes.iter().map(|p| p.keys().to_vec()).collect::<Vec<_>>())?),
+            ("dropped", to(py, r.dropped.clone())?),
+            ("bytes_read", to(py, r.bytes_read)?),
+            ("checkpoint_bytes", to(py, r.checkpoint_bytes)?),
+        ],
+    )
+}
+
+/// What an export did.
+pub fn export(py: Python<'_>, r: &ExportReport) -> PyResult<Py<PyAny>> {
+    dict(
+        py,
+        vec![
+            ("format", to(py, r.format.name())?),
+            ("seq", to(py, r.seq)?),
+            ("nodes", to(py, r.nodes)?),
+            ("edges", to(py, r.edges)?),
+            ("bytes", to(py, r.bytes)?),
         ],
     )
 }

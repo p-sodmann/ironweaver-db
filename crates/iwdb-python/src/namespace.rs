@@ -160,4 +160,11 @@ impl PyNamespace {
     fn checkpoint(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.store.get().checkpoint_in(py, &self.name)
     }
+
+    /// Write the namespace's graph to `path` as a core file (see
+    /// `Store.export`).
+    #[pyo3(signature = (path, *, format = None))]
+    fn export(&self, py: Python<'_>, path: std::path::PathBuf, format: Option<&str>) -> PyResult<Py<PyAny>> {
+        self.store.get().export_in(py, &self.name, path, format)
+    }
 }

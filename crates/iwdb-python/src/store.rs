@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::{PoisonError, RwLock};
 use std::time::Duration;
 
+use iwdb::import::{ExportFormat, ImportFormat};
 use iwdb::{
     AttrPath, CatalogChange, CheckpointOptions, CommitOptions, CommitResult, Constraint, ConstraintKind, EdgeId,
     Embedded, Error, FsyncPolicy, HistoryId, IdempotencyKey, IndexDef, Label, NAMESPACE, NamespaceResult, QueryConfig,
@@ -469,6 +470,29 @@ impl PyStore {
         })
     }
 
+    /// Create the namespace `name` from the graph file `path`: a core JSON
+    /// or binary file, or LGF (`format` "json", "binary" or "lgf"; by
+    /// default detected from the file's first bytes). The namespace is
+    /// made from one checkpoint at seq 1, all or nothing; take a backup
+    /// after an import if you rely on backups (ADR 0033).
+    #[pyo3(signature = (name, path, *, format = None))]
+    fn import_namespace(&self, py: Python<'_>, name: &str, path: PathBuf, format: Option<&str>) -> PyResult<Py<PyAny>> {
+        guard(|| {
+            let format = format.map(str::parse::<ImportFormat>).transpose().map_err(invalid)?;
+            let name = name.to_owned();
+            let report = self.with(py, move |s| s.import_file(&name, &path, format, None))?;
+            reports::import(py, &report)
+        })
+    }
+
+    /// Write `"default"`'s graph to `path` as a core file (`format` "json"
+    /// or "binary"; by default JSON for a `.json` path, binary otherwise),
+    /// atomically. Commits wait while it writes.
+    #[pyo3(signature = (path, *, format = None))]
+    fn export(&self, py: Python<'_>, path: PathBuf, format: Option<&str>) -> PyResult<Py<PyAny>> {
+        self.export_in(py, NAMESPACE, path, format)
+    }
+
     /// An online backup of every namespace into `dest`, a new or empty
     /// directory.
     fn backup(&self, py: Python<'_>, dest: PathBuf) -> PyResult<Py<PyAny>> {
@@ -608,6 +632,20 @@ impl PyStore {
         guard(|| {
             let status = self.status_of(py, ns)?;
             reports::indexes(py, &status.indexes)
+        })
+    }
+
+    pub(crate) fn export_in(
+        &self,
+        py: Python<'_>,
+        ns: &str,
+        path: PathBuf,
+        format: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        guard(|| {
+            let format = format.map(str::parse::<ExportFormat>).transpose().map_err(invalid)?;
+            let report = self.with_ns(py, ns, move |n| n.export_file(&path, format, None))?;
+            reports::export(py, &report)
         })
     }
 
