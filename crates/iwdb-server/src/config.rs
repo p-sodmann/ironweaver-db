@@ -1,4 +1,6 @@
-//! The `iwdb-server` config file (TOML). Only `data_dir` is required:
+//! The `iwdb-server` configuration: a TOML file, environment overrides of
+//! its settings (`IWDB_*`, [`KEYS`]), or both (ADR 0039). Only `data_dir`
+//! is required, in the file or as `IWDB_DATA_DIR`:
 //!
 //! ```toml
 //! data_dir = "/var/lib/iwdb"        # relative paths are relative to this file
@@ -17,6 +19,15 @@
 //! max_message_bytes = 67108864      # largest request or answer message (REST: body)
 //! workers = 0                       # threads running requests (0: one per CPU)
 //! queue = 1024                      # requests that may wait for a worker
+//! unready_delay_ms = 0              # on shutdown: serve unready this long before draining
+//!
+//! [log]
+//! format = "auto"                   # auto (json unless on a terminal) | json | text
+//! level = "info"                    # a filter: "warn,iwdb_storage=debug"
+//!
+//! [console]                         # the operator console at /console/ (feature `console`)
+//! enabled = false
+//! public = false                    # allow it on a non-loopback listen address
 //!
 //! [limits.default]                  # what a read gets if it asks for nothing
 //! max_results = 1000
@@ -58,10 +69,23 @@
 //! ]
 //! ```
 //!
-//! Environment overrides come with step 16. TLS and authentication with
-//! step 15: until then the server listens on plain TCP, so bind it to
-//! localhost or a private network.
+//! **Environment overrides.** Every setting above but the projections can
+//! be set as `IWDB_<KEY>`: the key's path in upper case, `.` as `_`
+//! (`IWDB_LISTEN`, `IWDB_STORE_FSYNC`, `IWDB_LIMITS_MAX_TIMEOUT_MS`). A
+//! variable wins over the file. A variable that starts like a section
+//! (`IWDB_STORE_`, `IWDB_SERVER_`, `IWDB_LIMITS_`, `IWDB_LOG_`,
+//! `IWDB_CONSOLE_`) but names no setting is an error, so a typo isn't
+//! ignored. With `IWDB_DATA_DIR` set, the file is optional.
+//!
+//! **Validation.** [`Config::from_sources`] reports every problem at once,
+//! each with the variable it came from; a TOML syntax or type error in the
+//! file stops the file's checks at the first. All of this happens before
+//! the store opens.
+//!
+//! TLS and authentication come with step 15: until then the server listens
+//! on plain TCP, so bind it to localhost or a private network.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -73,9 +97,10 @@ use iwdb::projection::postgres::{PostgresConfig, PostgresSource};
 use iwdb::projection::{Projection, ProjectionHandle, ProjectionOptions, Rules};
 use iwdb::{CheckpointOptions, FsyncPolicy, MarkName, QueryConfig, Store, StoreOptions, WalRetention};
 use iwdb_query::{Bounds, LimitConfig};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::DEFAULT_MAX_MESSAGE_BYTES;
+use crate::logging::LogFormat;
 
 /// The default listen address.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7600";
@@ -85,15 +110,18 @@ pub const DEFAULT_LISTEN: &str = "127.0.0.1:7600";
 pub enum ConfigError {
     #[error("can't read the config file {}: {source}", path.display())]
     Read { path: PathBuf, source: std::io::Error },
-    #[error("invalid config file {}: {message}", path.display())]
-    Invalid { path: PathBuf, message: String },
+    /// Every problem found, each saying where (the file, a variable).
+    #[error("invalid configuration{}:\n  - {}", path.as_ref().map(|p| format!(" ({})", p.display())).unwrap_or_default(), problems.join("\n  - "))]
+    Invalid { path: Option<PathBuf>, problems: Vec<String> },
 }
 
 /// The server's configuration (see the module docs for the file).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// The store's data directory, created if missing.
+    /// The store's data directory, created if missing. Required (empty
+    /// means missing).
+    #[serde(default)]
     pub data_dir: PathBuf,
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
@@ -103,10 +131,182 @@ pub struct Config {
     pub server: ServerSection,
     #[serde(default)]
     pub limits: LimitsSection,
+    #[serde(default)]
+    pub log: LogSection,
+    #[serde(default)]
+    pub console: ConsoleSection,
     /// `[[projection]]` sections (ADR 0032).
     #[serde(default, rename = "projection")]
     pub projections: Vec<ProjectionSection>,
+    /// Where each setting set by the file or the environment came from.
+    #[serde(skip)]
+    sources: BTreeMap<&'static str, Source>,
 }
+
+/// Where a setting's value comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Default,
+    File,
+    /// An environment variable.
+    Env(&'static str),
+}
+
+/// `[log]`: structured logs (ADR 0042).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LogSection {
+    pub format: LogFormat,
+    /// A filter in `tracing-subscriber`'s `EnvFilter` syntax.
+    pub level: String,
+}
+
+impl Default for LogSection {
+    fn default() -> Self {
+        LogSection { format: LogFormat::Auto, level: "info".into() }
+    }
+}
+
+/// `[console]`: the operator console's pages at `/console/` (feature
+/// `console`, ADR 0041).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ConsoleSection {
+    pub enabled: bool,
+    /// Allow it on a non-loopback listen address. Until step 15 there is no
+    /// authentication: whoever reaches the port can change the data.
+    pub public: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            data_dir: PathBuf::new(),
+            listen: default_listen(),
+            store: StoreSection::default(),
+            server: ServerSection::default(),
+            limits: LimitsSection::default(),
+            log: LogSection::default(),
+            console: ConsoleSection::default(),
+            projections: Vec::new(),
+            sources: BTreeMap::new(),
+        }
+    }
+}
+
+/// A setting that the environment can override ([`KEYS`]).
+pub struct Key {
+    /// Its path in the file (`store.fsync`).
+    pub key: &'static str,
+    /// Its variable (`IWDB_STORE_FSYNC`).
+    pub var: &'static str,
+    set: fn(&mut Config, &str) -> Result<(), String>,
+    get: fn(&Config) -> Option<toml::Value>,
+}
+
+/// A setting's type, read from a variable's text.
+trait FromEnv: Sized {
+    fn from_env(text: &str) -> Result<Self, String>;
+}
+
+macro_rules! from_str_env {
+    ($($t:ty: $what:literal),*) => {$(
+        impl FromEnv for $t {
+            fn from_env(text: &str) -> Result<Self, String> {
+                text.trim().parse().map_err(|_| format!("expected {}, got {:?}", $what, text))
+            }
+        }
+    )*};
+}
+from_str_env!(u64: "a whole number", u32: "a whole number", usize: "a whole number", SocketAddr: "an address like 127.0.0.1:7600");
+
+impl FromEnv for bool {
+    fn from_env(text: &str) -> Result<Self, String> {
+        match text.trim() {
+            "true" | "1" => Ok(true),
+            "false" | "0" => Ok(false),
+            _ => Err(format!("expected true or false, got {:?}", text)),
+        }
+    }
+}
+
+impl FromEnv for PathBuf {
+    fn from_env(text: &str) -> Result<Self, String> {
+        if text.is_empty() { Err("expected a path, got nothing".into()) } else { Ok(PathBuf::from(text)) }
+    }
+}
+
+impl FromEnv for String {
+    fn from_env(text: &str) -> Result<Self, String> {
+        Ok(text.to_owned())
+    }
+}
+
+impl<T: FromEnv> FromEnv for Option<T> {
+    fn from_env(text: &str) -> Result<Self, String> {
+        T::from_env(text).map(Some)
+    }
+}
+
+/// The enums: their names, as in the file.
+macro_rules! serde_env {
+    ($($t:ty),*) => {$(
+        impl FromEnv for $t {
+            fn from_env(text: &str) -> Result<Self, String> {
+                use serde::de::IntoDeserializer;
+                let d: serde::de::value::StrDeserializer<'_, serde::de::value::Error> = text.trim().into_deserializer();
+                <$t>::deserialize(d).map_err(|e| e.to_string())
+            }
+        }
+    )*};
+}
+serde_env!(Fsync, LogFormat);
+
+macro_rules! keys {
+    ($($key:literal $var:literal => $($field:ident).+;)*) => {
+        /// Every setting of the file but the projections, with its variable:
+        /// the one list the docs and `--check-config` are checked against.
+        pub const KEYS: &[Key] = &[$(
+            Key {
+                key: $key,
+                var: $var,
+                set: |c, text| { c.$($field).+ = FromEnv::from_env(text)?; Ok(()) },
+                get: |c| toml::Value::try_from(&c.$($field).+).ok(),
+            },
+        )*];
+    };
+}
+
+keys! {
+    "data_dir" "IWDB_DATA_DIR" => data_dir;
+    "listen" "IWDB_LISTEN" => listen;
+    "store.fsync" "IWDB_STORE_FSYNC" => store.fsync;
+    "store.group_max_delay_ms" "IWDB_STORE_GROUP_MAX_DELAY_MS" => store.group_max_delay_ms;
+    "store.group_max_batch" "IWDB_STORE_GROUP_MAX_BATCH" => store.group_max_batch;
+    "store.checkpoint_on_shutdown" "IWDB_STORE_CHECKPOINT_ON_SHUTDOWN" => store.checkpoint_on_shutdown;
+    "store.retain_records" "IWDB_STORE_RETAIN_RECORDS" => store.retain_records;
+    "store.retain_age_secs" "IWDB_STORE_RETAIN_AGE_SECS" => store.retain_age_secs;
+    "server.drain_timeout_secs" "IWDB_SERVER_DRAIN_TIMEOUT_SECS" => server.drain_timeout_secs;
+    "server.max_message_bytes" "IWDB_SERVER_MAX_MESSAGE_BYTES" => server.max_message_bytes;
+    "server.workers" "IWDB_SERVER_WORKERS" => server.workers;
+    "server.queue" "IWDB_SERVER_QUEUE" => server.queue;
+    "server.unready_delay_ms" "IWDB_SERVER_UNREADY_DELAY_MS" => server.unready_delay_ms;
+    "limits.default.max_results" "IWDB_LIMITS_DEFAULT_MAX_RESULTS" => limits.default.max_results;
+    "limits.default.max_visited" "IWDB_LIMITS_DEFAULT_MAX_VISITED" => limits.default.max_visited;
+    "limits.default.max_edges" "IWDB_LIMITS_DEFAULT_MAX_EDGES" => limits.default.max_edges;
+    "limits.default.timeout_ms" "IWDB_LIMITS_DEFAULT_TIMEOUT_MS" => limits.default.timeout_ms;
+    "limits.max.max_results" "IWDB_LIMITS_MAX_MAX_RESULTS" => limits.max.max_results;
+    "limits.max.max_visited" "IWDB_LIMITS_MAX_MAX_VISITED" => limits.max.max_visited;
+    "limits.max.max_edges" "IWDB_LIMITS_MAX_MAX_EDGES" => limits.max.max_edges;
+    "limits.max.timeout_ms" "IWDB_LIMITS_MAX_TIMEOUT_MS" => limits.max.timeout_ms;
+    "log.format" "IWDB_LOG_FORMAT" => log.format;
+    "log.level" "IWDB_LOG_LEVEL" => log.level;
+    "console.enabled" "IWDB_CONSOLE_ENABLED" => console.enabled;
+    "console.public" "IWDB_CONSOLE_PUBLIC" => console.public;
+}
+
+/// Variables with these prefixes must name a setting.
+const SECTION_PREFIXES: &[&str] = &["IWDB_STORE_", "IWDB_SERVER_", "IWDB_LIMITS_", "IWDB_LOG_", "IWDB_CONSOLE_"];
 
 /// A projection the server runs (ADR 0032).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -248,7 +448,7 @@ impl Default for StoreSection {
 }
 
 /// The WAL's fsync policy (`documentation/guarantees.md`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Fsync {
     Always,
@@ -264,11 +464,20 @@ pub struct ServerSection {
     /// 0: the available parallelism (at least 2).
     pub workers: usize,
     pub queue: usize,
+    /// On shutdown, serve this long with readiness off before draining
+    /// (ADR 0040).
+    pub unready_delay_ms: u64,
 }
 
 impl Default for ServerSection {
     fn default() -> Self {
-        ServerSection { drain_timeout_secs: 30, max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES, workers: 0, queue: 1024 }
+        ServerSection {
+            drain_timeout_secs: 30,
+            max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
+            workers: 0,
+            queue: 1024,
+            unready_delay_ms: 0,
+        }
     }
 }
 
@@ -301,54 +510,214 @@ impl LimitValues {
     }
 }
 
+/// The value at the dotted `key` of a parsed file.
+fn lookup<'a>(table: &'a toml::Table, key: &str) -> Option<&'a toml::Value> {
+    let mut parts = key.split('.');
+    let mut value = table.get(parts.next()?)?;
+    for part in parts {
+        value = value.as_table()?.get(part)?;
+    }
+    Some(value)
+}
+
 fn default_listen() -> SocketAddr {
     // A constant that parses
     DEFAULT_LISTEN.parse().unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 7600)))
 }
 
 impl Config {
-    /// Read and check the file at `path`; a relative `data_dir` is resolved
-    /// against the file's directory.
+    /// Read and check the file at `path` alone (no environment); a relative
+    /// `data_dir` is resolved against the file's directory.
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read { path: path.into(), source })?;
-        let mut config = Config::parse(&text).map_err(|message| ConfigError::Invalid { path: path.into(), message })?;
-        if config.data_dir.is_relative()
-            && let Some(dir) = path.parent()
+        Config::from_sources(Some(path), std::iter::empty())
+    }
+
+    /// The configuration from the file at `path` (if any) and the
+    /// variables of `env` (pass `std::env::vars()`), checked: every problem
+    /// at once. A relative `data_dir` from the file is resolved against the
+    /// file's directory; one from `IWDB_DATA_DIR` against the working
+    /// directory.
+    pub fn from_sources(
+        path: Option<&Path>,
+        env: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Config, ConfigError> {
+        let text = match path {
+            Some(path) => {
+                Some(std::fs::read_to_string(path).map_err(|source| ConfigError::Read { path: path.into(), source })?)
+            }
+            None => None,
+        };
+        let env: Vec<(String, String)> = env.into_iter().collect();
+        let mut config = Config::build(text.as_deref(), &env)
+            .map_err(|problems| ConfigError::Invalid { path: path.map(Path::to_path_buf), problems })?;
+        if config.source("data_dir") == Source::File
+            && config.data_dir.is_relative()
+            && let Some(dir) = path.and_then(Path::parent)
         {
             config.data_dir = dir.join(&config.data_dir);
         }
         Ok(config)
     }
 
-    /// Parse and check a config file's text.
+    /// Parse and check a config file's text (no environment).
     pub fn parse(text: &str) -> Result<Config, String> {
-        let config: Config = toml::from_str(text).map_err(|e| e.to_string())?;
-        config.limit_config().check().map_err(|e| format!("[limits]: {}", e))?;
-        if config.store.fsync == Fsync::Group && config.store.group_max_batch == 0 {
-            return Err("[store] group_max_batch must be at least 1".into());
+        Config::build(Some(text), &[]).map_err(|problems| problems.join("\n"))
+    }
+
+    fn build(text: Option<&str>, env: &[(String, String)]) -> Result<Config, Vec<String>> {
+        let mut problems = Vec::new();
+        let mut config = Config::default();
+        // A file that doesn't parse leaves nothing to check beyond the
+        // variables
+        let mut parsed = true;
+        if let Some(text) = text {
+            match toml::from_str::<Config>(text) {
+                Ok(c) => config = c,
+                Err(e) => {
+                    parsed = false;
+                    problems.push(e.to_string().trim_end().to_owned());
+                }
+            }
+            if let Ok(table) = toml::from_str::<toml::Table>(text) {
+                for k in KEYS {
+                    if lookup(&table, k.key).is_some() {
+                        config.sources.insert(k.key, Source::File);
+                    }
+                }
+            }
         }
-        if config.server.max_message_bytes < 1024 {
-            return Err("[server] max_message_bytes must be at least 1024".into());
+        let mut vars: Vec<&(String, String)> = env.iter().filter(|(var, _)| var.starts_with("IWDB_")).collect();
+        vars.sort();
+        for (var, value) in vars {
+            match KEYS.iter().find(|k| k.var == var) {
+                Some(k) => match (k.set)(&mut config, value) {
+                    Ok(()) => {
+                        config.sources.insert(k.key, Source::Env(k.var));
+                    }
+                    Err(e) => problems.push(format!("{}: {}", var, e)),
+                },
+                None if SECTION_PREFIXES.iter().any(|p| var.starts_with(p)) => {
+                    problems.push(format!("{}: no such setting (the settings: documentation/api/config.md)", var))
+                }
+                None => {}
+            }
+        }
+        if parsed {
+            problems.extend(config.check());
+        }
+        if problems.is_empty() { Ok(config) } else { Err(problems) }
+    }
+
+    /// Where `key`'s value came from ([`Key::key`]).
+    pub fn source(&self, key: &str) -> Source {
+        self.sources.get(key).copied().unwrap_or(Source::Default)
+    }
+
+    /// `key` for a message: `[section] name`, and the variable it came from.
+    fn at(&self, key: &str) -> String {
+        let named = match key.rsplit_once('.') {
+            Some((section, name)) => format!("[{}] {}", section, name),
+            None => key.to_owned(),
+        };
+        match self.source(key) {
+            Source::Env(var) => format!("{} (from {})", named, var),
+            _ => named,
+        }
+    }
+
+    /// The checks beyond the types: every problem.
+    fn check(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if self.data_dir.as_os_str().is_empty() {
+            problems.push("data_dir is required: set it in the config file or as IWDB_DATA_DIR".to_owned());
+        }
+        if let Err(e) = self.limit_config().check() {
+            let vars: Vec<&str> = KEYS
+                .iter()
+                .filter(|k| k.key.starts_with("limits."))
+                .filter_map(|k| match self.source(k.key) {
+                    Source::Env(var) => Some(var),
+                    _ => None,
+                })
+                .collect();
+            let from = if vars.is_empty() { String::new() } else { format!(" (from {})", vars.join(", ")) };
+            problems.push(format!("[limits]: {}{}", e, from));
+        }
+        if self.store.fsync == Fsync::Group && self.store.group_max_batch == 0 {
+            problems.push(format!("{} must be at least 1", self.at("store.group_max_batch")));
+        }
+        if self.server.max_message_bytes < 1024 {
+            problems.push(format!("{} must be at least 1024", self.at("server.max_message_bytes")));
+        }
+        if let Err(e) = crate::logging::check_level(&self.log.level) {
+            problems.push(format!("{}: {}", self.at("log.level"), e));
+        }
+        if self.console.enabled {
+            if cfg!(not(feature = "console")) {
+                problems.push(format!(
+                    "{}: this iwdb-server was built without the console feature",
+                    self.at("console.enabled")
+                ));
+            } else if !self.listen.ip().is_loopback() && !self.console.public {
+                problems.push(format!(
+                    "{}: the console has no authentication until step 15, and {} is {}, not a loopback address; \
+                     set [console] public = true (IWDB_CONSOLE_PUBLIC) to serve it there anyway",
+                    self.at("console.enabled"),
+                    self.at("listen"),
+                    self.listen
+                ));
+            }
         }
         let mut names = std::collections::BTreeSet::new();
-        for p in &config.projections {
+        for p in &self.projections {
             let at = format!("[[projection]] {:?}", p.name);
-            MarkName::new(p.name.as_str()).map_err(|e| format!("{}: {}", at, e))?;
+            if let Err(e) = MarkName::new(p.name.as_str()) {
+                problems.push(format!("{}: {}", at, e));
+                continue;
+            }
             if !names.insert((p.namespace.as_str(), p.name.as_str())) {
-                return Err(format!("{}: the name is used twice in namespace {:?}", at, p.namespace));
+                problems.push(format!("{}: the name is used twice in namespace {:?}", at, p.namespace));
             }
             if p.batch == 0 {
-                return Err(format!("{}: batch must be at least 1", at));
+                problems.push(format!("{}: batch must be at least 1", at));
             }
             let SourceSection::Postgres { url, url_env, .. } = &p.source;
             if url.is_some() == url_env.is_some() {
-                return Err(format!("{}: the source needs one of url and url_env", at));
-            }
-            if cfg!(not(feature = "postgres")) {
-                return Err(no_postgres(&at));
+                problems.push(format!("{}: the source needs one of url and url_env", at));
+            } else if cfg!(not(feature = "postgres")) {
+                problems.push(no_postgres(&at));
             }
         }
-        Ok(config)
+        problems
+    }
+
+    /// The effective configuration as TOML, each setting with where it
+    /// came from (`iwdb-server --check-config`). It parses back to the same
+    /// settings; projections are only counted.
+    pub fn describe(&self) -> String {
+        let mut out = String::from("# iwdb-server: the effective configuration\n");
+        let mut section = "";
+        for k in KEYS {
+            let (head, name) = k.key.rsplit_once('.').unwrap_or(("", k.key));
+            if head != section {
+                out.push_str(&format!("\n[{}]\n", head));
+                section = head;
+            }
+            let from = match self.source(k.key) {
+                Source::Default => "default".to_owned(),
+                Source::File => "file".to_owned(),
+                Source::Env(var) => var.to_owned(),
+            };
+            let line = match (k.get)(self) {
+                Some(value) => format!("{} = {}", name, value),
+                None => format!("# {} = (built in)", name),
+            };
+            out.push_str(&format!("{:<44} # {}\n", line, from));
+        }
+        if !self.projections.is_empty() {
+            out.push_str(&format!("\n# {} [[projection]] section(s) from the file\n", self.projections.len()));
+        }
+        out
     }
 
     /// The store's options: the defaults, with the fsync policy, checkpoint
@@ -391,6 +760,10 @@ impl Config {
 
     pub fn drain_timeout(&self) -> Duration {
         Duration::from_secs(self.server.drain_timeout_secs)
+    }
+
+    pub fn unready_delay(&self) -> Duration {
+        Duration::from_millis(self.server.unready_delay_ms)
     }
 
     /// The projections of the file, ready to run: a source each (its URL
@@ -544,6 +917,131 @@ mod tests {
         assert!(e.contains("url_env"), "{}", e);
         // A config without projections is fine
         assert!(Config::parse("data_dir = \"d\"").unwrap().projections().unwrap().is_empty());
+    }
+
+    fn env(vars: &[(&str, &str)]) -> Vec<(String, String)> {
+        vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn every_setting_has_a_variable_that_overrides_the_file() {
+        for k in KEYS {
+            assert_eq!(k.var, format!("IWDB_{}", k.key.replace('.', "_").to_uppercase()), "{}", k.key);
+        }
+        let file = "data_dir = \"/from/file\"\n[store]\nfsync = \"always\"\n[server]\nqueue = 5\n";
+        let config = Config::build(
+            Some(file),
+            &env(&[
+                ("IWDB_STORE_FSYNC", "group"),
+                ("IWDB_LISTEN", "0.0.0.0:9000"),
+                ("IWDB_LIMITS_MAX_TIMEOUT_MS", "60000"),
+                ("IWDB_LOG_FORMAT", "text"),
+                ("IWDB_CONSOLE_PUBLIC", "true"),
+                // Not settings: ignored (the test suites' and serve.py's)
+                ("IWDB_SERVER", "target/debug/iwdb-server"),
+                ("IWDB_URL", "http://x"),
+                ("PATH", "/bin"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(config.store.fsync, Fsync::Group);
+        assert_eq!(config.listen.to_string(), "0.0.0.0:9000");
+        assert_eq!(config.limits.max.timeout_ms, Some(60000));
+        assert_eq!(config.log.format, LogFormat::Text);
+        assert!(config.console.public);
+        assert_eq!(config.server.queue, 5);
+        assert_eq!(config.source("store.fsync"), Source::Env("IWDB_STORE_FSYNC"));
+        assert_eq!(config.source("server.queue"), Source::File);
+        assert_eq!(config.source("server.workers"), Source::Default);
+        // Without a file
+        let config = Config::build(None, &env(&[("IWDB_DATA_DIR", "rel/dir")])).unwrap();
+        assert_eq!(config.data_dir, PathBuf::from("rel/dir"));
+    }
+
+    #[test]
+    fn every_problem_is_reported_at_once() {
+        let problems = Config::build(
+            Some("[store]\nfsync = \"group\"\ngroup_max_batch = 0\n[log]\nlevel = \"loud=?=\"\n"),
+            &env(&[
+                ("IWDB_STORE_FSYNC", "sometimes"),
+                ("IWDB_SERVER_WORKRES", "4"),
+                ("IWDB_CONSOLE_ENABLED", "yes"),
+                ("IWDB_SERVER_MAX_MESSAGE_BYTES", "12"),
+            ]),
+        )
+        .unwrap_err();
+        let all = problems.join("\n");
+        for expected in [
+            "IWDB_STORE_FSYNC: unknown variant `sometimes`",
+            "IWDB_SERVER_WORKRES: no such setting",
+            "IWDB_CONSOLE_ENABLED: expected true or false",
+            "data_dir is required",
+            "[store] group_max_batch must be at least 1",
+            "[server] max_message_bytes (from IWDB_SERVER_MAX_MESSAGE_BYTES) must be at least 1024",
+            "[log] level",
+        ] {
+            assert!(all.contains(expected), "{:?} in\n{}", expected, all);
+        }
+        assert_eq!(problems.len(), 7, "{}", all);
+        // A file that doesn't parse: its error (with the line), and the
+        // variables' problems
+        let problems = Config::build(Some("data_dir = 3\n"), &env(&[("IWDB_LISTEN", "x")])).unwrap_err();
+        assert_eq!(problems.len(), 2, "{:?}", problems);
+        assert!(problems.iter().any(|p| p.contains("line 1")), "{:?}", problems);
+    }
+
+    #[test]
+    fn the_console_needs_its_feature_and_a_loopback_address_or_public() {
+        let base = "data_dir = \"d\"\n[console]\nenabled = true\n";
+        let local = Config::parse(base);
+        let remote = Config::parse(&format!("listen = \"0.0.0.0:7600\"\n{}", base));
+        let public = Config::parse(&format!("listen = \"0.0.0.0:7600\"\n{}public = true\n", base));
+        if cfg!(feature = "console") {
+            assert!(local.is_ok() && public.is_ok());
+            assert!(remote.unwrap_err().contains("public = true"));
+        } else {
+            for result in [local, remote, public] {
+                assert!(result.unwrap_err().contains("console feature"));
+            }
+        }
+    }
+
+    #[test]
+    fn the_described_configuration_reads_back() {
+        let config = Config::build(
+            Some("data_dir = \"/d\"\n[limits.max]\nmax_results = 50\n[limits.default]\nmax_results = 10\n"),
+            &env(&[("IWDB_LOG_LEVEL", "warn,iwdb_storage=debug")]),
+        )
+        .unwrap();
+        let text = config.describe();
+        let back = Config::parse(&text).unwrap();
+        assert_eq!(
+            (&back.store, &back.server, &back.log, &back.console),
+            (&config.store, &config.server, &config.log, &config.console)
+        );
+        assert_eq!(back.limit_config(), config.limit_config());
+        assert!(text.contains("# max_visited = (built in)"), "{}", text);
+    }
+
+    /// `documentation/api/config.md` lists exactly the settings, with their
+    /// variables and defaults.
+    #[test]
+    fn the_documentation_lists_every_setting() {
+        let doc = include_str!("../../../documentation/api/config.md");
+        let rows: Vec<Vec<String>> = doc
+            .lines()
+            .filter(|l| l.starts_with("| `"))
+            .map(|l| l.trim_matches('|').split(" | ").map(|c| c.trim().trim_matches('`').to_owned()).collect())
+            .collect();
+        let documented: Vec<(&str, &str)> = rows.iter().map(|r| (r[0].as_str(), r[1].as_str())).collect();
+        let keys: Vec<(&str, &str)> = KEYS.iter().map(|k| (k.key, k.var)).collect();
+        assert_eq!(documented, keys);
+        let defaults = Config::parse("data_dir = \"d\"").unwrap();
+        for (row, k) in rows.iter().zip(KEYS) {
+            let value = (k.get)(&defaults).map(|v| v.to_string()).unwrap_or_else(|| "built in".into());
+            let expected = if k.key == "data_dir" { "required".to_owned() } else { value };
+            assert_eq!(row[2], expected, "{}", k.key);
+        }
     }
 
     #[test]

@@ -15,6 +15,7 @@ use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
 use crate::convert::watch_response;
+use crate::health::{Health, Phase};
 use crate::ops;
 use crate::proto as pb;
 use crate::proto::database_service_server::{DatabaseService, DatabaseServiceServer};
@@ -39,11 +40,50 @@ pub struct Server<D> {
     /// Turns true when [`serve`](Self::serve) starts shutting down: the
     /// change streams end then (ADR 0031).
     pub(crate) stopping: watch::Sender<bool>,
+    /// Where the server is in its life (ADR 0040).
+    pub(crate) health: Health,
+    pub(crate) unready_delay: Duration,
+    /// Serve the operator console (feature `console`, ADR 0041).
+    pub(crate) console: bool,
 }
 
 impl<D: Database + 'static> Server<D> {
     pub fn new(db: Arc<D>) -> Self {
-        Server { db, max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES, stopping: watch::Sender::new(false) }
+        Server {
+            db,
+            max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
+            stopping: watch::Sender::new(false),
+            health: Health::new(Phase::Ready),
+            unready_delay: Duration::ZERO,
+            console: false,
+        }
+    }
+
+    /// How long the server goes on serving after a shutdown began, with
+    /// readiness off, before it drains (default 0): time for load
+    /// balancers to see it unready and stop sending (ADR 0040).
+    pub fn unready_delay(mut self, delay: Duration) -> Self {
+        self.unready_delay = delay;
+        self
+    }
+
+    /// Serve the operator console's pages at `/console/` (ADR 0041). Only
+    /// with the `console` feature; without it this does nothing.
+    pub fn console(mut self, on: bool) -> Self {
+        self.console = on;
+        self
+    }
+
+    /// Report into `health` instead of a health of its own (the server is
+    /// ready when [`serve`](Self::serve) starts).
+    pub fn with_health(mut self, health: Health) -> Self {
+        self.health = health;
+        self
+    }
+
+    /// The server's health.
+    pub fn health(&self) -> &Health {
+        &self.health
     }
 
     /// Requests and answer messages above this size fail (default

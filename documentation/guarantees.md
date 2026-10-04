@@ -142,6 +142,7 @@ The server ([api/grpc.md](api/grpc.md)) gives the guarantees of the store it ser
 - **A commit has no deadline on the server.** Once accepted it runs to the end, even if its client's deadline passes or the client disconnects; that client doesn't learn the outcome and retries with the same idempotency key, which applies the commit at most once.
 - **Errors carry their code** (`iwdb-code`) next to the gRPC status of [errors.md](api/errors.md).
 - A bug in a commit's apply path aborts the whole server (all namespaces), as a crash: run it under a supervisor ([ADR 0028](adr/0028-internal-apply-errors-abort.md)).
+- **Ready means recovered** (step 16b). The server opens its port before the store and answers health while it recovers; until recovery has finished it is not ready (`GET /v1/health/ready` 503, `grpc.health.v1` `NOT_SERVING`) and every database call fails with `unavailable`, so no client reads a namespace halfway through its replay. The first ready answer comes after recovery has applied every record in the log: every commit acknowledged before the last stop or crash is visible then. A shutdown turns readiness off before it drains. Tested in-process with the store's open held at a gate, and against the binary recovering a 100 000-node WAL (`crates/iwdb-server/tests/health.rs`, `tests/binary.rs`; [ADR 0040](adr/0040-health-and-readiness.md)).
 
 ## The change stream (step 13)
 

@@ -8,9 +8,10 @@ Decisions: [ADR 0023](../adr/0023-wire-encoding-of-values-filters-and-patterns.m
 
 ```
 iwdb-server --config server.toml
+IWDB_DATA_DIR=/var/lib/iwdb iwdb-server          # no file: the environment alone
 ```
 
-Only `data_dir` is required (relative to the config file); everything else has a default:
+Only `data_dir` is required (in the file, relative to it, or as `IWDB_DATA_DIR`); everything else has a default. Every setting can be overridden by an `IWDB_*` variable; [config.md](config.md) lists them all, with the rules, the logs and the health endpoints. `iwdb-server --check-config` validates a configuration and prints the effective settings.
 
 ```toml
 data_dir = "/var/lib/iwdb"
@@ -29,6 +30,15 @@ drain_timeout_secs = 30
 max_message_bytes = 67108864      # largest request or answer message (64 MiB); REST: request body
 workers = 0                       # threads running requests (0: one per CPU)
 queue = 1024                      # requests waiting for a worker; more fail with `unavailable`
+unready_delay_ms = 0              # on shutdown: serve unready this long before draining
+
+[log]
+format = "auto"                   # json unless stderr is a terminal | json | text
+level = "info"                    # a filter: "warn,iwdb_storage=debug"
+
+[console]                         # the operator console at /console/ (feature `console`)
+enabled = false
+public = false                    # allow it on a non-loopback address (no authentication until step 15)
 
 [limits.default]                  # what a read gets if it asks for nothing
 max_results = 1000
@@ -45,29 +55,32 @@ timeout_ms = 300000
 
 `[[projection]]` sections run projections from Postgres tables into namespaces while the server runs ([projections.md](projections.md)). Their marks are in `NamespaceStatus.marks`.
 
-- **SIGINT / SIGTERM** shut down gracefully (below); a second signal cancels the calls still running. Exit codes: 0 after a clean shutdown, 1 if serving or closing the store failed, 2 for a bad command line or config file.
+- **Startup.** The port opens first and answers health while the store recovers; database calls fail with `unavailable` until recovery has finished, then the server is ready (`grpc.health.v1.Health` reports `SERVING`, `GET /v1/health/ready` answers 200; [ADR 0040](../adr/0040-health-and-readiness.md)). A bad configuration is refused before that, with every problem listed (exit 2).
+- **SIGINT / SIGTERM** shut down gracefully (below): readiness turns off first (and with `unready_delay_ms` the server keeps serving that long), then the drain; a second signal cancels the calls still running. Exit codes: 0 after a clean shutdown, 1 if serving or closing the store failed, 2 for a bad command line or configuration.
+- **Logs** are JSON lines on stderr unless it is a terminal ([config.md](config.md#logs)).
 - **Run it under a supervisor** (systemd, Kubernetes). A bug in a commit's apply path (a panic, or `GraphError::Internal` from the core) aborts the whole process, as a crash, so that no reader ever sees part of a transaction (ADR 0008, ADR 0028). The next start recovers every logged commit.
 - **No TLS and no authentication yet** (step 15): bind to localhost or a private network.
-- Health and readiness endpoints, metrics and environment overrides come with step 16.
+- Metrics and status views come with step 16c.
 
 ### Features and Docker
 
-`iwdb-server` has two cargo features, both on by default (ADR 0034):
+`iwdb-server` has three cargo features (ADR 0034); the first two are on by default:
 
 - `rest`: the REST/JSON API on the same port ([rest.md](rest.md)). Without it the server speaks gRPC only, and answers every other request 404.
 - `postgres`: the Postgres source of `[[projection]]`s. Without it, a config file with a Postgres source is refused at startup (exit 2).
+- `console` (off by default; implies `rest`): the operator console's pages, compiled in and served at `/console/` when `[console] enabled = true` ([ADR 0041](../adr/0041-console-served-by-the-server.md)).
 
 `cargo build -p iwdb-server --no-default-features` builds a gRPC-only server. `iwdb-server --version` lists what a binary has.
 
 The `Dockerfile` at the root builds an image with `iwdb-server` and `iwctl`, with the same features chosen by the `FEATURES` build argument:
 
 ```
-docker build -t iwdb .                                # gRPC, REST, Postgres projections
+docker build -t iwdb .                                # gRPC, REST, Postgres projections, console
 docker build --build-arg FEATURES="" -t iwdb:grpc .   # gRPC only
 docker run -p 127.0.0.1:7600:7600 -v iwdb-data:/var/lib/iwdb iwdb
 ```
 
-The image runs as the user `iwdb` (uid 10001), keeps its data in the volume `/var/lib/iwdb`, and reads `/etc/iwdb/iwdb.toml` ([docker/iwdb.toml](../../docker/iwdb.toml): listens on `0.0.0.0:7600`, drains for 8 s so that `docker stop` ends with a checkpoint). Mount your own config there; if you raise `drain_timeout_secs`, raise `docker stop -t` above it. `compose.yaml` runs it, and with `--profile postgres` a Postgres with an example projection. Run `iwctl` against the volume only while the server is stopped: one process opens a data directory at a time.
+The image runs as the user `iwdb` (uid 10001), keeps its data in the volume `/var/lib/iwdb`, and reads `/etc/iwdb/iwdb.toml` ([docker/iwdb.toml](../../docker/iwdb.toml): listens on `0.0.0.0:7600`, drains for 8 s so that `docker stop` ends with a checkpoint). Mount your own config there, or set `IWDB_*` variables (`docker run -e IWDB_STORE_FSYNC=group ...`); if you raise `drain_timeout_secs`, raise `docker stop -t` above it. `compose.yaml` runs it, and with `--profile postgres` a Postgres with an example projection. Run `iwctl` against the volume only while the server is stopped: one process opens a data directory at a time. The image's `HEALTHCHECK` runs `iwdb-server --probe` (ready once recovery has finished). The console is compiled in but off: `-e IWDB_CONSOLE_ENABLED=true -e IWDB_CONSOLE_PUBLIC=true -p 127.0.0.1:7600:7600` serves it at `http://127.0.0.1:7600/console/` (public, because the container listens on `0.0.0.0`; publish the port on localhost only).
 
 ## RPCs
 

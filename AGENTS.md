@@ -48,7 +48,7 @@ crates/
   iwctl/                   # admin CLI and query shell
   iwdb-python/             # PyO3 bindings: embedded mode and the remote client (ADR 0035)
 proto/                     # protobuf contract (versioned, canonical schema for gRPC and REST)
-console/                   # operator web console: static pages, the vendored design system, a mock Source (ADR 0037)
+console/                   # operator web console: static pages, the vendored design system, a mock Source (ADR 0037); served by iwdb-server with feature `console` (ADR 0041)
 fuzz/                      # cargo-fuzz targets
 tests/                     # cross-crate integration, crash and compatibility tests
 documentation/             # design, steps, ADRs

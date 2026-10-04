@@ -294,6 +294,20 @@ impl Protos {
                 "content": { "application/json": { "schema": reference("Error") } },
             })
         };
+        if route.health() {
+            let health = json!({ "application/json": { "schema": reference("Health") } });
+            let mut responses = json!({ "200": { "description": "The server's state.", "content": health } });
+            let comment = self.messages.get("Health").map(|(_, c)| c.message.clone()).unwrap_or_default();
+            if !comment.is_empty() {
+                operation.insert("description".into(), comment.into());
+            }
+            if route.operation == "ready" {
+                responses["503"] =
+                    json!({ "description": "Not ready: recovering or shutting down.", "content": health });
+            }
+            operation.insert("responses".into(), responses);
+            return operation.into();
+        }
         let Some((rpc, comment)) = route.rpc.and_then(|r| self.rpcs.get(r)) else {
             let document = json!({ "application/json": { "schema": { "type": "object" } } });
             operation.insert(

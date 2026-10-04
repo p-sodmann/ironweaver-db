@@ -11,7 +11,13 @@
 //! - [`status`]: the error mapping, `Code` to gRPC status and back, with the
 //!   code string in the `iwdb-code` trailer, and to HTTP status
 //!   (`documentation/api/errors.md`).
-//! - [`config`]: the `iwdb-server` binary's config file.
+//! - [`config`]: the `iwdb-server` binary's configuration: a file and
+//!   `IWDB_*` environment overrides (ADR 0039).
+//! - [`health`]: liveness and readiness (ADR 0040); [`launch`] binds first
+//!   and serves health while the store opens.
+//! - [`logging`]: structured logs (ADR 0042).
+//! - `console` (feature `console`): the operator console's pages, served
+//!   at `/console/` when the config turns it on (ADR 0041).
 //! - [`proto`]: the generated messages (with their proto3 JSON serde),
 //!   server and client.
 //! - `client` (feature `client`): `client::Remote`, the trait over gRPC, and
@@ -19,7 +25,8 @@
 //!
 //! Features (ADR 0034): `rest` and `postgres` (the Postgres source of
 //! `[[projection]]`s) are on by default; without them the server speaks
-//! gRPC only and refuses Postgres projections in its config.
+//! gRPC only and refuses Postgres projections in its config. `console`
+//! (off by default, implies `rest`) compiles the operator console in.
 //!
 //! Values, filters and patterns travel in the core's serde form, encoded
 //! with postcard over gRPC (ADR 0023) and as JSON over REST (ADR 0030).
@@ -31,7 +38,11 @@
 //! (ADR 0020).
 
 pub mod config;
+#[cfg(feature = "console")]
+mod console;
 mod convert;
+pub mod health;
+pub mod logging;
 mod ops;
 #[cfg(feature = "rest")]
 pub mod rest;
@@ -43,7 +54,7 @@ pub mod status;
 pub mod client;
 
 pub use ops::CHUNK_BYTES;
-pub use serve::Drain;
+pub use serve::{Drain, LaunchOptions, Launched, launch};
 pub use service::{Adapter, DEFAULT_MAX_MESSAGE_BYTES, Server};
 
 /// The generated messages and services of `ironweaver_db.v1`, and (with

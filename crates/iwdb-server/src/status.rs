@@ -72,9 +72,19 @@ pub fn from_http(status: http::StatusCode, code: Option<&str>, message: &str) ->
 
 /// The status a failed call ends with.
 pub fn to_status(e: &Error) -> tonic::Status {
+    log_server_error(e);
     let mut metadata = MetadataMap::new();
     metadata.insert(CODE_KEY, MetadataValue::from_static(e.code().as_str()));
     tonic::Status::with_metadata(grpc_code(e.code()), e.message(), metadata)
+}
+
+/// Log the errors that are the server's, not the caller's: `internal`,
+/// `corrupt` and `io` (ADR 0042). Called where an error becomes an answer,
+/// inside the request's span, so the event carries its path.
+pub(crate) fn log_server_error(e: &Error) {
+    if matches!(e.code(), Code::Internal | Code::Corrupt | Code::Io) {
+        tracing::error!(code = e.code().as_str(), error = e.message(), "a request failed on the server's side");
+    }
 }
 
 /// The error a status stands for: the code in [`CODE_KEY`] if the server

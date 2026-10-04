@@ -89,6 +89,13 @@ pub struct Route {
     pub summary: &'static str,
 }
 
+impl Route {
+    /// A health route: served by the server's gate, not the router.
+    pub fn health(&self) -> bool {
+        matches!(self.operation, "live" | "ready")
+    }
+}
+
 const fn route(
     method: Method,
     path: &'static str,
@@ -191,6 +198,24 @@ pub const ROUTES: &[Route] = &[
         "watchChanges",
         "Follow the change stream (Server-Sent Events)",
     ),
+    // Served before the router, in every build and during recovery
+    // (crate::health); here for the OpenAPI document
+    Route {
+        method: Method::GET,
+        path: crate::health::LIVE_PATH,
+        rpc: None,
+        input: Input::Nothing,
+        operation: "live",
+        summary: "Liveness: 200 whenever the server answers",
+    },
+    Route {
+        method: Method::GET,
+        path: crate::health::READY_PATH,
+        rpc: None,
+        input: Input::Nothing,
+        operation: "ready",
+        summary: "Readiness: 200 once recovery has finished, 503 before and while shutting down",
+    },
     Route {
         method: Method::GET,
         path: "/v1/openapi.json",
@@ -216,7 +241,7 @@ type St<D> = State<Arc<Shared<D>>>;
 /// change streams end when `stopping` turns true.
 pub fn router<D: Database + 'static>(db: Arc<D>, max_body: usize, stopping: watch::Receiver<bool>) -> Router {
     let mut router = Router::new();
-    for r in ROUTES {
+    for r in ROUTES.iter().filter(|r| !r.health()) {
         router = router.route(r.path, handler::<D>(r));
     }
     router
@@ -280,6 +305,7 @@ impl From<Error> for Failure {
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
         let Failure(e, status) = self;
+        crate::status::log_server_error(&e);
         let body = pb::Error { code: e.code().as_str().to_owned(), message: e.message().to_owned() };
         // Two strings: writing them can't fail
         let bytes = serde_json::to_vec(&body).unwrap_or_default();

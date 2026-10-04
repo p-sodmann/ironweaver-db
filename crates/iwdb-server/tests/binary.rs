@@ -1,6 +1,8 @@
 //! The `iwdb-server` binary: it serves the data directory of its config
-//! file, shuts down gracefully on SIGTERM (checkpointing, so the next open
-//! replays nothing), and refuses a bad command line or config file.
+//! file or environment, shuts down gracefully on SIGTERM (checkpointing, so
+//! the next open replays nothing), refuses a bad command line or
+//! configuration with every problem, logs JSON lines, and becomes ready
+//! only once recovery has finished.
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -17,36 +19,72 @@ use iwdb_server::client::Remote;
 
 const BIN: &str = env!("CARGO_BIN_EXE_iwdb-server");
 
+/// A log line's JSON object (stderr isn't a terminal: JSON by default).
+fn event(line: &str) -> serde_json::Value {
+    serde_json::from_str(line).unwrap_or_else(|e| panic!("not a JSON log line ({}): {}", e, line))
+}
+
+/// The address of a `serving` event: the server is ready.
+fn serving(line: &str) -> Option<String> {
+    let e = event(line);
+    e["message"].as_str()?.starts_with("serving").then(|| e["address"].as_str().unwrap().to_owned())
+}
+
+/// Start `command` and read its stderr on a thread: the lines arrive on the
+/// receiver.
+fn spawn(command: &mut Command) -> (std::process::Child, mpsc::Receiver<String>, std::thread::JoinHandle<()>) {
+    let mut child = command.stderr(Stdio::piped()).spawn().unwrap();
+    let (lines_tx, lines) = mpsc::channel::<String>();
+    let stderr = child.stderr.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            let _ = lines_tx.send(line.unwrap());
+        }
+    });
+    (child, lines, reader)
+}
+
+/// Wait for the `serving` event; the lines before it are kept in `seen`.
+fn ready_address(lines: &mpsc::Receiver<String>, seen: &mut Vec<String>) -> String {
+    loop {
+        let line = lines.recv_timeout(Duration::from_secs(60)).unwrap_or_else(|_| panic!("not ready: {:?}", seen));
+        let address = serving(&line);
+        seen.push(line);
+        if let Some(address) = address {
+            return address;
+        }
+    }
+}
+
+fn node(id: &str) -> Mutation {
+    Mutation::UpsertNode {
+        id: id.into(),
+        labels: vec![],
+        attr: Default::default(),
+        meta: Default::default(),
+        expected_version: None,
+    }
+}
+
 #[test]
 fn serves_its_data_directory_and_shuts_down_on_sigterm() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("server.toml");
     std::fs::write(&config, "data_dir = \"data\"\nlisten = \"127.0.0.1:0\"\n[server]\ndrain_timeout_secs = 5\n")
         .unwrap();
-    let mut child = Command::new(BIN).arg("--config").arg(&config).stderr(Stdio::piped()).spawn().unwrap();
-    // The address it listens on, from its first line
-    let (lines_tx, lines) = mpsc::channel::<String>();
-    let stderr = child.stderr.take().unwrap();
-    let reader = std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines() {
-            let line = line.unwrap();
-            let _ = lines_tx.send(line);
-        }
-    });
-    let first = lines.recv_timeout(Duration::from_secs(30)).expect("the server started");
-    let address = first.rsplit(" on ").next().unwrap().to_owned();
-    assert!(first.contains("serving"), "{}", first);
+    let (mut child, lines, reader) = spawn(Command::new(BIN).arg("--config").arg(&config));
+    let mut seen = Vec::new();
+    let address = ready_address(&lines, &mut seen);
+    // Listening (recovering) comes first, then ready
+    assert!(event(&seen[0])["message"].as_str().unwrap().starts_with("listening"), "{:?}", seen);
+    assert!(seen.iter().any(|l| event(l)["message"] == "recovery finished"), "{:?}", seen);
 
     let remote = Remote::connect(&format!("http://{}", address)).unwrap();
-    let node = Mutation::UpsertNode {
-        id: "a".into(),
-        labels: vec![],
-        attr: Default::default(),
-        meta: Default::default(),
-        expected_version: None,
-    };
-    let seq = block_on(remote.commit("default", vec![node], CommitOptions::default())).unwrap().seq;
+    let seq = block_on(remote.commit("default", vec![node("a")], CommitOptions::default())).unwrap().seq;
     assert_eq!(seq, 1);
+    iwdb_server::health::probe(&address, Duration::from_secs(5)).unwrap();
+    let probe = Command::new(BIN).arg("--probe").arg(&address).output().unwrap();
+    assert!(probe.status.success(), "{:?}", probe);
 
     let killed = Command::new("kill").arg("-TERM").arg(child.id().to_string()).status().unwrap();
     assert!(killed.success());
@@ -54,7 +92,12 @@ fn serves_its_data_directory_and_shuts_down_on_sigterm() {
     reader.join().unwrap();
     let output: Vec<String> = lines.try_iter().collect();
     assert!(status.success(), "{:?}: {:?}", status, output);
-    assert!(output.iter().any(|l| l.contains("closed")), "{:?}", output);
+    assert!(output.iter().any(|l| event(l)["message"].as_str().unwrap().starts_with("closed")), "{:?}", output);
+    // Every line is JSON with the fields a collector needs
+    for line in &output {
+        let e = event(line);
+        assert!(e["timestamp"].is_string() && e["level"].is_string() && e["target"].is_string(), "{}", line);
+    }
 
     // The data is there, and the checkpoint at shutdown leaves nothing to replay
     let store = Store::open(&dir.path().join("data"), Default::default()).unwrap();
@@ -120,21 +163,8 @@ mutations = [{ upsert_node = { id = "${who}", labels = ["Person"], attr = { gree
     )
     .unwrap();
     let run = |expected_mark: u64| {
-        let mut child = Command::new(BIN).arg("--config").arg(&config).stderr(Stdio::piped()).spawn().unwrap();
-        let (lines_tx, lines) = mpsc::channel::<String>();
-        let stderr = child.stderr.take().unwrap();
-        let reader = std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                let _ = lines_tx.send(line.unwrap());
-            }
-        });
-        let serving = loop {
-            let line = lines.recv_timeout(Duration::from_secs(30)).expect("the server started");
-            if line.contains("serving") {
-                break line;
-            }
-        };
-        let address = serving.rsplit(" on ").next().unwrap().to_owned();
+        let (mut child, lines, reader) = spawn(Command::new(BIN).arg("--config").arg(&config));
+        let address = ready_address(&lines, &mut Vec::new());
         let remote = Remote::connect(&format!("http://{}", address)).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         let marks = loop {
@@ -182,4 +212,144 @@ fn the_version_lists_the_features() {
         assert!(String::from_utf8_lossy(&out.stderr).contains("postgres feature"));
         assert!(!dir.path().join("d").exists(), "the store was opened");
     }
+}
+
+fn sigterm(child: &std::process::Child) {
+    let killed = Command::new("kill").arg("-TERM").arg(child.id().to_string()).status().unwrap();
+    assert!(killed.success());
+}
+
+/// No file: `IWDB_DATA_DIR` and the other variables are the whole
+/// configuration (ADR 0039), as in a container.
+#[test]
+fn runs_from_the_environment_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let (mut child, lines, reader) = spawn(
+        Command::new(BIN)
+            .env("IWDB_DATA_DIR", &data)
+            .env("IWDB_LISTEN", "127.0.0.1:0")
+            .env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "5")
+            .env("IWDB_STORE_FSYNC", "group")
+            .env("IWDB_LOG_LEVEL", "debug"),
+    );
+    let address = ready_address(&lines, &mut Vec::new());
+    let remote = Remote::connect(&format!("http://{}", address)).unwrap();
+    block_on(remote.commit("default", vec![node("e")], CommitOptions::default())).unwrap();
+    sigterm(&child);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    let store = Store::open(&data, Default::default()).unwrap();
+    assert!(store.node("e").is_some());
+    store.close().unwrap();
+}
+
+/// Every problem at once, each with where it came from, before the store
+/// opens (exit 2).
+#[test]
+fn a_bad_configuration_lists_every_problem() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("server.toml");
+    std::fs::write(&config, "data_dir = \"d\"\n[store]\nfsync = \"group\"\ngroup_max_batch = 0\n").unwrap();
+    let out = Command::new(BIN)
+        .arg("--config")
+        .arg(&config)
+        .env("IWDB_STORE_FSINC", "off")
+        .env("IWDB_LIMITS_MAX_TIMEOUT_MS", "soon")
+        .env("IWDB_SERVER_MAX_MESSAGE_BYTES", "10")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let text = String::from_utf8_lossy(&out.stderr);
+    for expected in [
+        "IWDB_STORE_FSINC: no such setting",
+        "IWDB_LIMITS_MAX_TIMEOUT_MS: expected a whole number",
+        "[store] group_max_batch must be at least 1",
+        "[server] max_message_bytes (from IWDB_SERVER_MAX_MESSAGE_BYTES) must be at least 1024",
+        "server.toml",
+    ] {
+        assert!(text.contains(expected), "{:?} in {}", expected, text);
+    }
+    assert!(!dir.path().join("d").exists(), "the store was opened");
+    // No data directory anywhere
+    let out = Command::new(BIN).env_remove("IWDB_DATA_DIR").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("data_dir is required"));
+}
+
+/// `--check-config` prints the effective settings with their sources, as
+/// TOML that reads back to the same configuration.
+#[test]
+fn check_config_prints_the_effective_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("server.toml");
+    std::fs::write(&config, "data_dir = \"/var/lib/iwdb\"\n[store]\nretain_records = 7\n").unwrap();
+    let out = Command::new(BIN)
+        .arg("--check-config")
+        .arg("--config")
+        .arg(&config)
+        .env("IWDB_STORE_FSYNC", "off")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{:?}", out);
+    let text = String::from_utf8(out.stdout).unwrap();
+    let line = |key: &str| text.lines().find(|l| l.starts_with(&format!("{} =", key))).unwrap().to_owned();
+    assert!(line("fsync").contains("\"off\"") && line("fsync").ends_with("# IWDB_STORE_FSYNC"), "{}", text);
+    assert!(line("retain_records").ends_with("# file"), "{}", text);
+    assert!(line("listen").ends_with("# default"), "{}", text);
+    let back = iwdb_server::config::Config::parse(&text).unwrap();
+    assert_eq!(back.store.fsync, iwdb_server::config::Fsync::Off);
+    assert_eq!(back.store.retain_records, 7);
+    assert_eq!(back.data_dir, std::path::PathBuf::from("/var/lib/iwdb"));
+}
+
+/// Readiness against a real recovery (design rule 3): a WAL large enough
+/// that replaying it takes a while. The port answers at once, not ready;
+/// the first ready answer comes with every committed node visible.
+#[test]
+fn ready_only_after_a_large_recovery() {
+    const BATCHES: usize = 100;
+    const BATCH: usize = 1000;
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    {
+        let mut options = iwdb::StoreOptions::default();
+        options.wal.fsync = iwdb::FsyncPolicy::Off;
+        options.checkpoint.on_close = false;
+        options.checkpoint.wal_size = None;
+        options.checkpoint.interval = None;
+        let store = Store::open(&data, options).unwrap();
+        for b in 0..BATCHES {
+            let batch: Vec<Mutation> = (0..BATCH).map(|i| node(&format!("n{}-{}", b, i))).collect();
+            store.commit(&batch).unwrap();
+        }
+        store.close().unwrap();
+    }
+    let (mut child, lines, reader) = spawn(
+        Command::new(BIN)
+            .env("IWDB_DATA_DIR", &data)
+            .env("IWDB_LISTEN", "127.0.0.1:0")
+            .env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "5"),
+    );
+    let listening = event(&lines.recv_timeout(Duration::from_secs(30)).unwrap());
+    assert!(listening["message"].as_str().unwrap().starts_with("listening"), "{}", listening);
+    let address = listening["address"].as_str().unwrap().to_owned();
+    let mut not_ready = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while iwdb_server::health::probe(&address, Duration::from_secs(5)).is_err() {
+        not_ready += 1;
+        assert!(std::time::Instant::now() < deadline, "never ready");
+    }
+    let remote = Remote::connect(&format!("http://{}", address)).unwrap();
+    let status = block_on(remote.namespace_status("default")).unwrap();
+    assert_eq!(status.nodes, BATCHES * BATCH);
+    assert_eq!(status.recovery.replayed, BATCHES as u64);
+    assert!(not_ready > 0, "recovery was too quick to see it unready");
+    let mut seen = Vec::new();
+    ready_address(&lines, &mut seen);
+    let recovered = seen.iter().map(|l| event(l)).find(|e| e["message"] == "recovered").unwrap();
+    assert_eq!(recovered["replayed"], BATCHES as u64);
+    sigterm(&child);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
 }

@@ -1,6 +1,7 @@
 # Ironweaver DB in Docker (step 13a, ADR 0034).
 #
-#   docker compose up --build                     # iwdb-server on 127.0.0.1:7600
+#   docker compose up --build                     # iwdb-server on 127.0.0.1:7600,
+#                                                  # the console at http://127.0.0.1:7600/console/
 #   IWDB_CONFIG=projection.example.toml docker compose --profile postgres up --build
 #                                                  # plus Postgres and a projection from it
 #
@@ -12,7 +13,7 @@ services:
     build:
       context: .
       args:
-        FEATURES: ${IWDB_FEATURES:-rest postgres}
+        FEATURES: ${IWDB_FEATURES:-rest postgres console}
     image: iwdb-server:dev
     ports:
       - "127.0.0.1:7600:7600"
@@ -20,6 +21,10 @@ services:
       - iwdb-data:/var/lib/iwdb
       - ./docker/${IWDB_CONFIG:-iwdb.toml}:/etc/iwdb/iwdb.toml:ro
     environment:
+      # The operator console (ADR 0041). The container listens on 0.0.0.0,
+      # so it must be marked public; the port is published on localhost only
+      IWDB_CONSOLE_ENABLED: "true"
+      IWDB_CONSOLE_PUBLIC: "true"
       # Read by docker/projection.example.toml (url_env)
       ORDERS_DB_URL: postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable
     depends_on:

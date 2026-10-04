@@ -151,14 +151,17 @@
       },
       commit: async (name, mutations) => { const r = (await call('POST', ns(name) + '/commit', { mutations })).result || {}; return { seq: n(r.seq), edgeIds: (r.edgeIds || []).map(Number), timeMicros: n(r.timeMicros) }; },
       createIndex: async (name, path) => { const r = (await call('POST', ns(name) + '/catalog', { change: { createIndex: { path: { keys: path } } } })).result || {}; return { seq: n(r.seq) }; },
-      /** What the server reports: reachable and every namespace's status; the metrics come with step 16. */
+      /** What the server reports: its readiness and every namespace's status; the metrics come with step 16c. */
       server: async () => {
-        if (!config) config = await doFetch(base + '/console-config.json').then((r) => (r.ok ? r.json() : {}), () => ({}));
+        // Relative to the page: the proxy serves it at /, the server at /console/ (ADR 0041)
+        if (!config) config = await doFetch(base ? base + '/console-config.json' : 'console-config.json').then((r) => (r.ok ? r.json() : {}), () => ({}));
+        // Readiness (step 16b): 503 is an answer here, not a failure
+        const health = await doFetch(base + '/v1/health/ready', { method: 'GET', headers: { accept: 'application/json' } }).then((r) => r.json().catch(() => ({})), () => ({}));
         const list = await call('GET', '/v1/namespaces', undefined, true);
         const spaces = await Promise.all((list.namespaces || []).map((x) => call('GET', ns(x.name), undefined, true).then((r) => status(r.status))));
         const problems = spaces.some((s) => s.readOnly || s.checkpointFailure);
         return {
-          version: config.version || null, startedMicros: null, ready: true, health: problems ? 'warn' : 'ok', fsync: null,
+          version: config.version || null, startedMicros: null, ready: health.ready === true, health: problems || health.ready !== true ? 'warn' : 'ok', fsync: null,
           endpoints: { rest: config.upstream || base || 'this origin' }, dataDir: null,
           memory: null, disk: null, requests: null, series: null, tickMs: null,
           operations: null, active: null, consumers: null, jobs: null, namespaces: spaces, partial: true,
@@ -169,7 +172,7 @@
       onLog: (f) => { listeners.add(f); return () => listeners.delete(f); },
       tick: () => {},
     };
-    emit('INFO', `REST source on ${base || 'this origin'}: /v1 passed through to the server`);
+    emit('INFO', `REST source on ${base || 'this origin'}`);
     return src;
   }
 
