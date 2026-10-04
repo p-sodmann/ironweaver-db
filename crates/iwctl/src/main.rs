@@ -135,13 +135,21 @@ fn run(parsed: &Parsed, out: &Out) -> Result<u8, Error> {
             out.namespace_result("dropped", &result);
             Ok(exit::OK)
         }
-        Command::Import { dir, name, file, format } => {
+        Command::Import { dir, name, file, format, merge } => {
             let store = Store::open(dir, store_options(parsed))?;
             let mut progress = Progress::new(parsed.json);
-            let report = store.import_file(name, file, *format, Some(&mut |p| progress.show(p)))?;
-            progress.done();
-            store.close()?;
-            out.import(&report);
+            let mut show = |p| progress.show(p);
+            if *merge {
+                let report = store.namespace(name)?.import_file(file, *format, Some(&mut show))?;
+                progress.done();
+                store.close()?;
+                out.merge(name, &report);
+            } else {
+                let report = store.import_file(name, file, *format, Some(&mut show))?;
+                progress.done();
+                store.close()?;
+                out.import(&report);
+            }
             Ok(exit::OK)
         }
         Command::Export { dir, file, format } => {
@@ -235,11 +243,11 @@ impl Progress {
             return;
         }
         self.last = Some(std::time::Instant::now());
-        let what = match p.phase {
-            iwdb::import::Phase::Reading => "read",
-            iwdb::import::Phase::Writing => "written",
-        };
-        eprint!("\r{:.1} MiB {}   ", p.bytes as f64 / (1 << 20) as f64, what);
+        match p.phase {
+            iwdb::import::Phase::Reading => eprint!("\r{:.1} MiB read   ", p.bytes as f64 / (1 << 20) as f64),
+            iwdb::import::Phase::Writing => eprint!("\r{:.1} MiB written   ", p.bytes as f64 / (1 << 20) as f64),
+            iwdb::import::Phase::Committing => eprint!("\r{} mutations committed   ", p.mutations),
+        }
     }
 
     fn done(&self) {

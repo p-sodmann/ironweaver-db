@@ -4,6 +4,9 @@
 //!   namespace from a file, as one checkpoint and without WAL records, all
 //!   or nothing across crashes. Formats: the core's JSON and binary files
 //!   ([`iwdb_engine::plain`]) and LGF ([`lgf`]).
+//! - [`Ns::import`](crate::Ns::import) merges a file into an existing
+//!   namespace (`default` too) through the commit pipeline, in batches:
+//!   nodes are upserted, edges upserted by their ends and type.
 //! - [`Ns::export`](crate::Ns::export) writes a namespace's graph as a
 //!   core JSON or binary file, which the Ironweaver library and the import
 //!   read.
@@ -129,15 +132,20 @@ pub enum Phase {
     Reading,
     /// Writing the checkpoint (import) or the file (export).
     Writing,
+    /// Committing the file's nodes and edges (a merge, [`Ns::import`](crate::Ns::import)).
+    Committing,
 }
 
 /// Progress of an import or export: the bytes read or written so far in
-/// the current phase. Reported about every [`PROGRESS_STEP`] bytes, and at
-/// the end of each phase.
+/// the current phase, reported about every [`PROGRESS_STEP`] bytes and at
+/// the end of each phase; while committing, the mutations committed so
+/// far, after each commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Progress {
     pub phase: Phase,
     pub bytes: u64,
+    /// Mutations committed so far ([`Phase::Committing`]; 0 otherwise).
+    pub mutations: u64,
 }
 
 /// How often progress is reported, in bytes.
@@ -164,6 +172,26 @@ pub struct ImportReport {
     /// The bytes read, and the size of the checkpoint written.
     pub bytes_read: u64,
     pub checkpoint_bytes: u64,
+}
+
+/// What a merge ([`Ns::import`](crate::Ns::import)) did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeReport {
+    pub format: ImportFormat,
+    /// The file's nodes and edges, all committed.
+    pub nodes: usize,
+    pub edges: usize,
+    /// Indexes the file declared that the namespace didn't have, created.
+    pub created_indexes: Vec<AttrPath>,
+    /// What the file held that a namespace has no place for (see
+    /// [`ImportReport::dropped`]).
+    pub dropped: Vec<String>,
+    pub bytes_read: u64,
+    /// The commits made (index creations included), and the seqs of the
+    /// first and the last (`None` for an empty file).
+    pub commits: usize,
+    pub first_seq: Option<u64>,
+    pub last_seq: Option<u64>,
 }
 
 /// What an export did.
@@ -205,7 +233,14 @@ impl<'a> Reporter<'a> {
     fn report(&mut self, bytes: u64) {
         self.last = bytes;
         if let Some(on) = self.on.as_mut() {
-            on(Progress { phase: self.phase, bytes });
+            on(Progress { phase: self.phase, bytes, mutations: 0 });
+        }
+    }
+
+    /// While committing: `mutations` committed so far.
+    pub(crate) fn committed(&mut self, mutations: u64) {
+        if let Some(on) = self.on.as_mut() {
+            on(Progress { phase: Phase::Committing, bytes: 0, mutations });
         }
     }
 }

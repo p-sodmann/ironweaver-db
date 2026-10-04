@@ -17,7 +17,7 @@ iwctl [--json] <command> [options]
 | `indexes <dir> [-n <namespace>]` | The namespace's indexes with their state (`ready`, or `building`), paths, whether declared or needed by a unique constraint, and entries. |
 | `create-index <dir> <path> [-n <ns>] [--key <key>]`, `drop-index <dir> <path> ...` | Create (online build) or drop a property index; `path` is attribute names joined by `.`. |
 | `add-constraint <dir> unique\|required <label> <path> [-n <ns>] [--key <key>]`, `drop-constraint <dir> ...` | Add a constraint (the existing data is validated first: exit code 4 with the violating node if it fails) or drop one. |
-| `import <dir> <name> <file> [--format json\|binary\|lgf]` | Create the namespace `<name>` from a graph file: a core JSON or binary file (as the Ironweaver library writes them) or an LGF file, detected from its first bytes unless `--format` names it ([api/import-export.md](api/import-export.md)). One checkpoint, all or nothing; prints the counts, the indexes and what the file held that a namespace has no place for. Take a backup afterwards if you rely on backups: the WAL archive doesn't hold an import. Progress goes to stderr on a terminal. |
+| `import <dir> <name> <file> [--format json\|binary\|lgf] [--merge]` | With `--merge`, upsert the file's nodes and edges into the existing namespace `<name>` (`default` too) through commits, in batches. Without it: create the namespace `<name>` from a graph file: a core JSON or binary file (as the Ironweaver library writes them) or an LGF file, detected from its first bytes unless `--format` names it ([api/import-export.md](api/import-export.md)). One checkpoint, all or nothing; prints the counts, the indexes and what the file held that a namespace has no place for. Take a backup afterwards if you rely on backups: the WAL archive doesn't hold an import. Progress goes to stderr on a terminal. |
 | `export <dir> <file> [-n <ns>] [--format json\|binary]` | Write a namespace's graph to `<file>` (atomically) as a core file: JSON for a `.json` file, binary otherwise, unless `--format` says. |
 | `backup <dir> <dest> [--no-verify]` | Open the store, back it up into `<dest>` (missing or empty) up to its last commit, close it, and verify the backup ([backup.md](formats/backup.md)). |
 | `restore <dest> [--backup <dir>] [--archive <archive>] [--seq <n> \| --time <time>] [--no-verify]` | Restore into `<dest>` (missing or empty) from a backup (or a data directory no store has open), an archive, or both, to seq `n`, to the last commit at or before `time`, or to the latest seq they reach; then verify the result. `time` is RFC 3339 with a UTC offset: `2026-10-01T12:30:00Z`, `2026-10-01T14:30:00+02:00`. The restored store has a new history: give it a new archive. |
@@ -35,6 +35,7 @@ Options:
 | `-n`, `--namespace <name>` | The namespace a command acts on (default `default`); for `checkpoint` and `restore`, repeatable: only those namespaces (a `--seq` restore needs exactly one). |
 | `--key <key>` | An idempotency key for the operation (`create-namespace`, `drop-namespace`, index and constraint commands). |
 | `--no-verify` | Don't verify after `backup` or `restore`. |
+| `--merge` | `import` into an existing namespace through commits. |
 | `--format <format>` | The file format of `import` (`json`, `binary`, `lgf`) or `export` (`json`, `binary`). |
 
 ## Exit codes

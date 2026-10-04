@@ -82,3 +82,28 @@ def test_an_import_survives_reopening(path, tmp_path):
         ns = store.namespace("lemon")
         assert (ns.seq(), ns.node("0")["attr"]["title"], ns.node("3")["id"]) == (2, "First node", "3")
         assert store.status()["recovery"]["namespaces"]["lemon"]["finished_import"] is False
+
+
+def test_a_merge_upserts_into_an_existing_namespace(store, tmp_path):
+    with store.transaction() as tx:
+        tx.upsert_node("0", labels=["Old"], attr={"size": 1, "extra": True})
+        tx.upsert_node("other")
+    seq = store.seq()
+    lgf = tmp_path / "graph.lgf"
+    lgf.write_text(LEMON)
+    report = store.import_file(lgf)
+    assert (report["format"], report["nodes"], report["edges"], report["commits"]) == ("lgf", 3, 3, 2)
+    assert (report["first_seq"], report["last_seq"]) == (seq + 1, seq + 2)
+    node = store.node("0")
+    assert node["attr"] == {"coordinates": "(10,20)", "size": 10, "title": "First node"}
+    assert node["labels"] == ["Old"] and store.node("other") is not None
+    # Again: edges are updated, not added
+    edges = store.namespace("default").status()["edges"]
+    assert edges == 3
+    store.import_file(lgf)
+    assert store.namespace("default").status()["edges"] == edges
+    store.create_namespace("side")
+    side = store.namespace("side")
+    assert side.import_file(lgf, format="lgf")["nodes"] == 3
+    with pytest.raises(iwdb.InvalidError):
+        side.import_file(lgf, format="binary")

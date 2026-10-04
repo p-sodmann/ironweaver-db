@@ -235,9 +235,22 @@ fn import_and_export() {
         assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
         assert_eq!(json(&out)["imported"]["edges"].as_u64(), Some(1));
     }
+    // A merge into an existing namespace, default too
+    let out = iwctl(&["import", p(&dir), "default", p(&lgf), "--merge"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stdout(&out).contains("merged a lgf file into namespace 'default': 2 nodes, 1 edges in 2 commits"),
+        "{}",
+        stdout(&out)
+    );
+    let out = iwctl(&["--json", "import", p(&dir), "people", p(&lgf), "--merge"]);
+    assert_eq!(json(&out)["merged"]["commits"].as_u64(), Some(2));
+    assert_eq!(code(&iwctl(&["import", p(&dir), "nobody", p(&lgf), "--merge"])), 4);
+    assert_eq!(code(&iwctl(&["export", p(&dir), p(&bin_file), "--merge"])), 2);
+
     // The default namespace exports too
     let out = iwctl(&["export", p(&dir), p(&work.path().join("default.bin"))]);
-    assert!(stdout(&out).contains("(7 nodes, 0 edges)"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("(9 nodes, 1 edges)"), "{}", stdout(&out));
 
     // Failures: an existing namespace, a bad file, usage errors
     assert_eq!(code(&iwctl(&["import", p(&dir), "people", p(&lgf)])), 4);

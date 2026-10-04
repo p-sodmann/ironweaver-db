@@ -1,10 +1,11 @@
 # Import and export
 
-An **import** creates a namespace from a graph file: the file's graph becomes the namespace's state at seq 1, written as one checkpoint, with no WAL records. An **export** writes a namespace's graph as a core file, which the Ironweaver library and the import read. Design: [ADR 0033](../adr/0033-bulk-import-export.md).
+An **import** creates a namespace from a graph file: the file's graph becomes the namespace's state at seq 1, written as one checkpoint, with no WAL records. A **merge** imports a file into an existing namespace (`default` too) through ordinary commits. An **export** writes a namespace's graph as a core file, which the Ironweaver library and the import read. Design: [ADR 0033](../adr/0033-bulk-import-export.md).
 
 | | Rust | Python | iwctl |
 |---|---|---|---|
 | import | `Store::import_namespace(name, format, reader, progress)`, `Store::import_file(name, path, format, progress)` | `store.import_namespace(name, path, format=None)` | `iwctl import <dir> <name> <file> [--format f]` |
+| merge | `Ns::import(format, reader, progress)`, `Ns::import_file(path, format, progress)` | `store.import_file(path, format=None)`, `namespace.import_file(...)` | `iwctl import <dir> <name> <file> --merge` |
 | export | `Ns::export(out, format, progress)`, `Ns::export_file(path, format, progress)` | `store.export(path, format=None)`, `namespace.export(...)` | `iwctl export <dir> <file> [-n ns] [--format f]` |
 
 Not over gRPC or REST: that needs an upload and a download stream (a later step).
@@ -46,11 +47,22 @@ caption "LEMON test digraph"
 - **Values are typed by their look**: an unquoted token that parses as a 64-bit integer is an `Int`; one with a digit that parses as a number is a `Float`; anything else, and every quoted token, is a `String`. A string `007` written unquoted comes back as `Int(7)`: quote it.
 - Errors name the line: `line 6: no node 'b'`.
 
+## Merging into an existing namespace
+
+A merge reads the file like an import, then commits it through the commit pipeline, in batches of up to 10 000 mutations, nodes before edges:
+
+- **Nodes** are upserted: the file's attributes and meta replace the node's, its labels are added (labels the node has stay).
+- **Edges** are upserted by their ends and type: an existing edge from the same node to the same node with the same type gets the file's attributes and meta; otherwise one is added. Edges of the file that share their ends and type (parallel edges) are added, each time. The file's edge ids are not kept. Where the namespace has parallel edges an edge of the file would update, the batch fails (`AmbiguousEdge`).
+- **Indexes** the file declares that the namespace lacks are created first.
+- Each batch is an ordinary commit: in the WAL, the change stream and the archive, constraints checked, versions bumped. **A failure stops the merge**, with the batches before it committed; running it again converges, apart from parallel edges, which are added again.
+
+The report has the counts, the indexes created, what was left out, the number of commits and the seqs of the first and the last. Progress: the bytes read, then the mutations committed (`Phase::Committing`).
+
 ## Guarantees
 
 - **All or nothing.** After a crash at any point, the namespace is there with all the file's data, or not at all. The import's checkpoint is staged before the namespace's create event is logged, and the next open finishes a staged import whose event is logged ([data-dir.md](../formats/data-dir.md), "Import").
 - **Checked first.** The graph is checked like a recovered namespace before anything is written; a refused file creates nothing.
-- **A new namespace only.** The name must not exist (`conflict`); there is no import into an existing namespace.
+- **A new namespace.** The name must not exist (`conflict`); to import into an existing one, merge.
 - **Not in the WAL.** The namespace's change stream starts at seq 2 (seq 1 is `not_retained`), and the WAL archive doesn't hold the import. **Take a backup after an import**: a restore from an older backup plus the archive can't rebuild the namespace.
 - **Export** reads the namespace at one seq; commits to that namespace wait while it writes (reads don't). `export_file` writes a temporary file, fsyncs it and renames it over the path.
 

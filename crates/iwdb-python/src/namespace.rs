@@ -161,6 +161,16 @@ impl PyNamespace {
         self.store.get().checkpoint_in(py, &self.name)
     }
 
+    /// Merge the graph file `path` (core JSON or binary, or LGF; `format`
+    /// as for `Store.import_namespace`) into this namespace through
+    /// commits: nodes upserted, edges upserted by their ends and type, in
+    /// batches of up to 10 000 mutations. A failure leaves the batches
+    /// before it committed; running it again converges.
+    #[pyo3(signature = (path, *, format = None))]
+    fn import_file(&self, py: Python<'_>, path: std::path::PathBuf, format: Option<&str>) -> PyResult<Py<PyAny>> {
+        self.store.get().merge_in(py, &self.name, path, format)
+    }
+
     /// Write the namespace's graph to `path` as a core file (see
     /// `Store.export`).
     #[pyo3(signature = (path, *, format = None))]

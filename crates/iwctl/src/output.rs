@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use iwdb::import::{ExportReport, ImportReport};
+use iwdb::import::{ExportReport, ImportReport, MergeReport};
 use iwdb::{
     BackupReport, CheckpointOutcome, CommitTime, Error, Finding, FsyncPolicy, HistoryId, IndexState, Kind,
     NamespaceResult, NamespaceStatus, RecoveryReport, RestoreReport, Status, StoreRecovery, StoreStatus, VerifyReport,
@@ -346,6 +346,32 @@ impl Out {
         );
         if !indexes.is_empty() {
             text += &format!(", indexes {}", indexes.join(", "));
+        }
+        if !r.dropped.is_empty() {
+            text += &format!("\nleft out (a namespace has no place for them): {}", r.dropped.join(", "));
+        }
+        self.print(value, &text);
+    }
+
+    pub fn merge(&self, name: &str, r: &MergeReport) {
+        let created: Vec<String> = r.created_indexes.iter().map(|p| p.to_string()).collect();
+        let value = json!({
+            "merged": {
+                "namespace": name, "format": r.format.name(), "nodes": r.nodes, "edges": r.edges,
+                "created_indexes": created, "dropped": r.dropped, "bytes_read": r.bytes_read,
+                "commits": r.commits, "first_seq": r.first_seq, "last_seq": r.last_seq,
+            }
+        });
+        let seqs = match (r.first_seq, r.last_seq) {
+            (Some(a), Some(b)) => format!(", seqs {} to {}", a, b),
+            _ => String::new(),
+        };
+        let mut text = format!(
+            "merged a {} file into namespace '{}': {} nodes, {} edges in {} commits{}",
+            r.format, name, r.nodes, r.edges, r.commits, seqs
+        );
+        if !created.is_empty() {
+            text += &format!(", created indexes {}", created.join(", "));
         }
         if !r.dropped.is_empty() {
             text += &format!("\nleft out (a namespace has no place for them): {}", r.dropped.join(", "));

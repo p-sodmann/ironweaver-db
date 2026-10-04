@@ -485,6 +485,14 @@ impl PyStore {
         })
     }
 
+    /// Merge the graph file `path` into `"default"` through commits: its
+    /// nodes are upserted, its edges upserted by their ends and type, in
+    /// batches (see `Namespace.import_file`).
+    #[pyo3(signature = (path, *, format = None))]
+    fn import_file(&self, py: Python<'_>, path: PathBuf, format: Option<&str>) -> PyResult<Py<PyAny>> {
+        self.merge_in(py, NAMESPACE, path, format)
+    }
+
     /// Write `"default"`'s graph to `path` as a core file (`format` "json"
     /// or "binary"; by default JSON for a `.json` path, binary otherwise),
     /// atomically. Commits wait while it writes.
@@ -632,6 +640,20 @@ impl PyStore {
         guard(|| {
             let status = self.status_of(py, ns)?;
             reports::indexes(py, &status.indexes)
+        })
+    }
+
+    pub(crate) fn merge_in(
+        &self,
+        py: Python<'_>,
+        ns: &str,
+        path: PathBuf,
+        format: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        guard(|| {
+            let format = format.map(str::parse::<ImportFormat>).transpose().map_err(invalid)?;
+            let report = self.with_ns(py, ns, move |n| n.import_file(&path, format, None))?;
+            reports::merge(py, &report)
         })
     }
 

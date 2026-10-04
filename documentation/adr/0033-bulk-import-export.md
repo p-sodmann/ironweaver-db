@@ -18,7 +18,9 @@ What we have to fit into:
 
 ## Decision
 
-**1. Import creates a new namespace.** `Store::import_namespace(name, format, reader, progress)` reads the file into a graph, checks it, and creates the namespace `name` with that graph as its state at **seq 1**: one checkpoint, no WAL record. Seq 1 rather than 0, so that a change stream consumer asking for seq 1 gets `not_retained` instead of silently missing the imported data. The namespace must not exist (`NamespaceExists`), so there is no write next to the WAL of a live namespace: an import is a namespace created with content. Importing into an existing namespace (merging) is not supported; neither is an idempotency key (a retry finds the namespace there, or not).
+**1. Import creates a new namespace.** `Store::import_namespace(name, format, reader, progress)` reads the file into a graph, checks it, and creates the namespace `name` with that graph as its state at **seq 1**: one checkpoint, no WAL record. Seq 1 rather than 0, so that a change stream consumer asking for seq 1 gets `not_retained` instead of silently missing the imported data. The namespace must not exist (`NamespaceExists`), so there is no write next to the WAL of a live namespace: an import is a namespace created with content. No idempotency key: a retry finds the namespace there, or not.
+
+**1b. Merging into an existing namespace** (decision of 2026-10-04: import only into new namespaces was too limiting): `Ns::import(format, reader, progress)` goes through the commit pipeline instead, in batches of up to 10 000 mutations (halved while a batch is too large for one WAL record), nodes before edges. Nodes are upserted (attributes and meta replaced, labels added); edges are upserted by their ends and type (`EdgeKey::Endpoints`), except parallel edges of the file (same ends and type), which are added. Indexes the file declares that the namespace lacks are created first. So a merge works on `default` and on namespaces with data, is in the WAL, the change stream and the archive, checks constraints, and running it again converges (parallel edges apart). It is atomic per batch, not for the file: a failure stops it with the batches before committed. The file's edge ids are not kept, and the versions continue.
 
 **2. Crash safety, all or nothing.**
 
@@ -41,7 +43,7 @@ Memory: the graph, plus a buffer for binary and LGF files; JSON files are read i
 
 **5. Progress.** Import and export take an optional callback, called with the phase (reading, writing) and the bytes read or written so far, about every 4 MiB and at the end of each phase.
 
-**6. Where it is available.** `Store` and `Ns` in Rust (plus `import_file` / `export_file` for paths, which write the export atomically), Python (`Store.import_namespace`, `Namespace.export`), and `iwctl import` / `iwctl export` on a local data directory. Not over the `Database` trait (gRPC, REST): that needs an upload and a download stream, and the server reading or writing files of its own machine is a question for authentication (step 15). Like backup and restore, these are operations on a store, not requests.
+**6. Where it is available.** `Store` and `Ns` in Rust (plus `import_file` / `export_file` for paths, which write the export atomically), Python (`Store.import_namespace`, `Store.import_file` / `Namespace.import_file` to merge, `Namespace.export`), and `iwctl import [--merge]` / `iwctl export` on a local data directory. Not over the `Database` trait (gRPC, REST): that needs an upload and a download stream, and the server reading or writing files of its own machine is a question for authentication (step 15). Like backup and restore, these are operations on a store, not requests.
 
 ## Consequences
 
@@ -50,4 +52,5 @@ Memory: the graph, plus a buffer for binary and LGF files; JSON files are read i
 - The change stream of an imported namespace starts at seq 2: seq 1 is `not_retained`.
 - Export blocks commits to the namespace while it runs (a few seconds for a graph of millions of nodes). A consumer that needs a live namespace untouched can export from a restored backup instead.
 - LGF values are typed by their look: a string attribute `"007"` written unquoted comes back as `Int(7)`.
-- Not in this step: import into an existing namespace, remote import and export, CSV, GraphML, Parquet, LGF export.
+- A merge is as durable and visible as any commits, but costs them: millions of mutations make millions of WAL entries (in large records) and as many version bumps. A namespace created by import is the fast path for a new graph.
+- Not in this step: remote import and export, CSV, GraphML, Parquet, LGF export.

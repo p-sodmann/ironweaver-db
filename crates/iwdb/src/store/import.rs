@@ -5,7 +5,10 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
 
-use iwdb_engine::catalog::NamespaceName;
+use std::collections::HashMap;
+
+use iwdb_engine::catalog::{AttrPath, IndexDef, NamespaceName};
+use iwdb_engine::{CatalogChange, EdgeKey, Mutation};
 use iwdb_storage::Error;
 use iwdb_storage::import as files;
 use iwdb_storage::io::LogFs;
@@ -14,12 +17,72 @@ use iwdb_storage::namespaces::{EventKind, Plan};
 
 use super::{Ns, Store, background::or_abort, lock};
 use crate::import::{
-    CountingWriter, ExportFormat, ExportReport, ImportFormat, ImportReport, OnProgress, Phase, Reporter, invalid,
-    read_graph,
+    CountingWriter, ExportFormat, ExportReport, ImportFormat, ImportReport, MergeReport, OnProgress, Phase, Reporter,
+    invalid, read_graph,
 };
 
 /// At most this many invariant violations are named in an `InvalidImport`.
 const MAX_LISTED: usize = 10;
+
+/// Mutations per commit of a merge (halved while a commit's WAL record
+/// would be too large).
+const MERGE_BATCH: usize = 10_000;
+
+/// The file `path`, buffered, and its format: `format`, or the one
+/// [`ImportFormat::detect`] finds in its first bytes.
+fn open_detected(path: &Path, format: Option<ImportFormat>) -> Result<(BufReader<File>, ImportFormat), Error> {
+    let file = File::open(path).map_err(|e| Error::Io { op: "open", path: path.into(), source: e })?;
+    let mut input = BufReader::with_capacity(1 << 20, file);
+    let format = match format {
+        Some(format) => format,
+        None => {
+            let head = input.fill_buf().map_err(|e| Error::Io { op: "read", path: path.into(), source: e })?;
+            ImportFormat::detect(head).ok_or_else(|| {
+                invalid(format!("can't tell the format of '{}' (json, binary or lgf): name it", path.display()))
+            })?
+        }
+    };
+    Ok((input, format))
+}
+
+/// The mutations that merge `graph` into a namespace: an upsert per node
+/// (in slot order), then per edge an upsert by its ends and type, or, for
+/// edges that share their ends and type with another edge of the file
+/// (parallel edges), an add.
+fn merge_mutations(graph: &iwdb_engine::DbGraph) -> (Vec<Mutation>, Vec<Mutation>) {
+    let nodes = graph
+        .nodes()
+        .map(|(ix, node)| Mutation::UpsertNode {
+            id: node.id().to_owned(),
+            labels: graph.label_names(ix).unwrap_or_default().into_iter().map(str::to_owned).collect(),
+            attr: node.data.attr.clone(),
+            meta: node.data.meta.clone(),
+            expected_version: None,
+        })
+        .collect();
+    let key = |ix, e: &ironweaver_core::Edge<iwdb_engine::DbRecord>| {
+        (e.source(), e.target(), graph.edge_type_name(ix).map(str::to_owned))
+    };
+    let mut parallel: HashMap<_, usize> = HashMap::new();
+    for (ix, e) in graph.edges() {
+        *parallel.entry(key(ix, e)).or_default() += 1;
+    }
+    let id = |n| graph.node(n).map_or_else(String::new, |n| n.id().to_owned());
+    let edges = graph
+        .edges()
+        .map(|(ix, e)| {
+            let (from, to, ty) = key(ix, e);
+            let (attr, meta) = (e.data.attr.clone(), e.data.meta.clone());
+            if parallel.get(&(from, to, ty.clone())).copied().unwrap_or(0) > 1 {
+                Mutation::AddEdge { from: id(from), to: id(to), ty, attr, meta }
+            } else {
+                let key = EdgeKey::Endpoints { from: id(from), to: id(to), ty };
+                Mutation::UpsertEdge { key, attr, meta, expected_version: None }
+            }
+        })
+        .collect();
+    (nodes, edges)
+}
 
 impl<F: LogFs + Clone + Send + Sync + 'static> Store<F>
 where
@@ -76,17 +139,7 @@ where
         format: Option<ImportFormat>,
         progress: Option<OnProgress<'_>>,
     ) -> Result<ImportReport, Error> {
-        let file = File::open(path).map_err(|e| Error::Io { op: "open", path: path.into(), source: e })?;
-        let mut input = BufReader::with_capacity(1 << 20, file);
-        let format = match format {
-            Some(format) => format,
-            None => {
-                let head = input.fill_buf().map_err(|e| Error::Io { op: "read", path: path.into(), source: e })?;
-                ImportFormat::detect(head).ok_or_else(|| {
-                    invalid(format!("can't tell the format of '{}' (json, binary or lgf): name it", path.display()))
-                })?
-            }
-        };
+        let (input, format) = open_detected(path, format)?;
         self.import_from(name, format, input, progress, path)
     }
 
@@ -182,6 +235,130 @@ impl<F: LogFs + Clone + Send + Sync + 'static> Ns<'_, F>
 where
     F::File: Send,
 {
+    /// Merge a file in `format` read from `input` into this namespace,
+    /// through the commit pipeline: every node of the file is upserted
+    /// (its attributes and meta replace the node's, its labels are
+    /// added), then every edge is upserted by its ends and type (the
+    /// edge's attributes and meta replaced, or a new edge added; parallel
+    /// edges of the file, with the same ends and type, are added each
+    /// time). Indexes the file declares that the namespace lacks are
+    /// created first. The file's edge ids are not kept.
+    ///
+    /// **Batches, not one transaction**: the mutations are committed in
+    /// batches of up to 10 000, nodes before edges, each an ordinary
+    /// commit (in the WAL, the change stream and the archive; constraints
+    /// checked). A failure stops the merge with the batches before it
+    /// committed; running the merge again converges (except for parallel
+    /// edges, which are added again).
+    ///
+    /// Memory: the file's graph and one batch, plus the whole file for
+    /// JSON. `progress` gets the bytes read, then the mutations committed.
+    ///
+    /// Errors: [`Error::InvalidImport`] (the file; nothing committed); a
+    /// commit's errors ([`Error::Engine`] for a constraint, an
+    /// `AmbiguousEdge` where the namespace has parallel edges an edge of
+    /// the file would update, ...); [`Error::Io`].
+    pub fn import(
+        &self,
+        format: ImportFormat,
+        input: impl Read,
+        progress: Option<OnProgress<'_>>,
+    ) -> Result<MergeReport, Error> {
+        self.merge_from(format, input, progress, Path::new("<input>"))
+    }
+
+    /// [`import`](Self::import) from the file `path`, in `format` or the
+    /// one detected from its first bytes.
+    pub fn import_file(
+        &self,
+        path: &Path,
+        format: Option<ImportFormat>,
+        progress: Option<OnProgress<'_>>,
+    ) -> Result<MergeReport, Error> {
+        let (input, format) = open_detected(path, format)?;
+        self.merge_from(format, input, progress, path)
+    }
+
+    fn merge_from(
+        &self,
+        format: ImportFormat,
+        input: impl Read,
+        progress: Option<OnProgress<'_>>,
+        what: &Path,
+    ) -> Result<MergeReport, Error> {
+        if self.state.live.is_dropped() {
+            return Err(Error::NamespaceDropped { name: self.name().to_owned() });
+        }
+        let mut reporter = Reporter::new(progress, Phase::Reading);
+        let read = read_graph(format, input, &mut reporter, what)?;
+        reporter.end(read.bytes, Phase::Committing);
+        let graph = read.graph;
+        // The file's indexes, checked before anything is committed
+        let mut wanted = Vec::new();
+        for keys in graph.index_paths() {
+            let path = AttrPath::new(keys.iter().cloned()).map_err(invalid)?;
+            if path.keys() == ["labels"] {
+                return Err(invalid("the file declares an index on 'labels', which can't be indexed"));
+            }
+            wanted.push(IndexDef { path });
+        }
+        let mut report = MergeReport {
+            format,
+            nodes: graph.node_count(),
+            edges: graph.edge_count(),
+            created_indexes: Vec::new(),
+            dropped: read.dropped,
+            bytes_read: read.bytes,
+            commits: 0,
+            first_seq: None,
+            last_seq: None,
+        };
+        let committed = |report: &mut MergeReport, seq: u64| {
+            report.commits += 1;
+            report.first_seq.get_or_insert(seq);
+            report.last_seq = Some(seq);
+        };
+        for index in wanted {
+            if self.read(|n| n.catalog().has_index(&index)) {
+                continue;
+            }
+            let result = self.commit_catalog(CatalogChange::CreateIndex(index.clone()))?;
+            committed(&mut report, result.seq);
+            report.created_indexes.push(index.path);
+        }
+        let (nodes, edges) = merge_mutations(&graph);
+        drop(graph);
+        let mut done = 0u64;
+        for part in [nodes, edges] {
+            let mut rest = &part[..];
+            let mut size = MERGE_BATCH;
+            while !rest.is_empty() {
+                let batch = &rest[..size.min(rest.len())];
+                match self.commit(batch) {
+                    Ok(result) => {
+                        committed(&mut report, result.seq);
+                        done += batch.len() as u64;
+                        reporter.committed(done);
+                        rest = &rest[batch.len()..];
+                    }
+                    // Too large for one WAL record: smaller batches
+                    Err(Error::RecordTooLarge { .. }) if batch.len() > 1 => size = batch.len() / 2,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        log::info!(
+            "namespace '{}': merged {} nodes and {} edges from {} ({}) in {} commits",
+            self.name(),
+            report.nodes,
+            report.edges,
+            what.display(),
+            format,
+            report.commits
+        );
+        Ok(report)
+    }
+
     /// Write the namespace's graph to `out` as a core file in `format`: the
     /// state at the namespace's current seq, with nodes, edges (with their
     /// ids), labels, types, attributes, user meta and indexes, sorted like

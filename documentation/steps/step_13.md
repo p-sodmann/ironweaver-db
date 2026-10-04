@@ -92,6 +92,7 @@ Refined while writing the code:
 - **Python**: `NamespaceExists` from the store's own calls is now `ConflictError`, as it already was through the `Database` trait.
 - **Fixtures**: the core's sample files (`tests/fixtures/import/`: version 1 JSON and binary, version 2 JSON, binary and half-float binary) are imported by the tests, so files of the Ironweaver library stay importable.
 - **Tests**: the crash test was checked to fail when recovery doesn't finish a staged import.
+- **Merging into existing namespaces** (decision of 2026-10-04: an import only into new namespaces was too limiting): `Ns::import` / `import_file` commit the file through the commit pipeline in batches (nodes upserted, edges upserted by ends and type, parallel edges added); Python `import_file`, `iwctl import --merge`. Tests: converging re-runs, `default`, batches split below the WAL record limit, a failing batch.
 
 ## Notes for parts 2 and 3
 

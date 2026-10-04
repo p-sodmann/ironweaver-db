@@ -493,3 +493,134 @@ fn an_imported_namespace_is_backed_up_and_restored_but_not_from_the_archive_alon
     let error = iwdb::restore(&from_archive, &sources, RestoreTarget::Latest).unwrap_err();
     assert_matches!(error, Error::MissingRecords { from: 1, .. }, "{}", error);
 }
+
+// ---- merging into an existing namespace ----
+
+fn lgf_bytes(text: &str) -> Vec<u8> {
+    text.as_bytes().to_vec()
+}
+
+/// A merge upserts the file's nodes and edges through commits: into
+/// `default` too, over existing data, and again without changing anything
+/// but the versions and seqs.
+#[test]
+fn a_merge_upserts_through_commits_and_converges() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), options(2)).unwrap();
+    let ns = store.default_namespace();
+    ns.commit(&[
+        node("a", &["Old"], attrs(&[("name", Value::from("old")), ("keep", Value::Int(1))])),
+        node("z", &[], Attrs::new()),
+    ])
+    .unwrap();
+    let before = ns.seq();
+    // A core file: a and b with labels, a typed edge, an index
+    let mut g = Graph::<Record, Record>::new();
+    let a = g.add_node("a", Record { attr: attrs(&[("name", Value::from("Ann"))]), meta: Attrs::new() }).unwrap();
+    let b = g.add_node("b", Record { attr: Attrs::new(), meta: attrs(&[("m", Value::Int(2))]) }).unwrap();
+    g.add_label(a, "Person").unwrap();
+    let e = g.add_edge(a, b, Record { attr: attrs(&[("w", Value::Int(1))]), meta: Attrs::new() }).unwrap();
+    g.set_edge_type(e, Some("KNOWS")).unwrap();
+    // Two parallel untyped edges b -> a
+    for _ in 0..2 {
+        g.add_edge(b, a, Record { attr: Attrs::new(), meta: Attrs::new() }).unwrap();
+    }
+    g.create_index::<GraphError>(&["name".to_owned()]).unwrap();
+    let file = GraphWriter::new(&g, &RecordCodec { meta: &attrs(&[("t", Value::Int(1))]), half: false })
+        .to_json(false)
+        .unwrap();
+
+    let mut seen = Vec::new();
+    let report = ns.import(ImportFormat::Json, &file[..], Some(&mut |p: Progress| seen.push(p))).unwrap();
+    assert_eq!((report.nodes, report.edges), (2, 3));
+    assert_eq!(report.created_indexes, [AttrPath::new(["name"]).unwrap()]);
+    assert_eq!(report.dropped, ["graph meta 't'"]);
+    // The index, the nodes, the edges: three commits after the old ones
+    assert_eq!((report.commits, report.first_seq, report.last_seq), (3, Some(before + 1), Some(before + 3)));
+    assert_eq!(seen.last().map(|p| (p.phase, p.mutations)), Some((Phase::Committing, 5)));
+    let check = |ns: &iwdb::Ns<'_, iwdb::StdFs>| {
+        ns.read(|n| {
+            let g = n.graph();
+            let a = g.node_by_id("a").unwrap();
+            // Attributes replaced, labels added
+            assert_eq!(a.data.attr, attrs(&[("name", Value::from("Ann"))]));
+            let mut labels = g.label_names(g.node_ix("a").unwrap()).unwrap();
+            labels.sort_unstable();
+            assert_eq!(labels, ["Old", "Person"]);
+            assert!(g.contains_node("z"), "nodes the file doesn't have stay");
+            g.edges().filter(|(ix, _)| g.edge_type_name(*ix) == Some("KNOWS")).count()
+        })
+    };
+    assert_eq!(check(&ns), 1);
+    assert_eq!(ns.read(|n| n.graph().edge_count()), 3);
+    let limits = BatchLimits { max_records: 100, max_bytes: 1 << 20 };
+    let streamed = ns.changes(before + 1, limits, false, &ReadOptions::default()).unwrap();
+    assert_eq!(streamed.records.len(), 3, "the merge is in the change stream");
+
+    // Again: the same graph, except the parallel edges, which are added again
+    let again = ns.import(ImportFormat::Json, &file[..], None).unwrap();
+    assert!(again.created_indexes.is_empty());
+    assert_eq!(again.commits, 2);
+    assert_eq!(check(&ns), 1, "the typed edge is updated, not added");
+    assert_eq!(ns.read(|n| n.graph().edge_count()), 5);
+    assert!(ns.read(|n| n.graph().node_by_id("a").unwrap().data.version) > 1);
+    store.close().unwrap();
+
+    // Recovered from the WAL like any commits
+    let store = Store::open(dir.path(), options(2)).unwrap();
+    assert_eq!(check(&store.default_namespace()), 1);
+    store.close().unwrap();
+    assert!(iwdb::verify(dir.path()).unwrap().is_ok());
+}
+
+/// Batches: many mutations take several commits; a batch too large for one
+/// WAL record is split; a failing batch stops the merge with the batches
+/// before it committed.
+#[test]
+fn a_merge_commits_in_batches_and_stops_at_a_failing_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), options(2)).unwrap();
+    store.create_namespace("many", None).unwrap();
+    let ns = store.namespace("many").unwrap();
+    let mut text = String::from("@nodes\nlabel\n");
+    for i in 0..25_000 {
+        text += &format!("n{}\n", i);
+    }
+    let report = ns.import(ImportFormat::Lgf, text.as_bytes(), None).unwrap();
+    assert_eq!((report.nodes, report.commits), (25_000, 3));
+
+    // 80 nodes of 1 MiB: more than a WAL record holds (64 MiB)
+    store.create_namespace("large", None).unwrap();
+    let large = store.namespace("large").unwrap();
+    let mut g = Graph::<Record, Record>::new();
+    for i in 0..80 {
+        let attr = attrs(&[("blob", Value::Bytes(vec![i as u8; 1 << 20]))]);
+        g.add_node(format!("b{}", i), Record { attr, meta: Attrs::new() }).unwrap();
+    }
+    let mut file = Vec::new();
+    GraphWriter::new(&g, &RecordCodec { meta: &Attrs::new(), half: false }).write_binary(&mut file).unwrap();
+    let report = large.import(ImportFormat::Binary, &file[..], None).unwrap();
+    assert_eq!(report.nodes, 80);
+    assert!(report.commits >= 2, "{:?}", report);
+    assert_eq!(large.read(|n| n.graph().node_count()), 80);
+
+    // Parallel edges in the namespace make an upsert by ends ambiguous:
+    // the nodes are committed, the edges are not
+    store.create_namespace("ambiguous", None).unwrap();
+    let amb = store.namespace("ambiguous").unwrap();
+    amb.commit(&[node("a", &[], Attrs::new()), node("b", &[], Attrs::new())]).unwrap();
+    amb.commit(&[edge("a", "b", None, Attrs::new()), edge("a", "b", None, Attrs::new())]).unwrap();
+    let seq = amb.seq();
+    let error = amb
+        .import(ImportFormat::Lgf, &lgf_bytes("@nodes\nlabel x\na 1\nb 2\nc 3\n@arcs\n\t\tw\na b 1\n")[..], None)
+        .unwrap_err();
+    assert!(error.to_string().contains("needs at most one"), "{}", error);
+    assert_eq!(amb.seq(), seq + 1, "the nodes' batch is committed");
+    assert!(amb.read(|n| n.graph().contains_node("c")));
+
+    // A bad file commits nothing
+    let error = amb.import(ImportFormat::Lgf, &lgf_bytes("@nodes\nid\n")[..], None).unwrap_err();
+    assert_matches!(error, Error::InvalidImport { .. });
+    assert_eq!(amb.seq(), seq + 1);
+    store.close().unwrap();
+}
