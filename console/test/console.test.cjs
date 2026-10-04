@@ -268,6 +268,20 @@ test('REST answers become the contract\'s shapes: numbers, absent defaults, path
   await rejects(s.cancel('req-1'), 'unavailable');
 });
 
+test('the REST Source reports the server\'s readiness (step 16b)', async () => {
+  let ready = false;
+  const { fetch } = fakeServer({
+    'GET /v1/health/ready': () => (ready ? [200, { state: 'HEALTH_STATE_READY', ready: true }] : [503, { state: 'HEALTH_STATE_RECOVERING' }]),
+    'GET /v1/namespaces': [200, { namespaces: [] }],
+  });
+  const s = rest.create({ fetch });
+  const recovering = await s.server();
+  assert.equal(recovering.ready, false); assert.equal(recovering.health, 'warn');
+  ready = true;
+  const up = await s.server();
+  assert.equal(up.ready, true); assert.equal(up.health, 'ok');
+});
+
 test('a server that doesn\'t answer is unavailable', async () => {
   const s = rest.create({ fetch: async () => { throw new Error('connection refused'); } });
   await rejects(s.namespaces(), 'unavailable');

@@ -11,6 +11,7 @@ one the remote runs are skipped, unless `IWDB_REQUIRE_REMOTE=1` (CI), which
 makes them fail.
 """
 
+import json
 import os
 import re
 import signal
@@ -38,6 +39,18 @@ def server_binary():
     return max(found, key=lambda p: p.stat().st_mtime) if found else None
 
 
+def serving_address(line):
+    """The address of the server's `serving` log event, or None."""
+    try:
+        event = json.loads(line)
+    except ValueError:
+        match = re.search(r"serving .* on (\S+)$", line.strip())
+        return match.group(1) if match else None
+    if isinstance(event, dict) and str(event.get("message", "")).startswith("serving"):
+        return event.get("address")
+    return None
+
+
 class Server:
     """An iwdb-server on a free port, serving `data_dir`."""
 
@@ -58,12 +71,13 @@ class Server:
         self.process = subprocess.Popen(
             [str(binary), "--config", str(config)], stderr=subprocess.PIPE, text=True
         )
-        # "iwdb-server: serving <dir> on <address>"
+        # The "serving <dir> on <address>" event: the server is ready (a JSON
+        # line, since stderr is a pipe; a text line with IWDB_LOG_FORMAT=text)
         for line in self.process.stderr:
             self.stderr.append(line)
-            match = re.search(r"serving .* on (\S+)$", line.strip())
-            if match:
-                self.endpoint = "http://" + match.group(1)
+            address = serving_address(line)
+            if address:
+                self.endpoint = "http://" + address
                 break
         else:
             self.process.wait()

@@ -33,9 +33,13 @@
 | POST | `/v1/namespaces/{ns}/analyze` | `AnalyzeRequest` | `AnalyzeResponse` (streamed) | `analyze` |
 | GET | `/v1/namespaces/{ns}/changes` | `from_seq`, `wait` and options as query parameters | `GetChangesResponse` | `changes` |
 | GET | `/v1/namespaces/{ns}/changes/stream` | `from_seq` and options as query parameters, `Last-Event-ID` | Server-Sent Events ([changes.md](changes.md)) | `changes` with `wait`, in a loop |
+| GET | `/v1/health/live` | – | `Health`: 200 whenever the server answers | – (the server's, [config.md](config.md#health)) |
+| GET | `/v1/health/ready` | – | `Health`: 200 when ready, 503 while recovering or shutting down | – (the server's) |
 | GET | `/v1/openapi.json` | – | the OpenAPI document | – |
 
-Path parameters are percent-encoded: node `a/b` is `/nodes/a%2Fb`.
+Path parameters are percent-encoded: node `a/b` is `/nodes/a%2Fb`. A test keeps this table equal to the server's route table.
+
+The health routes are served in every build (also without the `rest` feature) and while the store recovers; until recovery has finished every other route answers 503 `unavailable` ([ADR 0040](../adr/0040-health-and-readiness.md)). With the `console` feature and `[console] enabled = true`, the operator console's pages are served at `/console/` on the same port ([ADR 0041](../adr/0041-console-served-by-the-server.md)); they aren't part of this API.
 
 ## Requests
 

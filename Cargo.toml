@@ -38,10 +38,18 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "signal",
 # own, without tonic's grpc-timeout layer (ADR 0026); both already in the tree through tonic
 hyper = { version = "1", default-features = false, features = ["server", "http2"] }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio", "server", "http2", "server-graceful", "service"] }
+# The standard gRPC health service grpc.health.v1 (step 16b): Kubernetes'
+# gRPC probes and grpc_health_probe speak it; from the tonic project
+tonic-health = { version = "0.14", default-features = false }
+# Structured logs (step 16b, iwdb-server only): tracing is already in the tree
+# through tokio; tracing-subscriber writes JSON or text lines, filters them, and
+# bridges the `log` records of the library crates
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "json", "env-filter", "ansi", "tracing-log"] }
 # Streamed answers as a stream of chunks (already in the tree through tonic)
 tokio-stream = { version = "0.1", default-features = false }
 # The server's config file
-toml = { version = "1", default-features = false, features = ["parse", "serde"] }
+toml = { version = "1", default-features = false, features = ["parse", "display", "serde"] }
 # Build: generated code from the protos, compiled by protox (pure Rust: no protoc)
 tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }
 protox = "0.9"

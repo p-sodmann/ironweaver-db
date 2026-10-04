@@ -5,11 +5,23 @@ A web interface for operators of an Ironweaver DB server (step 16a, [ADR 0037](.
 - **Explore** (`index.html`): walk through a graph like Neo4j's browser, and browse and edit a namespace like phpMyAdmin. The schema (namespaces, labels, edge types, indexes, constraints) is on the left; the result of the query line is in the middle as a graph, a table, a plan or the namespace's structure; the inspector opens with a selection. Hover a node to peek at its neighbours, double-click to bring them in. Edits (a property in the inspector, connecting or detaching on the canvas) are staged and committed together (`⌘S`).
 - **Status** (`status.html`): the server at one glance. Health and problems, commits, latencies, memory and active requests over the last minute and a half, every namespace's state, latency by operation, active requests (with cancel), change-stream consumers, jobs and index builds, and the log.
 
-It runs against a real server through `serve.py`, or on mock data on its own.
+It runs on a real server, served by `iwdb-server` itself or through `serve.py`, or on mock data on its own.
 
-## Against a server (Docker)
+## Served by the server
 
-`serve.py` is a small Flask app: it serves the pages and passes `/v1/...` through to the server, so the pages and the API share one origin. (The server answers no CORS preflight on purpose, so a page on another origin can't call it; the proxy keeps that guard.)
+A server built with the `console` feature serves the pages at `/console/` when `[console] enabled = true` (`IWDB_CONSOLE_ENABLED=true`), on its own port, with the REST API on the same origin ([ADR 0041](../documentation/adr/0041-console-served-by-the-server.md)). The pages are compiled into the binary. Until step 15 there is no authentication, so the server refuses the console on a non-loopback address unless `[console] public = true`.
+
+```sh
+docker compose up --build                      # iwdb-server on 127.0.0.1:7600, console turned on
+node console/tools/seed.mjs                    # optional: the sample namespaces
+open http://127.0.0.1:7600/console/
+```
+
+Or without Docker: `cargo run -p iwdb-server --features console` with `IWDB_DATA_DIR=data IWDB_CONSOLE_ENABLED=true`.
+
+## Through the Flask proxy (development)
+
+`serve.py` serves the pages from disk, so editing them needs no rebuild. It is a small Flask app: it serves the pages and passes `/v1/...` through to the server, so the pages and the API share one origin. (The server answers no CORS preflight on purpose, so a page on another origin can't call it; the proxy keeps that guard.)
 
 ```sh
 docker compose up --build                      # iwdb-server on 127.0.0.1:7600
@@ -20,7 +32,7 @@ open http://127.0.0.1:8000/
 
 `IWDB_URL` (or `--upstream`) points it at another server, `--port` changes its port. `seed.mjs` skips namespaces that exist; `--replace` drops them first.
 
-On a server, the explorer works fully: reads, edits and commits, index creation. The status page shows every namespace's state. Until step 16 adds the server's status views and metrics, it says so in place of the metrics, active requests, consumers and the log (it shows its own requests instead). The schema navigator's counts come from the first 2 000 nodes of a namespace, and a `find` doesn't know its total, so the pager counts pages as it goes.
+On a server, the explorer works fully: reads, edits and commits, index creation. The status page shows every namespace's state. It shows the server's readiness (step 16b). Until step 16c adds the server's status views and metrics, it says so in place of the metrics, active requests, consumers and the log (it shows its own requests instead). The schema navigator's counts come from the first 2 000 nodes of a namespace, and a `find` doesn't know its total, so the pager counts pages as it goes.
 
 ## On mock data
 

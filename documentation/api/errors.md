@@ -16,7 +16,7 @@ The engine's and the storage layer's errors are mapped to codes in one place (`c
 | `cursor_expired` | A paginated read's namespace changed since its first page (cursors are valid at one seq) | start again without the cursor | `CursorExpiredError` | `FAILED_PRECONDITION` | 410 |
 | `not_retained` | The change stream was asked for a seq older than the oldest one still in the WAL ([ADR 0031](../adr/0031-change-stream.md)); the message names the oldest retained seq | no: start again from a snapshot, or keep the WAL longer (retention) | `NotRetainedError` | `OUT_OF_RANGE` | 410 |
 | `read_only` | The namespace is read-only after a failed WAL write or fsync, or a failed apply, until the store is reopened | after reopening | `ReadOnlyError` | `UNAVAILABLE` | 503 |
-| `unavailable` | The store can't take the request now: shutting down, too many queued requests, the data directory locked by another store | yes, with backoff | `UnavailableError` | `UNAVAILABLE` | 503 |
+| `unavailable` | The store can't take the request now: the server is still recovering (not ready yet), shutting down, too many queued requests, the data directory locked by another store | yes, with backoff | `UnavailableError` | `UNAVAILABLE` | 503 |
 | `io` | A file operation failed. **A commit's outcome is unknown**: retry with the same idempotency key ([ADR 0015](../adr/0015-idempotency-keys.md)) | with the same idempotency key | `IoError` | `UNAVAILABLE` | 503 |
 | `corrupt` | Damaged data: the WAL, a checkpoint, the namespace log, a namespace directory | no, see `iwctl verify` | `CorruptError` | `DATA_LOSS` | 500 |
 | `internal` | A bug: a panic outside the commit path, a broken invariant | report it | `InternalError` | `INTERNAL` | 500 |

@@ -26,7 +26,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [15](step_15.md) | Security | M4 | todo |
 | [16](step_16.md) | Operability | M4 | in progress (split into 16a to 16i) |
 | [16a](step_16a.md) | Operator console | M4 | done |
-| [16b](step_16b.md) | Configuration, health and logs | M4 | todo |
+| [16b](step_16b.md) | Configuration, health and logs | M4 | done |
 | [16c](step_16c.md) | Metrics, status views, cancel and the console | M4 | todo |
 | [16d](step_16d.md) | Memory limit | M4 | todo |
 | [16e](step_16e.md) | `iwctl` against a server, archive pruning, backup throttling | M4 | todo |
@@ -49,5 +49,5 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | M1 Embedded durable | 4–7 | done, except the PyPI publish of 0.1.0 (prepared; the owner publishes) |
 | M2 Service | 8–10 | done |
 | M3 Network access | 11–14b | done |
-| M4 Production 1.0 | 15–17 | todo (16a done) |
+| M4 Production 1.0 | 15–17 | todo (16a, 16b done) |
 | M5 HA | 18 | todo |

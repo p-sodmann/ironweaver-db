@@ -70,7 +70,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: ["", "rest", "postgres"]
+        features: ["", "rest", "postgres", "rest console"]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -141,17 +141,19 @@ jobs:
       - name: Serve, answer, stop
         run: |
           docker run --rm iwdb-server:ci --version | tee version.txt
-          grep -q "grpc, rest, postgres" version.txt
+          grep -q "grpc, rest, postgres, console" version.txt
           docker run --rm iwdb-server:ci-grpc --version | tee version.txt
           grep -q "(grpc)" version.txt
           docker run -d --name iwdb -p 127.0.0.1:7600:7600 iwdb-server:ci
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:7600/v1/openapi.json -o /dev/null && break; sleep 1; done
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:7600/v1/health/ready && break; sleep 1; done
+          docker exec iwdb iwdb-server --probe 127.0.0.1:7600
           curl -fsS http://127.0.0.1:7600/v1/namespaces | tee namespaces.json
           grep -q default namespaces.json
           docker stop iwdb
           docker logs iwdb 2>&1 | tee server.log
           test "$(docker inspect -f '{{.State.ExitCode}}' iwdb)" = 0
           grep -q "closed /var/lib/iwdb" server.log
+          grep -q '"message":"serving /var/lib/iwdb on' server.log
 
   python:
     # Step 7: the wheel (abi3, CPython 3.9 and later) built by maturin on

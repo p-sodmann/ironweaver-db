@@ -23,9 +23,9 @@ An operator sees what the server is doing: Prometheus metrics, `status` views li
 - [ ] One metric name list in code, documented as a table (name, type, labels, unit, meaning) in `documentation/api/metrics.md`; a test that every exported metric is documented and every documented one exported.
 
 ### The console
-- [ ] For each read `console/src/source.js` marks "new" (`schema` with label and type counts and keys, `server`, `cancel`, the log, `find` total, explain `matched`, `lastCheckpointMs`): add it on the server and use it in `console/src/rest.js`, or drop it from the pages and the mock, and update `source.js`. Expected: `find` total and explain `matched` are dropped (unbounded counts, design rule 5); label and type counts come from the core's label index if it has an O(1) count; per-label keys stay sampled.
+- [ ] For each read `console/src/source.js` marks "new" (`schema` with label and type counts and keys, `server` beyond the readiness 16b added, `cancel`, the log, `find` total, explain `matched`, `lastCheckpointMs`): add it on the server and use it in `console/src/rest.js`, or drop it from the pages and the mock, and update `source.js`. Expected: `find` total and explain `matched` are dropped (unbounded counts, design rule 5); label and type counts come from the core's label index if it has an O(1) count; per-label keys stay sampled.
 - [ ] The mock's `server()` shape and the server's answer agree (change both where needed); `npm test`, `npm run check`, `pytest console/test` green; `status.html` checked with `serve.py` against a real server.
-- [ ] Decide whether `iwdb-server` serves `console/` itself, in an ADR. Step 15 (authentication) is `todo`, so the expected decision is: not before step 15; the Flask proxy stays the way to run it.
+- [ ] Check the console on the server's own `/console/` (step 16b serves it, ADR 0041) as well as through `serve.py`.
 
 ### Docs
 - [ ] ADRs: metrics library (or none: hand-written text exposition), the status-view API shape, request ids and cancel.

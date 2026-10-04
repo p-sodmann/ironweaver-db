@@ -16,6 +16,9 @@ default = ["rest", "postgres"]
 rest = ["dep:axum", "dep:pbjson", "dep:pbjson-build", "dep:prost-types", "dep:serde_json", "dep:http-body-util"]
 # `[[projection]]` sources of kind "postgres" (ADR 0032)
 postgres = ["iwdb/postgres"]
+# The operator console's pages (ADR 0041), compiled in from `console/` and
+# served at /console/ when `[console] enabled = true`; it uses the REST API
+console = ["rest"]
 # The Rust clients (`client::Remote` over gRPC, ADR 0024; with `rest`,
 # `client::RestRemote` over REST, ADR 0030); the tests turn it on
 client = ["hyper/client", "hyper/http1", "hyper-util/client-legacy", "hyper-util/http1"]
@@ -57,6 +60,11 @@ serde_json = { workspace = true, optional = true, features = ["raw_value", "floa
 toml.workspace = true
 thiserror.workspace = true
 log.workspace = true
+# Health: grpc.health.v1's generated messages and service (step 16b; the
+# implementation is ours, over the server's phase); structured logs
+tonic-health.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true

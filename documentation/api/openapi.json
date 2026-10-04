@@ -1184,6 +1184,29 @@
         },
         "type": "object"
       },
+      "Health": {
+        "description": "The server's state, as the REST health routes answer it: 200 for\n`/v1/health/live` whenever the process answers; for `/v1/health/ready`,\n200 when `ready`, 503 otherwise.",
+        "properties": {
+          "ready": {
+            "description": "Recovery has finished and the server isn't shutting down: database\ncalls are served. Otherwise they fail with `unavailable`.",
+            "type": "boolean"
+          },
+          "state": {
+            "$ref": "#/components/schemas/HealthState"
+          }
+        },
+        "type": "object"
+      },
+      "HealthState": {
+        "description": "Where the server is in its life.\n\n- `HEALTH_STATE_RECOVERING`: The port is open, the store is being opened: recovery replays the WAL.\n\n- `HEALTH_STATE_READY`: Recovery has finished; every committed record is visible.\n\n- `HEALTH_STATE_DRAINING`: Shutdown has begun: no longer ready, running calls may finish.",
+        "enum": [
+          "HEALTH_STATE_UNSPECIFIED",
+          "HEALTH_STATE_RECOVERING",
+          "HEALTH_STATE_READY",
+          "HEALTH_STATE_DRAINING"
+        ],
+        "type": "string"
+      },
       "IndexBuilding": {
         "properties": {
           "scanned": {
@@ -3010,6 +3033,54 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/health/live": {
+      "get": {
+        "description": "The server's state, as the REST health routes answer it: 200 for\n`/v1/health/live` whenever the process answers; for `/v1/health/ready`,\n200 when `ready`, 503 otherwise.",
+        "operationId": "live",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            },
+            "description": "The server's state."
+          }
+        },
+        "summary": "Liveness: 200 whenever the server answers"
+      }
+    },
+    "/v1/health/ready": {
+      "get": {
+        "description": "The server's state, as the REST health routes answer it: 200 for\n`/v1/health/live` whenever the process answers; for `/v1/health/ready`,\n200 when `ready`, 503 otherwise.",
+        "operationId": "ready",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            },
+            "description": "The server's state."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            },
+            "description": "Not ready: recovering or shutting down."
+          }
+        },
+        "summary": "Readiness: 200 once recovery has finished, 503 before and while shutting down"
+      }
+    },
     "/v1/namespaces": {
       "get": {
         "operationId": "listNamespaces",
