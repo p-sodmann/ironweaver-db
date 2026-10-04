@@ -1,6 +1,6 @@
 # Python API
 
-Status: contract for the embedded bindings (`crates/iwdb-python`, step 7) and the remote client (`clients/python`, step 14): both expose these names, arguments, return values and exceptions, so that code (and the shared test suite) runs against either. Decisions: [ADR 0013](adr/0013-python-bindings.md).
+Status: contract for the embedded bindings (`crates/iwdb-python`, step 7) and the remote client (`iwdb.connect`, step 14, [ADR 0035](adr/0035-python-remote-client.md)): both expose these names, arguments, return values and exceptions, so that code (and the shared test suite) runs against either. Decisions: [ADR 0013](adr/0013-python-bindings.md).
 
 ```python
 import iwdb

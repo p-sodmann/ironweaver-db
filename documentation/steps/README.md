@@ -20,7 +20,9 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [12](step_12.md) | REST/JSON API | M3 | done |
 | [13](step_13.md) | Change stream, projection mode, bulk import/export | M3 | done |
 | [13a](step_13a.md) | Docker image and optional server features | M3 | done |
-| [14](step_14.md) | Clients, query shell and benchmarks | M3 | todo |
+| [14](step_14.md) | Python query methods and the remote client | M3 | in progress |
+| [14a](step_14a.md) | Query shell | M3 | todo |
+| [14b](step_14b.md) | Benchmarks | M3 | todo |
 | [15](step_15.md) | Security | M4 | todo |
 | [16](step_16.md) | Operability | M4 | todo |
 | [17](step_17.md) | Release 1.0 | M4 | todo |
@@ -37,6 +39,6 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | M0 Foundation | 1–3 | done |
 | M1 Embedded durable | 4–7 | done, except the PyPI publish of 0.1.0 (prepared; the owner publishes) |
 | M2 Service | 8–10 | done |
-| M3 Network access | 11–14 | in progress (steps 11 to 13a done) |
+| M3 Network access | 11–14b | in progress (steps 11 to 13a done) |
 | M4 Production 1.0 | 15–17 | todo |
 | M5 HA | 18 | todo |
