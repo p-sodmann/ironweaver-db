@@ -512,7 +512,14 @@ fn the_console_session_is_a_cookie_with_a_csrf_header() {
     assert_eq!(r.status, StatusCode::UNAUTHORIZED);
     assert!(r.headers.get(header::SET_COOKIE).is_none());
     // Login with a cookie
-    let r = send(&server, &http, Method::POST, "/v1/auth/login", Some(&json!({"user": "ann", "password": "ann-password", "cookie": true})), &[]);
+    let r = send(
+        &server,
+        &http,
+        Method::POST,
+        "/v1/auth/login",
+        Some(&json!({"user": "ann", "password": "ann-password", "cookie": true})),
+        &[],
+    );
     assert_eq!(r.status, StatusCode::OK);
     assert!(r.json()["token"].as_str().unwrap_or_default().is_empty(), "no token in the body: {}", r.json());
     let set = r.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap().to_owned();
@@ -529,10 +536,24 @@ fn the_console_session_is_a_cookie_with_a_csrf_header() {
     let r = send(&server, &http, Method::POST, "/v1/namespaces/default/commit", Some(&commit), &[("cookie", &cookie)]);
     assert_eq!((r.status, r.code().as_str()), (StatusCode::FORBIDDEN, "permission_denied"));
     assert!(r.json()["message"].as_str().unwrap().contains("x-iwdb-csrf"));
-    let r = send(&server, &http, Method::POST, "/v1/namespaces/default/commit", Some(&commit), &[("cookie", &cookie), ("x-iwdb-csrf", "1")]);
+    let r = send(
+        &server,
+        &http,
+        Method::POST,
+        "/v1/namespaces/default/commit",
+        Some(&commit),
+        &[("cookie", &cookie), ("x-iwdb-csrf", "1")],
+    );
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json());
     // A cross-site form (no JSON, no CSRF header): refused before the body is read
-    let r = send(&server, &http, Method::PUT, "/v1/namespaces/evil", None, &[("cookie", &cookie), ("content-type", "application/x-www-form-urlencoded")]);
+    let r = send(
+        &server,
+        &http,
+        Method::PUT,
+        "/v1/namespaces/evil",
+        None,
+        &[("cookie", &cookie), ("content-type", "application/x-www-form-urlencoded")],
+    );
     assert_eq!(r.status, StatusCode::FORBIDDEN);
     let who = send(&server, &http, Method::GET, "/v1/auth/whoami", None, &[("cookie", &cookie)]);
     assert_eq!((who.json()["user"]["name"].as_str(), who.json()["authEnabled"].as_bool()), (Some("ann"), Some(true)));
