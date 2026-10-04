@@ -1,11 +1,15 @@
 """Step 14: what only the remote client has (ADR 0035): connecting, the
 calls that need an embedded store, read-your-writes across clients."""
 
+import json
 import socket
+import time
+import urllib.request
 
 import pytest
 
 import iwdb
+from conftest import ADMIN, Server
 
 
 def free_port():
@@ -28,7 +32,7 @@ def test_an_invalid_endpoint_is_invalid():
 
 
 def test_repr_and_close(server):
-    store = iwdb.connect(server.endpoint)
+    store = server.connect()
     assert repr(store) == "<iwdb.Store '{}' (open)>".format(server.endpoint)
     store.close()
     store.close()
@@ -54,13 +58,13 @@ def test_repr_and_close(server):
     ],
 )
 def test_local_only_calls_are_invalid(server, call):
-    with iwdb.connect(server.endpoint) as store:
+    with server.connect() as store:
         with pytest.raises(iwdb.InvalidError, match="needs an embedded store"):
             call(store)
 
 
 def test_read_your_writes_with_the_last_seq(server):
-    with iwdb.connect(server.endpoint) as a, iwdb.connect(server.endpoint) as b:
+    with server.connect() as a, server.connect() as b:
         with a.transaction() as tx:
             tx.upsert_node("x")
         # `a` sends its last seq; `b` passes `a`'s seq on
@@ -77,7 +81,7 @@ def test_read_your_writes_with_the_last_seq(server):
 
 
 def test_a_namespace_created_again_starts_its_seqs_again(server):
-    with iwdb.connect(server.endpoint) as store:
+    with server.connect() as store:
         store.create_namespace("n")
         ns = store.namespace("n")
         for i in range(3):
@@ -90,7 +94,7 @@ def test_a_namespace_created_again_starts_its_seqs_again(server):
 
 
 def test_errors_keep_their_class_over_the_network(server):
-    with iwdb.connect(server.endpoint) as store:
+    with server.connect() as store:
         with pytest.raises(iwdb.NotFoundError):
             store.namespace("nope")
         with pytest.raises(iwdb.ConflictError):
@@ -105,9 +109,88 @@ def test_errors_keep_their_class_over_the_network(server):
 
 
 def test_a_server_that_stops_makes_calls_unavailable(server):
-    store = iwdb.connect(server.endpoint)
+    store = server.connect()
     assert store.seq() == 0
     assert server.stop() == 0
     with pytest.raises(iwdb.UnavailableError):
         store.seq()
     store.close()
+
+
+# Authentication (step 15a)
+
+
+def rest(server, method, path, body=None, token=None):
+    """A REST call; the answer's JSON."""
+    request = urllib.request.Request(server.endpoint + path, method=method)
+    if body is not None:
+        request.add_header("content-type", "application/json")
+        request.data = json.dumps(body).encode()
+    if token:
+        request.add_header("authorization", "Bearer " + token)
+    with urllib.request.urlopen(request) as answer:
+        return json.loads(answer.read() or b"{}")
+
+
+def admin_token(server):
+    return rest(server, "POST", "/v1/auth/login", {"user": ADMIN[0], "password": ADMIN[1]})["token"]
+
+
+def test_without_credentials_calls_are_unauthenticated(server):
+    with iwdb.connect(server.endpoint) as store:
+        with pytest.raises(iwdb.UnauthenticatedError, match="needs credentials"):
+            store.node("a")
+    assert issubclass(iwdb.UnauthenticatedError, iwdb.Error)
+
+
+def test_a_wrong_password_is_unauthenticated(server):
+    with pytest.raises(iwdb.UnauthenticatedError, match="wrong user or password") as caught:
+        iwdb.connect(server.endpoint, user=ADMIN[0], password="not the password")
+    assert "not the password" not in str(caught.value)
+    with pytest.raises(iwdb.UnauthenticatedError):
+        iwdb.connect(server.endpoint, user="nobody", password="whatever-password")
+
+
+def test_credentials_are_a_token_or_a_user_and_password(server):
+    with pytest.raises(iwdb.InvalidError):
+        iwdb.connect(server.endpoint, user=ADMIN[0])
+    with pytest.raises(iwdb.InvalidError):
+        iwdb.connect(server.endpoint, token="t", user=ADMIN[0], password=ADMIN[1])
+
+
+def test_an_expired_session_is_unauthenticated(tmp_path):
+    server = Server(tmp_path / "data", tmp_path, auth="session_lifetime_secs = 1")
+    try:
+        with server.connect() as store:
+            assert store.node("a") is None
+            time.sleep(1.5)
+            with pytest.raises(iwdb.UnauthenticatedError, match="expired"):
+                store.node("a")
+        # Logging in again works
+        with server.connect() as store:
+            assert store.node("a") is None
+    finally:
+        assert server.stop() == 0, "".join(server.stderr)
+
+
+def test_api_tokens_and_roles(server):
+    token = admin_token(server)
+    rest(server, "POST", "/v1/users", {"name": "ann", "password": "ann-password"}, token)
+    rest(server, "PUT", "/v1/users/ann/grants/default", {"role": "ROLE_READ"}, token)
+    ann = rest(server, "POST", "/v1/users/ann/tokens", {"name": "py"}, token)["token"]
+    with server.connect() as admin:
+        with admin.transaction() as tx:
+            tx.upsert_node("a", labels=["P"])
+    with iwdb.connect(server.endpoint, token=ann) as store:
+        assert store.node("a")["labels"] == ["P"]
+        with pytest.raises(iwdb.PermissionDeniedError, match="'write' role"):
+            with store.transaction() as tx:
+                tx.upsert_node("b")
+        with pytest.raises(iwdb.PermissionDeniedError):
+            store.create_namespace("other")
+        assert [n["name"] for n in store.namespaces()] == ["default"]
+    # A revoked token is unauthenticated
+    rest(server, "DELETE", "/v1/users/ann/tokens/py", None, token)
+    with iwdb.connect(server.endpoint, token=ann) as store:
+        with pytest.raises(iwdb.UnauthenticatedError):
+            store.node("a")

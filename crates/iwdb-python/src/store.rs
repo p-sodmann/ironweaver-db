@@ -15,7 +15,7 @@ use iwdb::{
     Store, StoreOptions, Target, WalOptions, WalRetention,
 };
 use iwdb_query::exec::block_on;
-use iwdb_query::{ChangesRequest, Database, LimitConfig, QueryOptions};
+use iwdb_query::{ChangesRequest, Database, LimitConfig, QueryOptions, Secret};
 use iwdb_server::client::Remote;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
@@ -224,10 +224,36 @@ impl PyStore {
     /// with the same API, minus the calls that need the store's directory
     /// (ADR 0035). It connects on the first call, and again after a lost
     /// connection.
+    ///
+    /// Credentials (step 15a): a `token` (a session's or an API token), or a
+    /// `user` and `password`, which log in now and keep the session's token.
+    /// Errors: `UnauthenticatedError` for a wrong user or password;
+    /// `InvalidError` for both kinds of credentials, or a user without a
+    /// password.
     #[staticmethod]
-    fn connect(py: Python<'_>, endpoint: &str) -> PyResult<Self> {
+    #[pyo3(signature = (endpoint, token = None, user = None, password = None))]
+    fn connect(
+        py: Python<'_>,
+        endpoint: &str,
+        token: Option<String>,
+        user: Option<String>,
+        password: Option<String>,
+    ) -> PyResult<Self> {
         guard(|| {
             let remote = py.detach(|| Remote::connect(endpoint)).map_err(query_to_py)?;
+            match (token, user, password) {
+                (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                    return Err(invalid("give a token, or a user and a password, not both"));
+                }
+                (Some(token), None, None) => remote.set_token(Some(Secret::new(token))),
+                (None, Some(user), Some(password)) => {
+                    py.detach(|| block_on(remote.login(&user, Secret::new(password)))).map_err(query_to_py)?;
+                }
+                (None, Some(_), None) | (None, None, Some(_)) => {
+                    return Err(invalid("a login needs both a user and a password"));
+                }
+                (None, None, None) => {}
+            }
             let backend = Backend::Remote(Box::new(RemoteDb::new(remote)));
             Ok(PyStore { inner: RwLock::new(Some(backend)), location: endpoint.to_owned() })
         })
