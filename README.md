@@ -24,6 +24,18 @@ IWDB_ADMIN_PASSWORD=... docker compose up --build
 
 `docker build --build-arg FEATURES="" .` builds a gRPC-only image without REST or the Postgres projection source ([details](documentation/api/grpc.md#features-and-docker)).
 
+## By the numbers
+
+Lines of code, not counting blank lines or vendored code (as of October 2026):
+
+| Language | Files | Lines |
+|---|---:|---:|
+| Rust | 200 | 58,598 |
+| Python | 19 | 2,407 |
+| JavaScript | 9 | 1,871 |
+
+About 20,000 of the Rust lines are integration tests in `tests/` directories, and the inline `#[cfg(test)]` modules add more.
+
 ## Documentation
 
 - [Design proposal](documentation/ironweaver-db.md): goals, guiding decisions, workstreams and milestones
@@ -36,6 +48,7 @@ IWDB_ADMIN_PASSWORD=... docker compose up --build
 - [Architecture decision records](documentation/adr/)
 - [Implementation steps](documentation/steps/README.md): the ordered task list
 - [AGENTS.md](AGENTS.md): working rules for contributors and coding agents
+- [SECURITY.md](SECURITY.md): how to report a vulnerability; no telemetry
 
 ## License
 

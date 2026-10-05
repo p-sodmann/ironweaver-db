@@ -35,6 +35,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, delete, get, post, put};
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use iwdb_query::audit::AuditSink;
 use iwdb_query::{Authorized, Code, Error};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -42,7 +43,7 @@ use tokio::sync::watch;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::auth::{AuthMode, Caller, SESSION_COOKIE, Served, authorized};
+use crate::auth::{AuthMode, Caller, SESSION_COOKIE, Served, audit_of, authorized};
 use crate::ops;
 use crate::proto as pb;
 use crate::status::http_status;
@@ -266,6 +267,7 @@ pub const ROUTES: &[Route] = &[
 struct Shared<D> {
     db: Arc<D>,
     mode: AuthMode,
+    audit: Arc<dyn AuditSink>,
     max_body: usize,
     /// Turns true when the server shuts down: change streams end.
     stopping: watch::Receiver<bool>,
@@ -279,14 +281,33 @@ type Caller_ = Option<Extension<Caller>>;
 impl<D> Shared<D> {
     /// The database as the caller may use it (design rule 8, ADR 0045).
     fn db(&self, caller: &Caller_) -> Result<Authorized<D>, Failure> {
-        Ok(authorized(&self.db, self.mode, caller.as_ref().map(|Extension(c)| c))?)
+        Ok(authorized(&self.db, self.mode, caller.as_ref().map(|Extension(c)| c), &self.audit)?)
     }
 }
 
+/// The operation of the route `method` and `path` match (for the audit
+/// entry of a request the gate refuses); `None` if none does.
+pub(crate) fn operation_of(method: &Method, path: &str) -> Option<iwdb_query::Operation> {
+    let segments: Vec<&str> = path.split('/').collect();
+    let route = ROUTES.iter().find(|r| {
+        let pattern: Vec<&str> = r.path.split('/').collect();
+        r.method == *method
+            && pattern.len() == segments.len()
+            && pattern.iter().zip(&segments).all(|(p, s)| p == s || (p.starts_with('{') && !s.is_empty()))
+    })?;
+    iwdb_query::Operation::from_rpc(route.rpc?)
+}
+
 /// The REST routes over `db`, with request bodies of at most `max_body`
-/// bytes. Requests that match no route are answered here too (404). The
-/// change streams end when `stopping` turns true.
-pub fn router<D: Served>(db: Arc<D>, max_body: usize, stopping: watch::Receiver<bool>, mode: AuthMode) -> Router {
+/// bytes, auditing into `audit`. Requests that match no route are answered
+/// here too (404). The change streams end when `stopping` turns true.
+pub fn router<D: Served>(
+    db: Arc<D>,
+    max_body: usize,
+    stopping: watch::Receiver<bool>,
+    mode: AuthMode,
+    audit: Arc<dyn AuditSink>,
+) -> Router {
     let mut router = Router::new();
     for r in ROUTES.iter().filter(|r| !r.health()) {
         router = router.route(r.path, handler::<D>(r));
@@ -296,7 +317,7 @@ pub fn router<D: Served>(db: Arc<D>, max_body: usize, stopping: watch::Receiver<
         .method_not_allowed_fallback(|| async {
             Failure::http(StatusCode::METHOD_NOT_ALLOWED, "the route doesn't take this method")
         })
-        .with_state(Arc::new(Shared { db, mode, max_body, stopping }))
+        .with_state(Arc::new(Shared { db, mode, audit, max_body, stopping }))
 }
 
 /// The handler of `r`.
@@ -788,9 +809,9 @@ fn session_cookie(token: &str, max_age_secs: u64, secure: bool) -> HeaderValue {
 async fn login<D: Served>(State(s): St<D>, caller: Caller_, headers: HeaderMap, body: Body) -> Answer {
     let r: pb::LoginRequest = read(&headers, body, s.max_body).await?;
     let cookie = r.cookie;
-    let client = caller.as_ref().and_then(|Extension(c)| c.client);
+    let audit = audit_of(caller.as_ref().map(|Extension(c)| c), &s.audit);
     let secure = caller.as_ref().is_some_and(|Extension(c)| c.tls);
-    let (response, session) = ops::login(&*s.db, r, client).await?;
+    let (response, session) = ops::login(&*s.db, r, &audit).await?;
     let mut answer = unary(Ok(response))?;
     if cookie {
         let max_age = session.expires_ms.saturating_sub(iwdb::auth::now_ms()) / 1000;
@@ -802,10 +823,10 @@ async fn login<D: Served>(State(s): St<D>, caller: Caller_, headers: HeaderMap, 
 
 /// `POST /v1/auth/logout`: ends the session and clears the cookie.
 async fn logout<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
-    s.db(&caller)?;
+    let db = s.db(&caller)?;
     let token = caller.as_ref().and_then(|Extension(c)| c.token.clone());
     let secure = caller.as_ref().is_some_and(|Extension(c)| c.tls);
-    let mut answer = unary(ops::logout(&*s.db, token.as_ref()).await)?;
+    let mut answer = unary(ops::logout(&db, token.as_ref()).await)?;
     answer.headers_mut().insert(header::SET_COOKIE, session_cookie("", 0, secure));
     Ok(answer)
 }

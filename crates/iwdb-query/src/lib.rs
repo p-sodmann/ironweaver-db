@@ -17,6 +17,7 @@
 //!
 //! Pure Rust (design rule 1): no Python, no protocol types.
 
+pub mod audit;
 pub mod auth;
 mod cursor;
 mod error;
@@ -31,8 +32,8 @@ mod service;
 pub mod conformance;
 
 pub use auth::{
-    Accounts, Authenticate, Authorized, NewToken, Operation, Principal, Requirement, Role, Secret, Session, TokenInfo,
-    UserInfo,
+    Accounts, Audited, Authenticate, Authorized, NewToken, Operation, Principal, Requirement, Role, Secret, Session,
+    TokenInfo, UserInfo, Via,
 };
 pub use cursor::Cursor;
 pub use error::{Code, Error};

@@ -4,7 +4,8 @@
 //! configuration with every problem, logs JSON lines, and becomes ready
 //! only once recovery has finished. Authentication is on (the default): the
 //! tests bootstrap an admin and log in; one checks that no secret (nor a
-//! private key) reaches the logs. TLS is on (the default, step 15b) with
+//! private key, nor a value of the data) reaches the logs or the audit
+//! file (step 15c). TLS is on (the default, step 15b) with
 //! the test certificate of `tests/fixtures/tls`; SIGHUP reloads it.
 
 #![cfg(unix)]
@@ -483,12 +484,24 @@ fn no_secret_reaches_the_logs() {
             .env("IWDB_LOG_LEVEL", "debug")
             .env("IWDB_TLS_CERT", &cert)
             .env("IWDB_TLS_KEY", &key)
+            .env("IWDB_AUDIT_DIR", dir.path().join("audit"))
             .env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "5"),
     );
     let mut seen = Vec::new();
     let address = ready_address(&lines, &mut seen);
     let remote = admin(&address);
-    let mut secrets = vec![ADMIN_PASSWORD.to_owned(), remote.token().unwrap().expose().to_owned()];
+    // Data and a catalog change: their values must not reach the audit log
+    // (nor any other line)
+    let data = "data-value-not-for-the-log";
+    let mut valued = node("n1");
+    if let Mutation::UpsertNode { attr, .. } = &mut valued {
+        attr.insert("note".into(), iwdb::Value::String(data.into()));
+    }
+    block_on(remote.commit("default", vec![valued], CommitOptions::default())).unwrap();
+    let path = iwdb_engine::catalog::AttrPath::new(["note"]).unwrap();
+    let index = iwdb_engine::CatalogChange::CreateIndex(iwdb_engine::catalog::IndexDef { path });
+    block_on(remote.commit_catalog("default", index, CommitOptions::default())).unwrap();
+    let mut secrets = vec![ADMIN_PASSWORD.to_owned(), remote.token().unwrap().expose().to_owned(), data.to_owned()];
     block_on(remote.create_user("ann", Secret::new("ann-secret-password"), false)).unwrap();
     secrets.push("ann-secret-password".into());
     let token = block_on(remote.create_token("ann", "ci", None)).unwrap();
@@ -540,7 +553,40 @@ fn no_secret_reaches_the_logs() {
     seen.extend(lines.try_iter());
     assert!(seen.iter().any(|l| l.contains("failed login") && l.contains("ann")), "failed logins are logged");
     assert!(seen.iter().any(|l| l.contains("TLS handshake failed")), "failed handshakes are logged");
-    for line in &seen {
+    // The audit entries (step 15c): in the log, and the same in the audit
+    // file
+    let audit: Vec<serde_json::Value> =
+        seen.iter().map(|l| event(l)).filter(|e| e["target"] == "iwdb::audit").collect();
+    let has = |operation: &str, outcome: &str, check: &dyn Fn(&serde_json::Value) -> bool| {
+        audit.iter().any(|e| e["operation"] == operation && e["outcome"] == outcome && check(e))
+    };
+    let local = |e: &serde_json::Value| e["client"] == "127.0.0.1";
+    assert!(has("Login", "success", &|e| e["user"] == "admin" && e["auth"] == "session" && local(e)), "{:?}", audit);
+    assert!(
+        has("Login", "failure", &|e| e["user"] == "ann" && e["code"] == "unauthenticated" && local(e)),
+        "failed logins are audited with the client: {:?}",
+        audit
+    );
+    assert!(has("CreateUser", "success", &|e| e["subject"] == "ann" && e["user"] == "admin" && e["admin"] == false));
+    assert!(has("CreateToken", "success", &|e| e["subject"] == "ann" && e["token_name"] == "ci"));
+    assert!(has("SetPassword", "failure", &|e| e["user"] == "ann" && e["code"] == "unauthenticated"));
+    assert!(has("SetPassword", "success", &|e| e["user"] == "ann" && e["subject"] == "ann"));
+    assert!(has("CommitCatalog", "success", &|e| e["namespace"] == "default" && e["seq"].is_u64()));
+    assert!(
+        has("ListNamespaces", "failure", &|e| e["code"] == "unauthenticated" && e["user"].is_null() && local(e)),
+        "refusals are audited with the client: {:?}",
+        audit
+    );
+    assert!(!audit.iter().any(|e| e["operation"] == "Commit"), "data commits aren't audited");
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir.path().join("audit")).unwrap() {
+        files.extend(std::fs::read_to_string(entry.unwrap().path()).unwrap().lines().map(str::to_owned));
+    }
+    assert_eq!(files.len(), audit.len(), "the audit file holds the log's audit entries");
+    for line in &files {
+        assert_eq!(event(line)["target"], "iwdb::audit", "{}", line);
+    }
+    for line in seen.iter().chain(&files) {
         for secret in &secrets {
             assert!(!line.contains(secret.as_str()), "a secret in the log: {}", line);
         }
@@ -639,4 +685,69 @@ fn plaintext_needs_explicit_flags_and_tls_needs_a_certificate() {
     assert_eq!(code, Some(2), "{}", text);
     assert!(text.contains("can't read the TLS certificate") && text.contains("missing.pem"), "{}", text);
     assert!(!data.exists(), "the store was opened");
+}
+
+/// The process's internet sockets, as `lsof` lists them: `(protocol,
+/// name)`, the name `local` or `local->remote`. `None` without `lsof`.
+fn sockets(pid: u32) -> Option<Vec<(String, String)>> {
+    let output = Command::new("lsof").args(["-a", "-n", "-P", "-i", "-F", "Pn", "-p"]).arg(pid.to_string()).output();
+    let output = output.ok()?;
+    let mut sockets = Vec::new();
+    let mut protocol = String::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(p) = line.strip_prefix('P') {
+            protocol = p.to_owned();
+        } else if let Some(name) = line.strip_prefix('n') {
+            sockets.push((protocol.clone(), name.to_owned()));
+        }
+    }
+    Some(sockets)
+}
+
+/// SECURITY.md's promise (step 15c): without projections, the server opens
+/// no connection of its own. Through logins, user, token, namespace and
+/// catalog changes, commits and refusals, its only internet sockets are
+/// its listener and the connections to it: TCP, local port the listen
+/// port. No UDP either (no DNS lookups, no telemetry).
+#[test]
+fn opens_no_connection_it_was_not_configured_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut child, lines, reader) = spawn(
+        bin()
+            .env("IWDB_DATA_DIR", dir.path().join("data"))
+            .env("IWDB_LISTEN", "127.0.0.1:0")
+            .env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "5"),
+    );
+    let mut seen = Vec::new();
+    let address = ready_address(&lines, &mut seen);
+    let port = address.rsplit(':').next().unwrap().to_owned();
+    let remote = admin(&address);
+    block_on(remote.create_user("ann", Secret::new("ann-password-1"), false)).unwrap();
+    block_on(remote.create_token("ann", "ci", None)).unwrap();
+    block_on(remote.create_namespace("other", None)).unwrap();
+    block_on(remote.grant("ann", "other", iwdb_query::Role::Read)).unwrap();
+    block_on(remote.commit("other", vec![node("a")], CommitOptions::default())).unwrap();
+    let path = iwdb_engine::catalog::AttrPath::new(["x"]).unwrap();
+    let index = iwdb_engine::CatalogChange::CreateIndex(iwdb_engine::catalog::IndexDef { path });
+    block_on(remote.commit_catalog("other", index, CommitOptions::default())).unwrap();
+    assert!(block_on(client(&address).login("ann", Secret::new("wrong-password"))).is_err());
+    assert!(block_on(client(&address).namespaces()).is_err());
+    block_on(remote.drop_namespace("other", None)).unwrap();
+    // Give anything started in the background a moment
+    std::thread::sleep(Duration::from_millis(300));
+    let listed = sockets(child.id());
+    sigterm(&child);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    let Some(listed) = listed else {
+        assert!(std::env::var_os("CI").is_none(), "lsof is needed on CI");
+        eprintln!("skipped: no lsof");
+        return;
+    };
+    assert!(!listed.is_empty(), "lsof listed nothing: is it working?");
+    let local_port = |name: &str| name.split("->").next().unwrap().rsplit(':').next().unwrap().to_owned();
+    for (protocol, name) in &listed {
+        assert_eq!(protocol, "TCP", "{}", name);
+        assert_eq!(local_port(name), port, "a socket not of the listener: {} ({:?})", name, listed);
+    }
 }

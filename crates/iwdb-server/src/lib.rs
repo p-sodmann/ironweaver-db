@@ -41,6 +41,7 @@
 //! Pure Rust (design rule 1). tokio is a dependency of this crate only
 //! (ADR 0020).
 
+pub mod audit;
 pub mod auth;
 pub mod config;
 #[cfg(feature = "console")]

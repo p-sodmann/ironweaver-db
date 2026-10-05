@@ -8,10 +8,10 @@
 //! [`CHUNK_BYTES`] at most (one item may be bigger), and only the last has
 //! `meta`.
 
-use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use iwdb_query::audit::Audit;
 use iwdb_query::{Accounts, Authenticate, Authorized, ChangesRequest, Code, Database, Error, Secret, Session};
 use tokio::sync::{mpsc, watch};
 
@@ -370,16 +370,16 @@ pub(crate) fn follow<D: Database + 'static>(
 
 // ---- authentication, users, grants, tokens (auth.proto, step 15a) ----
 
-/// `Login`: on the database itself (no principal yet).
+/// `Login`: on the database itself (no principal yet), audited.
 pub(crate) async fn login<D: Authenticate>(
     db: &D,
     r: pb::LoginRequest,
-    client: Option<IpAddr>,
+    audit: &Audit,
 ) -> Result<(pb::LoginResponse, Session), Error> {
     if r.user.is_empty() {
         return Err(Error::invalid("a login needs a user"));
     }
-    let session = db.login(&r.user, Secret::new(r.password), client).await?;
+    let session = iwdb_query::auth::login(db, audit, &r.user, Secret::new(r.password)).await?;
     let response = pb::LoginResponse {
         token: if r.cookie { String::new() } else { session.token.expose().to_owned() },
         user: Some(user_to_pb(&session.user)),
@@ -389,10 +389,11 @@ pub(crate) async fn login<D: Authenticate>(
 }
 
 /// `Logout`: end the session of the caller's token.
-pub(crate) async fn logout<D: Authenticate>(db: &D, token: Option<&Secret>) -> Result<pb::LogoutResponse, Error> {
-    if let Some(token) = token {
-        db.logout(token).await?;
-    }
+pub(crate) async fn logout<D: Authenticate>(
+    db: &Authorized<D>,
+    token: Option<&Secret>,
+) -> Result<pb::LogoutResponse, Error> {
+    db.logout(token).await?;
     Ok(pb::LogoutResponse {})
 }
 

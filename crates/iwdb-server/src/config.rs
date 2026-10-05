@@ -164,6 +164,8 @@ pub struct Config {
     pub auth: AuthSection,
     #[serde(default)]
     pub tls: TlsSection,
+    #[serde(default)]
+    pub audit: AuditSection,
     /// `[[projection]]` sections (ADR 0032).
     #[serde(default, rename = "projection")]
     pub projections: Vec<ProjectionSection>,
@@ -223,6 +225,29 @@ pub struct TlsSection {
 impl Default for TlsSection {
     fn default() -> Self {
         TlsSection { enabled: true, cert: None, key: None, client_ca: None, client_auth: ClientAuth::Optional }
+    }
+}
+
+/// `[audit]`: the audit log's files (step 15c, ADR 0049). The entries
+/// always go to the log (target `iwdb::audit`); with `dir`, also to a
+/// file per UTC day there.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AuditSection {
+    /// The directory of the audit files (`audit-YYYY-MM-DD.jsonl`), made
+    /// if missing. `None`: only the log.
+    pub dir: Option<PathBuf>,
+    /// Days of audit files to keep, today included; older ones are
+    /// deleted at start and at each new day. 0: keep them all.
+    pub retention_days: u32,
+}
+
+/// The default of `[audit] retention_days`.
+pub const DEFAULT_AUDIT_RETENTION_DAYS: u32 = 30;
+
+impl Default for AuditSection {
+    fn default() -> Self {
+        AuditSection { dir: None, retention_days: DEFAULT_AUDIT_RETENTION_DAYS }
     }
 }
 
@@ -288,6 +313,7 @@ impl Default for Config {
             console: ConsoleSection::default(),
             auth: AuthSection::default(),
             tls: TlsSection::default(),
+            audit: AuditSection::default(),
             projections: Vec::new(),
             sources: BTreeMap::new(),
             bootstrap: None,
@@ -414,15 +440,25 @@ keys! {
     "tls.key" "IWDB_TLS_KEY" => tls.key;
     "tls.client_ca" "IWDB_TLS_CLIENT_CA" => tls.client_ca;
     "tls.client_auth" "IWDB_TLS_CLIENT_AUTH" => tls.client_auth;
+    "audit.dir" "IWDB_AUDIT_DIR" => audit.dir;
+    "audit.retention_days" "IWDB_AUDIT_RETENTION_DAYS" => audit.retention_days;
 }
 
 /// Variables with these prefixes must name a setting.
-const SECTION_PREFIXES: &[&str] =
-    &["IWDB_STORE_", "IWDB_SERVER_", "IWDB_LIMITS_", "IWDB_LOG_", "IWDB_CONSOLE_", "IWDB_AUTH_", "IWDB_TLS_"];
+const SECTION_PREFIXES: &[&str] = &[
+    "IWDB_STORE_",
+    "IWDB_SERVER_",
+    "IWDB_LIMITS_",
+    "IWDB_LOG_",
+    "IWDB_CONSOLE_",
+    "IWDB_AUTH_",
+    "IWDB_TLS_",
+    "IWDB_AUDIT_",
+];
 
 /// The settings that are paths, resolved against the file's directory when
 /// they come from the file.
-const PATH_KEYS: &[&str] = &["data_dir", "tls.cert", "tls.key", "tls.client_ca"];
+const PATH_KEYS: &[&str] = &["data_dir", "tls.cert", "tls.key", "tls.client_ca", "audit.dir"];
 
 /// A projection the server runs (ADR 0032).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -685,6 +721,7 @@ impl Config {
                     "data_dir" => Some(&mut config.data_dir),
                     "tls.cert" => config.tls.cert.as_mut(),
                     "tls.key" => config.tls.key.as_mut(),
+                    "audit.dir" => config.audit.dir.as_mut(),
                     _ => config.tls.client_ca.as_mut(),
                 };
                 if let Some(field) = field

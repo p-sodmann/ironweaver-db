@@ -20,7 +20,7 @@ use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation, Namespace};
 use iwdb_query::exec::{Pending, Pool};
 use iwdb_query::read::{self, ReadContext};
-use iwdb_query::{Accounts, Authenticate, NewToken, Principal, Role, Secret, Session, TokenInfo, UserInfo};
+use iwdb_query::{Accounts, Authenticate, NewToken, Principal, Role, Secret, Session, TokenInfo, UserInfo, Via};
 use iwdb_query::{
     AnalyticsRequest, Answer, CHANGES_BATCH_BYTES, ChangeEvent, Changes, ChangesRequest, Code, CommitOptions, Database,
     Edge, Error, Explain, ExplainRequest, FindRequest, JobResult, LimitConfig, MatchRequest, MatchRow, NamespaceStatus,
@@ -120,9 +120,9 @@ where
         let unknown = || Error::new(Code::Unauthenticated, "the token is unknown, expired or revoked: log in again");
         let users = self.store.users();
         let hash = token_hash(token);
-        let user = if let Some(session) = self.auth.sessions.get(&hash) {
+        let (user, via) = if let Some(session) = self.auth.sessions.get(&hash) {
             match users.record(&session.user)? {
-                Some(user) if user.epoch == session.epoch => user,
+                Some(user) if user.epoch == session.epoch => (user, Via::Session),
                 // Deleted, or its password changed since the login
                 _ => {
                     self.auth.sessions.remove(&hash);
@@ -134,10 +134,10 @@ where
             if token.expired(now_ms()) {
                 return Err(unknown());
             }
-            users.record(&token.user)?.ok_or_else(unknown)?
+            (users.record(&token.user)?.ok_or_else(unknown)?, Via::ApiToken)
         };
         let info = users.info_of(&user);
-        Ok(Principal { user: info.name, admin: info.admin, grants: info.grants })
+        Ok(Principal { user: info.name, admin: info.admin, grants: info.grants, via })
     }
 
     /// The principal of the user `name` (a client certificate's).
@@ -149,7 +149,7 @@ where
         let users = self.store.users();
         let user = users.record(name)?.ok_or_else(unknown)?;
         let info = users.info_of(&user);
-        Ok(Principal { user: info.name, admin: info.admin, grants: info.grants })
+        Ok(Principal { user: info.name, admin: info.admin, grants: info.grants, via: Via::Certificate })
     }
 
     /// The store, for what the trait doesn't cover: backups, checkpoints,
@@ -457,6 +457,8 @@ where
             }
             // The long poll waits here, without a worker, and leaves part of
             // the timeout for the read
+            let max_records = request_.bounds.max_results;
+            let limits = BatchLimits { max_records, max_bytes: CHANGES_BATCH_BYTES };
             if request.wait {
                 let ns = self.store.namespace(&name)?;
                 if ns.streamable_seq() < from {
@@ -465,26 +467,22 @@ where
                     if let Wait::Dropped = ns.streamable_wait(from, until)?.await {
                         return Err(crate::Error::NamespaceDropped { name }.into());
                     }
+                    // Nothing came: the empty batch is answered here, as
+                    // the contract says, rather than by a worker that may
+                    // not start before the deadline (a loaded machine)
+                    if ns.streamable_seq() < from && request_.options.min_seq.is_none() {
+                        let batch = ns.changes(from, limits, false, &ReadOptions::default())?;
+                        if batch.records.is_empty() {
+                            return Ok(Answer::at(ns.streamable_seq(), changes_of(batch)));
+                        }
+                    }
                 }
             }
-            let max_records = request_.bounds.max_results;
             self.run_until(request_.expiry(), move |store, token| {
                 let ns = store.namespace(&name)?;
                 let read = request_.read_options(token)?;
-                let limits = BatchLimits { max_records, max_bytes: CHANGES_BATCH_BYTES };
                 let batch = ns.changes(from, limits, false, &read).map_err(|e| request_.error(e))?;
-                let events = batch
-                    .records
-                    .into_iter()
-                    .map(|r| ChangeEvent {
-                        seq: r.record.seq,
-                        time: r.time,
-                        key: r.record.keyed.map(|k| k.key),
-                        change: r.record.change,
-                    })
-                    .collect();
-                let changes = Changes { events, next_seq: batch.next_seq, first_seq: batch.first_seq };
-                Ok(Answer::at(ns.streamable_seq(), changes))
+                Ok(Answer::at(ns.streamable_seq(), changes_of(batch)))
             })
             .await
         }
@@ -669,4 +667,19 @@ where
     fn principal_of(&self, user: &str) -> impl Future<Output = Result<Principal, Error>> + Send {
         std::future::ready(self.principal_of_user(user))
     }
+}
+
+/// A batch of the WAL as the change stream's answer.
+fn changes_of(batch: iwdb_storage::ChangeBatch) -> Changes {
+    let events = batch
+        .records
+        .into_iter()
+        .map(|r| ChangeEvent {
+            seq: r.record.seq,
+            time: r.time,
+            key: r.record.keyed.map(|k| k.key),
+            change: r.record.change,
+        })
+        .collect();
+    Changes { events, next_seq: batch.next_seq, first_seq: batch.first_seq }
 }
