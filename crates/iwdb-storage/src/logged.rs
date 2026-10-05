@@ -79,6 +79,20 @@ pub struct LoggedNamespace<F: LogFs = StdFs> {
     applies_waiting: AtomicUsize,
     /// The WAL's fsync histogram, readable without the writer's lock.
     fsyncs: Arc<Histogram>,
+    /// The graph's nodes, edges and memory use, published with each apply,
+    /// so the metrics need no lock ([`sizes`](Self::sizes)).
+    nodes: AtomicUsize,
+    edges: AtomicUsize,
+    memory: AtomicUsize,
+}
+
+/// A namespace's size as of its last apply ([`LoggedNamespace::sizes`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sizes {
+    pub nodes: usize,
+    pub edges: usize,
+    /// The core's `Graph::memory_usage`: indexes included, payloads not.
+    pub memory_bytes: usize,
 }
 
 /// Rows scanned per read-lock hold of an online index build.
@@ -171,8 +185,13 @@ impl<F: LogFs> LoggedNamespace<F> {
         let poisoned = namespace.is_poisoned().then(|| iwdb_engine::Error::Poisoned.to_string());
         let failure = wal.failure().map(str::to_owned).or(poisoned);
         let fsyncs = wal.fsyncs();
+        let g = namespace.graph();
+        let (nodes, edges, memory) = (g.node_count(), g.edge_count(), g.memory_usage());
         Ok(LoggedNamespace {
             fsyncs,
+            nodes: AtomicUsize::new(nodes),
+            edges: AtomicUsize::new(edges),
+            memory: AtomicUsize::new(memory),
             seq: AtomicU64::new(namespace.seq()),
             streamable: AtomicU64::new(streamable(&wal, namespace.seq())),
             namespace: RwLock::new(namespace),
@@ -460,6 +479,16 @@ impl<F: LogFs> LoggedNamespace<F> {
         }
     }
 
+    /// The graph's size as of the last apply (O(1), no lock): the core's
+    /// counts and memory estimate, read under the write lock then.
+    pub fn sizes(&self) -> Sizes {
+        Sizes {
+            nodes: self.nodes.load(Ordering::Relaxed),
+            edges: self.edges.load(Ordering::Relaxed),
+            memory_bytes: self.memory.load(Ordering::Relaxed),
+        }
+    }
+
     /// The namespace's duration histograms so far. Doesn't wait for any
     /// lock.
     pub fn histograms(&self) -> NamespaceHistograms {
@@ -534,6 +563,10 @@ impl<F: LogFs> LoggedNamespace<F> {
         // read-only) or a bug; either way the commit is not acknowledged.
         let applied = namespace.apply_built(prepared, Some(time), build);
         let seq = namespace.seq();
+        let g = namespace.graph();
+        self.nodes.store(g.node_count(), Ordering::Relaxed);
+        self.edges.store(g.edge_count(), Ordering::Relaxed);
+        self.memory.store(g.memory_usage(), Ordering::Relaxed);
         drop(namespace);
         self.stats.record(start.elapsed());
         match applied {

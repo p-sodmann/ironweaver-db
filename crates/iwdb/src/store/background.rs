@@ -124,7 +124,12 @@ pub(super) fn run_checkpoint<F: LogFs>(
     appended: u64,
 ) -> Result<CheckpointOutcome, Error> {
     let start = Instant::now();
-    let result = lock(&state.checkpointer).run(target);
+    let result = {
+        let mut checkpointer = lock(&state.checkpointer);
+        let result = checkpointer.run(target);
+        state.set_checkpoint_seq(checkpointer.newest());
+        result
+    };
     if let Ok(outcome) = &result
         && outcome.written
     {

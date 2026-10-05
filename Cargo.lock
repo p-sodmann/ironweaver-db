@@ -921,6 +921,7 @@ dependencies = [
  "log",
  "postgres",
  "proptest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

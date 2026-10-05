@@ -14,7 +14,9 @@ use iwdb_query::{
     CommitOptions, Edge, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus, Node, ProjectionSpec,
 };
 use iwdb_storage::io::LogFs;
-use iwdb_storage::{BatchLimits, ChangeBatch, CheckpointOutcome, Error, FsyncPolicy, LockStats, LoggedNamespace, Wait};
+use iwdb_storage::{
+    BatchLimits, ChangeBatch, CheckpointOutcome, Error, FsyncPolicy, LockStats, LoggedNamespace, Sizes, Wait,
+};
 
 use super::background::{abort_if_inconsistent, or_abort, run_checkpoint, target};
 use super::{Analysis, NsState, Shared, Store, StreamableWait, lock};
@@ -317,7 +319,7 @@ where
 
     /// The seq of the newest checkpoint, if any.
     pub fn checkpoint_seq(&self) -> Option<u64> {
-        lock(&self.state.checkpointer).newest()
+        self.state.checkpoint_seq()
     }
 
     /// Fsync the WAL, then checkpoint every commit so far and cut the WAL.
@@ -419,6 +421,20 @@ where
     /// [`NamespaceStatus::last_checkpoint`]).
     pub fn last_checkpoint(&self) -> Option<CommitTime> {
         *lock(&self.state.last_checkpoint)
+    }
+
+    /// The graph's nodes, edges and memory use as of the last commit (O(1),
+    /// no lock).
+    pub fn sizes(&self) -> Sizes {
+        self.live().sizes()
+    }
+
+    /// The streamable seq's lag behind the applied seq: commits applied but
+    /// not yet known to be durable. O(1), no lock; `None` under the `off`
+    /// policy, which knows of no fsync.
+    pub fn unsynced(&self) -> Option<u64> {
+        let fsync = self.store.shared.options.wal.fsync;
+        (fsync != FsyncPolicy::Off).then(|| self.seq().saturating_sub(self.streamable_seq()))
     }
 
     /// The namespace's duration histograms since the store opened:
