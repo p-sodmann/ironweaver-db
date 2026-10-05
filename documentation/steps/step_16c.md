@@ -1,10 +1,27 @@
 # Step 16c: Metrics, status views, cancel and the console
 
-Status: todo
+Status: in progress (16c-1)
 Milestone: M4 Production 1.0
 Depends on: step 16b (the lifecycle and logs these report on)
 
 Split out of step 16 on 2026-10-04 (see its "Plan change").
+
+## Plan change
+
+2026-10-05: 16c is too big for one PR (about the size of 15a), so it lands in two, in this order:
+
+| Part | Covers | Acceptance criteria |
+|---|---|---|
+| 16c-1 | the instrumentation, the request registry and cancel, the `Admin` reads, their proto, gRPC, REST, OpenAPI and clients, `GET /metrics`, the log tail, the ADRs and docs | the first three |
+| 16c-2 | the `schema` read, `rest.js` and the mock agreeing with the server, the status page against a real server | the fourth |
+
+16d, 16e and 16f need only 16c-1. The step is done when 16c-2 is.
+
+Decided before the work started (ADRs 0050 to 0052):
+
+- `namespace_stats` is not a separate read: `namespace_status` gains the unsynced and since-checkpoint counts and `last_checkpoint`, rather than two reads answering nearly the same.
+- A running request's visited count is not reported: the core's `Budget` counts visits only inside a read and reports them at its end. A live counter needs the core (an upstream proposal, not filed).
+- Commits are listed but can't be cancelled (dropping a commit's future doesn't undo it).
 
 ## Goal
 
