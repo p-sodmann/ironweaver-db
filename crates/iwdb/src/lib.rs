@@ -76,4 +76,4 @@ pub use iwdb_storage::{
 pub use ops::{Status, restore, restore_namespaces, restore_with, restore_with_only, status, verify};
 pub use options::{CheckpointOptions, StoreOptions};
 pub use request::{DEFAULT_TIMEOUT, ReadOptions};
-pub use store::{Analysis, NAMESPACE, Ns, Store, StoreStatus};
+pub use store::{Analysis, DiskUsage, NAMESPACE, NamespaceHistograms, Ns, Store, StoreStatus};

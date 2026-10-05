@@ -8,7 +8,8 @@ use std::time::Instant;
 use ironweaver_core::cancel::{self, Token};
 use ironweaver_core::{EdgeId, GraphError, Projection};
 use iwdb_engine::catalog::{AttrPath, NamespaceCatalog};
-use iwdb_engine::{CatalogChange, CommitResult, MarkName, MarkUpdate, Mutation, Namespace};
+use iwdb_engine::metrics::HistogramSnapshot;
+use iwdb_engine::{CatalogChange, CommitResult, CommitTime, MarkName, MarkUpdate, Mutation, Namespace};
 use iwdb_query::{
     CommitOptions, Edge, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus, Node, ProjectionSpec,
 };
@@ -389,13 +390,19 @@ where
                 size: None,
             });
         }
+        let seq = self.seq();
+        let synced_seq = (fsync != FsyncPolicy::Off || synced > 0).then_some(synced);
+        let checkpoint = self.checkpoint_seq();
         NamespaceStatus {
             id: self.state.info.id,
             name: self.name().to_owned(),
             created: self.state.info.created,
-            seq: self.seq(),
-            synced_seq: (fsync != FsyncPolicy::Off || synced > 0).then_some(synced),
-            checkpoint: self.checkpoint_seq(),
+            seq,
+            synced_seq,
+            checkpoint,
+            unsynced: synced_seq.map(|s| seq.saturating_sub(s)),
+            since_checkpoint: seq.saturating_sub(checkpoint.unwrap_or(0)),
+            last_checkpoint: checkpoint.and(self.last_checkpoint()),
             read_only: self.read_only(),
             checkpoint_failure: self.checkpoint_failure(),
             nodes,
@@ -405,6 +412,28 @@ where
             constraints: catalog.constraints().count(),
             marks: self.marks(),
             recovery: self.state.recovery.clone(),
+        }
+    }
+
+    /// When the newest checkpoint was written (see
+    /// [`NamespaceStatus::last_checkpoint`]).
+    pub fn last_checkpoint(&self) -> Option<CommitTime> {
+        *lock(&self.state.last_checkpoint)
+    }
+
+    /// The namespace's duration histograms since the store opened:
+    /// commits, fsyncs, lock holds and checkpoints. Doesn't wait for any
+    /// lock of the namespace.
+    pub fn histograms(&self) -> NamespaceHistograms {
+        NamespaceHistograms { live: self.live().histograms(), checkpoints: self.state.checkpoints.snapshot() }
+    }
+
+    /// The bytes of the namespace's files: its WAL segments and its
+    /// checkpoints. O(files): a directory listing each.
+    pub fn disk_usage(&self) -> DiskUsage {
+        DiskUsage {
+            wal_bytes: dir_bytes(&self.state.paths.wal),
+            checkpoint_bytes: dir_bytes(&self.state.paths.checkpoints),
         }
     }
 
@@ -502,4 +531,30 @@ where
         shared.wake.notify_all();
     }
     Ok(result)
+}
+
+/// A namespace's duration histograms ([`Ns::histograms`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NamespaceHistograms {
+    /// Commits, fsyncs and lock holds (see [`iwdb_storage::NamespaceHistograms`]).
+    pub live: iwdb_storage::NamespaceHistograms,
+    /// Checkpoint runs that wrote a checkpoint.
+    pub checkpoints: HistogramSnapshot,
+}
+
+/// The bytes of a namespace's files ([`Ns::disk_usage`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiskUsage {
+    pub wal_bytes: u64,
+    pub checkpoint_bytes: u64,
+}
+
+/// The total size of the files directly in `dir` (0 for what can't be
+/// read: a file removed meanwhile, a missing directory).
+fn dir_bytes(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries
+        .filter_map(|e| e.ok()?.metadata().ok())
+        .filter(|m| m.is_file())
+        .fold(0u64, |total, m| total.saturating_add(m.len()))
 }

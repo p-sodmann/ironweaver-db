@@ -195,6 +195,15 @@ pub struct NamespaceStatus {
     pub synced_seq: Option<u64>,
     /// The newest checkpoint's seq.
     pub checkpoint: Option<u64>,
+    /// Commits applied but not known to be durable (`seq - synced_seq`);
+    /// `None` when `synced_seq` is.
+    pub unsynced: Option<u64>,
+    /// Commits since the newest checkpoint (`seq - checkpoint`, or `seq`
+    /// without one): what recovery would replay.
+    pub since_checkpoint: u64,
+    /// When the newest checkpoint was written (its file's modification
+    /// time, for one written before the store opened); `None` without one.
+    pub last_checkpoint: Option<CommitTime>,
     /// Why the namespace is read-only, if it is.
     pub read_only: Option<String>,
     /// The last checkpoint error, if the last checkpoint failed.

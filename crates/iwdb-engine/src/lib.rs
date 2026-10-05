@@ -11,6 +11,7 @@
 //! - [`idempotency`]: idempotency keys and the table of recent keyed
 //!   commits.
 //! - [`mark`]: named high-water marks, moved by commits (projections).
+//! - [`metrics`]: duration histograms of atomics, for the metrics.
 //! - [`plain`]: plain graph files (the core's format without the
 //!   database's keys), for import and export.
 //! - [`CommitTime`]: when the WAL appended a commit.
@@ -27,6 +28,7 @@ pub mod failpoint;
 pub mod idempotency;
 pub mod invariants;
 pub mod mark;
+pub mod metrics;
 pub mod mutation;
 mod namespace;
 pub mod plain;

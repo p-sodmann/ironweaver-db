@@ -8,7 +8,8 @@ use std::thread::JoinHandle;
 
 use ironweaver_core::{EdgeId, GraphError, Projection};
 use iwdb_engine::catalog::{NamespaceCatalog, NamespaceName};
-use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation, Namespace};
+use iwdb_engine::metrics::Histogram;
+use iwdb_engine::{CatalogChange, CommitResult, CommitTime, IdempotencyKey, Mutation, Namespace};
 use iwdb_query::{CommitOptions, Edge, NamespaceStatus, Node, ProjectionSpec};
 use iwdb_storage::archive::{Archive, ArchiveHandle};
 use iwdb_storage::backup::{self, NamespaceSource};
@@ -30,7 +31,7 @@ mod projections;
 mod wait;
 
 use background::{checkpoint_loop, or_abort, run_checkpoint, spawn, sync_loop};
-pub use ns::Ns;
+pub use ns::{DiskUsage, NamespaceHistograms, Ns};
 pub(crate) use wait::StreamableWait;
 
 /// The name of the namespace every store has. It is created with the store
@@ -100,6 +101,11 @@ struct NsState<F: LogFs> {
     /// The last checkpoint error, cleared by a successful checkpoint.
     checkpoint_error: Mutex<Option<String>>,
     recovery: RecoveryReport,
+    /// How long checkpoint runs that wrote one took (the metrics).
+    checkpoints: Histogram,
+    /// When the newest checkpoint was written: its file's modification
+    /// time when the store opened, then the end of each written one.
+    last_checkpoint: Mutex<Option<CommitTime>>,
 }
 
 /// The namespace log and the archive: what creating and dropping a
@@ -840,7 +846,10 @@ fn new_state<F: LogFs + Clone>(
         checkpointer.set_archive(ArchiveHandle::new(archive.clone(), info.id));
     }
     checkpointer.set_retention(options.retention);
+    let last_checkpoint = recovery.checkpoint.and_then(|seq| checkpoint_time(&paths, seq));
     NsState {
+        checkpoints: Histogram::new(),
+        last_checkpoint: Mutex::new(last_checkpoint),
         info,
         paths,
         live,
@@ -850,6 +859,14 @@ fn new_state<F: LogFs + Clone>(
         checkpoint_error: Mutex::new(None),
         recovery,
     }
+}
+
+/// The modification time of checkpoint `seq` in `paths`, if it can be read.
+fn checkpoint_time(paths: &NsPaths, seq: u64) -> Option<CommitTime> {
+    let path = paths.checkpoints.join(iwdb_storage::checkpoint::checkpoint_name(seq));
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    let micros = modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_micros();
+    Some(CommitTime(i64::try_from(micros).ok()?))
 }
 
 /// Log what recovery found that is worth attention.

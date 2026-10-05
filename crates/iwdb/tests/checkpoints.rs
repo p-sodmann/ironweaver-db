@@ -327,3 +327,53 @@ fn a_failed_truncation_fails_the_open_and_the_next_open_finishes_it() {
     assert!(store.recovery().torn_tail.is_some());
     assert_eq!(store_state(&store), state(&reference));
 }
+
+#[test]
+fn the_status_and_histograms_report_commits_fsyncs_and_checkpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut reference = reference();
+    let steps = workload(30, 10);
+    let store = Store::open(dir.path(), options(1)).unwrap();
+    run(&store, &mut reference, &steps[..20]);
+    let ns = store.default_namespace();
+    let before = ns.status();
+    assert_eq!(before.checkpoint, None);
+    assert_eq!(before.last_checkpoint, None);
+    assert_eq!(before.since_checkpoint, before.seq);
+    assert_eq!(before.unsynced, Some(0), "fsync always: every commit is synced");
+    let h = ns.histograms();
+    // Every commit is timed, failed ones too; each applied one held the
+    // write lock and was fsynced first
+    assert_eq!(h.live.commits.count(), 20);
+    let applied = h.live.write_holds.count();
+    assert!(applied > 0 && applied <= 20, "{:?}", h.live.write_holds);
+    assert!(h.live.fsyncs.count() >= applied, "{:?}", h.live.fsyncs);
+    assert!(h.live.read_holds.count() >= 1, "status reads under the read lock");
+    assert_eq!(h.checkpoints.count(), 0);
+    assert!(ns.disk_usage().wal_bytes > 0);
+    assert_eq!(ns.disk_usage().checkpoint_bytes, 0);
+
+    let started = iwdb::CommitTime::now();
+    store.checkpoint().unwrap();
+    run(&store, &mut reference, &steps[20..]);
+    let after = ns.status();
+    assert_eq!(after.checkpoint, Some(before.seq));
+    assert_eq!(after.since_checkpoint, after.seq - before.seq);
+    assert!(after.last_checkpoint.is_some_and(|t| t >= started), "{:?}", after.last_checkpoint);
+    assert_eq!(ns.histograms().checkpoints.count(), 1);
+    assert!(ns.disk_usage().checkpoint_bytes > 0);
+    // A checkpoint that writes nothing isn't timed
+    let seq = store.seq();
+    store.checkpoint().unwrap();
+    store.checkpoint().unwrap();
+    assert_eq!(ns.histograms().checkpoints.count(), 2, "at seq {}", seq);
+
+    // After reopening, the time is the checkpoint file's
+    drop(ns);
+    store.close().unwrap();
+    let store = Store::open(dir.path(), options(1)).unwrap();
+    let reopened = store.default_namespace().status();
+    let written = fs::metadata(checkpoint_path(dir.path(), reopened.checkpoint.unwrap())).unwrap().modified().unwrap();
+    let micros = written.duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
+    assert_eq!(reopened.last_checkpoint.map(|t| t.0), Some(micros));
+}

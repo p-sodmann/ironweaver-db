@@ -165,6 +165,9 @@ pub(crate) fn status_to_pb(s: &NamespaceStatus) -> pb::NamespaceStatus {
             .iter()
             .map(|m| pb::MarkStatus { name: m.name.clone(), position: m.position, seq: m.seq })
             .collect(),
+        unsynced: s.unsynced,
+        since_checkpoint: s.since_checkpoint,
+        last_checkpoint_micros: s.last_checkpoint.map(|t| t.0),
     }
 }
 
@@ -177,6 +180,9 @@ pub(crate) fn status_from_pb(s: Option<pb::NamespaceStatus>) -> Result<Namespace
         seq: s.seq,
         synced_seq: s.synced_seq,
         checkpoint: s.checkpoint,
+        unsynced: s.unsynced,
+        since_checkpoint: s.since_checkpoint,
+        last_checkpoint: s.last_checkpoint_micros.map(time_from_pb),
         read_only: s.read_only,
         checkpoint_failure: s.checkpoint_failure,
         nodes: size(s.nodes),
