@@ -189,6 +189,25 @@ What it doesn't guarantee:
 - **Open connections keep their certificate** after a reload, until they close.
 - **The Postgres source of projections connects without TLS.**
 
+## Audit log (step 15c)
+
+[ADR 0049](adr/0049-audit-log.md); configuration: [api/config.md](api/config.md#audit-log).
+
+What it guarantees:
+
+- **Every login, logout, user, grant, token, namespace and catalog change leaves one entry**, with its principal (user, and how it authenticated: session, API token, client certificate, or authentication off), the client's address, the operation, the namespace, and the outcome (and error code). This holds whether the request came over gRPC or REST, and so from Python, `iwctl --server` and the console. **Every refusal** (`unauthenticated`, `permission_denied`) of any operation leaves one too. All are made at the authorisation point, never in an adapter. Tested for every role × operation cell over both APIs (`crates/iwdb-server/tests/roles.rs`) and for certificate principals (`tls.rs`).
+- **No secret or data value in an entry.** An entry never holds a password, a token, a token's hash, a certificate, an error message or an attribute value. The binary test greps the log and the audit file at `debug` through logins, failures, tokens, password changes, a commit and a catalog change (`no_secret_reaches_the_logs`).
+- **The log level doesn't hide entries** unless it names `iwdb::audit`.
+- **Bounded files.** With `[audit] dir`, files older than `[audit] retention_days` are deleted.
+- **No telemetry.** Without projections, the server opens no connection of its own (`opens_no_connection_it_was_not_configured_for`, by `lsof`), and the console loads nothing from another site ([SECURITY.md](../SECURITY.md)).
+
+What it doesn't guarantee:
+
+- **Entries are not durable with the change.** They are written after the outcome, without fsync; a crash can lose the last ones, never the changes, which are in the WAL. A call whose client goes away before it finishes can leave no entry.
+- **User, grant and token changes carry no seq** (catalog changes and namespace events do).
+- **Successful reads and data commits aren't audited** (the change stream records commits), nor failed TLS handshakes, nor in-process access to a data directory.
+- **Entries in stderr are kept as long as the log collector keeps them.**
+
 ## The change stream (step 13)
 
 The change stream ([api/changes.md](api/changes.md), [ADR 0031](adr/0031-change-stream.md)) returns a namespace's commits from a seq on, as logged:
