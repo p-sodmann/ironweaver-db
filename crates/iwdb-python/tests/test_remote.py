@@ -5,6 +5,7 @@ import json
 import socket
 import ssl
 import time
+import urllib.error
 import urllib.request
 
 import pytest
@@ -122,15 +123,22 @@ def test_a_server_that_stops_makes_calls_unavailable(server):
 
 
 def rest(server, method, path, body=None, token=None):
-    """A REST call; the answer's JSON."""
+    """A REST call; the answer's JSON. The tests set users up over REST
+    (the Python client has no account API): against a server built
+    without REST they are skipped."""
     request = urllib.request.Request(server.endpoint + path, method=method)
     if body is not None:
         request.add_header("content-type", "application/json")
         request.data = json.dumps(body).encode()
     if token:
         request.add_header("authorization", "Bearer " + token)
-    with urllib.request.urlopen(request, context=ssl.create_default_context(cafile=str(CA))) as answer:
-        return json.loads(answer.read() or b"{}")
+    try:
+        with urllib.request.urlopen(request, context=ssl.create_default_context(cafile=str(CA))) as answer:
+            return json.loads(answer.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        if e.code == 404 and not e.read():
+            pytest.skip("this iwdb-server has no REST API (build it with --features rest)")
+        raise
 
 
 def admin_token(server):
