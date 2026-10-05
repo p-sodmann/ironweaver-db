@@ -20,7 +20,7 @@ use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation, Namespace};
 use iwdb_query::exec::{Pending, Pool};
 use iwdb_query::read::{self, ReadContext};
-use iwdb_query::{Accounts, Authenticate, NewToken, Principal, Role, Secret, Session, TokenInfo, UserInfo};
+use iwdb_query::{Accounts, Authenticate, NewToken, Principal, Role, Secret, Session, TokenInfo, UserInfo, Via};
 use iwdb_query::{
     AnalyticsRequest, Answer, CHANGES_BATCH_BYTES, ChangeEvent, Changes, ChangesRequest, Code, CommitOptions, Database,
     Edge, Error, Explain, ExplainRequest, FindRequest, JobResult, LimitConfig, MatchRequest, MatchRow, NamespaceStatus,
@@ -120,9 +120,9 @@ where
         let unknown = || Error::new(Code::Unauthenticated, "the token is unknown, expired or revoked: log in again");
         let users = self.store.users();
         let hash = token_hash(token);
-        let user = if let Some(session) = self.auth.sessions.get(&hash) {
+        let (user, via) = if let Some(session) = self.auth.sessions.get(&hash) {
             match users.record(&session.user)? {
-                Some(user) if user.epoch == session.epoch => user,
+                Some(user) if user.epoch == session.epoch => (user, Via::Session),
                 // Deleted, or its password changed since the login
                 _ => {
                     self.auth.sessions.remove(&hash);
@@ -134,10 +134,10 @@ where
             if token.expired(now_ms()) {
                 return Err(unknown());
             }
-            users.record(&token.user)?.ok_or_else(unknown)?
+            (users.record(&token.user)?.ok_or_else(unknown)?, Via::ApiToken)
         };
         let info = users.info_of(&user);
-        Ok(Principal { user: info.name, admin: info.admin, grants: info.grants })
+        Ok(Principal { user: info.name, admin: info.admin, grants: info.grants, via })
     }
 
     /// The principal of the user `name` (a client certificate's).
@@ -149,7 +149,7 @@ where
         let users = self.store.users();
         let user = users.record(name)?.ok_or_else(unknown)?;
         let info = users.info_of(&user);
-        Ok(Principal { user: info.name, admin: info.admin, grants: info.grants })
+        Ok(Principal { user: info.name, admin: info.admin, grants: info.grants, via: Via::Certificate })
     }
 
     /// The store, for what the trait doesn't cover: backups, checkpoints,

@@ -49,6 +49,8 @@ use tonic_health::pb::health_server::HealthServer;
 use tower_service::Service;
 use tracing::Instrument;
 
+use iwdb_query::audit::AuditSink;
+
 use crate::auth::{AuthMode, Connection, GRPC_AUTH_PREFIX, Served};
 use crate::health::{GRPC_PREFIX, GrpcHealth, Health, LIVE_PATH, Phase, READY_PATH};
 use crate::tls::{ClientCertificate, ServerTls};
@@ -69,6 +71,7 @@ type Body = tonic::body::Body;
 pub(crate) struct Dispatch<D> {
     db: Arc<D>,
     mode: AuthMode,
+    audit: Arc<dyn AuditSink>,
     grpc: DatabaseServiceServer<Adapter<D>>,
     auth: AuthServiceServer<Adapter<D>>,
     #[cfg(feature = "rest")]
@@ -81,6 +84,7 @@ impl<D> Clone for Dispatch<D> {
         Dispatch {
             db: self.db.clone(),
             mode: self.mode,
+            audit: self.audit.clone(),
             grpc: self.grpc.clone(),
             auth: self.auth.clone(),
             #[cfg(feature = "rest")]
@@ -94,21 +98,23 @@ impl<D> Dispatch<D> {
     pub(crate) fn new(
         db: Arc<D>,
         mode: AuthMode,
+        audit: Arc<dyn AuditSink>,
         grpc: DatabaseServiceServer<Adapter<D>>,
         auth: AuthServiceServer<Adapter<D>>,
         rest: axum::Router,
     ) -> Self {
-        Dispatch { db, mode, grpc, auth, rest }
+        Dispatch { db, mode, audit, grpc, auth, rest }
     }
 
     #[cfg(not(feature = "rest"))]
     pub(crate) fn new(
         db: Arc<D>,
         mode: AuthMode,
+        audit: Arc<dyn AuditSink>,
         grpc: DatabaseServiceServer<Adapter<D>>,
         auth: AuthServiceServer<Adapter<D>>,
     ) -> Self {
-        Dispatch { db, mode, grpc, auth }
+        Dispatch { db, mode, audit, grpc, auth }
     }
 }
 
@@ -274,14 +280,20 @@ where
         match self.inner.get() {
             Some(inner) => {
                 let mut inner = inner.clone();
-                let credentials = match crate::auth::credentials(inner.mode, &request, grpc, &self.connection) {
+                let audit = inner.audit.clone();
+                let credentials = match crate::auth::credentials(inner.mode, &request, grpc, &self.connection, &*audit)
+                {
                     Ok(credentials) => credentials,
                     Err(e) => return Box::pin(std::future::ready(Ok(refused(grpc, e)))),
                 };
+                let operation = crate::auth::operation_of(&request, grpc);
+                let connection = self.connection.clone();
                 Box::pin(
                     async move {
                         let mut request = request;
-                        match crate::auth::authenticate(&*inner.db, credentials).await {
+                        let authenticated =
+                            crate::auth::authenticate(&*inner.db, credentials, operation, &connection, &*audit).await;
+                        match authenticated {
                             Ok(caller) => {
                                 request.extensions_mut().insert(caller);
                                 inner.call(request).await

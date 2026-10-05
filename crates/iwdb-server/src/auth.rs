@@ -23,7 +23,8 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use iwdb_query::{Accounts, Authenticate, Authorized, Code, Database, Error, Principal, Secret};
+use iwdb_query::audit::{Audit, AuditEntry, AuditSink};
+use iwdb_query::{Accounts, Authenticate, Authorized, Code, Database, Error, Operation, Principal, Secret, Via};
 
 use crate::tls::ClientCertificate;
 
@@ -151,11 +152,55 @@ fn check_csrf<B>(request: &http::Request<B>, grpc: bool, what: &str) -> Result<(
     Ok(())
 }
 
-/// Read a request's credentials (once, in the gate). Errors:
-/// `unauthenticated` (none, or malformed; no client certificate where one
-/// is required), `permission_denied` (an ambient credential without the
-/// CSRF header on a request that writes).
+/// The operation a request asks for, as far as the gate can tell (for the
+/// audit entry of a refusal): a gRPC method of ours, or a REST route.
+pub(crate) fn operation_of<B>(request: &http::Request<B>, grpc: bool) -> Option<Operation> {
+    let path = request.uri().path();
+    if grpc {
+        let method = path.strip_prefix("/ironweaver_db.v1.")?.split_once('/')?.1;
+        return Operation::from_rpc(method);
+    }
+    #[cfg(feature = "rest")]
+    {
+        crate::rest::operation_of(request.method(), path)
+    }
+    #[cfg(not(feature = "rest"))]
+    None
+}
+
+/// Record a request the gate refused (ADR 0049): its operation if known,
+/// the code, the client, and the certificate if that was the credential.
+fn refused(audit: &dyn AuditSink, operation: Option<Operation>, connection: &Connection, via: Option<Via>, e: &Error) {
+    audit.record(&AuditEntry {
+        operation,
+        code: Some(e.code()),
+        via,
+        client: connection.client,
+        ..AuditEntry::default()
+    });
+}
+
+/// Read a request's credentials (once, in the gate); a refusal is audited.
+/// Errors: `unauthenticated` (none, or malformed; no client certificate
+/// where one is required), `permission_denied` (an ambient credential
+/// without the CSRF header on a request that writes).
 pub(crate) fn credentials<B>(
+    mode: AuthMode,
+    request: &http::Request<B>,
+    grpc: bool,
+    connection: &Connection,
+    audit: &dyn AuditSink,
+) -> Result<Credentials, Error> {
+    credentials_of(mode, request, grpc, connection).inspect_err(|e| {
+        let via = match connection.certificate {
+            ClientCertificate::None => None,
+            _ => Some(Via::Certificate),
+        };
+        refused(audit, operation_of(request, grpc), connection, via, e)
+    })
+}
+
+fn credentials_of<B>(
     mode: AuthMode,
     request: &http::Request<B>,
     grpc: bool,
@@ -193,31 +238,56 @@ pub(crate) fn credentials<B>(
 }
 
 /// The caller of `credentials`: a token's or a certificate's principal
-/// looked up. Errors: `unauthenticated`.
-pub(crate) async fn authenticate<D: Served>(db: &D, credentials: Credentials) -> Result<Caller, Error> {
+/// looked up; a refusal of `operation` is audited. Errors:
+/// `unauthenticated`.
+pub(crate) async fn authenticate<D: Served>(
+    db: &D,
+    credentials: Credentials,
+    operation: Option<Operation>,
+    connection: &Connection,
+    audit: &dyn AuditSink,
+) -> Result<Caller, Error> {
     match credentials {
         Credentials::Caller(caller) => Ok(caller),
-        Credentials::Token(token, caller) => {
-            let principal = db.authenticate(&token).await?;
-            Ok(Caller { principal: Some(Arc::new(principal)), token: Some(token), ..caller })
-        }
-        Credentials::User(user, caller) => {
-            let principal = db.principal_of(&user).await?;
-            Ok(Caller { principal: Some(Arc::new(principal)), ..caller })
-        }
+        Credentials::Token(token, caller) => match db.authenticate(&token).await {
+            Ok(principal) => Ok(Caller { principal: Some(Arc::new(principal)), token: Some(token), ..caller }),
+            Err(e) => {
+                refused(audit, operation, connection, None, &e);
+                Err(e)
+            }
+        },
+        Credentials::User(user, caller) => match db.principal_of(&user).await {
+            Ok(principal) => Ok(Caller { principal: Some(Arc::new(principal)), ..caller }),
+            Err(e) => {
+                // Not the certificate's name: a certificate's contents
+                // stay out of the audit log
+                refused(audit, operation, connection, Some(Via::Certificate), &e);
+                Err(e)
+            }
+        },
     }
 }
 
-/// The database as the caller may use it. A request without a caller (a
-/// server's service used without its gate) is a server-wide admin's if
-/// authentication is off, and refused otherwise.
-pub(crate) fn authorized<D>(db: &Arc<D>, mode: AuthMode, caller: Option<&Caller>) -> Result<Authorized<D>, Error> {
+/// The database as the caller may use it, auditing into `audit`. A
+/// request without a caller (a server's service used without its gate) is
+/// a server-wide admin's if authentication is off, and refused otherwise.
+pub(crate) fn authorized<D>(
+    db: &Arc<D>,
+    mode: AuthMode,
+    caller: Option<&Caller>,
+    audit: &Arc<dyn AuditSink>,
+) -> Result<Authorized<D>, Error> {
     let principal = match caller.and_then(|c| c.principal.clone()) {
         Some(principal) => principal,
         None if !mode.enabled => Arc::new(Principal::unauthenticated()),
         None => return Err(unauthenticated("this call needs credentials")),
     };
-    Ok(Authorized::new(db.clone(), principal))
+    Ok(Authorized::new(db.clone(), principal, Audit::new(audit.clone(), caller.and_then(|c| c.client))))
+}
+
+/// The audit context of a request without a principal (login).
+pub(crate) fn audit_of(caller: Option<&Caller>, audit: &Arc<dyn AuditSink>) -> Audit {
+    Audit::new(audit.clone(), caller.and_then(|c| c.client))
 }
 
 #[cfg(test)]

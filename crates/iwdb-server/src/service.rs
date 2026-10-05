@@ -7,6 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use iwdb_query::audit::AuditSink;
 use iwdb_query::{Authorized, Error};
 use tokio::sync::watch;
 use tokio_stream::wrappers::ReceiverStream;
@@ -14,7 +15,7 @@ use tokio_stream::{Stream, StreamExt};
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
-use crate::auth::{AuthMode, Caller, Served, authorized};
+use crate::auth::{AuthMode, Caller, Served, audit_of, authorized};
 use crate::convert::watch_response;
 use crate::health::{Health, Phase};
 use crate::ops;
@@ -51,6 +52,8 @@ pub struct Server<D> {
     pub(crate) auth: AuthMode,
     /// Serve TLS only (step 15b).
     pub(crate) tls: Option<Arc<crate::tls::ServerTls>>,
+    /// Where audit entries go (step 15c).
+    pub(crate) audit: Arc<dyn AuditSink>,
 }
 
 impl<D: Served> Server<D> {
@@ -64,7 +67,16 @@ impl<D: Served> Server<D> {
             console: false,
             auth: AuthMode::default(),
             tls: None,
+            audit: Arc::new(crate::audit::LogAudit),
         }
+    }
+
+    /// Where audit entries go (step 15c, ADR 0049): by default
+    /// [`LogAudit`](crate::audit::LogAudit), the log's `iwdb::audit`
+    /// target.
+    pub fn audit(mut self, sink: Arc<dyn AuditSink>) -> Self {
+        self.audit = sink;
+        self
     }
 
     /// Serve TLS only, with `tls` (step 15b, ADR 0048); `None` (the
@@ -145,26 +157,44 @@ impl<D: Served> Server<D> {
     }
 
     fn adapter(&self) -> Arc<Adapter<D>> {
-        Arc::new(Adapter { db: self.db.clone(), stopping: self.stopping.subscribe(), mode: self.auth })
+        Arc::new(Adapter {
+            db: self.db.clone(),
+            stopping: self.stopping.subscribe(),
+            mode: self.auth,
+            audit: self.audit.clone(),
+        })
     }
 
     /// The REST routes (ADR 0030), with request bodies up to the message
     /// size limit.
     #[cfg(feature = "rest")]
     pub fn rest_router(&self) -> axum::Router {
-        crate::rest::router(self.db.clone(), self.max_message_bytes, self.stopping.subscribe(), self.auth)
+        crate::rest::router(
+            self.db.clone(),
+            self.max_message_bytes,
+            self.stopping.subscribe(),
+            self.auth,
+            self.audit.clone(),
+        )
     }
 
     /// gRPC and REST as one service, as [`serve`](Self::serve) serves them.
     #[cfg(feature = "rest")]
     pub(crate) fn http_service(&self) -> crate::serve::Dispatch<D> {
-        crate::serve::Dispatch::new(self.db.clone(), self.auth, self.service(), self.auth_service(), self.rest_router())
+        crate::serve::Dispatch::new(
+            self.db.clone(),
+            self.auth,
+            self.audit.clone(),
+            self.service(),
+            self.auth_service(),
+            self.rest_router(),
+        )
     }
 
     /// gRPC alone, as [`serve`](Self::serve) serves it without `rest`.
     #[cfg(not(feature = "rest"))]
     pub(crate) fn http_service(&self) -> crate::serve::Dispatch<D> {
-        crate::serve::Dispatch::new(self.db.clone(), self.auth, self.service(), self.auth_service())
+        crate::serve::Dispatch::new(self.db.clone(), self.auth, self.audit.clone(), self.service(), self.auth_service())
     }
 }
 
@@ -175,12 +205,13 @@ pub struct Adapter<D> {
     db: Arc<D>,
     stopping: watch::Receiver<bool>,
     mode: AuthMode,
+    audit: Arc<dyn AuditSink>,
 }
 
 impl<D> Adapter<D> {
     /// The database as the request's caller may use it.
     fn db<T>(&self, request: &Request<T>) -> Result<Authorized<D>, Status> {
-        authorized(&self.db, self.mode, request.extensions().get::<Caller>()).map_err(fail)
+        authorized(&self.db, self.mode, request.extensions().get::<Caller>(), &self.audit).map_err(fail)
     }
 
     fn caller<T>(request: &Request<T>) -> Option<Caller> {
@@ -368,18 +399,18 @@ impl<D: Served> DatabaseService for Adapter<D> {
 #[tonic::async_trait]
 impl<D: Served> AuthService for Adapter<D> {
     async fn login(&self, request: Request<pb::LoginRequest>) -> Res<pb::LoginResponse> {
-        let client = Self::caller(&request).and_then(|c| c.client);
+        let audit = audit_of(request.extensions().get::<Caller>(), &self.audit);
         let r = request.into_inner();
         if r.cookie {
             return Err(fail(Error::invalid("a session cookie is for REST only: leave `cookie` out")));
         }
-        Ok(Response::new(ops::login(&*self.db, r, client).await.map_err(fail)?.0))
+        Ok(Response::new(ops::login(&*self.db, r, &audit).await.map_err(fail)?.0))
     }
 
     async fn logout(&self, request: Request<pb::LogoutRequest>) -> Res<pb::LogoutResponse> {
-        self.db(&request)?;
+        let db = self.db(&request)?;
         let token = Self::caller(&request).and_then(|c| c.token);
-        Ok(Response::new(ops::logout(&*self.db, token.as_ref()).await.map_err(fail)?))
+        Ok(Response::new(ops::logout(&db, token.as_ref()).await.map_err(fail)?))
     }
 
     async fn who_am_i(&self, request: Request<pb::WhoAmIRequest>) -> Res<pb::WhoAmIResponse> {

@@ -74,6 +74,42 @@ pub fn client_tls(cert: Option<&str>) -> ClientTls {
     }
 }
 
+/// An audit sink that keeps the entries it is given (step 15c), unless
+/// paused (while a test sets a case up).
+#[derive(Default)]
+pub struct Captured {
+    entries: std::sync::Mutex<Vec<iwdb_query::audit::AuditEntry>>,
+    paused: std::sync::atomic::AtomicBool,
+}
+
+impl Captured {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Captured::default())
+    }
+
+    /// The entries recorded since the last call.
+    pub fn take(&self) -> Vec<iwdb_query::audit::AuditEntry> {
+        std::mem::take(&mut *self.entries.lock().unwrap())
+    }
+
+    /// Run `f` without recording.
+    pub fn paused<T>(&self, f: impl FnOnce() -> T) -> T {
+        use std::sync::atomic::Ordering;
+        let was = self.paused.swap(true, Ordering::SeqCst);
+        let result = f();
+        self.paused.store(was, Ordering::SeqCst);
+        result
+    }
+}
+
+impl iwdb_query::audit::AuditSink for Captured {
+    fn record(&self, entry: &iwdb_query::audit::AuditEntry) {
+        if !self.paused.load(std::sync::atomic::Ordering::SeqCst) {
+            self.entries.lock().unwrap().push(entry.clone());
+        }
+    }
+}
+
 /// A server of `D` on its own runtime, listening on 127.0.0.1 with an
 /// ephemeral port.
 pub struct Running<D: iwdb_server::auth::Served> {

@@ -1,7 +1,8 @@
 //! TLS and mTLS (step 15b, ADR 0048): the handshake over gRPC and REST, a
 //! wrong CA and expired certificates refused, client certificates mapped
 //! to users and their roles, a required client certificate, the Secure
-//! cookie, the probe, and reloading the certificate. The certificates are
+//! cookie, the probe, reloading the certificate, and certificate
+//! principals in the audit log (step 15c). The certificates are
 //! the test-only fixtures of `tests/fixtures/tls`.
 //!
 //! Needs `rest` (it compares both APIs); a gRPC-only build runs the gRPC
@@ -20,12 +21,12 @@ use std::time::Duration;
 use iwdb::{Embedded, QueryConfig, Secret, Store};
 use iwdb_engine::Mutation;
 use iwdb_query::exec::block_on;
-use iwdb_query::{Code, CommitOptions, Database, Error, QueryOptions, Role};
+use iwdb_query::{Code, CommitOptions, Database, Error, Operation, QueryOptions, Role, Via};
 use iwdb_server::auth::AuthMode;
 use iwdb_server::client::{ClientTls, Remote, RestRemote};
 use iwdb_server::config::ClientAuth;
 use iwdb_server::tls::{ServerTls, TlsFiles};
-use support::{ADMIN, FAST, Running, auth_settings, client_tls, options, tls_fixture};
+use support::{ADMIN, Captured, FAST, Running, auth_settings, client_tls, options, tls_fixture};
 
 const NS: &str = "default";
 const AUTH: AuthMode = AuthMode { enabled: true };
@@ -248,6 +249,95 @@ fn a_client_certificate_is_its_users_principal_with_its_roles() {
     block_on(r.login("bob", Secret::new("bob-password"))).unwrap();
     assert_eq!(r.who(), "bob");
     write(&r, "b3").unwrap();
+}
+
+/// A client certificate's principal is audited as such (step 15c, ADR
+/// 0049), over gRPC and REST: its user and `auth = certificate` on what it
+/// did and on what it was refused; a certificate that names no user, and
+/// a REST write by certificate without the CSRF header, as refusals the
+/// gate made before there was a principal.
+#[test]
+fn certificate_principals_are_audited() {
+    let (db, _dir) = store();
+    let audit = Captured::new();
+    let sink = audit.clone();
+    let server = Running::start_built(db, |s| {
+        s.auth(AUTH).tls(Some(support::server_tls(Some(ClientAuth::Optional)))).audit(sink)
+    });
+    let tls = |user: &str| client_tls(Some(user));
+    certificates_audited(
+        &audit,
+        "grpc",
+        &grpc(&server, &tls("admin")),
+        &grpc(&server, &tls("ann")),
+        &grpc(&server, &tls("nobody")),
+    );
+    certificates_audited(
+        &audit,
+        "rest",
+        &rest(&server, &tls("admin")),
+        &rest(&server, &tls("ann")),
+        &rest(&server, &tls("nobody")),
+    );
+    // A REST write by certificate without the CSRF header: refused by the
+    // gate, which knows the route but has no principal yet
+    audit.take();
+    let body = r#"{"mutations":[{"upsertNode":{"id":"c","labels":["P"]}}]}"#;
+    let post = format!(
+        "POST /v1/namespaces/default/commit HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    assert!(https(server.addr, &tls("bob"), &post).unwrap().starts_with("HTTP/1.1 403"));
+    let entries = audit.take();
+    let [e] = entries.as_slice() else { panic!("{:?}", entries) };
+    assert_eq!(
+        (e.operation, e.code, e.via),
+        (Some(Operation::Commit), Some(Code::PermissionDenied), Some(Via::Certificate))
+    );
+    assert_eq!((e.user.as_deref(), e.client), (None, Some(localhost())));
+}
+
+fn localhost() -> std::net::IpAddr {
+    "127.0.0.1".parse().unwrap()
+}
+
+/// The admin's certificate creates a namespace, ann's is refused a
+/// commit, and nobody's is refused a read: one entry each.
+fn certificates_audited<D: Database>(audit: &Captured, api: &str, admin: &D, ann: &D, nobody: &D) {
+    audit.take();
+    create(admin, &format!("by_cert_{}", api)).unwrap();
+    let entries = audit.take();
+    let [e] = entries.as_slice() else { panic!("{}: {:?}", api, entries) };
+    assert_eq!(
+        (e.operation, e.code, e.via),
+        (Some(Operation::CreateNamespace), None, Some(Via::Certificate)),
+        "{}",
+        api
+    );
+    assert_eq!((e.user.as_deref(), e.client), (Some("admin"), Some(localhost())), "{}", api);
+    assert!(e.namespace_event.is_some(), "{}: {:?}", api, e);
+    assert_eq!(write(ann, "a").unwrap_err().code(), Code::PermissionDenied);
+    let entries = audit.take();
+    let [e] = entries.as_slice() else { panic!("{}: {:?}", api, entries) };
+    assert_eq!(
+        (e.operation, e.code, e.via),
+        (Some(Operation::Commit), Some(Code::PermissionDenied), Some(Via::Certificate)),
+        "{}",
+        api
+    );
+    assert_eq!((e.user.as_deref(), e.namespace.as_deref()), (Some("ann"), Some(NS)), "{}", api);
+    assert_eq!(read(nobody).unwrap_err().code(), Code::Unauthenticated);
+    let entries = audit.take();
+    let [e] = entries.as_slice() else { panic!("{}: {:?}", api, entries) };
+    assert_eq!(
+        (e.operation, e.code, e.via),
+        (Some(Operation::GetNodes), Some(Code::Unauthenticated), Some(Via::Certificate)),
+        "{}",
+        api
+    );
+    // The certificate's name ("nobody") stays out
+    assert_eq!((e.user.as_deref(), e.client), (None, Some(localhost())), "{}", api);
 }
 
 fn create<D: Database>(db: &D, name: &str) -> Result<(), Error> {

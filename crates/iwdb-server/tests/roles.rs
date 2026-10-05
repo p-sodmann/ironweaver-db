@@ -4,6 +4,12 @@
 //! as that caller over both APIs and checks the outcome: allowed (the call
 //! succeeds), `unauthenticated` or `permission_denied`.
 //!
+//! Each cell also checks the audit log (step 15c, ADR 0049): a refusal
+//! leaves one entry with the caller, the code and the client's address;
+//! an allowed call of an operation the table marks `Audited::Always`
+//! leaves one success entry; any other call none. No entry holds a
+//! password or token.
+//!
 //! The callers: no credentials, a user without grants, users with `read`,
 //! `write` and `admin` on the namespace under test, and a server-wide
 //! admin. They authenticate with API tokens, which survive the password
@@ -12,24 +18,28 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ironweaver_core::Expr;
 use iwdb::{Embedded, QueryConfig, Store};
 use iwdb_engine::catalog::{AttrPath, IndexDef};
 use iwdb_engine::{CatalogChange, Mutation};
+use iwdb_query::audit::AuditEntry;
 use iwdb_query::exec::block_on;
 use iwdb_query::{
     Accounts, AnalyticsRequest, ChangesRequest, Code, CommitOptions, Database, Error, ExplainRequest, FindRequest, Job,
     MatchRequest, NeighbourhoodRequest, Order, PathRequest, ProjectionSpec, QueryOptions, Role, Secret,
     SubgraphRequest, TraverseRequest, UserInfo, WalkRequest,
 };
+use iwdb_query::{Audited, Operation, Via};
+use iwdb_server::auth::AuthMode;
 use iwdb_server::client::Remote;
 #[cfg(feature = "rest")]
 use iwdb_server::client::RestRemote;
 use iwdb_server::proto as pb;
 use iwdb_server::proto::database_service_client::DatabaseServiceClient;
-use support::{FAST, Running, auth_settings, options};
+use support::{Captured, FAST, Running, auth_settings, options};
 
 mod support;
 
@@ -124,6 +134,47 @@ enum Op {
     WhoAmI,
     Logout,
     Login,
+}
+
+impl Op {
+    /// The operation of the authorisation point's table this call runs.
+    fn operation(self) -> Operation {
+        match self {
+            Op::Commit => Operation::Commit,
+            Op::CommitCatalog => Operation::CommitCatalog,
+            Op::WaitForSeq => Operation::WaitForSeq,
+            Op::GetNodes => Operation::GetNodes,
+            Op::GetEdges => Operation::GetEdges,
+            Op::Find => Operation::Find,
+            Op::Explain => Operation::Explain,
+            Op::Neighbourhood => Operation::Neighbourhood,
+            Op::Traverse => Operation::Traverse,
+            Op::ShortestPath => Operation::ShortestPath,
+            Op::RandomWalks => Operation::RandomWalks,
+            Op::Subgraph => Operation::Subgraph,
+            Op::MatchPattern => Operation::MatchPattern,
+            Op::Analyze => Operation::Analyze,
+            Op::Changes | Op::Watch => Operation::Changes,
+            Op::Catalog => Operation::Catalog,
+            Op::NamespaceStatus => Operation::NamespaceStatus,
+            Op::Namespaces => Operation::Namespaces,
+            Op::CreateNamespace => Operation::CreateNamespace,
+            Op::DropNamespace => Operation::DropNamespace,
+            Op::Users => Operation::Users,
+            Op::CreateUser => Operation::CreateUser,
+            Op::DeleteUser => Operation::DeleteUser,
+            Op::SetAdmin => Operation::SetAdmin,
+            Op::Grant => Operation::Grant,
+            Op::Revoke => Operation::Revoke,
+            Op::SetOwnPassword | Op::SetOthersPassword => Operation::SetPassword,
+            Op::CreateOwnToken | Op::CreateOthersToken => Operation::CreateToken,
+            Op::RevokeOwnToken | Op::RevokeOthersToken => Operation::RevokeToken,
+            Op::OwnTokens | Op::OthersTokens => Operation::Tokens,
+            Op::WhoAmI => Operation::WhoAmI,
+            Op::Logout => Operation::Logout,
+            Op::Login => Operation::Login,
+        }
+    }
 }
 
 /// The table: per operation, the outcome for each caller of [`CALLERS`]
@@ -223,6 +274,8 @@ struct World {
     /// Each caller's API token.
     tokens: Vec<(Who, Option<Secret>)>,
     counter: AtomicUsize,
+    /// The server's audit entries.
+    audit: Arc<Captured>,
 }
 
 fn node(id: &str) -> Mutation {
@@ -265,9 +318,11 @@ impl World {
             tokens.push((who, token));
         }
         let db = Embedded::new(store, QueryConfig::default()).unwrap().with_auth(auth_settings());
-        let server = Running::start_auth(db);
+        let audit = Captured::new();
+        let sink = audit.clone();
+        let server = Running::start_built(db, |s| s.auth(AuthMode { enabled: true }).audit(sink));
         let admin = server.client().with_token(tokens.last().unwrap().1.clone().unwrap());
-        World { server, _dir: dir, admin, tokens, counter: AtomicUsize::new(0) }
+        World { server, _dir: dir, admin, tokens, counter: AtomicUsize::new(0), audit }
     }
 
     fn token(&self, who: Who) -> Option<Secret> {
@@ -294,8 +349,10 @@ impl World {
     /// A user for an operation on someone else, with a token named "victim".
     fn victim(&self) -> String {
         let name = self.unique("victim");
-        block_on(self.admin.create_user(&name, Secret::new("victim-password"), false)).unwrap();
-        block_on(self.admin.create_token(&name, "victim", None)).unwrap();
+        self.audit.paused(|| {
+            block_on(self.admin.create_user(&name, Secret::new("victim-password"), false)).unwrap();
+            block_on(self.admin.create_token(&name, "victim", None)).unwrap();
+        });
         name
     }
 
@@ -347,18 +404,21 @@ impl World {
             Op::CreateNamespace => {
                 let name = self.unique("new");
                 block_on(c.create_namespace(&name, None)).map(drop).inspect(|()| {
-                    block_on(self.admin.drop_namespace(&name, None)).unwrap();
+                    self.audit.paused(|| block_on(self.admin.drop_namespace(&name, None)).unwrap());
                 })
             }
             Op::DropNamespace => {
                 // A namespace with the same grants as NS
                 let name = self.unique("drop");
-                block_on(self.admin.create_namespace(&name, None)).unwrap();
-                for (who, role) in [(Who::Read, Role::Read), (Who::Write, Role::Write), (Who::NsAdmin, Role::Admin)] {
-                    block_on(self.admin.grant(who.user(), &name, role)).unwrap();
-                }
+                self.audit.paused(|| {
+                    block_on(self.admin.create_namespace(&name, None)).unwrap();
+                    for (who, role) in [(Who::Read, Role::Read), (Who::Write, Role::Write), (Who::NsAdmin, Role::Admin)]
+                    {
+                        block_on(self.admin.grant(who.user(), &name, role)).unwrap();
+                    }
+                });
                 block_on(c.drop_namespace(&name, None)).map(drop).inspect_err(|_| {
-                    block_on(self.admin.drop_namespace(&name, None)).unwrap();
+                    self.audit.paused(|| block_on(self.admin.drop_namespace(&name, None)).unwrap());
                 })
             }
             Op::Users => block_on(c.users()).map(drop),
@@ -379,7 +439,7 @@ impl World {
             Op::RevokeOwnToken => {
                 let name = self.unique("own");
                 if who != Who::Anonymous {
-                    block_on(self.admin.create_token(me, &name, None)).unwrap();
+                    self.audit.paused(|| block_on(self.admin.create_token(me, &name, None)).unwrap());
                 }
                 block_on(c.revoke_token(me, &name))
             }
@@ -450,11 +510,87 @@ impl World {
     }
 }
 
-fn check(transport: &str, run: impl Fn(Op, Who) -> Result<(), Error>) -> Vec<String> {
+/// The operations whose successful calls aren't audited: reads, data
+/// commits and lists (step 15c's non-goal). Every other operation (any
+/// new one too, until it is listed here) must leave an entry per call.
+const NOT_AUDITED: &[Operation] = &[
+    Operation::Commit,
+    Operation::WaitForSeq,
+    Operation::GetNodes,
+    Operation::GetEdges,
+    Operation::Find,
+    Operation::Explain,
+    Operation::Neighbourhood,
+    Operation::Traverse,
+    Operation::ShortestPath,
+    Operation::RandomWalks,
+    Operation::Subgraph,
+    Operation::MatchPattern,
+    Operation::Analyze,
+    Operation::Changes,
+    Operation::Catalog,
+    Operation::NamespaceStatus,
+    Operation::Namespaces,
+    Operation::Users,
+    Operation::Tokens,
+    Operation::WhoAmI,
+];
+
+/// What is wrong with the audit entries of `op` run by `who` with outcome
+/// `got` (empty: nothing).
+fn audit_problems(op: Op, who: Who, got: Outcome, entries: &[AuditEntry]) -> Vec<String> {
+    let operation = op.operation();
+    let audited = got != A || !NOT_AUDITED.contains(&operation);
+    if !audited {
+        return if entries.is_empty() { vec![] } else { vec![format!("expected no entry, got {:?}", entries)] };
+    }
+    let [e] = entries else {
+        return vec![format!("expected one entry, got {:?}", entries)];
+    };
+    let mut problems = Vec::new();
+    let mut expect = |what: &str, ok: bool| {
+        if !ok {
+            problems.push(format!("{} wrong in {:?}", what, e));
+        }
+    };
+    expect("operation", e.operation == Some(operation));
+    expect("client", e.client == Some("127.0.0.1".parse().unwrap()));
+    let code = match got {
+        A => None,
+        U => Some(Code::Unauthenticated),
+        D => Some(Code::PermissionDenied),
+    };
+    expect("code", e.code == code);
+    match (got, op) {
+        (U, _) => expect("principal", e.user.is_none() && e.via.is_none()),
+        (_, Op::Login) => {
+            expect("principal", e.user.as_deref() == Some(Who::Read.user()) && e.via == Some(Via::Session))
+        }
+        _ => expect("principal", e.user.as_deref() == Some(who.user()) && e.via == Some(Via::ApiToken)),
+    }
+    if got == A {
+        match op {
+            Op::CommitCatalog => expect("seq", e.namespace.as_deref() == Some(NS) && e.seq.is_some()),
+            Op::CreateNamespace | Op::DropNamespace => {
+                expect("namespace_event", e.namespace.is_some() && e.namespace_event.is_some())
+            }
+            Op::Grant => expect("grant", e.subject.is_some() && e.namespace.as_deref() == Some(NS) && e.role.is_some()),
+            Op::CreateOwnToken | Op::RevokeOwnToken => {
+                expect("token", e.subject.as_deref() == Some(who.user()) && e.token_name.is_some())
+            }
+            _ => {}
+        }
+    }
+    problems
+}
+
+fn check(transport: &str, world: &World, run: impl Fn(Op, Who) -> Result<(), Error>) -> Vec<String> {
     let mut failures = Vec::new();
     for (op, outcomes) in TABLE {
         for (who, expected) in CALLERS.into_iter().zip(outcomes) {
+            world.audit.take();
             let result = run(*op, who);
+            let entries = world.audit.take();
             let got = match &result {
                 Ok(()) => A,
                 Err(e) if e.code() == Code::Unauthenticated => U,
@@ -477,6 +613,17 @@ fn check(transport: &str, run: impl Fn(Op, Who) -> Result<(), Error>) -> Vec<Str
                     transport, op, who, got, expected, result
                 ));
             }
+            for problem in audit_problems(*op, who, got, &entries) {
+                failures.push(format!("{} {:?} as {:?}: audit: {}", transport, op, who, problem));
+            }
+            // No password or token in any entry
+            let text = format!("{:?}", entries);
+            for (w, token) in &world.tokens {
+                let leaked = token.as_ref().is_some_and(|t| text.contains(t.expose()));
+                if leaked || text.contains(&w.password()) {
+                    failures.push(format!("{} {:?} as {:?}: a secret in {}", transport, op, who, text));
+                }
+            }
         }
     }
     failures
@@ -484,16 +631,17 @@ fn check(transport: &str, run: impl Fn(Op, Who) -> Result<(), Error>) -> Vec<Str
 
 #[test]
 fn every_role_and_operation_over_grpc_and_rest() {
-    // The table covers every operation the authorisation point knows
-    assert_eq!(
-        TABLE.iter().filter(|(op, _)| !matches!(op, Op::Login | Op::Watch)).count(),
-        iwdb_query::Operation::ALL.len() + 4,
-        "own and others' variants of SetPassword, CreateToken, RevokeToken, ListTokens"
-    );
+    // The table covers every operation the authorisation point knows, so
+    // every audited one is checked too
+    for &operation in Operation::ALL {
+        assert!(TABLE.iter().any(|(op, _)| op.operation() == operation), "{:?} isn't in the table", operation);
+        let expected = if NOT_AUDITED.contains(&operation) { Audited::Refusals } else { Audited::Always };
+        assert_eq!(operation.audited(), expected, "{:?}: the operation table's audit column", operation);
+    }
     let world = World::new();
-    let grpc = check("gRPC", |op, who| world.run(op, who, &world.grpc(who), true));
+    let grpc = check("gRPC", &world, |op, who| world.run(op, who, &world.grpc(who), true));
     #[cfg(feature = "rest")]
-    let rest = check("REST", |op, who| world.run(op, who, &world.rest(who), false));
+    let rest = check("REST", &world, |op, who| world.run(op, who, &world.rest(who), false));
     #[cfg(not(feature = "rest"))]
     let rest = Vec::new();
     let failures = [grpc, rest].concat();
