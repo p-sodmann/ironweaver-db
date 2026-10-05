@@ -29,8 +29,12 @@ use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation};
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 
+use crate::admin::{Admin, Listed, ServerStatus};
 use crate::audit::{Audit, AuditEntry};
+use crate::log::LogTail;
+use crate::metrics::Metrics;
 use crate::read::Explain;
+use crate::requests::{Call, ConsumerInfo, RequestInfo, Requests};
 use crate::{
     AnalyticsRequest, Answer, Changes, ChangesRequest, Code, CommitOptions, Database, Edge, Error, ExplainRequest,
     FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
@@ -339,8 +343,8 @@ pub enum Audited {
 
 macro_rules! operations {
     ($($op:ident => $name:literal, $req:expr, $audit:ident;)*) => {
-        /// Every authorised operation: those of [`Database`] and
-        /// [`Accounts`], plus `login`, `whoami` and `logout`.
+        /// Every authorised operation: those of [`Database`], [`Accounts`]
+        /// and [`Admin`], plus `login`, `whoami` and `logout`.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub enum Operation { $($op,)* }
 
@@ -400,9 +404,41 @@ operations! {
     Login => "Login", Open, Always;
     WhoAmI => "WhoAmI", Authenticated, Refusals;
     Logout => "Logout", Authenticated, Always;
+    ServerStatus => "GetServerStatus", Authenticated, Refusals;
+    ActiveRequests => "ListRequests", Authenticated, Refusals;
+    CancelRequest => "CancelRequest", Authenticated, Always;
+    Consumers => "ListConsumers", Authenticated, Refusals;
+    Metrics => "GetMetrics", Authenticated, Refusals;
+    Log => "GetLog", ServerAdmin, Refusals;
 }
 
 impl Operation {
+    /// Whether a running call can be cancelled ([`Admin::cancel_request`]):
+    /// reads can; commits and other changes can't (dropping one wouldn't
+    /// undo it, only make its outcome unknown), nor can logging in or out
+    /// and cancelling.
+    pub fn cancellable(self) -> bool {
+        use Operation::*;
+        !matches!(
+            self,
+            Commit
+                | CommitCatalog
+                | CreateNamespace
+                | DropNamespace
+                | CreateUser
+                | SetPassword
+                | DeleteUser
+                | SetAdmin
+                | Grant
+                | Revoke
+                | CreateToken
+                | RevokeToken
+                | Login
+                | Logout
+                | CancelRequest
+        )
+    }
+
     /// The operation an RPC of the protos runs (`Watch` is `GetChanges`'s
     /// stream); `None` for a name that isn't one.
     pub fn from_rpc(name: &str) -> Option<Operation> {
@@ -454,29 +490,41 @@ pub struct Authorized<D> {
     inner: Arc<D>,
     principal: Arc<Principal>,
     audit: Audit,
+    requests: Option<Arc<Requests>>,
 }
 
 impl<D> Clone for Authorized<D> {
     fn clone(&self) -> Self {
-        Authorized { inner: self.inner.clone(), principal: self.principal.clone(), audit: self.audit.clone() }
+        Authorized {
+            inner: self.inner.clone(),
+            principal: self.principal.clone(),
+            audit: self.audit.clone(),
+            requests: self.requests.clone(),
+        }
     }
 }
 
-/// A checked call's entry, recorded once its outcome is known; `None` if
-/// the operation is audited only when refused.
-struct Pending(Option<AuditEntry>);
+/// A checked call: its audit entry, recorded once its outcome is known
+/// (`None` if the operation is audited only when refused), and its
+/// registration in the request registry (step 16c).
+struct Pending(Option<AuditEntry>, Option<Call>);
 
 /// What an audit entry takes from a call's answer (its seq).
 type Seq<T> = fn(&T, &mut AuditEntry);
 
 fn no_seq<T>(_: &T, _: &mut AuditEntry) {}
 
-impl<D> Authorized<D> {
-    /// `inner` as `principal` may use it, auditing into `audit`.
+impl<D: Admin> Authorized<D> {
+    /// `inner` as `principal` may use it, auditing into `audit`. Every call
+    /// is registered in `inner`'s request registry while it runs
+    /// ([`Admin::registry`]), so it can be listed and cancelled.
     pub fn new(inner: Arc<D>, principal: Arc<Principal>, audit: Audit) -> Self {
-        Authorized { inner, principal, audit }
+        let requests = inner.registry();
+        Authorized { inner, principal, audit, requests }
     }
+}
 
+impl<D> Authorized<D> {
     pub fn principal(&self) -> &Principal {
         &self.principal
     }
@@ -501,8 +549,17 @@ impl<D> Authorized<D> {
             ..entry
         };
         match op.check(&self.principal, subject) {
-            Ok(()) => Ok(Pending((op.audited() == Audited::Always).then_some(entry))),
+            Ok(()) => {
+                let call = self
+                    .requests
+                    .as_ref()
+                    .map(|r| r.begin(op, entry.namespace.as_deref(), &self.principal.user, self.audit.client));
+                Ok(Pending((op.audited() == Audited::Always).then_some(entry), call))
+            }
             Err(e) => {
+                if let Some(requests) = &self.requests {
+                    requests.refused(op, e.code());
+                }
                 entry.code = Some(e.code());
                 self.audit.record(entry);
                 Err(e)
@@ -512,7 +569,7 @@ impl<D> Authorized<D> {
 
     /// Record a checked call's outcome.
     fn finish<T>(&self, pending: Pending, result: &Result<T, Error>, seq: Seq<T>) {
-        if let Pending(Some(mut entry)) = pending {
+        if let Pending(Some(mut entry), _) = pending {
             match result {
                 Ok(answer) => seq(answer, &mut entry),
                 Err(e) => entry.code = Some(e.code()),
@@ -522,13 +579,17 @@ impl<D> Authorized<D> {
     }
 }
 
-/// Run a checked call (`$checked`, checked when the method was called)
-/// and record its outcome.
+/// Run a checked call (`$checked`, checked when the method was called),
+/// registered while it runs (and cancellable, if its operation is), and
+/// record its outcome.
 macro_rules! run {
     ($self:ident, $checked:ident, $call:expr, $seq:expr) => {
         async move {
-            let pending = $checked?;
-            let result = $call.await;
+            let mut pending = $checked?;
+            let result = match pending.1.take() {
+                Some(call) => call.run($call).await,
+                None => $call.await,
+            };
             $self.finish(pending, &result, $seq);
             result
         }
@@ -539,13 +600,14 @@ impl<D: Authenticate> Authorized<D> {
     /// End the caller's session (`token`: the one it sent; an API token or
     /// none ends nothing).
     pub async fn logout(&self, token: Option<&Secret>) -> Result<(), Error> {
-        let pending = self.check(Operation::Logout, "", AuditEntry::default())?;
-        let result = match token {
-            Some(token) => self.inner.logout(token).await,
-            None => Ok(()),
+        let checked = self.check(Operation::Logout, "", AuditEntry::default());
+        let logout = async move {
+            match token {
+                Some(token) => self.inner.logout(token).await,
+                None => Ok(()),
+            }
         };
-        self.finish(pending, &result, no_seq);
-        result
+        run!(self, checked, logout, no_seq).await
     }
 }
 
@@ -640,7 +702,24 @@ impl<D: Database + Accounts> Database for Authorized<D> {
     read!(subgraph, Subgraph, SubgraphRequest, Answer<Subgraph>);
     read!(match_pattern, MatchPattern, MatchRequest, Answer<Vec<MatchRow>>);
     read!(analyze, Analyze, AnalyticsRequest, Answer<JobResult>);
-    read!(changes, Changes, ChangesRequest, Answer<Changes>);
+
+    fn changes(
+        &self,
+        namespace: &str,
+        request: ChangesRequest,
+        options: QueryOptions,
+    ) -> impl Future<Output = Result<Answer<Changes>, Error>> + Send {
+        let checked = self.check(Operation::Changes, namespace, on(namespace));
+        let read = async move {
+            let answer = self.inner.changes(namespace, request, options).await?;
+            // A change-stream reader, as of this poll (`ListConsumers`)
+            if let Some(requests) = &self.requests {
+                requests.polled(namespace, &self.principal.user, self.audit.client, answer.value.next_seq);
+            }
+            Ok(answer)
+        };
+        run!(self, checked, read, no_seq)
+    }
 
     fn catalog(
         &self,
@@ -768,6 +847,78 @@ impl<D: Database + Accounts> Accounts for Authorized<D> {
     fn tokens(&self, user: &str) -> impl Future<Output = Result<Vec<TokenInfo>, Error>> + Send {
         let checked = self.check(Operation::Tokens, user, about(user));
         run!(self, checked, self.inner.tokens(user), no_seq)
+    }
+}
+
+impl<D: Database + Accounts + Admin> Admin for Authorized<D> {
+    /// Namespaces the caller has no role on are left out.
+    fn server_status(&self) -> impl Future<Output = Result<ServerStatus, Error>> + Send {
+        let checked = self.check(Operation::ServerStatus, "", AuditEntry::default());
+        let status = async move {
+            let mut status = self.inner.server_status().await?;
+            status.namespaces.retain(|n| self.principal.role(&n.name).is_some());
+            Ok(status)
+        };
+        run!(self, checked, status, no_seq::<ServerStatus>)
+    }
+
+    /// A user who isn't a server admin sees only its own requests.
+    fn active_requests(
+        &self,
+        user: Option<String>,
+        limit: Option<usize>,
+    ) -> impl Future<Output = Result<Listed<RequestInfo>, Error>> + Send {
+        let checked = self.check(Operation::ActiveRequests, "", AuditEntry::default());
+        let user = self.own(user);
+        run!(self, checked, self.inner.active_requests(user, limit), no_seq)
+    }
+
+    /// A user who isn't a server admin may cancel only its own requests
+    /// (others' are `not_found`). Audited, with the request's id and its
+    /// owner as the subject.
+    fn cancel_request(&self, id: u64, user: Option<String>) -> impl Future<Output = Result<RequestInfo, Error>> + Send {
+        let entry = AuditEntry { request: Some(id), ..AuditEntry::default() };
+        let checked = self.check(Operation::CancelRequest, "", entry);
+        let user = self.own(user);
+        run!(self, checked, self.inner.cancel_request(id, user), |r: &RequestInfo, e| {
+            e.subject = Some(r.user.clone());
+            e.namespace = r.namespace.clone();
+        })
+    }
+
+    /// Only readers of namespaces the caller can read.
+    fn consumers(&self) -> impl Future<Output = Result<Vec<ConsumerInfo>, Error>> + Send {
+        let checked = self.check(Operation::Consumers, "", AuditEntry::default());
+        let list = async move {
+            let mut list = self.inner.consumers().await?;
+            list.retain(|c| self.principal.role(&c.namespace).is_some());
+            Ok(list)
+        };
+        run!(self, checked, list, no_seq::<Vec<ConsumerInfo>>)
+    }
+
+    /// Only the series of namespaces the caller has a role on, and those
+    /// of no namespace.
+    fn metrics(&self) -> impl Future<Output = Result<Metrics, Error>> + Send {
+        let checked = self.check(Operation::Metrics, "", AuditEntry::default());
+        let metrics = async move {
+            let mut metrics = self.inner.metrics().await?;
+            metrics.retain_namespaces(|n| self.principal.role(n).is_some());
+            Ok(metrics)
+        };
+        run!(self, checked, metrics, no_seq::<Metrics>)
+    }
+
+    fn log(&self, after: u64, limit: Option<usize>) -> impl Future<Output = Result<LogTail, Error>> + Send {
+        let checked = self.check(Operation::Log, "", AuditEntry::default());
+        run!(self, checked, self.inner.log(after, limit), no_seq)
+    }
+}
+
+impl<D> Authorized<D> {
+    /// `user` for a server admin; the caller itself for anyone else.
+    fn own(&self, user: Option<String>) -> Option<String> {
+        if self.principal.admin { user } else { Some(self.principal.user.clone()) }
     }
 }
 

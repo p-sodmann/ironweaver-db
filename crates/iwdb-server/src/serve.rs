@@ -55,8 +55,12 @@ use crate::auth::{AuthMode, Connection, GRPC_AUTH_PREFIX, Served};
 use crate::health::{GRPC_PREFIX, GrpcHealth, Health, LIVE_PATH, Phase, READY_PATH};
 use crate::tls::{ClientCertificate, ServerTls};
 
+/// The path prefix of `AdminService`'s RPCs.
+pub const GRPC_ADMIN_PREFIX: &str = "/ironweaver_db.v1.AdminService/";
+
 /// How long a client has for its TLS handshake.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+use crate::proto::admin_service_server::AdminServiceServer;
 use crate::proto::auth_service_server::AuthServiceServer;
 use crate::proto::database_service_server::DatabaseServiceServer;
 use crate::{Adapter, Server};
@@ -65,8 +69,9 @@ use crate::{Adapter, Server};
 #[cfg(not(feature = "rest"))]
 type Body = tonic::body::Body;
 
-/// Both APIs as one service: gRPC by content type (`AuthService` by its
-/// path, `DatabaseService` otherwise), REST otherwise. The gate
+/// Both APIs as one service: gRPC by content type (`AuthService` and
+/// `AdminService` by their path, `DatabaseService` otherwise), REST
+/// otherwise. The gate
 /// authenticates with `db` before it passes a request on.
 pub(crate) struct Dispatch<D> {
     db: Arc<D>,
@@ -74,6 +79,7 @@ pub(crate) struct Dispatch<D> {
     audit: Arc<dyn AuditSink>,
     grpc: DatabaseServiceServer<Adapter<D>>,
     auth: AuthServiceServer<Adapter<D>>,
+    admin: AdminServiceServer<Adapter<D>>,
     #[cfg(feature = "rest")]
     rest: axum::Router,
 }
@@ -87,6 +93,7 @@ impl<D> Clone for Dispatch<D> {
             audit: self.audit.clone(),
             grpc: self.grpc.clone(),
             auth: self.auth.clone(),
+            admin: self.admin.clone(),
             #[cfg(feature = "rest")]
             rest: self.rest.clone(),
         }
@@ -101,9 +108,10 @@ impl<D> Dispatch<D> {
         audit: Arc<dyn AuditSink>,
         grpc: DatabaseServiceServer<Adapter<D>>,
         auth: AuthServiceServer<Adapter<D>>,
+        admin: AdminServiceServer<Adapter<D>>,
         rest: axum::Router,
     ) -> Self {
-        Dispatch { db, mode, audit, grpc, auth, rest }
+        Dispatch { db, mode, audit, grpc, auth, admin, rest }
     }
 
     #[cfg(not(feature = "rest"))]
@@ -113,8 +121,9 @@ impl<D> Dispatch<D> {
         audit: Arc<dyn AuditSink>,
         grpc: DatabaseServiceServer<Adapter<D>>,
         auth: AuthServiceServer<Adapter<D>>,
+        admin: AdminServiceServer<Adapter<D>>,
     ) -> Self {
-        Dispatch { db, mode, audit, grpc, auth }
+        Dispatch { db, mode, audit, grpc, auth, admin }
     }
 }
 
@@ -146,6 +155,14 @@ where
                 let response = auth.call(request).await?;
                 Ok(response.map(Body::new))
             })
+        } else if is_grpc(&request) && request.uri().path().starts_with(GRPC_ADMIN_PREFIX) {
+            let mut admin = self.admin.clone();
+            Box::pin(async move {
+                let response = admin.call(request).await?;
+                Ok(response.map(Body::new))
+            })
+        } else if !is_grpc(&request) && request.uri().path() == crate::metrics::METRICS_PATH {
+            self.metrics(request)
         } else if is_grpc(&request) {
             let mut grpc = self.grpc.clone();
             Box::pin(async move {
@@ -155,6 +172,29 @@ where
         } else {
             self.not_grpc(request)
         }
+    }
+}
+
+impl<D: Served> Dispatch<D> {
+    /// `GET /metrics` (and `HEAD`), in every build.
+    fn metrics<B>(&self, request: http::Request<B>) -> BoxFuture<Result<http::Response<Body>, Infallible>> {
+        let (db, mode, audit) = (self.db.clone(), self.mode, self.audit.clone());
+        let method = request.method().clone();
+        let caller = request.extensions().get::<crate::auth::Caller>().cloned();
+        Box::pin(async move {
+            let (status, media, text) = if method == http::Method::GET || method == http::Method::HEAD {
+                crate::metrics::answer(&db, mode, caller.as_ref(), &audit).await
+            } else {
+                let mut answer = crate::metrics::failure(&Error::invalid("the route doesn't take this method"));
+                answer.0 = http::StatusCode::METHOD_NOT_ALLOWED;
+                answer
+            };
+            let mut response = http::Response::new(Body::new(text));
+            *response.status_mut() = status;
+            response.headers_mut().insert(http::header::CONTENT_TYPE, http::HeaderValue::from_static(media));
+            response.headers_mut().insert(http::header::CACHE_CONTROL, http::HeaderValue::from_static("no-store"));
+            Ok(response)
+        })
     }
 }
 
@@ -281,12 +321,15 @@ where
             Some(inner) => {
                 let mut inner = inner.clone();
                 let audit = inner.audit.clone();
+                let operation = crate::auth::operation_of(&request, grpc);
                 let credentials = match crate::auth::credentials(inner.mode, &request, grpc, &self.connection, &*audit)
                 {
                     Ok(credentials) => credentials,
-                    Err(e) => return Box::pin(std::future::ready(Ok(refused(grpc, e)))),
+                    Err(e) => {
+                        crate::auth::count_refusal(&*inner.db, operation, &e);
+                        return Box::pin(std::future::ready(Ok(refused(grpc, e))));
+                    }
                 };
-                let operation = crate::auth::operation_of(&request, grpc);
                 let connection = self.connection.clone();
                 Box::pin(
                     async move {
@@ -298,7 +341,10 @@ where
                                 request.extensions_mut().insert(caller);
                                 inner.call(request).await
                             }
-                            Err(e) => Ok(refused(grpc, e)),
+                            Err(e) => {
+                                crate::auth::count_refusal(&*inner.db, operation, &e);
+                                Ok(refused(grpc, e))
+                            }
                         }
                     }
                     .instrument(span),
@@ -453,10 +499,10 @@ impl<D: Served> Server<D> {
             self.health.set(Phase::Ready);
         }
         let gate = Gate::new(self.health.clone(), slot, self.console, self.tls.clone());
-        let (health, delay) = (self.health.clone(), self.unready_delay);
+        let (health, delay, db) = (self.health.clone(), self.unready_delay, self.db.clone());
         let until = async move {
             stop.await;
-            unready(&health, delay).await;
+            unready(&health, delay, &*db).await;
         };
         // The change streams never finish on their own: end them as the
         // drain begins
@@ -486,9 +532,11 @@ impl<D: Served> Server<D> {
     }
 }
 
-/// Turn readiness off, then keep serving for `delay`.
-async fn unready(health: &Health, delay: Duration) {
+/// Turn readiness off (the health's and the database's status), then keep
+/// serving for `delay`.
+async fn unready<D: iwdb_query::Admin>(health: &Health, delay: Duration, db: &D) {
     health.set(Phase::Draining);
+    db.set_ready(false);
     tracing::info!(delay_ms = delay.as_millis() as u64, "shutting down: no longer ready");
     if !delay.is_zero() {
         tokio::time::sleep(delay).await;
@@ -604,6 +652,7 @@ where
             };
             let _ = slot.set(server.http_service());
             let stopping = server.stopping.clone();
+            let db = server.db.clone();
             let _ = opened.set(Ok(server));
             if stopped {
                 stopping.send_replace(true);
@@ -620,7 +669,7 @@ where
                 address
             );
             stop.await;
-            unready(&health, options.unready_delay).await;
+            unready(&health, options.unready_delay, &*db).await;
         }
     };
     let stopping = {

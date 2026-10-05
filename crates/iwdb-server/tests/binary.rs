@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use iwdb::{Mutation, Store};
 use iwdb_query::exec::block_on;
-use iwdb_query::{Accounts, Code, CommitOptions, Database, Secret};
+use iwdb_query::{Accounts, Admin, Code, CommitOptions, Database, Secret};
 use iwdb_server::client::{ClientTls, Remote};
 
 const BIN: &str = env!("CARGO_BIN_EXE_iwdb-server");
@@ -485,6 +485,7 @@ fn no_secret_reaches_the_logs() {
             .env("IWDB_TLS_CERT", &cert)
             .env("IWDB_TLS_KEY", &key)
             .env("IWDB_AUDIT_DIR", dir.path().join("audit"))
+            .env("IWDB_LOG_TAIL_EVENTS", "100000")
             .env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "5"),
     );
     let mut seen = Vec::new();
@@ -547,6 +548,28 @@ fn no_secret_reaches_the_logs() {
     let other_ca = ClientTls { ca: Some(fixture("other-ca.pem")), ..ClientTls::default() };
     let stranger = Remote::connect_tls(&format!("https://{}", address), &other_ca).unwrap();
     assert_eq!(block_on(stranger.namespaces()).unwrap_err().code(), Code::Unavailable);
+    // The log tail (step 16c): every event so far, page by page
+    let mut tail = Vec::new();
+    loop {
+        let page = block_on(remote.log(tail.last().map_or(0, |e: &iwdb_query::log::LogEvent| e.seq), None)).unwrap();
+        let more = page.missed && !page.events.is_empty();
+        tail.extend(page.events);
+        if !more {
+            break;
+        }
+    }
+    let tail_text: Vec<String> = tail.iter().map(|e| format!("{} {} {:?}", e.target, e.message, e.fields)).collect();
+    assert!(tail.len() > 20 && tail.first().map(|e| e.seq) == Some(1), "the tail holds every event: {:?}", tail_text);
+    assert!(tail_text.iter().any(|l| l.contains("failed login") && l.contains("ann")), "{:?}", tail_text);
+    assert!(
+        tail.iter().any(|e| e.target == "iwdb::audit" && e.fields.contains(&("operation".into(), "CreateUser".into())))
+    );
+    assert!(tail_text.iter().any(|l| l.contains("reloading TLS failed")), "{:?}", tail_text);
+    for line in &tail_text {
+        for secret in &secrets {
+            assert!(!line.contains(secret.as_str()), "a secret in the log tail: {}", line);
+        }
+    }
     sigterm(&child);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
@@ -750,4 +773,67 @@ fn opens_no_connection_it_was_not_configured_for() {
         assert_eq!(protocol, "TCP", "{}", name);
         assert_eq!(local_port(name), port, "a socket not of the listener: {} ({:?})", name, listed);
     }
+}
+
+/// `GET path` over HTTP/1.1 and TLS, with `token` as a bearer token: the
+/// status, the content type and the body.
+fn https_get(address: &str, path: &str, token: Option<&str>) -> (u16, String, String) {
+    use std::io::{Read, Write};
+    let tls = ClientTls { ca: Some(fixture("ca.pem")), ..ClientTls::default() };
+    let config = std::sync::Arc::new(tls.rustls_config(&[b"http/1.1"]).unwrap());
+    let name = rustls_pki_types::ServerName::try_from("localhost").unwrap();
+    let connection = rustls::ClientConnection::new(config, name).unwrap();
+    let mut stream = rustls::StreamOwned::new(connection, std::net::TcpStream::connect(address).unwrap());
+    let auth = token.map(|t| format!("authorization: Bearer {}\r\n", t)).unwrap_or_default();
+    write!(stream, "GET {} HTTP/1.1\r\nhost: localhost\r\n{}connection: close\r\n\r\n", path, auth).unwrap();
+    let mut answer = Vec::new();
+    // A server that closes without TLS's close_notify ends the read with an error
+    let _ = stream.read_to_end(&mut answer);
+    let answer = String::from_utf8(answer).unwrap();
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+    let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+    let media = head
+        .lines()
+        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-type:").map(|v| v.trim().to_owned()))
+        .unwrap_or_default();
+    (status, media, body.to_owned())
+}
+
+/// The binary serves `GET /metrics` to a caller with a token, in
+/// Prometheus' text format, with every metric of metrics.md; without a
+/// token it is refused (step 16c, ADR 0050).
+#[test]
+fn serves_the_metrics_to_prometheus() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut child, lines, reader) =
+        spawn(bin().env("IWDB_DATA_DIR", dir.path().join("data")).env("IWDB_LISTEN", "127.0.0.1:0"));
+    let mut seen = Vec::new();
+    let address = ready_address(&lines, &mut seen);
+    let remote = admin(&address);
+    block_on(remote.commit("default", vec![node("n1")], CommitOptions::default())).unwrap();
+    let token = block_on(remote.create_token("admin", "prometheus", None)).unwrap().token;
+
+    let (status, media, body) = https_get(&address, "/metrics", None);
+    assert_eq!((status, media.as_str()), (401, "application/json"), "{}", body);
+    assert!(body.contains("\"code\":\"unauthenticated\""), "{}", body);
+
+    let (status, media, text) = https_get(&address, "/metrics", Some(token.expose()));
+    assert_eq!(status, 200, "{}", text);
+    assert_eq!(media, "text/plain; version=0.0.4; charset=utf-8");
+    let names: Vec<&str> = text.lines().filter_map(|l| l.strip_prefix("# TYPE ")?.split(' ').next()).collect();
+    let documented: Vec<&str> = iwdb_query::metrics::METRICS.iter().map(|d| d.name).collect();
+    assert_eq!(names, documented, "every documented metric is exported, and only those");
+    // Every sample belongs to one of them
+    for line in text.lines().filter(|l| !l.starts_with('#')) {
+        let series = line.split(['{', ' ']).next().unwrap();
+        let family = ["_bucket", "_sum", "_count"].iter().fold(series, |s, suffix| s.strip_suffix(suffix).unwrap_or(s));
+        assert!(names.contains(&series) || names.contains(&family), "{}", line);
+    }
+    assert!(text.contains("iwdb_namespace_nodes{namespace=\"default\"} 1\n"), "{}", text);
+    assert!(text.contains("iwdb_requests_total{operation=\"Commit\",code=\"ok\"} 1\n"), "{}", text);
+    assert!(text.contains("iwdb_ready 1\n"));
+    assert!(!text.contains(token.expose()) && !text.contains(ADMIN_PASSWORD));
+    sigterm(&child);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
 }

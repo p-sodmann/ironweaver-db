@@ -12,8 +12,19 @@
 //! A JSON line carries `timestamp` (RFC 3339, UTC), `level`, `target`,
 //! `message` and the event's fields at the top level, and the fields of the
 //! request it happened in (`span`: its `path`).
+//!
+//! The log tail (step 16c, ADR 0051): every event that passes the level
+//! filter also goes to a [`LogRing`] ([`RingLayer`]), which `GetLog` and the
+//! console read. The same events as stderr, nothing more.
 
+use std::fmt::Write as _;
 use std::io::IsTerminal;
+use std::sync::Arc;
+
+use iwdb_engine::CommitTime;
+use iwdb_query::log::{Level, LogRing};
+use tracing::field::{Field, Visit};
+use tracing_subscriber::layer::Context;
 
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::filter::{LevelFilter, Targets};
@@ -71,9 +82,11 @@ fn filter(level: &str) -> Result<EnvFilter, String> {
 }
 
 /// Install the process's logger: `format` lines on stderr, filtered by
-/// `level`, and audit entries to `audit` too. Call once, early; later
-/// calls fail (a logger is installed).
-pub fn init(format: LogFormat, level: &str, audit: Option<AuditFiles>) -> Result<(), String> {
+/// `level`, the same events to `ring` (the log tail), and audit entries to
+/// `audit` too. Call once, early; later calls fail (a logger is
+/// installed).
+pub fn init(format: LogFormat, level: &str, audit: Option<AuditFiles>, ring: Arc<LogRing>) -> Result<(), String> {
+    let ring = RingLayer { ring }.with_filter(filter(level).map_err(|e| format!("[log] level: {}", e))?);
     let filter = filter(level).map_err(|e| format!("[log] level: {}", e))?;
     let stderr = fmt::layer().with_writer(std::io::stderr);
     let stderr = match format.resolve() {
@@ -91,9 +104,70 @@ pub fn init(format: LogFormat, level: &str, audit: Option<AuditFiles>) -> Result
     });
     tracing_subscriber::registry()
         .with(stderr.with_filter(filter))
+        .with(ring)
         .with(files)
         .try_init()
         .map_err(|e| format!("installing the logger: {}", e))
+}
+
+/// A layer that keeps each event in a [`LogRing`]: its level, target,
+/// message and fields (as text), not its span.
+pub struct RingLayer {
+    pub ring: Arc<LogRing>,
+}
+
+/// An event's message and fields, as text.
+#[derive(Default)]
+struct Fields {
+    message: String,
+    fields: Vec<(String, String)>,
+}
+
+impl Visit for Fields {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.message = value.to_owned();
+        } else {
+            self.fields.push((field.name().to_owned(), value.to_owned()));
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        let mut text = String::new();
+        let _ = write!(text, "{:?}", value);
+        if field.name() == "message" {
+            self.message = text;
+        } else {
+            self.fields.push((field.name().to_owned(), text));
+        }
+    }
+}
+
+fn level_of(level: &tracing::Level) -> Level {
+    match *level {
+        tracing::Level::TRACE => Level::Trace,
+        tracing::Level::DEBUG => Level::Debug,
+        tracing::Level::INFO => Level::Info,
+        tracing::Level::WARN => Level::Warn,
+        tracing::Level::ERROR => Level::Error,
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for RingLayer {
+    fn on_event(&self, event: &tracing::Event<'_>, _cx: Context<'_, S>) {
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        let meta = event.metadata();
+        // Records bridged from the `log` facade carry their target as a field
+        let target = fields
+            .fields
+            .iter()
+            .position(|(name, _)| name == "log.target")
+            .map(|i| fields.fields.remove(i).1)
+            .unwrap_or_else(|| meta.target().to_owned());
+        fields.fields.retain(|(name, _)| !name.starts_with("log."));
+        self.ring.push(CommitTime::now(), level_of(meta.level()), &target, &fields.message, fields.fields);
+    }
 }
 
 #[cfg(test)]
@@ -107,5 +181,23 @@ mod tests {
         }
         assert!(!filter("warn,iwdb::audit=off").expect("filter").to_string().contains("iwdb::audit=info"));
         assert!(check_level("nonsense=[").is_err());
+    }
+
+    #[test]
+    fn the_ring_keeps_what_passes_the_filter() {
+        let ring = Arc::new(LogRing::new(10));
+        let filter = filter("info").expect("filter");
+        let subscriber = tracing_subscriber::registry().with(RingLayer { ring: ring.clone() }.with_filter(filter));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!("hidden");
+            tracing::warn!(namespace = "social", count = 3, "a warning");
+            tracing::info!(target: "iwdb::audit", operation = "Grant", "audit");
+        });
+        let tail = ring.read(0, 10);
+        assert_eq!(tail.events.len(), 2, "{:?}", tail);
+        let e = &tail.events[0];
+        assert_eq!((e.level, e.message.as_str()), (Level::Warn, "a warning"));
+        assert_eq!(e.fields, vec![("namespace".into(), "social".into()), ("count".into(), "3".into())]);
+        assert_eq!(tail.events[1].target, "iwdb::audit");
     }
 }

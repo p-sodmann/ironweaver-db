@@ -39,6 +39,7 @@
 //! [log]
 //! format = "auto"                   # auto (json unless on a terminal) | json | text
 //! level = "info"                    # a filter: "warn,iwdb_storage=debug"
+//! tail_events = 1000                # log events kept for GetLog and the console
 //!
 //! [console]                         # the operator console at /console/ (feature `console`)
 //! enabled = false
@@ -281,11 +282,14 @@ pub struct LogSection {
     pub format: LogFormat,
     /// A filter in `tracing-subscriber`'s `EnvFilter` syntax.
     pub level: String,
+    /// The log events kept for `GetLog` and the console (step 16c); 0 keeps
+    /// none.
+    pub tail_events: usize,
 }
 
 impl Default for LogSection {
     fn default() -> Self {
-        LogSection { format: LogFormat::Auto, level: "info".into() }
+        LogSection { format: LogFormat::Auto, level: "info".into(), tail_events: iwdb_query::log::DEFAULT_EVENTS }
     }
 }
 
@@ -429,6 +433,7 @@ keys! {
     "limits.max.timeout_ms" "IWDB_LIMITS_MAX_TIMEOUT_MS" => limits.max.timeout_ms;
     "log.format" "IWDB_LOG_FORMAT" => log.format;
     "log.level" "IWDB_LOG_LEVEL" => log.level;
+    "log.tail_events" "IWDB_LOG_TAIL_EVENTS" => log.tail_events;
     "console.enabled" "IWDB_CONSOLE_ENABLED" => console.enabled;
     "auth.enabled" "IWDB_AUTH_ENABLED" => auth.enabled;
     "auth.session_lifetime_secs" "IWDB_AUTH_SESSION_LIFETIME_SECS" => auth.session_lifetime_secs;
@@ -843,6 +848,14 @@ impl Config {
         }
         if self.server.max_message_bytes < 1024 {
             problems.push(format!("{} must be at least 1024", self.at("server.max_message_bytes")));
+        }
+        if self.log.tail_events > iwdb_query::log::MAX_EVENTS {
+            problems.push(format!(
+                "{}: at most {} events, not {}",
+                self.at("log.tail_events"),
+                iwdb_query::log::MAX_EVENTS,
+                self.log.tail_events
+            ));
         }
         if let Err(e) = crate::logging::check_level(&self.log.level) {
             problems.push(format!("{}: {}", self.at("log.level"), e));

@@ -11,6 +11,11 @@ mod support;
 mod json {
     use super::support;
     iwdb_query::conformance_tests!(support::fresh_rest(false));
+
+    mod admin {
+        use super::support;
+        iwdb_query::admin_conformance_tests!(support::fresh_rest(false));
+    }
 }
 
 mod ndjson {

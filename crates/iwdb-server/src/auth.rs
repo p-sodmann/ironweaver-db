@@ -24,15 +24,15 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use iwdb_query::audit::{Audit, AuditEntry, AuditSink};
-use iwdb_query::{Accounts, Authenticate, Authorized, Code, Database, Error, Operation, Principal, Secret, Via};
+use iwdb_query::{Accounts, Admin, Authenticate, Authorized, Code, Database, Error, Operation, Principal, Secret, Via};
 
 use crate::tls::ClientCertificate;
 
-/// What the server serves: a database, its users, and logging in.
-/// `iwdb::Embedded` is one.
-pub trait Served: Database + Accounts + Authenticate + 'static {}
+/// What the server serves: a database, its users, the operator's reads,
+/// and logging in. `iwdb::Embedded` is one.
+pub trait Served: Database + Accounts + Admin + Authenticate + 'static {}
 
-impl<D: Database + Accounts + Authenticate + 'static> Served for D {}
+impl<D: Database + Accounts + Admin + Authenticate + 'static> Served for D {}
 
 /// The console's session cookie.
 pub const SESSION_COOKIE: &str = "iwdb_session";
@@ -160,12 +160,23 @@ pub(crate) fn operation_of<B>(request: &http::Request<B>, grpc: bool) -> Option<
         let method = path.strip_prefix("/ironweaver_db.v1.")?.split_once('/')?.1;
         return Operation::from_rpc(method);
     }
+    if path == crate::metrics::METRICS_PATH {
+        return Some(Operation::Metrics);
+    }
     #[cfg(feature = "rest")]
     {
         crate::rest::operation_of(request.method(), path)
     }
     #[cfg(not(feature = "rest"))]
     None
+}
+
+/// Count a request the gate refused in the request metrics (its
+/// operation, if known).
+pub(crate) fn count_refusal<D: Admin>(db: &D, operation: Option<Operation>, e: &Error) {
+    if let (Some(requests), Some(operation)) = (db.registry(), operation) {
+        requests.refused(operation, e.code());
+    }
 }
 
 /// Record a request the gate refused (ADR 0049): its operation if known,
@@ -271,7 +282,7 @@ pub(crate) async fn authenticate<D: Served>(
 /// The database as the caller may use it, auditing into `audit`. A
 /// request without a caller (a server's service used without its gate) is
 /// a server-wide admin's if authentication is off, and refused otherwise.
-pub(crate) fn authorized<D>(
+pub(crate) fn authorized<D: Admin>(
     db: &Arc<D>,
     mode: AuthMode,
     caller: Option<&Caller>,

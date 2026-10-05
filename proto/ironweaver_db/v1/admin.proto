@@ -1,0 +1,257 @@
+// Ironweaver DB gRPC contract, version 1: the operator's reads and
+// cancelling a request (step 16c, ADRs 0050 to 0052).
+//
+// One RPC per operation of the `Admin` trait (crates/iwdb-query), with the
+// same semantics: the server only translates. Every list is bounded. Who
+// may call what (ADR 0045): any authenticated caller reads the status, the
+// metrics and the change-stream readers, narrowed to the namespaces it has
+// a role on, and lists and cancels its own requests; a server-wide admin
+// sees and cancels everyone's and reads the log. Cancelling is audited.
+//
+// Nothing here holds a secret, a token, a certificate or a value of the
+// data: names, numbers and the server's own log lines (which hold none).
+
+syntax = "proto3";
+
+package ironweaver_db.v1;
+
+import "ironweaver_db/v1/catalog.proto";
+
+service AdminService {
+  // Version, uptime, readiness, fsync policy, memory, disk, request counts
+  // and every namespace's status.
+  rpc GetServerStatus(GetServerStatusRequest) returns (GetServerStatusResponse);
+  // The running requests, oldest first.
+  rpc ListRequests(ListRequestsRequest) returns (ListRequestsResponse);
+  // Cancel a running request: its caller gets `cancelled`, unless its
+  // answer was ready first. Commits and other changes can't be cancelled
+  // (`invalid_argument`).
+  rpc CancelRequest(CancelRequestRequest) returns (CancelRequestResponse);
+  // The change-stream readers that polled in the last minute, with their
+  // lag.
+  rpc ListConsumers(ListConsumersRequest) returns (ListConsumersResponse);
+  // Every metric (documentation/api/metrics.md); `GET /metrics` serves
+  // them in Prometheus' text format.
+  rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
+  // The server's last log events (server-wide admin).
+  rpc GetLog(GetLogRequest) returns (GetLogResponse);
+}
+
+message GetServerStatusRequest {}
+
+message GetServerStatusResponse {
+  ServerStatus status = 1;
+}
+
+message ServerStatus {
+  // The server's version.
+  string version = 1;
+  // When the database started serving, in microseconds since 1970 (UTC).
+  int64 started_micros = 2;
+  // Whether it serves requests: false once it drains (shutdown).
+  bool ready = 3;
+  // The WAL's fsync policy: `always`, `group` or `off`.
+  string fsync = 4;
+  MemoryStatus memory = 5;
+  DiskStatus disk = 6;
+  RequestCounts requests = 7;
+  // The namespaces' status (those the caller has a role on), by name.
+  repeated NamespaceStatus namespaces = 8;
+}
+
+message MemoryStatus {
+  // The namespaces' graphs, indexes included.
+  uint64 graph_bytes = 1;
+  // The configured memory limit; missing: none.
+  optional uint64 limit_bytes = 2;
+}
+
+message DiskStatus {
+  // The namespaces' WAL segments.
+  uint64 wal_bytes = 1;
+  // The namespaces' checkpoints.
+  uint64 checkpoint_bytes = 2;
+  // Free for the server on the data directory's file system; missing where
+  // that can't be read.
+  optional uint64 free_bytes = 3;
+}
+
+// Requests since the database started.
+message RequestCounts {
+  // Running now.
+  uint64 active = 1;
+  // Ended (refused ones included).
+  uint64 total = 2;
+  // Ended with `timeout`.
+  uint64 timed_out = 3;
+  // Ended with `cancelled` (by a cancel, or the client went away).
+  uint64 cancelled = 4;
+  // Refused with `unavailable` (the queue was full, or the server drained).
+  uint64 rejected = 5;
+  // Refused with `unauthenticated` or `permission_denied`.
+  uint64 denied = 6;
+}
+
+message ListRequestsRequest {
+  // Only this user's requests (a caller who isn't a server-wide admin sees
+  // only its own anyway).
+  optional string user = 1;
+  // At most this many (default and maximum 1000).
+  optional uint32 limit = 2;
+}
+
+message ListRequestsResponse {
+  repeated RequestInfo requests = 1;
+  // There were more than the limit.
+  bool truncated = 2;
+}
+
+// A running request.
+message RequestInfo {
+  // Unique while the server runs (a counter from 1).
+  uint64 id = 1;
+  // Its operation: an RPC's name (`Find`, `GetChanges`, ...).
+  string operation = 2;
+  // The namespace it is on, if it is a namespace operation.
+  optional string namespace = 3;
+  // The caller's user.
+  string user = 4;
+  // The client's address.
+  optional string client = 5;
+  // When it started, in microseconds since 1970 (UTC).
+  int64 started_micros = 6;
+  // How long it has run.
+  uint64 elapsed_micros = 7;
+  // Whether CancelRequest can cancel it.
+  bool cancellable = 8;
+}
+
+message CancelRequestRequest {
+  uint64 id = 1;
+  // Only if it is this user's (a caller who isn't a server-wide admin can
+  // cancel only its own anyway); otherwise `not_found`.
+  optional string user = 2;
+}
+
+message CancelRequestResponse {
+  // The request, as it was when cancelled.
+  RequestInfo request = 1;
+}
+
+message ListConsumersRequest {}
+
+message ListConsumersResponse {
+  // By namespace, user and client (at most 1024).
+  repeated ConsumerInfo consumers = 1;
+}
+
+// A change-stream reader: a user, from a client, reading a namespace's
+// changes, as of its last successful poll.
+message ConsumerInfo {
+  string namespace = 1;
+  string user = 2;
+  optional string client = 3;
+  // The seq it reads from next.
+  uint64 next_seq = 4;
+  // Commits it hasn't read yet (of those the stream can return).
+  uint64 lag = 5;
+  // Its last successful poll, in microseconds since 1970 (UTC).
+  int64 last_poll_micros = 6;
+  // Successful polls so far.
+  uint64 polls = 7;
+}
+
+message GetMetricsRequest {}
+
+message GetMetricsResponse {
+  // Every metric, in the order of documentation/api/metrics.md.
+  repeated MetricFamily families = 1;
+}
+
+// A metric and its samples.
+message MetricFamily {
+  string name = 1;
+  MetricKind kind = 2;
+  string help = 3;
+  repeated MetricSample samples = 4;
+}
+
+enum MetricKind {
+  METRIC_KIND_UNSPECIFIED = 0;
+  METRIC_KIND_COUNTER = 1;
+  METRIC_KIND_GAUGE = 2;
+  METRIC_KIND_HISTOGRAM = 3;
+}
+
+// One series of a metric.
+message MetricSample {
+  // In the order of the metric's labels.
+  repeated MetricLabel labels = 1;
+  oneof value {
+    uint64 counter = 2;
+    double gauge = 3;
+    MetricHistogram histogram = 4;
+  }
+}
+
+message MetricLabel {
+  string name = 1;
+  string value = 2;
+}
+
+// Durations by bucket.
+message MetricHistogram {
+  // The buckets' upper bounds in seconds, without the last (+Inf).
+  repeated double bounds_seconds = 1;
+  // Observations per bucket (not cumulative): one more than the bounds,
+  // the last for +Inf.
+  repeated uint64 counts = 2;
+  // The sum of the observations, in microseconds.
+  uint64 sum_micros = 3;
+}
+
+message GetLogRequest {
+  // The events after this one (0: from the oldest kept).
+  uint64 after = 1;
+  // At most this many (default and maximum 1000).
+  optional uint32 limit = 2;
+}
+
+message GetLogResponse {
+  // Oldest first.
+  repeated LogEvent events = 1;
+  // The last event logged so far: ask for the events after it next.
+  uint64 last_seq = 2;
+  // Events after `after` fell out of the ring before they were read, or
+  // the limit cut the answer.
+  bool missed = 3;
+}
+
+// An event of the server's log, as its JSON lines carry it.
+message LogEvent {
+  // Its number, from 1 (since the server started).
+  uint64 seq = 1;
+  // When it was logged, in microseconds since 1970 (UTC).
+  int64 time_micros = 2;
+  LogLevel level = 3;
+  // Where it was logged: a module path, or `iwdb::audit`.
+  string target = 4;
+  string message = 5;
+  // Its fields, in the order logged. Message and fields are cut at about
+  // 2 KiB together.
+  repeated LogField fields = 6;
+}
+
+message LogField {
+  string name = 1;
+  string value = 2;
+}
+
+enum LogLevel {
+  LOG_LEVEL_UNSPECIFIED = 0;
+  LOG_LEVEL_TRACE = 1;
+  LOG_LEVEL_DEBUG = 2;
+  LOG_LEVEL_INFO = 3;
+  LOG_LEVEL_WARN = 4;
+  LOG_LEVEL_ERROR = 5;
+}

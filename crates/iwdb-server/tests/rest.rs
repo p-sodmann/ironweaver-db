@@ -112,7 +112,7 @@ fn store(dir: &std::path::Path, workers: usize) -> Embedded {
 
 /// A path of `route` with its parameters filled in.
 fn fill(path: &str) -> String {
-    path.replace("{ns}", NS).replace("{id}", "0")
+    path.replace("{ns}", NS).replace("{id}", "0").replace("{request}", "0")
 }
 
 #[test]
@@ -145,7 +145,8 @@ fn every_route_is_served_and_other_methods_are_not_allowed() {
             reply.status,
             reply.body
         );
-        assert!(reply.content_type().starts_with("application/json"), "{} {}", route.method, path);
+        let media = if route.operation == "prometheusMetrics" { "text/plain" } else { "application/json" };
+        assert!(reply.content_type().starts_with(media), "{} {}", route.method, path);
         if route.operation == "createNamespace" {
             assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
         }

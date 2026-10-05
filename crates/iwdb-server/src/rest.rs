@@ -69,6 +69,9 @@ pub enum Input {
     /// The change stream's query parameters (`from_seq`, `wait`, options); with
     /// `stream`, as Server-Sent Events (and without `wait`).
     Changes { stream: bool },
+    /// These query parameters (name, type, description): the request
+    /// message's fields.
+    Query(&'static [(&'static str, &'static str, &'static str)]),
     /// Nothing.
     Nothing,
 }
@@ -96,6 +99,12 @@ impl Route {
     /// A health route: served by the server's gate, not the router.
     pub fn health(&self) -> bool {
         matches!(self.operation, "live" | "ready")
+    }
+
+    /// A route the server serves before the router, in every build: health
+    /// and the Prometheus metrics.
+    pub fn gate(&self) -> bool {
+        self.health() || self.operation == "prometheusMetrics"
     }
 
     /// A route that needs no credentials: health, login, the OpenAPI
@@ -235,6 +244,36 @@ pub const ROUTES: &[Route] = &[
         "revokeToken",
         "Revoke an API token",
     ),
+    // The operator's reads (admin.proto, step 16c)
+    route(Method::GET, "/v1/status", "GetServerStatus", Input::Nothing, "getServerStatus", "The server's status"),
+    route(
+        Method::GET,
+        "/v1/requests",
+        "ListRequests",
+        Input::Query(REQUESTS_PARAMETERS),
+        "listRequests",
+        "The running requests",
+    ),
+    route(
+        Method::POST,
+        "/v1/requests/{request}/cancel",
+        "CancelRequest",
+        OPTIONAL_BODY,
+        "cancelRequest",
+        "Cancel a running request",
+    ),
+    route(Method::GET, "/v1/consumers", "ListConsumers", Input::Nothing, "listConsumers", "The change-stream readers"),
+    route(Method::GET, "/v1/metrics", "GetMetrics", Input::Nothing, "getMetrics", "The metrics"),
+    route(Method::GET, "/v1/log", "GetLog", Input::Query(LOG_PARAMETERS), "getLog", "The server's last log events"),
+    // Served by the gate in every build, also without `rest`
+    route(
+        Method::GET,
+        crate::metrics::METRICS_PATH,
+        "GetMetrics",
+        Input::Nothing,
+        "prometheusMetrics",
+        "The metrics in Prometheus' text format",
+    ),
     // Served before the router, in every build and during recovery
     // (crate::health); here for the OpenAPI document
     Route {
@@ -263,6 +302,18 @@ pub const ROUTES: &[Route] = &[
     },
 ];
 
+/// The query parameters of `GET /v1/requests`.
+pub(crate) const REQUESTS_PARAMETERS: &[(&str, &str, &str)] = &[
+    ("user", "string", "Only this user's requests (others than a server admin see only their own)."),
+    ("limit", "integer", "At most this many (default and maximum 1000)."),
+];
+
+/// The query parameters of `GET /v1/log`.
+pub(crate) const LOG_PARAMETERS: &[(&str, &str, &str)] = &[
+    ("after", "integer", "The events after this one (0 or none: from the oldest kept)."),
+    ("limit", "integer", "At most this many (default and maximum 1000)."),
+];
+
 /// What the handlers share.
 struct Shared<D> {
     db: Arc<D>,
@@ -278,7 +329,7 @@ type St<D> = State<Arc<Shared<D>>>;
 /// The caller the gate attached (none when the router runs without it).
 type Caller_ = Option<Extension<Caller>>;
 
-impl<D> Shared<D> {
+impl<D: iwdb_query::Admin> Shared<D> {
     /// The database as the caller may use it (design rule 8, ADR 0045).
     fn db(&self, caller: &Caller_) -> Result<Authorized<D>, Failure> {
         Ok(authorized(&self.db, self.mode, caller.as_ref().map(|Extension(c)| c), &self.audit)?)
@@ -309,7 +360,7 @@ pub fn router<D: Served>(
     audit: Arc<dyn AuditSink>,
 ) -> Router {
     let mut router = Router::new();
-    for r in ROUTES.iter().filter(|r| !r.health()) {
+    for r in ROUTES.iter().filter(|r| !r.gate()) {
         router = router.route(r.path, handler::<D>(r));
     }
     router
@@ -360,6 +411,12 @@ fn handler<D: Served>(r: &Route) -> MethodRouter<Arc<Shared<D>>> {
         "listTokens" => get(list_tokens::<D>),
         "createToken" => post(create_token::<D>),
         "revokeToken" => delete(revoke_token::<D>),
+        "getServerStatus" => get(get_server_status::<D>),
+        "listRequests" => get(list_requests::<D>),
+        "cancelRequest" => post(cancel_request::<D>),
+        "listConsumers" => get(list_consumers::<D>),
+        "getMetrics" => get(get_metrics::<D>),
+        "getLog" => get(get_log::<D>),
         other => get(move || async move { Failure::from(Error::internal(format!("route {} has no handler", other))) }),
     }
 }
@@ -833,6 +890,65 @@ async fn logout<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
 
 async fn who_am_i<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
     unary(Ok(ops::who_am_i(&s.db(&caller)?, s.mode)))
+}
+
+// ---- the operator's reads (step 16c) ----
+
+async fn get_server_status<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
+    unary(ops::get_server_status(&s.db(&caller)?).await)
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestsQuery {
+    user: Option<String>,
+    limit: Option<u32>,
+}
+
+async fn list_requests<D: Served>(
+    State(s): St<D>,
+    caller: Caller_,
+    q: Result<Query<RequestsQuery>, QueryRejection>,
+) -> Answer {
+    let Query(q) = q.map_err(|e| Failure::from(Error::invalid(format!("invalid query: {}", e))))?;
+    unary(ops::list_requests(&s.db(&caller)?, pb::ListRequestsRequest { user: q.user, limit: q.limit }).await)
+}
+
+async fn cancel_request<D: Served>(
+    State(s): St<D>,
+    caller: Caller_,
+    p: Result<Path<u64>, PathRejection>,
+    headers: HeaderMap,
+    body: Body,
+) -> Answer {
+    let db = s.db(&caller)?;
+    let mut r: pb::CancelRequestRequest = read(&headers, body, s.max_body).await?;
+    let id = path(p)?;
+    if r.id != 0 && r.id != id {
+        return Err(Error::invalid(format!("the body names request {}, the path {}", r.id, id)).into());
+    }
+    r.id = id;
+    unary(ops::cancel_request(&db, r).await)
+}
+
+async fn list_consumers<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
+    unary(ops::list_consumers(&s.db(&caller)?).await)
+}
+
+async fn get_metrics<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
+    unary(ops::get_metrics(&s.db(&caller)?).await)
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogQuery {
+    after: Option<u64>,
+    limit: Option<u32>,
+}
+
+async fn get_log<D: Served>(State(s): St<D>, caller: Caller_, q: Result<Query<LogQuery>, QueryRejection>) -> Answer {
+    let Query(q) = q.map_err(|e| Failure::from(Error::invalid(format!("invalid query: {}", e))))?;
+    unary(ops::get_log(&s.db(&caller)?, pb::GetLogRequest { after: q.after.unwrap_or(0), limit: q.limit }).await)
 }
 
 async fn list_users<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {

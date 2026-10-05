@@ -183,6 +183,31 @@
         },
         "type": "object"
       },
+      "CancelRequestRequest": {
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "user": {
+            "description": "Only if it is this user's (a caller who isn't a server-wide admin can\ncancel only its own anyway); otherwise `not_found`.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CancelRequestResponse": {
+        "properties": {
+          "request": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RequestInfo"
+              }
+            ],
+            "description": "The request, as it was when cancelled."
+          }
+        },
+        "type": "object"
+      },
       "CatalogChange": {
         "description": "A change to a namespace's catalog, committed on its own.\n\nAt most one of `createIndex`, `dropIndex`, `addConstraint`, `dropConstraint` (`kind`).",
         "properties": {
@@ -457,6 +482,53 @@
         ],
         "type": "string"
       },
+      "ConsumerInfo": {
+        "description": "A change-stream reader: a user, from a client, reading a namespace's\nchanges, as of its last successful poll.",
+        "properties": {
+          "client": {
+            "type": "string"
+          },
+          "lag": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Commits it hasn't read yet (of those the stream can return)."
+          },
+          "lastPollMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Int64"
+              }
+            ],
+            "description": "Its last successful poll, in microseconds since 1970 (UTC)."
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "nextSeq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The seq it reads from next."
+          },
+          "polls": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Successful polls so far."
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "Coords": {
         "description": "Where a node's coordinates live. Without a kind: the core's default.\n\nAt most one of `sequence`, `perDimension` (`kind`).",
         "properties": {
@@ -696,6 +768,35 @@
           "DIRECTION_BOTH"
         ],
         "type": "string"
+      },
+      "DiskStatus": {
+        "properties": {
+          "checkpointBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The namespaces' checkpoints."
+          },
+          "freeBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Free for the server on the data directory's file system; missing where\nthat can't be read."
+          },
+          "walBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The namespaces' WAL segments."
+          }
+        },
+        "type": "object"
       },
       "Double": {
         "description": "A floating-point number; NaN and the infinities as strings.",
@@ -1201,6 +1302,42 @@
         },
         "type": "object"
       },
+      "GetLogResponse": {
+        "properties": {
+          "events": {
+            "description": "Oldest first.",
+            "items": {
+              "$ref": "#/components/schemas/LogEvent"
+            },
+            "type": "array"
+          },
+          "lastSeq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The last event logged so far: ask for the events after it next."
+          },
+          "missed": {
+            "description": "Events after `after` fell out of the ring before they were read, or\nthe limit cut the answer.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "GetMetricsResponse": {
+        "properties": {
+          "families": {
+            "description": "Every metric, in the order of documentation/api/metrics.md.",
+            "items": {
+              "$ref": "#/components/schemas/MetricFamily"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "GetNamespaceStatusResponse": {
         "properties": {
           "status": {
@@ -1237,6 +1374,14 @@
               "$ref": "#/components/schemas/MaybeNode"
             },
             "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "GetServerStatusResponse": {
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/ServerStatus"
           }
         },
         "type": "object"
@@ -1527,6 +1672,18 @@
         },
         "type": "object"
       },
+      "ListConsumersResponse": {
+        "properties": {
+          "consumers": {
+            "description": "By namespace, user and client (at most 1024).",
+            "items": {
+              "$ref": "#/components/schemas/ConsumerInfo"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "ListNamespacesResponse": {
         "properties": {
           "namespaces": {
@@ -1535,6 +1692,21 @@
               "$ref": "#/components/schemas/NamespaceInfo"
             },
             "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ListRequestsResponse": {
+        "properties": {
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/RequestInfo"
+            },
+            "type": "array"
+          },
+          "truncated": {
+            "description": "There were more than the limit.",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -1562,6 +1734,67 @@
           }
         },
         "type": "object"
+      },
+      "LogEvent": {
+        "description": "An event of the server's log, as its JSON lines carry it.",
+        "properties": {
+          "fields": {
+            "description": "Its fields, in the order logged. Message and fields are cut at about\n2 KiB together.",
+            "items": {
+              "$ref": "#/components/schemas/LogField"
+            },
+            "type": "array"
+          },
+          "level": {
+            "$ref": "#/components/schemas/LogLevel"
+          },
+          "message": {
+            "type": "string"
+          },
+          "seq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Its number, from 1 (since the server started)."
+          },
+          "target": {
+            "description": "Where it was logged: a module path, or `iwdb::audit`.",
+            "type": "string"
+          },
+          "timeMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Int64"
+              }
+            ],
+            "description": "When it was logged, in microseconds since 1970 (UTC)."
+          }
+        },
+        "type": "object"
+      },
+      "LogField": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LogLevel": {
+        "enum": [
+          "LOG_LEVEL_UNSPECIFIED",
+          "LOG_LEVEL_TRACE",
+          "LOG_LEVEL_DEBUG",
+          "LOG_LEVEL_INFO",
+          "LOG_LEVEL_WARN",
+          "LOG_LEVEL_ERROR"
+        ],
+        "type": "string"
       },
       "LoginRequest": {
         "properties": {
@@ -1713,6 +1946,27 @@
         },
         "type": "object"
       },
+      "MemoryStatus": {
+        "properties": {
+          "graphBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The namespaces' graphs, indexes included."
+          },
+          "limitBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The configured memory limit; missing: none."
+          }
+        },
+        "type": "object"
+      },
       "Metric": {
         "description": "The distance between two coordinate vectors.\n\n- `METRIC_UNSPECIFIED`: Euclidean (the default).",
         "enum": [
@@ -1721,6 +1975,97 @@
           "METRIC_MANHATTAN"
         ],
         "type": "string"
+      },
+      "MetricFamily": {
+        "description": "A metric and its samples.",
+        "properties": {
+          "help": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MetricKind"
+          },
+          "name": {
+            "type": "string"
+          },
+          "samples": {
+            "items": {
+              "$ref": "#/components/schemas/MetricSample"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "MetricHistogram": {
+        "description": "Durations by bucket.",
+        "properties": {
+          "boundsSeconds": {
+            "description": "The buckets' upper bounds in seconds, without the last (+Inf).",
+            "items": {
+              "$ref": "#/components/schemas/Double"
+            },
+            "type": "array"
+          },
+          "counts": {
+            "description": "Observations per bucket (not cumulative): one more than the bounds,\nthe last for +Inf.",
+            "items": {
+              "$ref": "#/components/schemas/Uint64"
+            },
+            "type": "array"
+          },
+          "sumMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The sum of the observations, in microseconds."
+          }
+        },
+        "type": "object"
+      },
+      "MetricKind": {
+        "enum": [
+          "METRIC_KIND_UNSPECIFIED",
+          "METRIC_KIND_COUNTER",
+          "METRIC_KIND_GAUGE",
+          "METRIC_KIND_HISTOGRAM"
+        ],
+        "type": "string"
+      },
+      "MetricLabel": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "MetricSample": {
+        "description": "One series of a metric.\n\nAt most one of `counter`, `gauge`, `histogram` (`value`).",
+        "properties": {
+          "counter": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "gauge": {
+            "$ref": "#/components/schemas/Double"
+          },
+          "histogram": {
+            "$ref": "#/components/schemas/MetricHistogram"
+          },
+          "labels": {
+            "description": "In the order of the metric's labels.",
+            "items": {
+              "$ref": "#/components/schemas/MetricLabel"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
       },
       "Mutation": {
         "description": "One change in a transaction.\n\nAt most one of `upsertNode`, `deleteNode`, `addEdge`, `upsertEdge`, `deleteEdge`, `setAttr`, `removeAttr`, `appendAttr`, `addLabel`, `removeLabel`, `setEdgeType` (`kind`).",
@@ -1896,6 +2241,14 @@
             },
             "type": "array"
           },
+          "lastCheckpointMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Int64"
+              }
+            ],
+            "description": "When the newest checkpoint was written, in microseconds since 1970\n(UTC); missing without one."
+          },
           "marks": {
             "description": "The namespace's marks (ADR 0032), by name: how far each projection\nhas committed its source's events.",
             "items": {
@@ -1937,6 +2290,14 @@
             ],
             "description": "The seq of the last applied commit."
           },
+          "sinceCheckpoint": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Commits since the newest checkpoint (seq - checkpoint, or seq without\none): what recovery would replay."
+          },
           "syncedSeq": {
             "allOf": [
               {
@@ -1944,6 +2305,14 @@
               }
             ],
             "description": "The highest seq known to be durable; missing under the `off` fsync\npolicy until an explicit sync."
+          },
+          "unsynced": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Commits applied but not known to be durable (seq - synced_seq);\nmissing when synced_seq is."
           }
         },
         "type": "object"
@@ -2539,6 +2908,110 @@
         },
         "type": "object"
       },
+      "RequestCounts": {
+        "description": "Requests since the database started.",
+        "properties": {
+          "active": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Running now."
+          },
+          "cancelled": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Ended with `cancelled` (by a cancel, or the client went away)."
+          },
+          "denied": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Refused with `unauthenticated` or `permission_denied`."
+          },
+          "rejected": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Refused with `unavailable` (the queue was full, or the server drained)."
+          },
+          "timedOut": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Ended with `timeout`."
+          },
+          "total": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Ended (refused ones included)."
+          }
+        },
+        "type": "object"
+      },
+      "RequestInfo": {
+        "description": "A running request.",
+        "properties": {
+          "cancellable": {
+            "description": "Whether CancelRequest can cancel it.",
+            "type": "boolean"
+          },
+          "client": {
+            "description": "The client's address.",
+            "type": "string"
+          },
+          "elapsedMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "How long it has run."
+          },
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Unique while the server runs (a counter from 1)."
+          },
+          "namespace": {
+            "description": "The namespace it is on, if it is a namespace operation.",
+            "type": "string"
+          },
+          "operation": {
+            "description": "Its operation: an RPC's name (`Find`, `GetChanges`, ...).",
+            "type": "string"
+          },
+          "startedMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Int64"
+              }
+            ],
+            "description": "When it started, in microseconds since 1970 (UTC)."
+          },
+          "user": {
+            "description": "The caller's user.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "RevokeRequest": {
         "properties": {
           "name": {
@@ -2590,6 +3063,47 @@
           },
           "score": {
             "$ref": "#/components/schemas/Double"
+          }
+        },
+        "type": "object"
+      },
+      "ServerStatus": {
+        "properties": {
+          "disk": {
+            "$ref": "#/components/schemas/DiskStatus"
+          },
+          "fsync": {
+            "description": "The WAL's fsync policy: `always`, `group` or `off`.",
+            "type": "string"
+          },
+          "memory": {
+            "$ref": "#/components/schemas/MemoryStatus"
+          },
+          "namespaces": {
+            "description": "The namespaces' status (those the caller has a role on), by name.",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceStatus"
+            },
+            "type": "array"
+          },
+          "ready": {
+            "description": "Whether it serves requests: false once it drains (shutdown).",
+            "type": "boolean"
+          },
+          "requests": {
+            "$ref": "#/components/schemas/RequestCounts"
+          },
+          "startedMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Int64"
+              }
+            ],
+            "description": "When the database started serving, in microseconds since 1970 (UTC)."
+          },
+          "version": {
+            "description": "The server's version.",
+            "type": "string"
           }
         },
         "type": "object"
@@ -3345,6 +3859,45 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/metrics": {
+      "get": {
+        "description": "Every metric (documentation/api/metrics.md); `GET /metrics` serves\nthem in Prometheus' text format.",
+        "operationId": "prometheusMetrics",
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain; version=0.0.4; charset=utf-8": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The metrics in Prometheus' text exposition format, version 0.0.4 (documentation/api/metrics.md). Served in every build, also without the REST API."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "The metrics in Prometheus' text format"
+      }
+    },
     "/v1/auth/login": {
       "post": {
         "description": "Check a user's password and start a session. Failed logins are slowed\ndown per user and per client address. Needs no token.",
@@ -3483,6 +4036,45 @@
         "summary": "The caller and its roles"
       }
     },
+    "/v1/consumers": {
+      "get": {
+        "description": "The change-stream readers that polled in the last minute, with their\nlag.",
+        "operationId": "listConsumers",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListConsumersResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "The change-stream readers"
+      }
+    },
     "/v1/health/live": {
       "get": {
         "description": "The server's state, as the REST health routes answer it: 200 for\n`/v1/health/live` whenever the process answers; for `/v1/health/ready`,\n200 when `ready`, 503 otherwise.",
@@ -3531,6 +4123,102 @@
         },
         "security": [],
         "summary": "Readiness: 200 once recovery has finished, 503 before and while shutting down"
+      }
+    },
+    "/v1/log": {
+      "get": {
+        "description": "The server's last log events (server-wide admin).",
+        "operationId": "getLog",
+        "parameters": [
+          {
+            "description": "The events after this one (0 or none: from the oldest kept).",
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "At most this many (default and maximum 1000).",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetLogResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "The server's last log events"
+      }
+    },
+    "/v1/metrics": {
+      "get": {
+        "description": "Every metric (documentation/api/metrics.md); `GET /metrics` serves\nthem in Prometheus' text format.",
+        "operationId": "getMetrics",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetMetricsResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "The metrics"
       }
     },
     "/v1/namespaces": {
@@ -5213,6 +5901,163 @@
         },
         "security": [],
         "summary": "This API's OpenAPI document"
+      }
+    },
+    "/v1/requests": {
+      "get": {
+        "description": "The running requests, oldest first.",
+        "operationId": "listRequests",
+        "parameters": [
+          {
+            "description": "Only this user's requests (others than a server admin see only their own).",
+            "in": "query",
+            "name": "user",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "At most this many (default and maximum 1000).",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRequestsResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "The running requests"
+      }
+    },
+    "/v1/requests/{request}/cancel": {
+      "post": {
+        "description": "Cancel a running request: its caller gets `cancelled`, unless its\nanswer was ready first. Commits and other changes can't be cancelled\n(`invalid_argument`).",
+        "operationId": "cancelRequest",
+        "parameters": [
+          {
+            "description": "The request's id.",
+            "in": "path",
+            "name": "request",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelRequestRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelRequestResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Cancel a running request"
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "description": "Version, uptime, readiness, fsync policy, memory, disk, request counts\nand every namespace's status.",
+        "operationId": "getServerStatus",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetServerStatusResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "The server's status"
       }
     },
     "/v1/users": {

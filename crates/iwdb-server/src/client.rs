@@ -33,8 +33,11 @@ use std::time::Duration;
 use ironweaver_core::EdgeId;
 use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation};
+use iwdb_query::log::LogTail;
+use iwdb_query::metrics::Metrics;
 use iwdb_query::read::Explain;
-use iwdb_query::{Accounts, NewToken, Role, Secret, Session, TokenInfo, UserInfo};
+use iwdb_query::requests::{ConsumerInfo, RequestInfo};
+use iwdb_query::{Accounts, Admin, Listed, NewToken, Role, Secret, ServerStatus, Session, TokenInfo, UserInfo};
 use iwdb_query::{
     AnalyticsRequest, Answer, Changes, ChangesRequest, CommitOptions, Database, Edge, Error, ExplainRequest,
     FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
@@ -52,6 +55,7 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity
 use crate::DEFAULT_MAX_MESSAGE_BYTES;
 use crate::convert::*;
 use crate::proto as pb;
+use crate::proto::admin_service_client::AdminServiceClient;
 use crate::proto::auth_service_client::AuthServiceClient;
 use crate::proto::database_service_client::DatabaseServiceClient;
 use crate::status::from_status;
@@ -66,6 +70,7 @@ pub use rest::RestRemote;
 
 type Client = DatabaseServiceClient<InterceptedService<Channel, Bearer>>;
 type AuthClient = AuthServiceClient<InterceptedService<Channel, Bearer>>;
+type AdminClient = AdminServiceClient<InterceptedService<Channel, Bearer>>;
 
 /// The token a client sends, shared by its calls.
 pub(crate) type TokenSlot = Arc<RwLock<Option<Secret>>>;
@@ -134,6 +139,7 @@ fn tonic_tls(tls: &ClientTls) -> Result<ClientTlsConfig, Error> {
 pub struct Remote {
     client: Client,
     auth: AuthClient,
+    admin: AdminClient,
     token: TokenSlot,
     handle: Handle,
     /// The runtime this client started, if it started one.
@@ -197,8 +203,10 @@ impl Remote {
         let client = DatabaseServiceClient::with_interceptor(channel.clone(), Bearer(token.clone()))
             .max_decoding_message_size(DEFAULT_MAX_MESSAGE_BYTES)
             .max_encoding_message_size(DEFAULT_MAX_MESSAGE_BYTES);
-        let auth = AuthServiceClient::with_interceptor(channel, Bearer(token.clone()));
-        Ok(Remote { client, auth, token, handle, runtime: None })
+        let auth = AuthServiceClient::with_interceptor(channel.clone(), Bearer(token.clone()));
+        let admin = AdminServiceClient::with_interceptor(channel, Bearer(token.clone()))
+            .max_decoding_message_size(DEFAULT_MAX_MESSAGE_BYTES);
+        Ok(Remote { client, auth, admin, token, handle, runtime: None })
     }
 
     /// Send `token` (a session's or an API token) with every call.
@@ -260,6 +268,14 @@ impl Remote {
         F: Future<Output = Result<T, Error>> + Send + 'static,
     {
         Call(self.handle.spawn(f(self.auth.clone())))
+    }
+
+    fn call_admin<T, F>(&self, f: impl FnOnce(AdminClient) -> F) -> Call<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, Error>> + Send + 'static,
+    {
+        Call(self.handle.spawn(f(self.admin.clone())))
     }
 
     /// Run `f` with a client on the runtime.
@@ -710,6 +726,66 @@ impl Database for Remote {
             let request = pb::DropNamespaceRequest { name, idempotency_key: idempotency_key_to_pb(&key) };
             let response = client.drop_namespace(request).await.map_err(status)?.into_inner();
             namespace_result_from_pb(response.event, response.deduplicated).map_err(bad_answer)
+        })
+    }
+}
+
+fn limit_to_pb(limit: Option<usize>) -> Option<u32> {
+    limit.map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+}
+
+impl Admin for Remote {
+    fn server_status(&self) -> impl Future<Output = Result<ServerStatus, Error>> + Send {
+        self.call_admin(move |mut client| async move {
+            let response = client.get_server_status(pb::GetServerStatusRequest {}).await.map_err(status)?;
+            server_status_from_pb(response.into_inner().status).map_err(bad_answer)
+        })
+    }
+
+    fn active_requests(
+        &self,
+        user: Option<String>,
+        limit: Option<usize>,
+    ) -> impl Future<Output = Result<Listed<RequestInfo>, Error>> + Send {
+        self.call_admin(move |mut client| async move {
+            let request = pb::ListRequestsRequest { user, limit: limit_to_pb(limit) };
+            let response = client.list_requests(request).await.map_err(status)?;
+            requests_from_pb(response.into_inner()).map_err(bad_answer)
+        })
+    }
+
+    fn cancel_request(&self, id: u64, user: Option<String>) -> impl Future<Output = Result<RequestInfo, Error>> + Send {
+        self.call_admin(move |mut client| async move {
+            let response = client.cancel_request(pb::CancelRequestRequest { id, user }).await.map_err(status)?;
+            request_from_pb(response.into_inner().request).map_err(bad_answer)
+        })
+    }
+
+    fn consumers(&self) -> impl Future<Output = Result<Vec<ConsumerInfo>, Error>> + Send {
+        self.call_admin(move |mut client| async move {
+            let response = client.list_consumers(pb::ListConsumersRequest {}).await.map_err(status)?;
+            response
+                .into_inner()
+                .consumers
+                .into_iter()
+                .map(consumer_from_pb)
+                .collect::<Result<_, _>>()
+                .map_err(bad_answer)
+        })
+    }
+
+    fn metrics(&self) -> impl Future<Output = Result<Metrics, Error>> + Send {
+        self.call_admin(move |mut client| async move {
+            let response = client.get_metrics(pb::GetMetricsRequest {}).await.map_err(status)?;
+            metrics_from_pb(response.into_inner()).map_err(bad_answer)
+        })
+    }
+
+    fn log(&self, after: u64, limit: Option<usize>) -> impl Future<Output = Result<LogTail, Error>> + Send {
+        self.call_admin(move |mut client| async move {
+            let response =
+                client.get_log(pb::GetLogRequest { after, limit: limit_to_pb(limit) }).await.map_err(status)?;
+            log_from_pb(response.into_inner()).map_err(bad_answer)
         })
     }
 }

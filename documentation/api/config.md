@@ -46,6 +46,7 @@ iwdb-server --check-config --config server.toml       # validate; print the effe
 | `limits.max.timeout_ms` | `IWDB_LIMITS_MAX_TIMEOUT_MS` | `built in` | (built in: 300000) |
 | `log.format` | `IWDB_LOG_FORMAT` | `"auto"` | `json`, `text`, or `auto`: JSON unless stderr is a terminal ([ADR 0042](../adr/0042-structured-logs.md)). |
 | `log.level` | `IWDB_LOG_LEVEL` | `"info"` | A filter: a level, or directives such as `warn,iwdb_storage=debug`. |
+| `log.tail_events` | `IWDB_LOG_TAIL_EVENTS` | `1000` | The last log events the server keeps for `GetLog` (`GET /v1/log`) and the console, at most 100 000; 0 keeps none ([ADR 0051](../adr/0051-the-status-views.md)). The same events as stderr, after `log.level`. |
 | `console.enabled` | `IWDB_CONSOLE_ENABLED` | `false` | Serve the operator console at `/console/` (needs a build with the `console` feature; [ADR 0041](../adr/0041-console-served-by-the-server.md)). |
 | `auth.enabled` | `IWDB_AUTH_ENABLED` | `true` | Every call but login, health, the console's pages and the OpenAPI document needs a token; a store without users refuses to start ([ADR 0047](../adr/0047-auth-bootstrap-and-configuration.md)). Off, every caller is a server-wide admin. |
 | `auth.session_lifetime_secs` | `IWDB_AUTH_SESSION_LIFETIME_SECS` | `43200` | How long a login's session lasts (sessions also end at logout, a password change, the user's deletion and a restart). |
@@ -109,10 +110,10 @@ The REST body is the `Health` message: `{"state": "HEALTH_STATE_RECOVERING"}`, `
 
 ## Audit log
 
-Every login (and failed login), logout, user, grant, token, namespace and catalog change, and every refused request (`unauthenticated`, `permission_denied`), leaves one audit entry ([ADR 0049](../adr/0049-audit-log.md)). Reads and data commits don't (the change stream is for those).
+Every login (and failed login), logout, user, grant, token, namespace and catalog change, every cancelled request (`CancelRequest`, step 16c), and every refused request (`unauthenticated`, `permission_denied`), leaves one audit entry ([ADR 0049](../adr/0049-audit-log.md)). Reads and data commits don't (the change stream is for those).
 
 - **In the log.** Entries are log events of target `iwdb::audit` at `info`, in the log's format. They pass whatever `log.level` says unless the level names `iwdb::audit` itself (`warn,iwdb::audit=off` turns them off in the log).
 - **In files** with `audit.dir`: the same entries as JSON lines, one file per UTC day, the files older than `audit.retention_days` deleted.
 - **How long they are kept.** The audit files: `audit.retention_days` (30 by default). Entries in the log (stderr) are kept as long as whatever collects it keeps them: set its limits there (Docker: the log driver's `max-size` and `max-file`; journald: `MaxRetentionSec`, `SystemMaxUse`).
-- **Fields** (absent ones left out): `operation` (the RPC: `Login`, `CreateUser`, `CommitCatalog`, ...), `outcome` (`success` or `failure`), `code` (the error code of a failure), `user`, `auth` (`session`, `api_token`, `certificate`, `off`), `client` (the client's IP address), `namespace`, `subject` (the user an account change is about), `token_name`, `role`, `admin`, `seq` (a catalog change's commit), `namespace_event` (a namespace's creation or drop). Never a password, a token or its hash, a certificate, an error message or a value of the data.
+- **Fields** (absent ones left out): `operation` (the RPC: `Login`, `CreateUser`, `CommitCatalog`, ...), `outcome` (`success` or `failure`), `code` (the error code of a failure), `user`, `auth` (`session`, `api_token`, `certificate`, `off`), `client` (the client's IP address), `namespace`, `subject` (the user an account change is about), `token_name`, `role`, `admin`, `seq` (a catalog change's commit), `namespace_event` (a namespace's creation or drop), `request` (the id of the request a `CancelRequest` cancels; its owner is the `subject`). Never a password, a token or its hash, a certificate, an error message or a value of the data.
 - **Best effort.** An entry is written after the outcome is known, without fsync: a crash can lose the last entries, never the changes, which are in the WAL.

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iwdb_query::audit::Audit;
-use iwdb_query::{Accounts, Authenticate, Authorized, ChangesRequest, Code, Database, Error, Secret, Session};
+use iwdb_query::{Accounts, Admin, Authenticate, Authorized, ChangesRequest, Code, Database, Error, Secret, Session};
 use tokio::sync::{mpsc, watch};
 
 use crate::auth::AuthMode;
@@ -369,6 +369,52 @@ pub(crate) fn follow<D: Database + 'static>(
 }
 
 // ---- authentication, users, grants, tokens (auth.proto, step 15a) ----
+
+// ---- the operator's reads (step 16c, `AdminService`) ----
+
+/// A list limit from the wire.
+fn limit_from_pb(limit: Option<u32>) -> Option<usize> {
+    limit.map(|n| usize::try_from(n).unwrap_or(usize::MAX))
+}
+
+pub(crate) async fn get_server_status<D: Admin>(db: &D) -> Result<pb::GetServerStatusResponse, Error> {
+    let status = db.server_status().await?;
+    Ok(pb::GetServerStatusResponse { status: Some(server_status_to_pb(&status)) })
+}
+
+pub(crate) async fn list_requests<D: Admin>(
+    db: &D,
+    r: pb::ListRequestsRequest,
+) -> Result<pb::ListRequestsResponse, Error> {
+    let list = db.active_requests(r.user, limit_from_pb(r.limit)).await?;
+    Ok(requests_to_pb(&list))
+}
+
+pub(crate) async fn cancel_request<D: Admin>(
+    db: &D,
+    r: pb::CancelRequestRequest,
+) -> Result<pb::CancelRequestResponse, Error> {
+    let request = db.cancel_request(r.id, r.user).await?;
+    Ok(pb::CancelRequestResponse { request: Some(request_to_pb(&request)) })
+}
+
+pub(crate) async fn list_consumers<D: Admin>(db: &D) -> Result<pb::ListConsumersResponse, Error> {
+    let list = db.consumers().await?;
+    Ok(pb::ListConsumersResponse { consumers: list.iter().map(consumer_to_pb).collect() })
+}
+
+pub(crate) async fn get_metrics<D: Admin>(db: &D) -> Result<pb::GetMetricsResponse, Error> {
+    Ok(metrics_to_pb(&db.metrics().await?))
+}
+
+/// The metrics in Prometheus' text format (`GET /metrics`).
+pub(crate) async fn metrics_text<D: Admin>(db: &D) -> Result<String, Error> {
+    Ok(db.metrics().await?.to_prometheus())
+}
+
+pub(crate) async fn get_log<D: Admin>(db: &D, r: pb::GetLogRequest) -> Result<pb::GetLogResponse, Error> {
+    Ok(log_to_pb(&db.log(r.after, limit_from_pb(r.limit)).await?))
+}
 
 /// `Login`: on the database itself (no principal yet), audited.
 pub(crate) async fn login<D: Authenticate>(
