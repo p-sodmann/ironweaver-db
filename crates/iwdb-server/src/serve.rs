@@ -182,18 +182,14 @@ impl<D: Served> Dispatch<D> {
         let method = request.method().clone();
         let caller = request.extensions().get::<crate::auth::Caller>().cloned();
         Box::pin(async move {
-            let (status, media, text) = if method == http::Method::GET || method == http::Method::HEAD {
+            let answer = if method == http::Method::GET || method == http::Method::HEAD {
                 crate::metrics::answer(&db, mode, caller.as_ref(), &audit).await
             } else {
                 let mut answer = crate::metrics::failure(&Error::invalid("the route doesn't take this method"));
                 answer.0 = http::StatusCode::METHOD_NOT_ALLOWED;
                 answer
             };
-            let mut response = http::Response::new(Body::new(text));
-            *response.status_mut() = status;
-            response.headers_mut().insert(http::header::CONTENT_TYPE, http::HeaderValue::from_static(media));
-            response.headers_mut().insert(http::header::CACHE_CONTROL, http::HeaderValue::from_static("no-store"));
-            Ok(response)
+            Ok(text_response(answer))
         })
     }
 }
@@ -317,6 +313,13 @@ where
         // Errors logged while the call runs (`internal`, `corrupt`, `io`)
         // carry its route
         let span = tracing::info_span!("request", path = %path);
+        let kind = if grpc {
+            Answering::Grpc
+        } else if path == crate::metrics::METRICS_PATH {
+            Answering::Metrics
+        } else {
+            Answering::Rest
+        };
         match self.inner.get() {
             Some(inner) => {
                 let mut inner = inner.clone();
@@ -327,7 +330,7 @@ where
                     Ok(credentials) => credentials,
                     Err(e) => {
                         crate::auth::count_refusal(&*inner.db, operation, &e);
-                        return Box::pin(std::future::ready(Ok(refused(grpc, e))));
+                        return Box::pin(std::future::ready(Ok(refused(kind, e))));
                     }
                 };
                 let connection = self.connection.clone();
@@ -343,23 +346,35 @@ where
                             }
                             Err(e) => {
                                 crate::auth::count_refusal(&*inner.db, operation, &e);
-                                Ok(refused(grpc, e))
+                                Ok(refused(kind, e))
                             }
                         }
                     }
                     .instrument(span),
                 )
             }
-            None => Box::pin(std::future::ready(Ok(refused(grpc, recovering())))),
+            None => Box::pin(std::future::ready(Ok(refused(kind, recovering())))),
         }
     }
 }
 
-/// The answer to a request the gate refuses: a gRPC status, or a REST
-/// `Error` body (an empty 404 without REST).
-fn refused(grpc: bool, e: Error) -> http::Response<Body> {
-    if grpc {
-        return crate::status::to_status(&e).into_http::<tonic::body::Body>().map(Body::new);
+/// What kind of answer a request gets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Answering {
+    Grpc,
+    /// `GET /metrics`: served in every build, so refused with an `Error`
+    /// body in every build too.
+    Metrics,
+    Rest,
+}
+
+/// The answer to a request the gate refuses: a gRPC status, or an `Error`
+/// body (an empty 404 for a REST route without REST).
+fn refused(kind: Answering, e: Error) -> http::Response<Body> {
+    match kind {
+        Answering::Grpc => return crate::status::to_status(&e).into_http::<tonic::body::Body>().map(Body::new),
+        Answering::Metrics => return text_response(crate::metrics::failure(&e)),
+        Answering::Rest => {}
     }
     #[cfg(feature = "rest")]
     {
@@ -371,6 +386,15 @@ fn refused(grpc: bool, e: Error) -> http::Response<Body> {
         let _ = e;
         not_found()
     }
+}
+
+/// A response of `status` with a `media` body, never cached.
+fn text_response((status, media, text): (http::StatusCode, &'static str, String)) -> http::Response<Body> {
+    let mut response = http::Response::new(Body::new(text));
+    *response.status_mut() = status;
+    response.headers_mut().insert(http::header::CONTENT_TYPE, http::HeaderValue::from_static(media));
+    response.headers_mut().insert(http::header::CACHE_CONTROL, http::HeaderValue::from_static("no-store"));
+    response
 }
 
 /// How a shutdown went ([`Server::serve`]).
