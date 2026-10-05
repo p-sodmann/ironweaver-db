@@ -303,11 +303,27 @@ impl<T> Drop for Call<T> {
     }
 }
 
+/// Whether `s` is a call cancelled here, without the server's code, by
+/// anything but its deadline: the connection closed under it (hyper's
+/// "operation was canceled", an HTTP/2 stream reset). With TLS 1.3 the
+/// server checks a client certificate after the client's side of the
+/// handshake is done, so a refused certificate closes the connection
+/// during the first call. A deadline is tonic's `TimeoutExpired`.
+fn connection_closed(s: &tonic::Status) -> bool {
+    s.code() == tonic::Code::Cancelled
+        && s.metadata().get(crate::status::CODE_KEY).is_none()
+        && s.message() != tonic::TimeoutExpired(()).to_string()
+}
+
 /// A call's status as an error. A status with a source error and without
 /// the server's code was made here, by a connection that failed (refused,
 /// a TLS handshake the server or the client refused, a connection that
-/// broke): `unavailable`, with the source's reasons.
+/// broke): `unavailable`, with the source's reasons; so is a connection
+/// that closed under the call ([`connection_closed`]).
 fn status(s: tonic::Status) -> Error {
+    if connection_closed(&s) {
+        return Error::unavailable(format!("the connection closed: {}", s.message()));
+    }
     let local = s.metadata().get(crate::status::CODE_KEY).is_none()
         && matches!(s.code(), tonic::Code::Internal | tonic::Code::Unknown | tonic::Code::Unavailable);
     match std::error::Error::source(&s) {
@@ -799,5 +815,23 @@ impl Accounts for Remote {
             let response = client.list_tokens(pb::ListTokensRequest { user }).await.map_err(status)?.into_inner();
             Ok(response.tokens.into_iter().map(token_info_from_pb).collect())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iwdb_query::Code;
+
+    #[test]
+    fn a_connection_closed_under_a_call_is_unavailable() {
+        for closed in ["operation was canceled: connection closed", "h2 protocol error: stream reset"] {
+            assert_eq!(status(tonic::Status::cancelled(closed)).code(), Code::Unavailable, "{}", closed);
+        }
+        // A deadline, and the server's own cancel, stay `cancelled`
+        assert_eq!(status(tonic::Status::cancelled("Timeout expired")).code(), Code::Cancelled);
+        let mut server = tonic::Status::cancelled("operation was canceled");
+        server.metadata_mut().insert(crate::status::CODE_KEY, "cancelled".parse().expect("value"));
+        assert_eq!(status(server).code(), Code::Cancelled);
     }
 }
