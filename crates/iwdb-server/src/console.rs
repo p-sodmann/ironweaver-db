@@ -43,6 +43,14 @@ files! {
     "design-system/tokens.css" => "text/css; charset=utf-8",
     "design-system/bundle.css" => "text/css; charset=utf-8",
     "design-system/bundle.js" => "text/javascript; charset=utf-8",
+    "design-system/fonts/archivo-latin-wght-normal.woff2" => "font/woff2",
+    "design-system/fonts/archivo-latin-ext-wght-normal.woff2" => "font/woff2",
+    "design-system/fonts/ibm-plex-mono-latin-400-normal.woff2" => "font/woff2",
+    "design-system/fonts/ibm-plex-mono-latin-500-normal.woff2" => "font/woff2",
+    "design-system/fonts/ibm-plex-mono-latin-ext-400-normal.woff2" => "font/woff2",
+    "design-system/fonts/ibm-plex-mono-latin-ext-500-normal.woff2" => "font/woff2",
+    "design-system/fonts/OFL-Archivo.txt" => "text/plain; charset=utf-8",
+    "design-system/fonts/OFL-IBM-Plex-Mono.txt" => "text/plain; charset=utf-8",
     "vendor/react.production.min.js" => "text/javascript; charset=utf-8",
     "vendor/react-dom.production.min.js" => "text/javascript; charset=utf-8",
     "vendor/LICENSE-react" => "text/plain; charset=utf-8",
@@ -123,7 +131,8 @@ mod tests {
             for attr in ["src=\"", "href=\""] {
                 for part in text.split(attr).skip(1) {
                     let target = part.split('"').next().unwrap();
-                    if target.starts_with("http") || target.starts_with('#') || target.is_empty() {
+                    assert!(!target.contains("//"), "{} loads {} from elsewhere", page, target);
+                    if target.starts_with('#') || target.is_empty() {
                         continue;
                     }
                     let target = target.split('?').next().unwrap();
@@ -136,9 +145,31 @@ mod tests {
                 Some("html") => HTML,
                 Some("js") => JS,
                 Some("css") => CSS,
+                Some("woff2") => "font/woff2",
                 _ => "text/plain; charset=utf-8",
             };
             assert_eq!(*kind, expected, "{}", path);
+        }
+    }
+
+    /// The stylesheets load nothing from another site (step 15c: the
+    /// fonts are served with the pages), and every `url()` is served.
+    #[test]
+    fn the_stylesheets_load_only_served_files() {
+        for (path, ..) in FILES.iter().filter(|(_, kind, _)| *kind == CSS) {
+            let (_, _, bytes) = FILES.iter().find(|(p, ..)| p == path).unwrap();
+            let text = std::str::from_utf8(bytes).unwrap();
+            assert!(!text.contains("@import"), "{} imports a stylesheet", path);
+            let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+            for part in text.split("url(").skip(1) {
+                let target = part.split(')').next().unwrap().trim_matches(|c| c == '"' || c == '\'');
+                if target.starts_with("data:") {
+                    continue;
+                }
+                assert!(!target.contains("//"), "{} loads {} from elsewhere", path, target);
+                let full = format!("{}/{}", dir, target);
+                assert!(FILES.iter().any(|(p, ..)| *p == full), "{} loads {}, which isn't served", path, full);
+            }
         }
     }
 

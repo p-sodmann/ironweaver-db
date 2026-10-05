@@ -71,6 +71,9 @@ def test_the_pages_and_their_files_are_served(client):
     assert client.get("/").headers["Location"].endswith("/index.html?source=rest")
     for path in ["/index.html", "/status.html", "/src/rest.js", "/design-system/bundle.js", "/vendor/react.production.min.js"]:
         assert client.get(path).status_code == 200, path
+    # The fonts come with the pages (step 15c), not from Google Fonts
+    font = client.get("/design-system/fonts/archivo-latin-wght-normal.woff2")
+    assert font.status_code == 200 and font.headers["Content-Type"] == "font/woff2"
     for path in ["/serve.py", "/package.json", "/tools/seed.mjs", "/test/test_serve.py", "/src/../serve.py", "/node_modules/x"]:
         assert client.get(path).status_code == 404, path
 
