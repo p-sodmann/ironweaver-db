@@ -457,6 +457,8 @@ where
             }
             // The long poll waits here, without a worker, and leaves part of
             // the timeout for the read
+            let max_records = request_.bounds.max_results;
+            let limits = BatchLimits { max_records, max_bytes: CHANGES_BATCH_BYTES };
             if request.wait {
                 let ns = self.store.namespace(&name)?;
                 if ns.streamable_seq() < from {
@@ -465,26 +467,22 @@ where
                     if let Wait::Dropped = ns.streamable_wait(from, until)?.await {
                         return Err(crate::Error::NamespaceDropped { name }.into());
                     }
+                    // Nothing came: the empty batch is answered here, as
+                    // the contract says, rather than by a worker that may
+                    // not start before the deadline (a loaded machine)
+                    if ns.streamable_seq() < from && request_.options.min_seq.is_none() {
+                        let batch = ns.changes(from, limits, false, &ReadOptions::default())?;
+                        if batch.records.is_empty() {
+                            return Ok(Answer::at(ns.streamable_seq(), changes_of(batch)));
+                        }
+                    }
                 }
             }
-            let max_records = request_.bounds.max_results;
             self.run_until(request_.expiry(), move |store, token| {
                 let ns = store.namespace(&name)?;
                 let read = request_.read_options(token)?;
-                let limits = BatchLimits { max_records, max_bytes: CHANGES_BATCH_BYTES };
                 let batch = ns.changes(from, limits, false, &read).map_err(|e| request_.error(e))?;
-                let events = batch
-                    .records
-                    .into_iter()
-                    .map(|r| ChangeEvent {
-                        seq: r.record.seq,
-                        time: r.time,
-                        key: r.record.keyed.map(|k| k.key),
-                        change: r.record.change,
-                    })
-                    .collect();
-                let changes = Changes { events, next_seq: batch.next_seq, first_seq: batch.first_seq };
-                Ok(Answer::at(ns.streamable_seq(), changes))
+                Ok(Answer::at(ns.streamable_seq(), changes_of(batch)))
             })
             .await
         }
@@ -669,4 +667,19 @@ where
     fn principal_of(&self, user: &str) -> impl Future<Output = Result<Principal, Error>> + Send {
         std::future::ready(self.principal_of_user(user))
     }
+}
+
+/// A batch of the WAL as the change stream's answer.
+fn changes_of(batch: iwdb_storage::ChangeBatch) -> Changes {
+    let events = batch
+        .records
+        .into_iter()
+        .map(|r| ChangeEvent {
+            seq: r.record.seq,
+            time: r.time,
+            key: r.record.keyed.map(|k| k.key),
+            change: r.record.change,
+        })
+        .collect();
+    Changes { events, next_seq: batch.next_seq, first_seq: batch.first_seq }
 }
