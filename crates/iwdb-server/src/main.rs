@@ -150,7 +150,17 @@ fn main() -> ExitCode {
         print!("{}", config.describe());
         return ExitCode::SUCCESS;
     }
-    if let Err(e) = logging::init(config.log.format, &config.log.level) {
+    let audit = match &config.audit.dir {
+        Some(dir) => match iwdb_server::audit::AuditFiles::open(dir, config.audit.retention_days) {
+            Ok(files) => Some(files),
+            Err(e) => {
+                eprintln!("iwdb-server: {}", e);
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    if let Err(e) = logging::init(config.log.format, &config.log.level, audit) {
         eprintln!("iwdb-server: {}", e);
         return ExitCode::from(2);
     }

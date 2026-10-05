@@ -13,9 +13,9 @@ iwdb-server --check-config --config server.toml       # validate; print the effe
 
 - **Names.** A setting's variable is `IWDB_` and its path in the file in upper case, with `.` as `_`: `store.fsync` is `IWDB_STORE_FSYNC`, `limits.max.timeout_ms` is `IWDB_LIMITS_MAX_TIMEOUT_MS`.
 - **Values.** Numbers as digits, booleans as `true`/`false` (or `1`/`0`), choices by name (`group`), paths and addresses as they are.
-- **Typos are errors.** A variable that starts like a section (`IWDB_STORE_`, `IWDB_SERVER_`, `IWDB_LIMITS_`, `IWDB_LOG_`, `IWDB_CONSOLE_`, `IWDB_AUTH_`, `IWDB_TLS_`) but names no setting stops the server (apart from the two bootstrap variables below). Other `IWDB_*` variables (test harnesses use some) are ignored.
+- **Typos are errors.** A variable that starts like a section (`IWDB_STORE_`, `IWDB_SERVER_`, `IWDB_LIMITS_`, `IWDB_LOG_`, `IWDB_CONSOLE_`, `IWDB_AUTH_`, `IWDB_TLS_`, `IWDB_AUDIT_`) but names no setting stops the server (apart from the two bootstrap variables below). Other `IWDB_*` variables (test harnesses use some) are ignored.
 - **Every problem at once.** Startup checks the file and the variables before it opens the store, and lists every problem with where it came from (the file, a variable), then exits with code 2. A TOML syntax or type error in the file is reported with its line; the file's other checks wait until it parses.
-- **Relative paths** (`data_dir`, `tls.cert`, `tls.key`, `tls.client_ca`). From the file: relative to the file's directory. From a variable: relative to the working directory.
+- **Relative paths** (`data_dir`, `tls.cert`, `tls.key`, `tls.client_ca`, `audit.dir`). From the file: relative to the file's directory. From a variable: relative to the working directory.
 - **Projections** (`[[projection]]`, [projections.md](projections.md)) are set in the file only; a projection's Postgres URL can come from a variable of your choice (`url_env`).
 
 ## Settings
@@ -57,6 +57,8 @@ iwdb-server --check-config --config server.toml       # validate; print the effe
 | `tls.key` | `IWDB_TLS_KEY` | `unset` | Its private key (PEM: PKCS#8, PKCS#1 or SEC1). Required with TLS on. |
 | `tls.client_ca` | `IWDB_TLS_CLIENT_CA` | `unset` | The CAs (PEM) client certificates are verified against: turns mTLS on. |
 | `tls.client_auth` | `IWDB_TLS_CLIENT_AUTH` | `"optional"` | With `tls.client_ca`: `optional` (a client may present a certificate) or `required` (every request but health and the console's pages needs one). |
+| `audit.dir` | `IWDB_AUDIT_DIR` | `unset` | Also write the audit log to a file per UTC day here (`audit-YYYY-MM-DD.jsonl`, JSON lines, mode 0600; the directory is made with 0700). Unset: the audit log is only in the log ([ADR 0049](../adr/0049-audit-log.md)). |
+| `audit.retention_days` | `IWDB_AUDIT_RETENTION_DAYS` | `30` | Days of audit files to keep, today included; older ones are deleted at start and at each new day. `0`: keep them all. |
 
 A test keeps this table equal to the code's list (`iwdb_server::config::KEYS`).
 
@@ -104,3 +106,13 @@ Events at `info`: `listening; opening the store (recovery)` (`address`), `create
 The REST body is the `Health` message: `{"state": "HEALTH_STATE_RECOVERING"}`, `{"state": "HEALTH_STATE_READY", "ready": true}`, `{"state": "HEALTH_STATE_DRAINING"}`. The health routes are served in every build (also without the `rest` feature) and while the store recovers. Database calls before the server is ready fail with `unavailable`.
 
 `iwdb-server --probe [--config <file>]` asks the readiness route of the configured server (file and `IWDB_*` variables: the `listen` port, a wildcard address as loopback, over TLS unless `tls.enabled = false`) and exits 0 when ready, 1 otherwise, 2 for a configuration it can't read: the Docker image's `HEALTHCHECK`, with no curl needed. `iwdb-server --probe https://<host:port>` (or `http://`) asks that address instead. Over TLS the probe doesn't verify the server's certificate: it sends no credentials and reads only readiness. A Kubernetes pod can use the gRPC probe or `httpGet` on `/v1/health/ready` for readiness and `/v1/health/live` for liveness.
+
+## Audit log
+
+Every login (and failed login), logout, user, grant, token, namespace and catalog change, and every refused request (`unauthenticated`, `permission_denied`), leaves one audit entry ([ADR 0049](../adr/0049-audit-log.md)). Reads and data commits don't (the change stream is for those).
+
+- **In the log.** Entries are log events of target `iwdb::audit` at `info`, in the log's format. They pass whatever `log.level` says unless the level names `iwdb::audit` itself (`warn,iwdb::audit=off` turns them off in the log).
+- **In files** with `audit.dir`: the same entries as JSON lines, one file per UTC day, the files older than `audit.retention_days` deleted.
+- **How long they are kept.** The audit files: `audit.retention_days` (30 by default). Entries in the log (stderr) are kept as long as whatever collects it keeps them: set its limits there (Docker: the log driver's `max-size` and `max-file`; journald: `MaxRetentionSec`, `SystemMaxUse`).
+- **Fields** (absent ones left out): `operation` (the RPC: `Login`, `CreateUser`, `CommitCatalog`, ...), `outcome` (`success` or `failure`), `code` (the error code of a failure), `user`, `auth` (`session`, `api_token`, `certificate`, `off`), `client` (the client's IP address), `namespace`, `subject` (the user an account change is about), `token_name`, `role`, `admin`, `seq` (a catalog change's commit), `namespace_event` (a namespace's creation or drop). Never a password, a token or its hash, a certificate, an error message or a value of the data.
+- **Best effort.** An entry is written after the outcome is known, without fsync: a crash can lose the last entries, never the changes, which are in the WAL.
