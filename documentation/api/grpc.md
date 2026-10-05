@@ -110,7 +110,7 @@ The image runs as the user `iwdb` (uid 10001), keeps its data in the volume `/va
 | `GetChanges` | `changes` (ADR 0031) | unary |
 | `Watch` | `changes` with `wait`, in a loop | stream, until cancelled, an error or shutdown ([changes.md](changes.md)) |
 
-Every operation names a namespace; seqs, cursors, idempotency keys and catalogs are per namespace.
+`AuthService` and `AdminService` are described in [Authentication](#authentication) and [The operator's reads](#the-operators-reads). Every `DatabaseService` operation names a namespace; seqs, cursors, idempotency keys and catalogs are per namespace.
 
 ## Versioning
 
@@ -196,10 +196,14 @@ On SIGINT or SIGTERM the server stops accepting connections and sends every HTTP
 | `read` | `WaitForSeq`, `GetNodes`, `GetEdges`, `Find`, `Explain`, `Neighbourhood`, `Traverse`, `ShortestPath`, `RandomWalks`, `Subgraph`, `MatchPattern`, `Analyze`, `GetChanges`, `Watch`, `GetCatalog`, `GetNamespaceStatus` |
 | `write` | `read`, and `Commit` |
 | `admin` | `write`, and `CommitCatalog`, `DropNamespace` |
-| server-wide admin | every role on every namespace, `CreateNamespace`, and the user, grant and token RPCs for anyone |
-| any user | `ListNamespaces` (the ones it has a role on), `WhoAmI`, `Logout`, and `SetPassword` (with its current password), `CreateToken`, `RevokeToken`, `ListTokens` for itself |
+| server-wide admin | every role on every namespace, `CreateNamespace`, the user, grant and token RPCs for anyone, `GetLog`, and `ListRequests` and `CancelRequest` for anyone's requests |
+| any user | `ListNamespaces` (the ones it has a role on), `WhoAmI`, `Logout`, and `SetPassword` (with its current password), `CreateToken`, `RevokeToken`, `ListTokens` for itself; `GetServerStatus`, `ListConsumers` and `GetMetrics` (narrowed to the namespaces it has a role on), and `ListRequests` and `CancelRequest` for its own requests |
 
 The Rust clients take a token (`Remote::with_token`) or log in (`Remote::login`, which keeps the session's token), and implement `iwdb_query::Accounts` for the user RPCs.
+
+## The operator's reads
+
+`AdminService` (`proto/ironweaver_db/v1/admin.proto`, step 16c, [ADRs 0050 to 0052](../adr/0051-the-status-views.md)): `GetServerStatus`, `ListRequests`, `CancelRequest`, `ListConsumers`, `GetMetrics` and `GetLog`, the `Admin` trait's methods, on the same port and with the same token. A request cancelled with `CancelRequest` ends with `CANCELLED` (`iwdb-code: cancelled`); commits can't be cancelled (`INVALID_ARGUMENT`). Every list is bounded. The metrics are also served in Prometheus' text format at `GET /metrics` ([metrics.md](metrics.md)), in every build.
 
 ## TLS
 

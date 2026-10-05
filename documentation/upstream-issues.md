@@ -28,6 +28,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 20 | [Traversals: `bfs` / `dfs` follow outgoing edges only, `expand` takes no edge filter](#20-traversals-bfs--dfs-follow-outgoing-edges-only-expand-takes-no-edge-filter) | fixed upstream (`ace9a0d`): [#49](https://github.com/p-sodmann/Ironweaver/issues/49) |
 | 21 | [`index_candidates` doesn't say which index it used](#21-index_candidates-doesnt-say-which-index-it-used) | fixed upstream (`ace9a0d`): [#50](https://github.com/p-sodmann/Ironweaver/issues/50) |
 | 22 | [`Value` / `Expr` serde can't be read from JSON beyond 64 levels, and skips unknown fields](#22-value--expr-serde-cant-be-read-from-json-beyond-64-levels-and-skips-unknown-fields) | fixed upstream (`7e7b7fa`): [#57](https://github.com/p-sodmann/Ironweaver/issues/57) |
+| 23 | [A search's progress, readable while it runs](#23-a-searchs-progress-readable-while-it-runs) | not filed: a feature proposal (step 16c), held for the owner's decision |
 
 ---
 
@@ -529,3 +530,21 @@ With 1 alone, callers can do 2 themselves; 2 makes the safe way the easy one.
 **Why the database needs it**
 
 Step 12 serves the `Database` trait over REST/JSON with the core's serde form for values and filters (ADR 0023): `{"Int": 30}`, `{"Compare": {...}}`. With `serde_json`'s default limit, a node whose attribute is nested 65 to 100 levels deep can be committed over gRPC but not over REST, and REST can't return it in the same JSON form. Lifting the limit ourselves would let a crafted filter overflow the server's stack. Until this is fixed, the REST API documents a JSON nesting limit of 64 for values and filters and refuses deeper ones with `invalid_argument`; gRPC carries postcard and is unaffected. Pinned in `value_serde_json_stops_at_64_levels_and_expr_skips_unknown_fields` (`core_smoke.rs`).
+
+---
+
+## 23. A search's progress, readable while it runs
+
+Status: **not filed**. A feature proposal from step 16c, not a bug: the database works without it. Held for the owner's decision, as agreed for 16c.
+
+**Problem**
+
+A `Budget` counts the nodes a search visits and the edges it examines, but only inside the search: the count reaches the caller as an error (`BudgetExceeded`) or not at all. A caller that wants to show how far a running search has got (a server listing its running requests, an operator deciding whether to cancel one) has no way to read it while the search runs. Counting in the `edge_ok` closure works for some searches but not all (path expansion, pattern matching and random walks count internally), and it duplicates the core's count.
+
+**Proposal**
+
+An optional shared progress counter on `Budget`, for example `progress: Option<Arc<Progress>>` where `Progress` holds two `AtomicUsize` (visited, edges) that the search adds to with relaxed stores, at the points where it checks its limits already. The cost when absent is a branch; when present, a relaxed add per visited node and examined edge (or per batch of them).
+
+**Why the database needs it**
+
+Step 16c's `ListRequests` (ADR 0052) lists every running request with its operation, namespace, user and elapsed time. Step 16 asked for its visited count too, which would tell an operator whether a slow request is working through a large neighbourhood or waiting on a lock. Until the core reports progress, the database lists running requests without it.

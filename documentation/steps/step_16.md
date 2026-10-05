@@ -12,9 +12,9 @@ Operators can configure, monitor and administer the server without reading the c
 
 - [x] Config file plus environment overrides, validated at startup with clear errors (16b).
 - [x] Health and readiness endpoints (ready only after recovery finished) (16b).
-- [ ] Prometheus metrics: commit latency, fsync time, WAL size, checkpoint duration and lag, memory per namespace, query latency per operation, rejected and timed-out requests, lock hold times.
+- [x] Prometheus metrics: commit latency, fsync time, WAL size, checkpoint duration and lag, memory per namespace, query latency per operation, rejected and timed-out requests, lock hold times (16c).
 - [ ] OpenTelemetry traces (16g) and structured JSON logs (`tracing`; done in 16b).
-- [ ] `status` views (like `pg_stat_*`): namespaces, sizes, indexes, active requests, replication/stream consumers.
+- [x] `status` views (like `pg_stat_*`): namespaces, sizes, indexes, active requests, replication/stream consumers (16c).
 - [ ] `iwctl` against a running server: status, checkpoint, backup, restore, verify, index and constraint management, namespaces, cancel a request.
 - [ ] Memory-limit behaviour: reject writes and alert before the OS kills the process.
 - [ ] Windows (moved here from step 7, [ADR 0013](../adr/0013-python-bindings.md)): a directory fsync (`FILE_FLAG_BACKUP_SEMANTICS` and `FlushFileBuffers`, checked on NTFS), a CI job that builds and tests the workspace and the Python bindings on Windows, a crash harness mode that kills with `TerminateProcess`, then Windows wheels and the platform row in [guarantees.md](../guarantees.md).
