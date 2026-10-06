@@ -29,6 +29,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 21 | [`index_candidates` doesn't say which index it used](#21-index_candidates-doesnt-say-which-index-it-used) | fixed upstream (`ace9a0d`): [#50](https://github.com/p-sodmann/Ironweaver/issues/50) |
 | 22 | [`Value` / `Expr` serde can't be read from JSON beyond 64 levels, and skips unknown fields](#22-value--expr-serde-cant-be-read-from-json-beyond-64-levels-and-skips-unknown-fields) | fixed upstream (`7e7b7fa`): [#57](https://github.com/p-sodmann/Ironweaver/issues/57) |
 | 23 | [A search's progress, readable while it runs](#23-a-searchs-progress-readable-while-it-runs) | not filed: a feature proposal (step 16c), held for the owner's decision |
+| 24 | [List a graph's labels, and count its edges by type](#24-list-a-graphs-labels-and-count-its-edges-by-type) | filed: [#60](https://github.com/p-sodmann/Ironweaver/issues/60) |
 
 ---
 
@@ -548,3 +549,32 @@ An optional shared progress counter on `Budget`, for example `progress: Option<A
 **Why the database needs it**
 
 Step 16c's `ListRequests` (ADR 0052) lists every running request with its operation, namespace, user and elapsed time. Step 16 asked for its visited count too, which would tell an operator whether a slow request is working through a large neighbourhood or waiting on a lock. Until the core reports progress, the database lists running requests without it.
+
+---
+
+## 24. List a graph's labels, and count its edges by type
+
+Status: filed as [#60](https://github.com/p-sodmann/Ironweaver/issues/60) on 2026-10-06. A feature proposal from step 16c-2, not a bug: the database works without it (it samples). Checked against `7e7b7fa`.
+
+**Problem**
+
+`Graph::label_count(name)` counts a label's nodes in O(1) from the label index, but a caller has to know the name: there is no way to list the labels a graph has. `Symbols` interns labels and edge types together, has no iterator, and `Symbol`'s field is private, so the symbols can't be walked either. Edge types have no index at all, so counting the edges of a type means reading every edge.
+
+```rust
+let mut g = Graph::<(), ()>::new();
+let a = g.add_node("a", ()).unwrap();
+g.add_label(a, "Person").unwrap();
+assert_eq!(g.label_count("Person"), 1); // O(1), but only for a name we already know
+// g.labels()?                            // no: nothing lists "Person"
+// g.edge_type_count("KNOWS")?            // no: only a scan of g.edges()
+```
+
+**Proposal**
+
+- `Graph::labels(&self) -> impl Iterator<Item = (&str, usize)>`: every label with at least one node, and its count, from the label index (O(labels)).
+- A count of edges per type, kept like the label index (incremented in `add_edge` / `insert_edge` / `set_edge_type`, decremented on removal): `Graph::edge_type_count(&str) -> usize` in O(1), and `Graph::edge_types() -> impl Iterator<Item = (Option<&str>, usize)>` in O(types). A counter per symbol is enough; no set of edges is needed.
+
+**Why the database needs it**
+
+Step 16c-2's `schema` read (ADR 0053) lists a namespace's labels and edge types for the operator console. Without a list, it finds label names in a sample of nodes (the counts are exact, through `label_count`) and counts types in a sample of edges, so a large namespace's schema can miss a rare label and its type counts are only the sample's. With the proposal, the labels and types become complete and exact in O(labels + types), and only the attribute keys stay sampled.
+

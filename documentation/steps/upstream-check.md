@@ -20,7 +20,7 @@ Last checked: 2026-10-03 at core `7e7b7fa` (start of step 12: #57 fixed and adop
 
 | Issue | Finding | Needed before | Until fixed | When fixed |
 |---|---|---|---|---|
-| – | none open | | | |
+| [#60](https://github.com/p-sodmann/Ironweaver/issues/60) | The core can't list a graph's labels, and has no count of edges by type (filed in step 16c-2) | nothing: no step depends on it | `read::schema` samples (ADR 0053): label names from the first `max_visited` nodes with exact counts (`label_count`), types counted in the first `max_edges` edges | List labels and types (with counts) from the core in `read::schema`, keep the sample for keys only; update `schema_is_bounded` (labels complete at any sample size), ADR 0053 and the guarantees' "schema is sampled" item |
 
 ## Closed issues
 
