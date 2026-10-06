@@ -72,7 +72,7 @@ Archiving starts with the segments a checkpoint removes after the option is set.
 
 - Incremental backups (only the WAL since the last backup): an archive gives the same effect.
 - Restoring in place over a damaged store: restore into a new directory and swap.
-- Pruning an archive: an operator removes segments older than the oldest backup they keep; a tool for it can come with step 16.
+- Pruning an archive: an operator removes segments older than the oldest backup they keep; a tool for it can come with step 16. (Step 16e added it, with backup throttling: [ADR 0055](0055-admin-writes-and-iwctl-against-a-server.md).)
 
 ## Consequences
 

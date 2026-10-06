@@ -21,5 +21,5 @@ Step 7 adds `iwctl` with `status`, `checkpoint`, `backup`, `restore` and `verify
 ## Consequences
 
 - `iwctl` is a thin binary; what it does is tested where it is implemented, and its own tests (`crates/iwctl/tests/cli.rs`) run the binary for each command and exit code.
-- An operator can't back up or verify a running store with `iwctl` until step 11 (a server) or a later `iwctl` mode that asks the store's process.
-- If the store's archive setting should be enforced rather than repeated, a later layout version can record it in the data directory.
+- An operator can't back up or verify a running store with `iwctl` until step 11 (a server) or a later `iwctl` mode that asks the store's process. (Step 16e added that mode, `iwctl --server`: [ADR 0055](0055-admin-writes-and-iwctl-against-a-server.md).)
+- If the store's archive setting should be enforced rather than repeated, a later layout version can record it in the data directory. (Step 16e decided against it for now: ADR 0055.)
