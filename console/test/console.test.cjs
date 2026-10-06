@@ -143,16 +143,44 @@ test('the server status: series, problems in the degraded scenario', async () =>
   const calm = await fresh().server();
   assert.deepEqual(U.problems(calm), []); assert.equal(calm.ready, true);
   assert.equal(calm.series.commitsPerSec.length, 90);
-  assert.equal(calm.memory.limitBytes, null, 'no memory limit before step 16d');
+  assert.deepEqual([calm.memory.state, calm.memory.limitSource], ['normal', 'cgroup v2']);
+  assert.equal(calm.memory.usedBytes, calm.memory.graphBytes + calm.memory.payloadBytes + calm.memory.checkpointBytes + calm.memory.workingBytes);
   const s = fresh({ scenario: 'degraded' }); const d = await s.server();
-  assert.equal(U.problems(d).length, 2);
+  assert.equal(U.problems(d).length, 3);
+  assert.equal(d.memory.state, 'warn');
+  assert.ok(U.problems(d).some((p) => p.includes('above the warning line at 80 %')), U.problems(d).join('; '));
   assert.ok(d.namespaces.find((n) => n.name === 'archive_2025').readOnly);
   assert.ok(d.namespaces.find((n) => n.name === 'orders').checkpointFailure);
-  assert.ok(U.problems({ ...d, namespaces: [], memory: { graphBytes: 90, limitBytes: 100 } })[0].includes('90 %'));
+  // The server's lines and state, not the console's: inside the band the state decides
+  const mem = (usedBytes, state) => ({ ...d, namespaces: [], memory: { usedBytes, limitBytes: 100, warnBytes: 80, refuseWritesBytes: 90, state } });
+  assert.ok(U.problems(mem(95, 'refusing_writes'))[0].includes('writes are refused: memory at 95 % of the limit, above 90 %'));
+  assert.ok(U.problems(mem(87, 'refusing_writes'))[0].includes('writes are refused'));
+  assert.ok(U.problems(mem(78, 'warn'))[0].includes('78 %'));
+  assert.deepEqual(U.problems(mem(85, 'normal')), []);
+  assert.equal(U.memory(mem(78, 'warn').memory).meterWarnAt, 0, 'the meter shows the server\'s state');
+  assert.equal(U.memory(mem(78, 'normal').memory).meterWarnAt, 0.8);
+  assert.equal(U.memory({ usedBytes: 5, limitBytes: null }), null);
   // A failed checkpoint stops checkpoints: the lag grows
   const lag0 = d.namespaces.find((n) => n.name === 'orders'); for (let k = 0; k < 30; k++) s.tick();
   const lag1 = (await s.server()).namespaces.find((n) => n.name === 'orders');
   assert.ok(lag1.sinceCheckpoint > lag0.sinceCheckpoint);
+});
+
+test('above the line the mock refuses writes that add, lets deletes through, and resumes below the band', async () => {
+  const s = fresh({ scenario: 'degraded' });
+  // Grow orders' payload past the refusal line, one big node at a time
+  for (let k = 0; (await s.server()).memory.state !== 'refusing_writes'; k++) {
+    await s.commit('social', [{ upsertNode: { id: 'big' + k, labels: ['Note'], attr: { text: { String: 'x'.repeat(20000) } } } }]);
+  }
+  await rejects(s.commit('social', [{ upsertNode: { id: 'one-more', labels: [] } }]), 'resource_exhausted');
+  await rejects(s.createIndex('social', ['text']), 'resource_exhausted');
+  for (let k = 0; ; k++) {
+    await s.commit('social', [{ deleteNode: { id: 'big' + k } }]);
+    if ((await s.server()).memory.state !== 'refusing_writes') break;
+  }
+  const m = (await s.server()).memory;
+  assert.ok(m.usedBytes < m.refuseWritesBytes - 0.05 * m.limitBytes, 'it left the state only below the band');
+  await s.commit('social', [{ upsertNode: { id: 'one-more', labels: [] } }]);
 });
 
 test('cancel ends a running read and is logged; a commit can\'t be cancelled', async () => {
@@ -290,7 +318,7 @@ const metrics = (commits, finds) => ({ families: [
 function statusServer(o = {}) {
   let commits = 10; let finds = 4;
   const routes = {
-    'GET /v1/status': () => [200, { status: { version: '0.1.0', startedMicros: '1791260391767612', ready: true, fsync: 'always', memory: { graphBytes: '648086' }, disk: { walBytes: '84369', freeBytes: '74012971008' }, requests: { active: '1', total: '18' },
+    'GET /v1/status': () => [200, { status: { version: '0.1.0', startedMicros: '1791260391767612', ready: true, fsync: 'always', memory: { graphBytes: '648086', payloadBytes: '900000', usedBytes: '1548086', limitBytes: '2000000', warnBytes: '1600000', refuseWritesBytes: '1800000', state: 'MEMORY_STATE_NORMAL', limitSource: 'MEMORY_LIMIT_SOURCE_CGROUP_V2' }, disk: { walBytes: '84369', freeBytes: '74012971008' }, requests: { active: '1', total: '18' },
       namespaces: [{ id: '1', name: 'default', createdMicros: '1791260391478630', syncedSeq: '0', memoryBytes: '432', recovery: {}, unsynced: '0' }] } }],
     'GET /v1/requests?limit=100': [200, { requests: [{ id: '20', operation: 'Find', namespace: 'default', user: 'admin', client: '127.0.0.1', startedMicros: '1791260399290946', elapsedMicros: '23', cancellable: true }] }],
     'GET /v1/consumers': [200, { consumers: [{ namespace: 'default', user: 'ann', nextSeq: '4', lag: '2', lastPollMicros: '1791260399290946', polls: '3' }] }],
@@ -329,7 +357,8 @@ test('the REST Source reads the status views: numbers, series from the metrics, 
   const srv = statusServer();
   const s = rest.create({ fetch: srv.fetch });
   const first = await s.server();
-  assert.equal(first.version, '0.1.0'); assert.equal(first.memory.graphBytes, 648086); assert.equal(first.memory.limitBytes, null);
+  assert.equal(first.version, '0.1.0'); assert.equal(first.memory.graphBytes, 648086);
+  assert.deepEqual(first.memory, { graphBytes: 648086, payloadBytes: 900000, checkpointBytes: 0, workingBytes: 0, usedBytes: 1548086, limitBytes: 2000000, warnBytes: 1600000, refuseWritesBytes: 1800000, state: 'normal', limitSource: 'cgroup v2' });
   assert.equal(first.disk.checkpointBytes, 0); assert.equal(first.requests.total, 18); assert.equal(first.requests.denied, 0);
   assert.deepEqual(first.active[0], { id: 20, operation: 'Find', namespace: 'default', user: 'admin', client: '127.0.0.1', startedMicros: 1791260399290946, elapsedMicros: 23, cancellable: true });
   assert.deepEqual(first.consumers[0], { namespace: 'default', user: 'ann', client: null, nextSeq: 4, lag: 2, lastPollMicros: 1791260399290946, polls: 3 });

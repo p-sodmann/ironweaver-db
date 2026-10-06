@@ -31,11 +31,12 @@
   }
 
   /** A stat tile: an engraved caption, the current figure, the last minute and a half. */
-  function Tile({ caption, values, format, tickMs, note, state }) {
+  /** `state`: 'warn' (▲ HIGH) or 'failed' (✕ and `flag`). */
+  function Tile({ caption, values, format, tickMs, note, state, flag }) {
     const [readout, setReadout] = useState(null);
     const last = values.length ? values[values.length - 1] : null;
     return h('section', { className: 'cs-tile' + (state ? ' is-' + state : '') },
-      h('div', { className: 'cs-tile__head' }, h('span', { className: 'iw-cap' }, caption), state === 'warn' && h('span', { className: 'iw-state is-populating' }, '▲ HIGH')),
+      h('div', { className: 'cs-tile__head' }, h('span', { className: 'iw-cap' }, caption), state === 'warn' && h('span', { className: 'iw-state is-populating' }, '▲ HIGH'), state === 'failed' && h('span', { className: 'iw-state is-failed' }, '✕ ' + (flag || 'FAILED'))),
       h('div', { className: 'iw-metric' }, last == null ? '—' : format(last)),
       h(Spark, { values, format, tickMs, onHover: setReadout }),
       h('div', { className: 'iw-mono-s iw-muted cs-tile__note' }, readout || note));
@@ -99,7 +100,8 @@
     const sr = s.series; const tick = s.tickMs;
     const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
     const maxOf = (a) => (a.length ? Math.max(...a) : 0);
-    const limit = s.memory.limitBytes; const memF = limit ? s.memory.graphBytes / limit : null;
+    const limit = s.memory.limitBytes; const mem = U.memory(s.memory);
+    const memState = !mem || s.memory.state === 'normal' ? null : s.memory.state === 'refusing_writes' ? 'failed' : 'warn';
     const uptime = s.startedMicros ? (now * 1000 - s.startedMicros) / 1e6 : null;
     const word = !s.ready ? 'Shutting down' : problems.length ? 'Degraded' : 'Healthy';
     const p99max = Math.max(1e-9, ...s.operations.map((o) => o.p99Ms));
@@ -136,7 +138,7 @@
           h(Tile, { caption: 'FSYNC P99', values: sr.fsyncP99, format: U.ms, tickMs: tick, note: 'max ' + U.ms(maxOf(sr.fsyncP99)) + ' · policy ' + s.fsync }),
           h(Tile, { caption: 'QUERY P99', values: sr.queryP99, format: U.ms, tickMs: tick, note: 'p50 ' + U.ms(sr.queryP50.slice(-1)[0]) }),
           h(Tile, { caption: 'ACTIVE REQUESTS', values: sr.active, format: (v) => U.num(v), tickMs: tick, note: U.num(s.requests.rejected) + ' rejected · ' + U.num(s.requests.timedOut) + ' timed out' }),
-          h(Tile, { caption: 'GRAPH MEMORY', values: sr.graphBytes, format: U.bytes, tickMs: tick, note: limit ? U.pct(memF) + ' of ' + U.bytes(limit) : 'graphs and indexes · no limit', state: memF >= U.MEMORY_WARN ? 'warn' : null })),
+          h(Tile, { caption: 'MEMORY', values: sr.usedBytes, format: U.bytes, tickMs: tick, note: mem ? U.pct(mem.f) + ' of ' + U.bytes(limit) : 'graphs, payloads, copies · no limit', state: memState, flag: 'WRITES REFUSED' })),
         /* Namespaces */
         h(Section, { title: 'NAMESPACES', meta: s.namespaces.length + ' open', className: 'cs-ns' },
           h(Table, {
@@ -170,10 +172,15 @@
         h(Section, { title: 'MEMORY AND DISK', className: 'cs-res' },
           h('div', { className: 'cs-res__body' },
             h('div', { className: 'cs-res__mem' },
-              limit
-                ? h(I.Meter, { caption: 'GRAPH MEMORY', value: s.memory.graphBytes, max: limit, warnAt: U.MEMORY_WARN, width: 220, readout: U.bytes(s.memory.graphBytes) + ' / ' + U.bytes(limit) })
-                : h('div', null, h('div', { className: 'iw-cap' }, 'GRAPH MEMORY'), h('div', { className: 'iw-metric' }, U.bytes(s.memory.graphBytes))),
-              h('div', { className: 'iw-small iw-muted' }, limit ? `The namespaces' graphs and indexes; the console warns at ${U.pct(U.MEMORY_WARN)} of the limit.` : 'The namespaces\' graphs and indexes. The server has no memory limit set.')),
+              mem
+                ? h(I.Meter, { caption: 'MEMORY', value: s.memory.usedBytes, max: limit, warnAt: mem.meterWarnAt, width: 220, readout: U.bytes(s.memory.usedBytes) + ' / ' + U.bytes(limit) })
+                : h('div', null, h('div', { className: 'iw-cap' }, 'MEMORY'), h('div', { className: 'iw-metric' }, U.bytes(s.memory.usedBytes))),
+              h('dl', { className: 'cs-dl' },
+                [['GRAPHS', s.memory.graphBytes], ['PAYLOADS', s.memory.payloadBytes], ['CHECKPOINT COPIES', s.memory.checkpointBytes], ['PROJECTIONS, BUILDS', s.memory.workingBytes]]
+                  .map(([k, v]) => h('div', { key: k }, h('dt', { className: 'iw-cap' }, k), h('dd', { className: 'iw-mono' }, U.bytes(v))))),
+              h('div', { className: 'iw-small iw-muted' }, mem
+                ? `What the server counts against its limit (${s.memory.limitSource || 'set'}): it warns at ${U.pct(mem.warnAt)} and refuses writes at ${U.pct(mem.refuseAt)}, each until memory is 5 % below the line. Payloads, projections and builds are estimates.`
+                : 'What the server counts: graphs, payloads (estimated), checkpoint copies, projections and builds. The server has no memory limit.')),
             h('dl', { className: 'cs-dl' },
               [['WAL', U.bytes(s.disk.walBytes)], ['CHECKPOINTS', U.bytes(s.disk.checkpointBytes)], ['DISK FREE', U.bytes(s.disk.freeBytes)], ['REQUESTS', U.num(s.requests.total)], ['REJECTED', U.num(s.requests.rejected)], ['TIMED OUT', U.num(s.requests.timedOut)], ['CANCELLED', U.num(s.requests.cancelled)], ['DENIED', U.num(s.requests.denied)]]
                 .map(([k, v]) => h('div', { key: k }, h('dt', { className: 'iw-cap' }, k), h('dd', { className: 'iw-mono' }, v)))),

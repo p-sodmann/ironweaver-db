@@ -241,7 +241,7 @@
 
   /**
    * A mock Source. `scenario`: 'calm' (default) or 'degraded' (a read-only namespace, a failed checkpoint and
-   * memory near the limit, to see how the console shows problems). `latency`: [min, max] ms per call.
+   * memory above the warning line, to see how the console shows problems). `latency`: [min, max] ms per call.
    */
   function create(opts = {}) {
     const scenario = opts.scenario || 'calm';
@@ -278,7 +278,7 @@
     // A build in progress, so the status page shows one (social: an index on ["joined"])
     byName.get('social').indexes.push({ path: ['joined'], declared: true, unique: false, building: { scanned: 4, total: byName.get('social').nodes.size } });
 
-    const series = ['commitsPerSec', 'commitP50', 'commitP99', 'fsyncP99', 'queryP50', 'queryP99', 'active', 'graphBytes', 'walBytes'];
+    const series = ['commitsPerSec', 'commitP50', 'commitP99', 'fsyncP99', 'queryP50', 'queryP99', 'active', 'usedBytes', 'walBytes'];
     series.forEach((k) => { server.series[k] = []; });
     const emit = (level, msg) => {
       const d = new Date(); const e = { t: d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0'), level, msg };
@@ -290,13 +290,47 @@
       return b + ns.edges.size * 64 + ns.indexes.length * ns.nodes.size * 40;
     };
     const graphBytes = () => spaces.reduce((a, s) => a + memoryOf(s), 0);
+    // The server's memory (step 16d, ADR 0054): the payloads (their JSON's length and a map each), the checkpointers'
+    // copies of both, index builds while they run; a limit from the cgroup, its lines and the state with its band
+    const payloadOf = (ns) => {
+      let b = 0; const add = (x) => { b += 120 + JSON.stringify(x.attr).length; };
+      ns.nodes.forEach(add); ns.edges.forEach(add); return b;
+    };
+    const memoryParts = () => {
+      const graph = graphBytes(); const payload = spaces.reduce((a, s) => a + payloadOf(s), 0);
+      let working = 0; spaces.forEach((s) => s.indexes.forEach((ix) => { if (ix.building) working += 8 * ix.building.total + 96 * ix.building.scanned; }));
+      return { graph, payload, checkpoint: graph + payload, working };
+    };
+    const usedBytes = () => { const p = memoryParts(); return p.graph + p.payload + p.checkpoint + p.working; };
+    const limit = { bytes: 4 * 2 ** 20, source: 'cgroup v2', warnAt: 0.8, refuseAt: 0.9, band: 0.05 };
+    let memState = 'normal';
+    const memoryNow = () => {
+      const used = usedBytes(); const at = (f) => f * limit.bytes;
+      const rising = used >= at(limit.refuseAt) ? 'refusing_writes' : used >= at(limit.warnAt) ? 'warn' : 'normal';
+      const rank = { normal: 0, warn: 1, refusing_writes: 2 };
+      if (rank[rising] >= rank[memState]) memState = rising;
+      else if (memState === 'refusing_writes' && used >= at(limit.refuseAt - limit.band)) memState = 'refusing_writes';
+      else if (memState !== 'normal' && used >= at(limit.warnAt - limit.band)) memState = 'warn';
+      else memState = 'normal';
+      const p = memoryParts();
+      return {
+        graphBytes: p.graph, payloadBytes: p.payload, checkpointBytes: p.checkpoint, workingBytes: p.working, usedBytes: used,
+        limitBytes: limit.bytes, warnBytes: Math.floor(at(limit.warnAt)), refuseWritesBytes: Math.floor(at(limit.refuseAt)),
+        state: memState, limitSource: limit.source,
+      };
+    };
+    /** Writes that add are refused above the line, before anything changes (as on the server). */
+    const admit = () => {
+      const m = memoryNow();
+      if (m.state === 'refusing_writes') fail('resource_exhausted', `memory limit: writes are refused above ${m.refuseWritesBytes} bytes (${m.usedBytes} of ${m.limitBytes} bytes in use); deletes and drops are accepted`);
+    };
 
     /* One simulated second of traffic; the status page calls tick() on its timer, the tests call it directly. */
     function tick() {
       server.ticks++;
       const o = byName.get('orders');
       const commits = Math.max(0, Math.round(14 + 6 * Math.sin(server.ticks / 7) + r() * 6));
-      if (!o.readOnly) {
+      if (!o.readOnly && memoryNow().state !== 'refusing_writes') {
         for (let k = 0; k < Math.min(commits, 3); k++) { addOrder(o, r); }
         o.seq += commits; o.synced = o.seq; o.marks[0].position += commits * 3; o.marks[0].seq = o.seq;
       }
@@ -310,7 +344,7 @@
       if (spike > 1) emit('WARN', `slow commit · orders · ${p99.toFixed(1)} ms (p99 budget 10 ms)`);
       const push = (k, v) => { const a = server.series[k]; a.push(v); if (a.length > 90) a.shift(); };
       push('commitsPerSec', commits); push('commitP50', p50); push('commitP99', p99); push('fsyncP99', p99 * 0.62);
-      push('queryP50', 1.1 + r() * 0.6); push('queryP99', 9 + r() * 6 * spike); push('graphBytes', graphBytes());
+      push('queryP50', 1.1 + r() * 0.6); push('queryP99', 9 + r() * 6 * spike); push('usedBytes', usedBytes());
       server.walBytes += commits * 380; if (server.ticks % 40 === 0) server.walBytes = Math.round(server.walBytes * 0.6);
       push('walBytes', server.walBytes);
       OPS.forEach((op) => { const st = server.opStats[op]; const n = between(r, 0, op === 'Commit' ? commits : 20); st.calls += n; server.total += n; st.p50 = BASE_P50[op] * (0.85 + r() * 0.3); st.p99 = st.p50 * (5 + r() * 3) * (op === 'Commit' ? spike : 1); });
@@ -332,6 +366,8 @@
       if (server.ticks % 6 === 0) emit('INFO', `commit ${o.name} · seq ${o.seq} · ${commits} commits/s · mark ${o.marks[0].name} at ${o.marks[0].position}`);
     }
     for (let k = 0; k < 90; k++) tick(); // a minute and a half of history before the first look
+    // Degraded: just above the warning line, as the first look finds it
+    if (scenario === 'degraded') { limit.bytes = Math.round(usedBytes() / 0.82); memState = 'warn'; }
     server.log = [];
     emit('INFO', 'recovery done · 4 namespaces · 190 records replayed · 212 ms');
     emit('INFO', 'serving 0.0.0.0:7600 · gRPC, REST, health and the console');
@@ -509,10 +545,11 @@
       subgraph: (name, ids) => call('Subgraph', () => { const ns = nsOf(name); const s = new Set(ids); return { edges: [...ns.edges.values()].filter((e) => s.has(e.from) && s.has(e.to)).map(edgeOut), meta: meta(ns) }; }),
       getEdges: (name, ids) => call('GetEdges', () => { const ns = nsOf(name); return { edges: ids.map((id) => (ns.edges.has(id) ? edgeOut(ns.edges.get(id)) : null)), meta: meta(ns) }; }),
       matchPattern: (name, pattern, o = {}) => call('MatchPattern', () => matchIn(nsOf(name), pattern, Math.min(o.limit || 200, 10000))),
-      commit: (name, mutations) => call('Commit', () => { const res = applyMutations(nsOf(name), mutations); emit('INFO', `commit ${name} · seq ${res.seq} · ${mutations.length} mutation${mutations.length > 1 ? 's' : ''}`); return res; }),
+      commit: (name, mutations) => call('Commit', () => { if (!mutations.every((m) => m.deleteNode || m.deleteEdge || m.removeAttr || m.removeLabel)) admit(); const res = applyMutations(nsOf(name), mutations); emit('INFO', `commit ${name} · seq ${res.seq} · ${mutations.length} mutation${mutations.length > 1 ? 's' : ''}`); return res; }),
       /** Catalog operations; the mock knows createIndex. */
       createIndex: (name, path) => call('CommitCatalog', () => {
         const ns = nsOf(name); if (ns.readOnly) fail('read_only', `namespace ${name} is read-only: ${ns.readOnly}`);
+        admit();
         if (ns.indexes.some((ix) => ix.path.join('.') === path.join('.'))) fail('conflict', `an index on [${path.join(', ')}] exists`);
         ns.indexes.push({ path, declared: true, unique: false, building: { scanned: 0, total: ns.nodes.size } }); ns.seq++;
         emit('INFO', `index ${name} [${path.join('.')}] building · online (ADR 0019)`);
@@ -521,7 +558,7 @@
       /** What the server reports about itself: the shape of the REST Source's (step 16c, source.js). */
       server: () => call('GetServerStatus', () => ({
         version: server.version, startedMicros: server.startedMicros, ready: true, fsync: server.fsync,
-        memory: { graphBytes: graphBytes(), limitBytes: null },
+        memory: memoryNow(),
         disk: { walBytes: server.walBytes, checkpointBytes: server.checkpointBytes, freeBytes: server.diskFree },
         requests: { active: server.active.length, total: server.total, timedOut: server.timedOut, cancelled: server.cancelled, rejected: server.rejected, denied: server.denied },
         namespaces: spaces.map(statusOf),

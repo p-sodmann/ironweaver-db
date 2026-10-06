@@ -41,7 +41,7 @@ On a server, the explorer works fully: reads, edits and commits, index creation.
 
 ## On mock data
 
-Open `index.html` or `status.html` from the file system (or `?source=mock` on `serve.py`): `src/mock.js` generates the four namespaces and simulates a running server, and the rail says `MOCK DATA`. `?scenario=degraded` shows how problems look (a read-only namespace, a failed checkpoint, memory near the limit). The mock has a login too: `admin` / `admin` (a server-wide admin) or `reader` / `reader` (read on `social`), remembered for the tab (`sessionStorage`; a mock flag, never a credential).
+Open `index.html` or `status.html` from the file system (or `?source=mock` on `serve.py`): `src/mock.js` generates the four namespaces and simulates a running server, and the rail says `MOCK DATA`. `?scenario=degraded` shows how problems look (a read-only namespace, a failed checkpoint, memory above the server's warning line). The mock has a login too: `admin` / `admin` (a server-wide admin) or `reader` / `reader` (read on `social`), remembered for the tab (`sessionStorage`; a mock flag, never a credential).
 
 No build step is needed either way: React, the design system's bundle and the console's scripts are committed. The fonts (Archivo, IBM Plex Mono; SIL OFL 1.1) are in `design-system/fonts/` and served with the pages: the console loads nothing from another site.
 

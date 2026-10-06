@@ -77,6 +77,7 @@ html, body { background: var(--surface-000); color: var(--ink); }
 .cs-tile__head { display: flex; justify-content: space-between; gap: 8px; }
 .cs-tile__note { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 14px; }
 .cs-tile.is-warn .iw-metric { color: var(--warn); }
+.cs-tile.is-failed .iw-metric { color: var(--danger); }
 .cs-spark { display: block; width: 100%; height: 32px; overflow: visible; touch-action: none; }
 .cs-spark__hit { fill: transparent; }
 .cs-spark__line { fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }

@@ -135,6 +135,15 @@
   });
 
   /** A Source over the REST API at `base` ('' for the page's origin). `fetch` can be passed in for tests. */
+  /** The status's memory (ADR 0054), with the enums by their short names. */
+  const MEMORY_STATES = { MEMORY_STATE_NORMAL: 'normal', MEMORY_STATE_WARN: 'warn', MEMORY_STATE_REFUSING_WRITES: 'refusing_writes' };
+  const LIMIT_SOURCES = { MEMORY_LIMIT_SOURCE_CONFIG: 'config', MEMORY_LIMIT_SOURCE_CGROUP_V2: 'cgroup v2', MEMORY_LIMIT_SOURCE_CGROUP_V1: 'cgroup v1' };
+  const memoryOf = (m) => ({
+    graphBytes: n(m.graphBytes), payloadBytes: n(m.payloadBytes), checkpointBytes: n(m.checkpointBytes), workingBytes: n(m.workingBytes),
+    usedBytes: n(m.usedBytes), limitBytes: opt(m.limitBytes), warnBytes: opt(m.warnBytes), refuseWritesBytes: opt(m.refuseWritesBytes),
+    state: MEMORY_STATES[m.state] || 'normal', limitSource: LIMIT_SOURCES[m.limitSource] || null,
+  });
+
   function create(opts = {}) {
     const base = opts.base || '';
     const doFetch = opts.fetch || root.fetch.bind(root);
@@ -146,7 +155,7 @@
     const emit = (level, msg) => { const e = { t: clock(new Date()), level, msg }; keep(pageLog, e); if (logKind === 'page') tell(e); };
     let config = null;
     let last = null; // the previous call's metrics: {at, commit, fsync, queries}
-    const series = { commitsPerSec: [], commitP50: [], commitP99: [], fsyncP99: [], queryP50: [], queryP99: [], active: [], graphBytes: [], walBytes: [] };
+    const series = { commitsPerSec: [], commitP50: [], commitP99: [], fsyncP99: [], queryP50: [], queryP99: [], active: [], usedBytes: [], walBytes: [] };
     let tickMs = 3000;
     const push = (k, v) => { const a = series[k]; a.push(v); if (a.length > SERIES) a.shift(); };
 
@@ -200,7 +209,7 @@
         push('commitsPerSec', countOf(commits) / dt);
         push('commitP50', quantile(commits, 0.5)); push('commitP99', quantile(commits, 0.99)); push('fsyncP99', quantile(fsyncs, 0.99));
         push('queryP50', quantile(queries, 0.5)); push('queryP99', quantile(queries, 0.99));
-        push('active', d.active); push('graphBytes', n(status.memory && status.memory.graphBytes)); push('walBytes', n(status.disk && status.disk.walBytes));
+        push('active', d.active); push('usedBytes', n(status.memory && status.memory.usedBytes)); push('walBytes', n(status.disk && status.disk.walBytes));
       }
       last = { at: now, commit: d.commit, fsync: d.fsync, queries: d.queries };
     }
@@ -273,7 +282,7 @@
         const r = s.requests || {};
         return {
           version: s.version || null, startedMicros: n(s.startedMicros), ready: !!s.ready, fsync: s.fsync || null,
-          memory: { graphBytes: n(s.memory && s.memory.graphBytes), limitBytes: opt(s.memory && s.memory.limitBytes) },
+          memory: memoryOf(s.memory || {}),
           disk: { walBytes: n(s.disk && s.disk.walBytes), checkpointBytes: n(s.disk && s.disk.checkpointBytes), freeBytes: opt(s.disk && s.disk.freeBytes) },
           requests: { active: n(r.active), total: n(r.total), timedOut: n(r.timedOut), cancelled: n(r.cancelled), rejected: n(r.rejected), denied: n(r.denied) },
           namespaces: (s.namespaces || []).map(status),

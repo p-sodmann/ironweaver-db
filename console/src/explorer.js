@@ -356,9 +356,9 @@
     const drawer = status && [
       h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'NODES'), h('span', { className: 'iw-mono-s' }, U.num(status.nodes))),
       h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'EDGES'), h('span', { className: 'iw-mono-s' }, U.num(status.edges))),
-      mem && (mem.limitBytes
-        ? h(I.Meter, { caption: 'MEMORY', value: mem.graphBytes, max: mem.limitBytes, warnAt: U.MEMORY_WARN, readout: U.bytes(mem.graphBytes) + ' / ' + U.bytes(mem.limitBytes) })
-        : h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'GRAPH MEMORY'), h('span', { className: 'iw-mono-s' }, U.bytes(mem.graphBytes)))),
+      mem && (U.memory(mem)
+        ? h(I.Meter, { caption: 'MEMORY', value: mem.usedBytes, max: mem.limitBytes, warnAt: U.memory(mem).meterWarnAt, readout: U.bytes(mem.usedBytes) + ' / ' + U.bytes(mem.limitBytes) })
+        : h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'MEMORY'), h('span', { className: 'iw-mono-s' }, U.bytes(mem.usedBytes)))),
       h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'SEQ'), h('span', { className: 'iw-mono-s' }, U.num(status.seq))),
       h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'UNSYNCED'), h('span', { className: 'iw-mono-s' }, status.unsynced == null ? 'fsync off' : U.num(status.unsynced))),
       h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'SINCE CHECKPOINT'), h('span', { className: 'iw-mono-s' }, U.num(status.sinceCheckpoint) + ' commits')),
