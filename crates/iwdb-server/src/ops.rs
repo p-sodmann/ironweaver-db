@@ -12,7 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iwdb_query::audit::Audit;
-use iwdb_query::{Accounts, Admin, Authenticate, Authorized, ChangesRequest, Code, Database, Error, Secret, Session};
+use iwdb_query::{
+    Accounts, Admin, Authenticate, Authorized, BackupRequest, ChangesRequest, Code, Database, Error, Secret, Session,
+};
 use tokio::sync::{mpsc, watch};
 
 use crate::auth::AuthMode;
@@ -424,6 +426,27 @@ pub(crate) async fn metrics_text<D: Admin>(db: &D) -> Result<String, Error> {
 
 pub(crate) async fn get_log<D: Admin>(db: &D, r: pb::GetLogRequest) -> Result<pb::GetLogResponse, Error> {
     Ok(log_to_pb(&db.log(r.after, limit_from_pb(r.limit)).await?))
+}
+
+pub(crate) async fn checkpoint<D: Admin>(db: &D, r: pb::CheckpointRequest) -> Result<pb::CheckpointResponse, Error> {
+    Ok(checkpoints_to_pb(&db.checkpoint(r.namespace).await?))
+}
+
+pub(crate) async fn backup<D: Admin>(db: &D, r: pb::BackupRequest) -> Result<pb::BackupResponse, Error> {
+    let request = BackupRequest { name: r.name, max_bytes_per_second: r.max_bytes_per_second, verify: !r.no_verify };
+    Ok(backup_to_pb(&db.backup(request).await?))
+}
+
+pub(crate) async fn verify<D: Admin>(db: &D, r: pb::VerifyRequest) -> Result<pb::VerifyResponse, Error> {
+    let report = db.verify(verify_target_from_pb(r)?).await?;
+    Ok(pb::VerifyResponse { report: Some(verify_to_pb(&report)) })
+}
+
+pub(crate) async fn prune_archive<D: Admin>(
+    db: &D,
+    r: pb::PruneArchiveRequest,
+) -> Result<pb::PruneArchiveResponse, Error> {
+    Ok(prune_to_pb(&db.prune_archive(r.before, r.dry_run).await?))
 }
 
 /// `Login`: on the database itself (no principal yet), audited.

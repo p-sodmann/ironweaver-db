@@ -51,6 +51,9 @@ pub struct AuditEntry {
     pub namespace_event: Option<u64>,
     /// The request a `CancelRequest` cancels (its id).
     pub request: Option<u64>,
+    /// The backup a `Backup`, `Verify` or `PruneArchive` names: its name in
+    /// the server's backup directory, never a full path.
+    pub backup: Option<String>,
 }
 
 impl AuditEntry {

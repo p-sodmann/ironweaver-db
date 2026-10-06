@@ -273,6 +273,32 @@ pub const ROUTES: &[Route] = &[
     route(Method::GET, "/v1/consumers", "ListConsumers", Input::Nothing, "listConsumers", "The change-stream readers"),
     route(Method::GET, "/v1/metrics", "GetMetrics", Input::Nothing, "getMetrics", "The metrics"),
     route(Method::GET, "/v1/log", "GetLog", Input::Query(LOG_PARAMETERS), "getLog", "The server's last log events"),
+    // The admin writes (admin.proto, step 16e)
+    route(
+        Method::POST,
+        "/v1/checkpoint",
+        "Checkpoint",
+        OPTIONAL_BODY,
+        "checkpoint",
+        "Checkpoint a namespace, or every namespace",
+    ),
+    route(Method::POST, "/v1/backups", "Backup", BODY, "backup", "Back up the store into the backup directory"),
+    route(
+        Method::POST,
+        "/v1/verify",
+        "Verify",
+        OPTIONAL_BODY,
+        "verify",
+        "Verify the store, a backup or the WAL archive",
+    ),
+    route(
+        Method::POST,
+        "/v1/archive/prune",
+        "PruneArchive",
+        BODY,
+        "pruneArchive",
+        "Prune the WAL archive before a backup",
+    ),
     // Served by the gate in every build, also without `rest`
     route(
         Method::GET,
@@ -426,6 +452,10 @@ fn handler<D: Served>(r: &Route) -> MethodRouter<Arc<Shared<D>>> {
         "listConsumers" => get(list_consumers::<D>),
         "getMetrics" => get(get_metrics::<D>),
         "getLog" => get(get_log::<D>),
+        "checkpoint" => post(checkpoint::<D>),
+        "backup" => post(backup::<D>),
+        "verify" => post(verify::<D>),
+        "pruneArchive" => post(prune_archive::<D>),
         other => get(move || async move { Failure::from(Error::internal(format!("route {} has no handler", other))) }),
     }
 }
@@ -969,6 +999,23 @@ async fn get_log<D: Served>(State(s): St<D>, caller: Caller_, q: Result<Query<Lo
     let Query(q) = q.map_err(|e| Failure::from(Error::invalid(format!("invalid query: {}", e))))?;
     unary(ops::get_log(&s.db(&caller)?, pb::GetLogRequest { after: q.after.unwrap_or(0), limit: q.limit }).await)
 }
+
+/// A route whose body is its RPC's request message, and that has no path
+/// parameters: the admin writes.
+macro_rules! body_handler {
+    ($name:ident, $request:ty) => {
+        async fn $name<D: Served>(State(s): St<D>, caller: Caller_, headers: HeaderMap, body: Body) -> Answer {
+            let db = s.db(&caller)?;
+            let r: $request = read(&headers, body, s.max_body).await?;
+            unary(ops::$name(&db, r).await)
+        }
+    };
+}
+
+body_handler!(checkpoint, pb::CheckpointRequest);
+body_handler!(backup, pb::BackupRequest);
+body_handler!(verify, pb::VerifyRequest);
+body_handler!(prune_archive, pb::PruneArchiveRequest);
 
 async fn list_users<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
     unary(ops::list_users(&s.db(&caller)?).await)

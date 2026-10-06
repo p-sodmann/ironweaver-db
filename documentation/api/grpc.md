@@ -111,7 +111,7 @@ The image runs as the user `iwdb` (uid 10001), keeps its data in the volume `/va
 | `GetChanges` | `changes` (ADR 0031) | unary |
 | `Watch` | `changes` with `wait`, in a loop | stream, until cancelled, an error or shutdown ([changes.md](changes.md)) |
 
-`AuthService` and `AdminService` are described in [Authentication](#authentication) and [The operator's reads](#the-operators-reads). Every `DatabaseService` operation names a namespace; seqs, cursors, idempotency keys and catalogs are per namespace.
+`AuthService` and `AdminService` are described in [Authentication](#authentication), [The operator's reads](#the-operators-reads) and [Admin writes](#admin-writes). Every `DatabaseService` operation names a namespace; seqs, cursors, idempotency keys and catalogs are per namespace.
 
 ## Versioning
 
@@ -197,7 +197,7 @@ On SIGINT or SIGTERM the server stops accepting connections and sends every HTTP
 | `read` | `WaitForSeq`, `GetNodes`, `GetEdges`, `Find`, `Explain`, `Neighbourhood`, `Traverse`, `ShortestPath`, `RandomWalks`, `Subgraph`, `MatchPattern`, `Analyze`, `GetChanges`, `Watch`, `GetCatalog`, `GetSchema`, `GetNamespaceStatus` |
 | `write` | `read`, and `Commit` |
 | `admin` | `write`, and `CommitCatalog`, `DropNamespace` |
-| server-wide admin | every role on every namespace, `CreateNamespace`, the user, grant and token RPCs for anyone, `GetLog`, and `ListRequests` and `CancelRequest` for anyone's requests |
+| server-wide admin | every role on every namespace, `CreateNamespace`, the user, grant and token RPCs for anyone, `GetLog`, `ListRequests` and `CancelRequest` for anyone's requests, and the admin writes (`Checkpoint`, `Backup`, `Verify`, `PruneArchive`) |
 | any user | `ListNamespaces` (the ones it has a role on), `WhoAmI`, `Logout`, and `SetPassword` (with its current password), `CreateToken`, `RevokeToken`, `ListTokens` for itself; `GetServerStatus`, `ListConsumers` and `GetMetrics` (narrowed to the namespaces it has a role on), and `ListRequests` and `CancelRequest` for its own requests |
 
 The Rust clients take a token (`Remote::with_token`) or log in (`Remote::login`, which keeps the session's token), and implement `iwdb_query::Accounts` for the user RPCs.
@@ -205,6 +205,10 @@ The Rust clients take a token (`Remote::with_token`) or log in (`Remote::login`,
 ## The operator's reads
 
 `AdminService` (`proto/ironweaver_db/v1/admin.proto`, step 16c, [ADRs 0050 to 0052](../adr/0051-the-status-views.md)): `GetServerStatus`, `ListRequests`, `CancelRequest`, `ListConsumers`, `GetMetrics` and `GetLog`, the `Admin` trait's methods, on the same port and with the same token. A request cancelled with `CancelRequest` ends with `CANCELLED` (`iwdb-code: cancelled`); commits can't be cancelled (`INVALID_ARGUMENT`). Every list is bounded. The metrics are also served in Prometheus' text format at `GET /metrics` ([metrics.md](metrics.md)), in every build.
+
+## Admin writes
+
+`AdminService`'s `Checkpoint`, `Backup`, `Verify` and `PruneArchive` (step 16e, [ADR 0055](../adr/0055-admin-writes-and-iwctl-against-a-server.md)): checkpoint a namespace or all; back up into the server's backup directory (`[backup] dir`) under a name, throttled by `max_bytes_per_second`, then verify; verify the running store, a backup by name, or the WAL archive; and prune the WAL archive before a backup. Only a server-wide admin may call them, every call is audited, and none can be cancelled (`CancelRequest` answers `INVALID_ARGUMENT`). Send them without a deadline, or with one longer than the copy: a checkpoint waits for a running backup, and a throttled backup takes as long as its copy. `iwctl --server` makes these calls ([iwctl.md](../iwctl.md#against-a-running-server)); [rest.md](rest.md#admin-writes) has the details, which are the same over both APIs.
 
 ## TLS
 

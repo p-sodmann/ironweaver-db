@@ -29,7 +29,9 @@ use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation};
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 
-use crate::admin::{Admin, Listed, ServerStatus};
+use crate::admin::{
+    Admin, BackupDone, BackupRequest, Checkpointed, Listed, PruneReport, ServerStatus, VerifyReport, VerifyTarget,
+};
 use crate::audit::{Audit, AuditEntry};
 use crate::log::LogTail;
 use crate::metrics::Metrics;
@@ -411,13 +413,18 @@ operations! {
     Consumers => "ListConsumers", Authenticated, Refusals;
     Metrics => "GetMetrics", Authenticated, Refusals;
     Log => "GetLog", ServerAdmin, Refusals;
+    Checkpoint => "Checkpoint", ServerAdmin, Always;
+    Backup => "Backup", ServerAdmin, Always;
+    Verify => "Verify", ServerAdmin, Always;
+    PruneArchive => "PruneArchive", ServerAdmin, Always;
 }
 
 impl Operation {
     /// Whether a running call can be cancelled ([`Admin::cancel_request`]):
     /// reads can; commits and other changes can't (dropping one wouldn't
     /// undo it, only make its outcome unknown), nor can logging in or out
-    /// and cancelling.
+    /// and cancelling, nor the admin writes, which run on threads of their
+    /// own that a dropped future doesn't stop (ADR 0055).
     pub fn cancellable(self) -> bool {
         use Operation::*;
         !matches!(
@@ -437,6 +444,10 @@ impl Operation {
                 | Login
                 | Logout
                 | CancelRequest
+                | Checkpoint
+                | Backup
+                | Verify
+                | PruneArchive
         )
     }
 
@@ -922,6 +933,37 @@ impl<D: Database + Accounts + Admin> Admin for Authorized<D> {
     fn log(&self, after: u64, limit: Option<usize>) -> impl Future<Output = Result<LogTail, Error>> + Send {
         let checked = self.check(Operation::Log, "", AuditEntry::default());
         run!(self, checked, self.inner.log(after, limit), no_seq)
+    }
+
+    /// Audited with the namespace, if one is named.
+    fn checkpoint(&self, namespace: Option<String>) -> impl Future<Output = Result<Vec<Checkpointed>, Error>> + Send {
+        let entry = AuditEntry { namespace: namespace.clone(), ..AuditEntry::default() };
+        let checked = self.check(Operation::Checkpoint, "", entry);
+        run!(self, checked, self.inner.checkpoint(namespace), no_seq)
+    }
+
+    /// Audited with the backup's name.
+    fn backup(&self, request: BackupRequest) -> impl Future<Output = Result<BackupDone, Error>> + Send {
+        let entry = AuditEntry { backup: Some(request.name.clone()), ..AuditEntry::default() };
+        let checked = self.check(Operation::Backup, "", entry);
+        run!(self, checked, self.inner.backup(request), no_seq)
+    }
+
+    /// Audited with the backup's name, for a backup.
+    fn verify(&self, target: VerifyTarget) -> impl Future<Output = Result<VerifyReport, Error>> + Send {
+        let backup = match &target {
+            VerifyTarget::Backup(name) => Some(name.clone()),
+            VerifyTarget::Store | VerifyTarget::Archive => None,
+        };
+        let checked = self.check(Operation::Verify, "", AuditEntry { backup, ..AuditEntry::default() });
+        run!(self, checked, self.inner.verify(target), no_seq)
+    }
+
+    /// Audited with the backup's name.
+    fn prune_archive(&self, before: String, dry_run: bool) -> impl Future<Output = Result<PruneReport, Error>> + Send {
+        let entry = AuditEntry { backup: Some(before.clone()), ..AuditEntry::default() };
+        let checked = self.check(Operation::PruneArchive, "", entry);
+        run!(self, checked, self.inner.prune_archive(before, dry_run), no_seq)
     }
 }
 

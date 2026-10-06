@@ -177,6 +177,8 @@ pub struct Config {
     pub tls: TlsSection,
     #[serde(default)]
     pub audit: AuditSection,
+    #[serde(default)]
+    pub backup: BackupSection,
     /// `[[projection]]` sections (ADR 0032).
     #[serde(default, rename = "projection")]
     pub projections: Vec<ProjectionSection>,
@@ -251,6 +253,20 @@ pub struct AuditSection {
     /// Days of audit files to keep, today included; older ones are
     /// deleted at start and at each new day. 0: keep them all.
     pub retention_days: u32,
+}
+
+/// `[backup]`: online backups (step 16e, ADR 0055).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BackupSection {
+    /// The backup directory: the only place remote backups are written
+    /// (as `<dir>/<name>`), and where `Verify` and `PruneArchive` find them.
+    /// It must exist, and not be inside the data directory. `None`: remote
+    /// backups are refused.
+    pub dir: Option<PathBuf>,
+    /// Copy backups at most this fast, in bytes per second (0: as fast as
+    /// the disks go). Checkpoints wait for a backup's whole copy.
+    pub max_bytes_per_second: u64,
 }
 
 /// The default of `[audit] retention_days`.
@@ -329,6 +345,7 @@ impl Default for Config {
             auth: AuthSection::default(),
             tls: TlsSection::default(),
             audit: AuditSection::default(),
+            backup: BackupSection::default(),
             projections: Vec::new(),
             sources: BTreeMap::new(),
             bootstrap: None,
@@ -428,6 +445,7 @@ keys! {
     "store.checkpoint_on_shutdown" "IWDB_STORE_CHECKPOINT_ON_SHUTDOWN" => store.checkpoint_on_shutdown;
     "store.retain_records" "IWDB_STORE_RETAIN_RECORDS" => store.retain_records;
     "store.retain_age_secs" "IWDB_STORE_RETAIN_AGE_SECS" => store.retain_age_secs;
+    "store.archive" "IWDB_STORE_ARCHIVE" => store.archive;
     "server.drain_timeout_secs" "IWDB_SERVER_DRAIN_TIMEOUT_SECS" => server.drain_timeout_secs;
     "server.max_message_bytes" "IWDB_SERVER_MAX_MESSAGE_BYTES" => server.max_message_bytes;
     "server.workers" "IWDB_SERVER_WORKERS" => server.workers;
@@ -461,6 +479,8 @@ keys! {
     "tls.client_auth" "IWDB_TLS_CLIENT_AUTH" => tls.client_auth;
     "audit.dir" "IWDB_AUDIT_DIR" => audit.dir;
     "audit.retention_days" "IWDB_AUDIT_RETENTION_DAYS" => audit.retention_days;
+    "backup.dir" "IWDB_BACKUP_DIR" => backup.dir;
+    "backup.max_bytes_per_second" "IWDB_BACKUP_MAX_BYTES_PER_SECOND" => backup.max_bytes_per_second;
 }
 
 /// Variables with these prefixes must name a setting.
@@ -474,11 +494,13 @@ const SECTION_PREFIXES: &[&str] = &[
     "IWDB_AUTH_",
     "IWDB_TLS_",
     "IWDB_AUDIT_",
+    "IWDB_BACKUP_",
 ];
 
 /// The settings that are paths, resolved against the file's directory when
 /// they come from the file.
-const PATH_KEYS: &[&str] = &["data_dir", "tls.cert", "tls.key", "tls.client_ca", "audit.dir"];
+const PATH_KEYS: &[&str] =
+    &["data_dir", "tls.cert", "tls.key", "tls.client_ca", "audit.dir", "store.archive", "backup.dir"];
 
 /// A projection the server runs (ADR 0032).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -604,6 +626,10 @@ pub struct StoreSection {
     pub retain_records: u64,
     /// ... and commits younger than this many seconds (0: none).
     pub retain_age_secs: u64,
+    /// The WAL archive (ADR 0009): every segment is copied there, durably,
+    /// before a checkpoint removes it. Created if missing; it must belong
+    /// to the store's history.
+    pub archive: Option<PathBuf>,
 }
 
 impl Default for StoreSection {
@@ -615,6 +641,7 @@ impl Default for StoreSection {
             checkpoint_on_shutdown: true,
             retain_records: 0,
             retain_age_secs: 0,
+            archive: None,
         }
     }
 }
@@ -769,6 +796,8 @@ impl Config {
                     "tls.cert" => config.tls.cert.as_mut(),
                     "tls.key" => config.tls.key.as_mut(),
                     "audit.dir" => config.audit.dir.as_mut(),
+                    "store.archive" => config.store.archive.as_mut(),
+                    "backup.dir" => config.backup.dir.as_mut(),
                     _ => config.tls.client_ca.as_mut(),
                 };
                 if let Some(field) = field
@@ -1077,7 +1106,8 @@ impl Config {
     }
 
     /// The store's options: the defaults, with the fsync policy, checkpoint
-    /// on shutdown and WAL retention from the file.
+    /// on shutdown, WAL retention, the archive and the backup rate from the
+    /// file.
     pub fn store_options(&self) -> StoreOptions {
         let mut options = StoreOptions::default();
         options.wal.fsync = match self.store.fsync {
@@ -1094,6 +1124,8 @@ impl Config {
             age: (self.store.retain_age_secs > 0).then(|| Duration::from_secs(self.store.retain_age_secs)),
         };
         options.memory = self.memory_options_with(iwdb::cgroup_limit());
+        options.archive = self.store.archive.clone();
+        options.backup.max_bytes_per_second = Some(self.backup.max_bytes_per_second).filter(|r| *r > 0);
         options
     }
 

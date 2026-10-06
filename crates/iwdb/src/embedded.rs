@@ -77,6 +77,8 @@ where
     config: QueryConfig,
     auth: Arc<AuthState>,
     pub(crate) monitor: Arc<Monitor>,
+    /// The backup directory: where `Admin::backup` writes (ADR 0055).
+    pub(crate) backup_dir: Option<Arc<std::path::PathBuf>>,
 }
 
 /// What the operator's reads report beyond the store (step 16c): the
@@ -122,7 +124,49 @@ where
             started: CommitTime::now(),
             ready: AtomicBool::new(true),
         };
-        Ok(Embedded { store: Arc::new(store), pool, config, auth: Arc::default(), monitor: Arc::new(monitor) })
+        Ok(Embedded {
+            store: Arc::new(store),
+            pool,
+            config,
+            auth: Arc::default(),
+            monitor: Arc::new(monitor),
+            backup_dir: None,
+        })
+    }
+
+    /// Take remote backups into `dir` (`[backup] dir`, ADR 0055): the only
+    /// place [`Admin::backup`](iwdb_query::Admin::backup) writes, and where
+    /// `verify` and `prune_archive` find backups by name. It is resolved
+    /// now (symlinks in its path are followed once), must be a directory,
+    /// and must not be inside the data directory. Errors:
+    /// `invalid_argument`.
+    pub fn with_backup_dir(mut self, dir: &std::path::Path) -> Result<Self, Error> {
+        let resolved = std::fs::canonicalize(dir)
+            .map_err(|e| Error::invalid(format!("the backup directory '{}': {}", dir.display(), e)))?;
+        if !resolved.is_dir() {
+            return Err(Error::invalid(format!("the backup directory '{}' is not a directory", dir.display())));
+        }
+        let data = self.store.root();
+        let data = std::fs::canonicalize(data).unwrap_or_else(|_| data.to_path_buf());
+        if resolved.starts_with(&data) {
+            return Err(Error::invalid(format!(
+                "the backup directory '{}' is inside the data directory '{}'",
+                dir.display(),
+                data.display()
+            )));
+        }
+        self.backup_dir = Some(Arc::new(resolved));
+        Ok(self)
+    }
+
+    /// The backup directory, if one is set ([`with_backup_dir`](Self::with_backup_dir)).
+    pub fn backup_dir(&self) -> Option<&std::path::Path> {
+        self.backup_dir.as_deref().map(|p| p.as_path())
+    }
+
+    /// The store, shared: for jobs on threads of their own.
+    pub(crate) fn shared_store(&self) -> Arc<Store<F>> {
+        self.store.clone()
     }
 
     /// Serve `log` as the log tail (`Admin::log`): the ring the process's

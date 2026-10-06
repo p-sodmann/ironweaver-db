@@ -507,6 +507,22 @@ impl<D: Served> AdminService for Adapter<D> {
     async fn get_log(&self, request: Request<pb::GetLogRequest>) -> Res<pb::GetLogResponse> {
         Ok(Response::new(ops::get_log(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
     }
+
+    async fn checkpoint(&self, request: Request<pb::CheckpointRequest>) -> Res<pb::CheckpointResponse> {
+        Ok(Response::new(ops::checkpoint(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
+
+    async fn backup(&self, request: Request<pb::BackupRequest>) -> Res<pb::BackupResponse> {
+        Ok(Response::new(ops::backup(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
+
+    async fn verify(&self, request: Request<pb::VerifyRequest>) -> Res<pb::VerifyResponse> {
+        Ok(Response::new(ops::verify(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
+
+    async fn prune_archive(&self, request: Request<pb::PruneArchiveRequest>) -> Res<pb::PruneArchiveResponse> {
+        Ok(Response::new(ops::prune_archive(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
 }
 
 #[cfg(test)]

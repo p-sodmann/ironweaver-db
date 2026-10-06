@@ -50,9 +50,17 @@ impl Deref for FreshAuthorized {
     }
 }
 
+/// Its data in `data/`, its WAL archive in `archive/` and its backup
+/// directory `backups/` (step 16e).
 fn fresh_authorized() -> FreshAuthorized {
-    let Fresh { db, _dir } = fresh();
-    FreshAuthorized { db: Authorized::new(Arc::new(db), Arc::new(Principal::unauthenticated()), Audit::none()), _dir }
+    let dir = tempfile::tempdir().unwrap();
+    let options = iwdb::StoreOptions { archive: Some(dir.path().join("archive")), ..support::options(2) };
+    let store = Store::open(&dir.path().join("data"), options).unwrap();
+    std::fs::create_dir(dir.path().join("backups")).unwrap();
+    let db =
+        Embedded::new(store, QueryConfig::default()).unwrap().with_backup_dir(&dir.path().join("backups")).unwrap();
+    let principal = Arc::new(Principal::unauthenticated());
+    FreshAuthorized { db: Authorized::new(Arc::new(db), principal, Audit::none()), _dir: dir }
 }
 
 mod admin {

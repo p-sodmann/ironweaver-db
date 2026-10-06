@@ -56,11 +56,15 @@
 | GET | `/v1/consumers` | – | `ListConsumersResponse` | `Admin::consumers` |
 | GET | `/v1/metrics` | – | `GetMetricsResponse` | `Admin::metrics` |
 | GET | `/v1/log` | `after`, `limit` as query parameters | `GetLogResponse` | `Admin::log` |
+| POST | `/v1/checkpoint` | `CheckpointRequest` (optional: `namespace`) | `CheckpointResponse` | `Admin::checkpoint` |
+| POST | `/v1/backups` | `BackupRequest` (`name`, `max_bytes_per_second`, `no_verify`) | `BackupResponse` | `Admin::backup` |
+| POST | `/v1/verify` | `VerifyRequest` (optional: `backup` or `archive`) | `VerifyResponse` | `Admin::verify` |
+| POST | `/v1/archive/prune` | `PruneArchiveRequest` (`before`, `dry_run`) | `PruneArchiveResponse` | `Admin::prune_archive` |
 | GET | `/metrics` | – | the metrics in Prometheus' text format ([metrics.md](metrics.md)) | `Admin::metrics` |
 
 Path parameters are percent-encoded: node `a/b` is `/nodes/a%2Fb`. A test keeps this table equal to the server's route table.
 
-The operator's routes (`/v1/status` to `/metrics`, step 16c) are described in [Operator reads](#operator-reads). The health routes are served in every build (also without the `rest` feature) and while the store recovers; until recovery has finished every other route answers 503 `unavailable` ([ADR 0040](../adr/0040-health-and-readiness.md)). With the `console` feature and `[console] enabled = true`, the operator console's pages are served at `/console/` on the same port ([ADR 0041](../adr/0041-console-served-by-the-server.md)); they aren't part of this API.
+The operator's routes (`/v1/status` to `/metrics`, step 16c) are described in [Operator reads](#operator-reads), the admin writes (`/v1/checkpoint` to `/v1/archive/prune`, step 16e) in [Admin writes](#admin-writes). The health routes are served in every build (also without the `rest` feature) and while the store recovers; until recovery has finished every other route answers 503 `unavailable` ([ADR 0040](../adr/0040-health-and-readiness.md)). With the `console` feature and `[console] enabled = true`, the operator console's pages are served at `/console/` on the same port ([ADR 0041](../adr/0041-console-served-by-the-server.md)); they aren't part of this API.
 
 ## Operator reads
 
@@ -76,6 +80,23 @@ curl -s $U/status -H "authorization: Bearer $T" | jq .status.requests
 curl -s "$U/requests?limit=10" -H "authorization: Bearer $T"
 curl -s -X POST $U/requests/42/cancel -H "authorization: Bearer $T"
 curl -s https://127.0.0.1:7600/metrics -H "authorization: Bearer $T"
+```
+
+## Admin writes
+
+The admin writes of `AdminService` (step 16e, [ADR 0055](../adr/0055-admin-writes-and-iwctl-against-a-server.md)): checkpoints, backups into the server's backup directory, verifying, and pruning the WAL archive. Only a server-wide admin may call them (403 otherwise), every call is audited, and none can be cancelled. They have no deadline: a throttled backup answers when its copy is done. `iwctl --server` makes the same calls ([iwctl.md](../iwctl.md)).
+
+- **`POST /v1/checkpoint`**: `{}` checkpoints every namespace, `{"namespace": "social"}` one. Each answer says whether a checkpoint was written and what was removed (archived first, with `[store] archive`). It waits for a running backup's copy.
+- **`POST /v1/backups`**: `{"name": "nightly-2026-10-06"}` writes a backup into `[backup] dir` under that name (1 to 128 ASCII letters, digits, `.`, `_` or `-`, not starting with `.`), then verifies it (`"no_verify": true` skips that). A name under which anything exists is 409 `conflict`; without `[backup] dir`, 400 `invalid_argument`. `max_bytes_per_second` overrides `[backup] max_bytes_per_second` (0: unthrottled). Checkpoints wait for the whole copy. A backup that fails is removed.
+- **`POST /v1/verify`**: `{}` verifies the running store (its checkpoints and WAL up to each namespace's synced seq, and its live state), `{"backup": "<name>"}` a backup in the backup directory, `{"archive": true}` the WAL archive. Damage is in the report's `problems`, with 200. While the server refuses writes for memory, 503 `resource_exhausted`.
+- **`POST /v1/archive/prune`**: `{"before": "<name>"}` removes from the WAL archive what no restore from that backup (or a later one) can need; `"dry_run": true` only reports it. A backup of another history is 400.
+- **Restore** has no route: it is offline (`iwctl restore` on the server's host).
+
+```sh
+curl -s -X POST $U/backups -H "authorization: Bearer $T" -H 'content-type: application/json' \
+  -d '{"name": "nightly", "max_bytes_per_second": 52428800}' | jq .verify.problems
+curl -s -X POST $U/archive/prune -H "authorization: Bearer $T" -H 'content-type: application/json' \
+  -d '{"before": "nightly", "dry_run": true}'
 ```
 
 ## Authentication

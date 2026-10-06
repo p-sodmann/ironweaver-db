@@ -1,6 +1,8 @@
 //! The [`Admin`] trait (step 16c, ADR 0051): what an operator reads about a
 //! running database (its status, the running requests, the change-stream
-//! readers, the metrics and the log tail) and cancelling a request. A
+//! readers, the metrics and the log tail) and cancelling a request; and
+//! its admin writes (step 16e, ADR 0055): checkpoints, backups into the
+//! server's backup directory, verifying, and pruning the WAL archive. A
 //! sibling of [`Database`](crate::Database), which stays the data API.
 //!
 //! Implemented once, by the embedded database (`iwdb::Embedded`), and
@@ -17,7 +19,11 @@ use std::future::Future;
 use std::sync::Arc;
 
 use iwdb_engine::CommitTime;
+pub use iwdb_storage::archive::{NamespacePrune, PruneReport};
 pub use iwdb_storage::memory::{LimitSource, MemorySnapshot, MemoryState};
+pub use iwdb_storage::{
+    BackupReport, CheckpointOutcome, Finding, Kind, NamespaceBackup, NamespaceVerify, VerifyReport,
+};
 
 use crate::log::LogTail;
 use crate::metrics::Metrics;
@@ -126,8 +132,69 @@ pub struct Listed<T> {
     pub truncated: bool,
 }
 
-/// The operator's reads of a database, and cancelling a request. Errors
-/// have the stable codes of [`Code`](crate::Code).
+/// A namespace's checkpoint ([`Admin::checkpoint`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Checkpointed {
+    pub namespace: String,
+    pub outcome: CheckpointOutcome,
+}
+
+/// A backup to take ([`Admin::backup`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackupRequest {
+    /// Its name in the server's backup directory: one path component of 1
+    /// to 128 ASCII letters, digits, `.`, `_` or `-`, not starting with
+    /// `.` ([`check_backup_name`]). Nothing may exist there yet.
+    pub name: String,
+    /// Copy at most this many bytes per second; `None`: the server's
+    /// setting (`[backup] max_bytes_per_second`); 0: unthrottled.
+    pub max_bytes_per_second: Option<u64>,
+    /// Verify the backup once written.
+    pub verify: bool,
+}
+
+/// A backup taken, and its verification if asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackupDone {
+    pub report: BackupReport,
+    pub verify: Option<VerifyReport>,
+}
+
+/// What [`Admin::verify`] checks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VerifyTarget {
+    /// The running store: its checkpoints and WAL up to each namespace's
+    /// synced seq, and its live state.
+    Store,
+    /// A backup in the server's backup directory, by name.
+    Backup(String),
+    /// The store's WAL archive.
+    Archive,
+}
+
+/// The longest backup name.
+pub const MAX_BACKUP_NAME: usize = 128;
+
+/// Whether `name` is a valid backup name: one path component of 1 to
+/// [`MAX_BACKUP_NAME`] ASCII letters, digits, `.`, `_` or `-`, not starting
+/// with `.` (so no `..`, no hidden file, no separator). Errors:
+/// `invalid_argument`.
+pub fn check_backup_name(name: &str) -> Result<(), Error> {
+    let valid = (1..=MAX_BACKUP_NAME).contains(&name.len())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && !name.starts_with('.');
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::invalid(format!(
+            "a backup name is 1 to {} ASCII letters, digits, '.', '_' or '-', not starting with '.'; not {:?}",
+            MAX_BACKUP_NAME, name
+        )))
+    }
+}
+
+/// The operator's reads of a database, cancelling a request, and the
+/// admin writes. Errors have the stable codes of [`Code`](crate::Code).
 pub trait Admin: Send + Sync {
     /// Version, uptime, readiness, fsync policy, memory, disk, request
     /// counts and every namespace's status. O(namespaces).
@@ -160,6 +227,37 @@ pub trait Admin: Send + Sync {
     /// The logged events after `after`, at most `limit` (default and
     /// maximum [`MAX_READ`](crate::log::MAX_READ)).
     fn log(&self, after: u64, limit: Option<usize>) -> impl Future<Output = Result<LogTail, Error>> + Send;
+
+    /// Checkpoint `namespace`, or every namespace (`None`): write a
+    /// checkpoint at its seq if it has none there, and remove the
+    /// checkpoints and WAL segments no longer kept (archiving them first if
+    /// the store archives its WAL). Waits for a running backup's copy (ADR
+    /// 0009). Allowed in every memory state (ADR 0055). Errors:
+    /// `not_found`; `io`; `read_only`.
+    fn checkpoint(&self, namespace: Option<String>) -> impl Future<Output = Result<Vec<Checkpointed>, Error>> + Send;
+
+    /// Back up the store into its backup directory, under `request.name`
+    /// (ADR 0055): a consistent copy of every namespace up to its synced
+    /// seq. Checkpoints wait for the whole copy, longer when it is
+    /// throttled. Allowed in every memory state. Errors: `invalid_argument`
+    /// (a bad name, or no backup directory); `conflict` (something exists
+    /// under that name); `io`; `corrupt` (a WAL segment it copies is
+    /// damaged).
+    fn backup(&self, request: BackupRequest) -> impl Future<Output = Result<BackupDone, Error>> + Send;
+
+    /// Verify `target` without changing it (ADR 0055). Damage is in the
+    /// report, not an error. Errors: `invalid_argument` (no backup
+    /// directory, or no archive); `not_found` (no such backup);
+    /// `resource_exhausted` while the server refuses writes (a verify
+    /// replays each namespace into memory the limit doesn't count).
+    fn verify(&self, target: VerifyTarget) -> impl Future<Output = Result<VerifyReport, Error>> + Send;
+
+    /// Remove from the store's WAL archive what no restore from the backup
+    /// `before` (in the backup directory) or a later one can need; with
+    /// `dry_run`, only report it (ADR 0055). Errors: `invalid_argument` (no
+    /// archive, no backup directory, a bad name, or a backup of another
+    /// history); `not_found` (no such backup).
+    fn prune_archive(&self, before: String, dry_run: bool) -> impl Future<Output = Result<PruneReport, Error>> + Send;
 
     /// Whether the database's server serves requests: the server says
     /// `false` when it starts draining (shutdown). What

@@ -283,9 +283,13 @@ fn open(config: &Config, projections: &Mutex<Vec<ProjectionHandle>>, ring: Arc<L
     if let Ok(mut list) = projections.lock() {
         list.extend(started);
     }
-    Embedded::new(store, config.query_config())
+    let db = Embedded::new(store, config.query_config())
         .map(|db| db.with_auth(config.auth_settings()).with_log(ring))
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    match &config.backup.dir {
+        Some(dir) => db.with_backup_dir(dir).map_err(|e| format!("[backup] dir: {}", e.message())),
+        None => Ok(db),
+    }
 }
 
 /// The first admin from the bootstrap variables, on a store without users;
