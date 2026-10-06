@@ -12,8 +12,8 @@ iwdb-server --check-config --config server.toml       # validate; print the effe
 ## Rules
 
 - **Names.** A setting's variable is `IWDB_` and its path in the file in upper case, with `.` as `_`: `store.fsync` is `IWDB_STORE_FSYNC`, `limits.max.timeout_ms` is `IWDB_LIMITS_MAX_TIMEOUT_MS`.
-- **Values.** Numbers as digits, booleans as `true`/`false` (or `1`/`0`), choices by name (`group`), paths and addresses as they are.
-- **Typos are errors.** A variable that starts like a section (`IWDB_STORE_`, `IWDB_SERVER_`, `IWDB_LIMITS_`, `IWDB_LOG_`, `IWDB_CONSOLE_`, `IWDB_AUTH_`, `IWDB_TLS_`, `IWDB_AUDIT_`) but names no setting stops the server (apart from the two bootstrap variables below). Other `IWDB_*` variables (test harnesses use some) are ignored.
+- **Values.** Numbers as digits (fractions like `0.9`), booleans as `true`/`false` (or `1`/`0`), choices by name (`group`), paths and addresses as they are.
+- **Typos are errors.** A variable that starts like a section (`IWDB_STORE_`, `IWDB_SERVER_`, `IWDB_MEMORY_`, `IWDB_LIMITS_`, `IWDB_LOG_`, `IWDB_CONSOLE_`, `IWDB_AUTH_`, `IWDB_TLS_`, `IWDB_AUDIT_`) but names no setting stops the server (apart from the two bootstrap variables below). Other `IWDB_*` variables (test harnesses use some) are ignored.
 - **Every problem at once.** Startup checks the file and the variables before it opens the store, and lists every problem with where it came from (the file, a variable), then exits with code 2. A TOML syntax or type error in the file is reported with its line; the file's other checks wait until it parses.
 - **Relative paths** (`data_dir`, `tls.cert`, `tls.key`, `tls.client_ca`, `audit.dir`). From the file: relative to the file's directory. From a variable: relative to the working directory.
 - **Projections** (`[[projection]]`, [projections.md](projections.md)) are set in the file only; a projection's Postgres URL can come from a variable of your choice (`url_env`).
@@ -36,6 +36,9 @@ iwdb-server --check-config --config server.toml       # validate; print the effe
 | `server.queue` | `IWDB_SERVER_QUEUE` | `1024` | Requests waiting for a worker; more fail with `unavailable`. |
 | `server.unready_delay_ms` | `IWDB_SERVER_UNREADY_DELAY_MS` | `0` | On shutdown, serve this long with readiness off before draining, so load balancers stop sending first ([ADR 0040](../adr/0040-health-and-readiness.md)). |
 | `server.plaintext_public` | `IWDB_SERVER_PLAINTEXT_PUBLIC` | `false` | With `tls.enabled = false`: allow a non-loopback `listen` address, where passwords, tokens and data cross the network in clear (and with authentication off, anyone who reaches the port can change everything); without this flag such an address is refused. With TLS on it has no effect, and a warning says so ([ADR 0048](../adr/0048-tls-and-mtls.md)). |
+| `memory.limit_bytes` | `IWDB_MEMORY_LIMIT_BYTES` | `the cgroup's, or none` | The memory the server may use ([ADR 0054](../adr/0054-the-memory-limit.md)). Unset: the limit of its cgroup on Linux (v2 `memory.max`, v1 `memory.limit_in_bytes`), none elsewhere; `0`: none. It counts the graphs, their payloads (estimated), the checkpointers' copies, and analytics projections and index builds while they run. |
+| `memory.warn_at` | `IWDB_MEMORY_WARN_AT` | `0.8` | From this fraction of the limit on, the server warns: a log event, `iwdb_memory_state` 1, the status's `state`. |
+| `memory.refuse_writes_at` | `IWDB_MEMORY_REFUSE_WRITES_AT` | `0.9` | From this fraction on, commits, index and constraint creation, namespace creation and imports fail with `resource_exhausted` before they are logged. Deletes, drops, logins and reads go on. Writes resume once memory is 5 % of the limit below the line. `0.05 < warn_at <= refuse_writes_at <= 1`. |
 | `limits.default.max_results` | `IWDB_LIMITS_DEFAULT_MAX_RESULTS` | `built in` | What a read gets if it asks for nothing (built in: 1000). |
 | `limits.default.max_visited` | `IWDB_LIMITS_DEFAULT_MAX_VISITED` | `built in` | (built in: 100000) |
 | `limits.default.max_edges` | `IWDB_LIMITS_DEFAULT_MAX_EDGES` | `built in` | (built in: 1000000) |

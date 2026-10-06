@@ -34,6 +34,14 @@ pub enum Error {
     /// more writes until it is reopened.
     #[error("read-only until reopened, after an earlier failure: {cause}")]
     ReadOnly { cause: String },
+    /// The server's memory is above its `refuse_writes_at` line (ADR 0054):
+    /// the commit, catalog change or namespace change was refused before
+    /// it was logged, and nothing changed. Deletes and drops are still
+    /// accepted; retry once memory has fallen.
+    #[error(
+        "memory limit: writes are refused above {refuse_at} bytes ({used} of {limit} bytes in use); deletes and drops are accepted"
+    )]
+    MemoryLimit { used: u64, refuse_at: u64, limit: u64 },
     /// The commit's record is larger than [`MAX_RECORD_LEN`](crate::format::MAX_RECORD_LEN).
     /// Nothing was written or applied, and the log stays usable.
     #[error("commit {seq} needs a WAL record of {len} bytes, more than the limit of {max}")]

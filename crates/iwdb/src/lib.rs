@@ -69,6 +69,7 @@ pub use iwdb_query::{
 };
 pub use iwdb_query::{NewToken, Role, Secret, TokenInfo, UserInfo};
 pub use iwdb_storage::io::{LogFs, StdFs};
+pub use iwdb_storage::memory::{self, LimitSource, MemoryOptions, MemorySnapshot, MemoryState, cgroup_limit};
 pub use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 pub use iwdb_storage::{
     BackupReport, BatchLimits, ChangeBatch, ChangeRecord, CheckpointOutcome, CutTail, DirStatus, Error, Finding,

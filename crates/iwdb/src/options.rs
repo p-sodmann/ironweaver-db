@@ -3,10 +3,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use iwdb_storage::memory::MemoryOptions;
 use iwdb_storage::{WalOptions, WalRetention};
 
 /// Options of [`Store::open`](crate::Store::open).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StoreOptions {
     /// The WAL: fsync policy (default `always`) and segment size.
     pub wal: WalOptions,
@@ -26,6 +27,13 @@ pub struct StoreOptions {
     /// stream ([`Ns::changes`](crate::Ns::changes)) serves the seqs still
     /// in the WAL; older ones fail with `NotRetained`.
     pub retention: WalRetention,
+    /// The memory limit (ADR 0054; default: none). With a limit, writes
+    /// that add anything are refused with `MemoryLimit` from
+    /// `refuse_writes_at` of it on, before they are logged; deletes, drops
+    /// and reads go on. An embedded store has none unless set here: it
+    /// can't see the memory of the application it runs in. The server sets
+    /// it from `[memory]`, or from its cgroup.
+    pub memory: MemoryOptions,
 }
 
 impl Default for StoreOptions {
@@ -36,6 +44,7 @@ impl Default for StoreOptions {
             create_if_missing: true,
             archive: None,
             retention: WalRetention::default(),
+            memory: MemoryOptions::default(),
         }
     }
 }

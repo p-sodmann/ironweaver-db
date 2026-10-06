@@ -213,6 +213,8 @@ impl PyStore {
                     records: retain_records,
                     age: retain_age.map(|s| seconds(s, "retain_age")).transpose()?,
                 },
+                // No limit: an embedded store can't see the application's memory (ADR 0054)
+                memory: Default::default(),
             };
             let store = py.detach(|| Store::open(&path, options)).map_err(to_py)?;
             let db = Embedded::new(store, query_config()).map_err(query_to_py)?;

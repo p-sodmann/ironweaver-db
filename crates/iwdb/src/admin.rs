@@ -113,6 +113,21 @@ where
     if let Some(free) = store.disk_free() {
         out.add(m::DISK_FREE, &[], Value::Gauge(free as f64));
     }
+    let memory = store.memory();
+    for (part, bytes) in [
+        ("graph", memory.graph),
+        ("payload", memory.payload),
+        ("checkpoint", memory.checkpoint),
+        ("working", memory.working),
+    ] {
+        out.add(m::MEMORY_USED, &[part], Value::Gauge(bytes as f64));
+    }
+    if let Some(limit) = memory.limit {
+        out.add(m::MEMORY_LIMIT, &[], Value::Gauge(limit.bytes as f64));
+        out.add(m::MEMORY_WARN, &[], Value::Gauge(limit.warn as f64));
+        out.add(m::MEMORY_REFUSE_WRITES, &[], Value::Gauge(limit.refuse_writes as f64));
+    }
+    out.add(m::MEMORY_STATE, &[], Value::Gauge(memory.state as u8 as f64));
     out
 }
 
@@ -130,13 +145,12 @@ where
                 disk.wal_bytes += usage.wal_bytes;
                 disk.checkpoint_bytes += usage.checkpoint_bytes;
             }
-            let graph_bytes = namespaces.iter().map(|n| n.memory_bytes as u64).sum();
             Ok(ServerStatus {
                 version: VERSION.to_owned(),
                 started: monitor.started,
                 ready: monitor.ready.load(Ordering::Acquire),
                 fsync: fsync_name(store.fsync_policy()).to_owned(),
-                memory: MemoryStatus { graph_bytes, limit_bytes: None },
+                memory: MemoryStatus::of(&store.memory()),
                 disk,
                 requests: counts(&monitor.requests),
                 namespaces,

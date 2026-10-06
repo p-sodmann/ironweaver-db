@@ -157,6 +157,9 @@ where
         if lock(&self.shared.catalog).log.table().get(&name).is_some() {
             return Err(Error::NamespaceExists { name: name.to_string() });
         }
+        // The memory limit (ADR 0054), before the file is read into memory,
+        // and again before the namespace is logged
+        self.shared.memory.check_write()?;
         let mut reporter = Reporter::new(progress, Phase::Reading);
         let read = read_graph(format, input, &mut reporter, what)?;
         reporter.end(read.bytes, Phase::Writing);
@@ -186,6 +189,7 @@ where
                 if let Some(cause) = catalog.log.failure() {
                     return Err(Error::ReadOnly { cause: cause.to_owned() });
                 }
+                shared.memory.check_write()?;
                 let id = match catalog.log.table().plan(EventKind::Create, &name, None)? {
                     Plan::New { id } => id,
                     // Only with a key

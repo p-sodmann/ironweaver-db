@@ -59,11 +59,52 @@ message ServerStatus {
   repeated NamespaceStatus namespaces = 8;
 }
 
+// Memory as the server counts it, and its limit (ADR 0054). The limit
+// counts `used_bytes`: the graphs, their payloads, the checkpointers' copies
+// and the working memory.
 message MemoryStatus {
-  // The namespaces' graphs, indexes included.
+  // The live graphs (the core's estimate), indexes included.
   uint64 graph_bytes = 1;
-  // The configured memory limit; missing: none.
+  // The memory limit; missing: none.
   optional uint64 limit_bytes = 2;
+  // The live graphs' attribute payloads, estimated.
+  uint64 payload_bytes = 3;
+  // The checkpointers' copies of the namespaces, graphs and payloads.
+  uint64 checkpoint_bytes = 4;
+  // Analytics projections and index builds while they run, estimated.
+  uint64 working_bytes = 5;
+  // The sum of the parts: what the limit counts.
+  uint64 used_bytes = 6;
+  // From here on the server warns; missing without a limit.
+  optional uint64 warn_bytes = 7;
+  // From here on the server refuses writes (`resource_exhausted`); missing
+  // without a limit.
+  optional uint64 refuse_writes_bytes = 8;
+  MemoryState state = 9;
+  // Where the limit came from; unspecified without a limit.
+  MemoryLimitSource limit_source = 10;
+}
+
+// The memory state. Each state is left only once memory is 5 % of the limit
+// below its line.
+enum MemoryState {
+  MEMORY_STATE_UNSPECIFIED = 0;
+  // Below the warning line, or no limit.
+  MEMORY_STATE_NORMAL = 1;
+  // At or above the warning line: writes are accepted.
+  MEMORY_STATE_WARN = 2;
+  // At or above the refusal line: writes that add are refused.
+  MEMORY_STATE_REFUSING_WRITES = 3;
+}
+
+enum MemoryLimitSource {
+  MEMORY_LIMIT_SOURCE_UNSPECIFIED = 0;
+  // `[memory] limit_bytes`.
+  MEMORY_LIMIT_SOURCE_CONFIG = 1;
+  // The cgroup v2 `memory.max` of the server's process.
+  MEMORY_LIMIT_SOURCE_CGROUP_V2 = 2;
+  // The cgroup v1 `memory.limit_in_bytes` of the server's process.
+  MEMORY_LIMIT_SOURCE_CGROUP_V1 = 3;
 }
 
 message DiskStatus {

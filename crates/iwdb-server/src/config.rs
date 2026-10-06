@@ -22,6 +22,11 @@
 //! unready_delay_ms = 0              # on shutdown: serve unready this long before draining
 //! plaintext_public = false          # with [tls] enabled = false: allow a non-loopback listen address
 //!
+//! [memory]                          # step 16d, ADR 0054
+//! # limit_bytes = 4294967296        # what the server may use; unset: the cgroup's limit (Linux), else none; 0: none
+//! warn_at = 0.8                     # warn from this fraction of the limit on
+//! refuse_writes_at = 0.9            # refuse writes (resource_exhausted) from here on; deletes and reads go on
+//!
 //! [tls]                             # step 15b
 //! enabled = false                   # true by default: then cert and key are required
 //! # cert = "tls/server.pem"         # PEM: the certificate chain, the server's first
@@ -88,7 +93,7 @@
 //! be set as `IWDB_<KEY>`: the key's path in upper case, `.` as `_`
 //! (`IWDB_LISTEN`, `IWDB_STORE_FSYNC`, `IWDB_LIMITS_MAX_TIMEOUT_MS`). A
 //! variable wins over the file. A variable that starts like a section
-//! (`IWDB_STORE_`, `IWDB_SERVER_`, `IWDB_LIMITS_`, `IWDB_LOG_`,
+//! (`IWDB_STORE_`, `IWDB_SERVER_`, `IWDB_MEMORY_`, `IWDB_LIMITS_`, `IWDB_LOG_`,
 //! `IWDB_CONSOLE_`, `IWDB_AUTH_`, `IWDB_TLS_`) but names no setting is an
 //! error, so a typo isn't ignored. With `IWDB_DATA_DIR` set, the file is optional.
 //!
@@ -121,7 +126,10 @@ use iwdb::projection::OnError;
 #[cfg(feature = "postgres")]
 use iwdb::projection::postgres::{PostgresConfig, PostgresSource};
 use iwdb::projection::{Projection, ProjectionHandle, ProjectionOptions, Rules};
-use iwdb::{CheckpointOptions, FsyncPolicy, MarkName, QueryConfig, Store, StoreOptions, WalRetention};
+use iwdb::{
+    CheckpointOptions, FsyncPolicy, LimitSource, MarkName, MemoryOptions, QueryConfig, Store, StoreOptions,
+    WalRetention,
+};
 use iwdb_query::{Bounds, LimitConfig, Secret};
 use serde::{Deserialize, Serialize};
 
@@ -155,6 +163,8 @@ pub struct Config {
     pub store: StoreSection,
     #[serde(default)]
     pub server: ServerSection,
+    #[serde(default)]
+    pub memory: MemorySection,
     #[serde(default)]
     pub limits: LimitsSection,
     #[serde(default)]
@@ -312,6 +322,7 @@ impl Default for Config {
             listen: default_listen(),
             store: StoreSection::default(),
             server: ServerSection::default(),
+            memory: MemorySection::default(),
             limits: LimitsSection::default(),
             log: LogSection::default(),
             console: ConsoleSection::default(),
@@ -349,7 +360,7 @@ macro_rules! from_str_env {
         }
     )*};
 }
-from_str_env!(u64: "a whole number", u32: "a whole number", usize: "a whole number", SocketAddr: "an address like 127.0.0.1:7600");
+from_str_env!(u64: "a whole number", u32: "a whole number", usize: "a whole number", f64: "a number like 0.9", SocketAddr: "an address like 127.0.0.1:7600");
 
 impl FromEnv for bool {
     fn from_env(text: &str) -> Result<Self, String> {
@@ -423,6 +434,9 @@ keys! {
     "server.queue" "IWDB_SERVER_QUEUE" => server.queue;
     "server.unready_delay_ms" "IWDB_SERVER_UNREADY_DELAY_MS" => server.unready_delay_ms;
     "server.plaintext_public" "IWDB_SERVER_PLAINTEXT_PUBLIC" => server.plaintext_public;
+    "memory.limit_bytes" "IWDB_MEMORY_LIMIT_BYTES" => memory.limit_bytes;
+    "memory.warn_at" "IWDB_MEMORY_WARN_AT" => memory.warn_at;
+    "memory.refuse_writes_at" "IWDB_MEMORY_REFUSE_WRITES_AT" => memory.refuse_writes_at;
     "limits.default.max_results" "IWDB_LIMITS_DEFAULT_MAX_RESULTS" => limits.default.max_results;
     "limits.default.max_visited" "IWDB_LIMITS_DEFAULT_MAX_VISITED" => limits.default.max_visited;
     "limits.default.max_edges" "IWDB_LIMITS_DEFAULT_MAX_EDGES" => limits.default.max_edges;
@@ -453,6 +467,7 @@ keys! {
 const SECTION_PREFIXES: &[&str] = &[
     "IWDB_STORE_",
     "IWDB_SERVER_",
+    "IWDB_MEMORY_",
     "IWDB_LIMITS_",
     "IWDB_LOG_",
     "IWDB_CONSOLE_",
@@ -643,6 +658,29 @@ impl Default for ServerSection {
     }
 }
 
+/// `[memory]`: the memory limit (step 16d, ADR 0054).
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MemorySection {
+    /// What the server may use. Unset: the cgroup's limit on Linux, else
+    /// none; 0: none.
+    pub limit_bytes: Option<u64>,
+    /// Warn from this fraction of the limit on.
+    pub warn_at: f64,
+    /// Refuse writes from this fraction of the limit on.
+    pub refuse_writes_at: f64,
+}
+
+impl Default for MemorySection {
+    fn default() -> Self {
+        MemorySection {
+            limit_bytes: None,
+            warn_at: iwdb::memory::DEFAULT_WARN_AT,
+            refuse_writes_at: iwdb::memory::DEFAULT_REFUSE_WRITES_AT,
+        }
+    }
+}
+
 /// Read limits: `default` for reads that ask for nothing, `max` that no read
 /// can exceed. A missing value is the built-in one (`LimitConfig::default`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -684,7 +722,11 @@ fn lookup<'a>(table: &'a toml::Table, key: &str) -> Option<&'a toml::Value> {
 
 /// What a setting without a value means: a built-in limit, or nothing.
 fn unset(key: &str) -> &'static str {
-    if key.starts_with("limits.") { "built in" } else { "unset" }
+    match key {
+        "memory.limit_bytes" => "the cgroup's, or none",
+        _ if key.starts_with("limits.") => "built in",
+        _ => "unset",
+    }
 }
 
 fn default_listen() -> SocketAddr {
@@ -845,6 +887,10 @@ impl Config {
         }
         if self.store.fsync == Fsync::Group && self.store.group_max_batch == 0 {
             problems.push(format!("{} must be at least 1", self.at("store.group_max_batch")));
+        }
+        if let Err(e) = self.memory_options_with(None).check() {
+            let at = |k| self.at(k);
+            problems.push(format!("{}, {}: {}", at("memory.warn_at"), at("memory.refuse_writes_at"), e));
         }
         if self.server.max_message_bytes < 1024 {
             problems.push(format!("{} must be at least 1024", self.at("server.max_message_bytes")));
@@ -1047,7 +1093,24 @@ impl Config {
             records: self.store.retain_records,
             age: (self.store.retain_age_secs > 0).then(|| Duration::from_secs(self.store.retain_age_secs)),
         };
+        options.memory = self.memory_options_with(iwdb::cgroup_limit());
         options
+    }
+
+    /// The memory limit: `[memory] limit_bytes`, or else `cgroup` (the
+    /// process's cgroup limit, [`iwdb::cgroup_limit`]); 0 is none.
+    pub fn memory_options_with(&self, cgroup: Option<(u64, LimitSource)>) -> MemoryOptions {
+        let (limit_bytes, source) = match self.memory.limit_bytes {
+            Some(0) => (None, LimitSource::Config),
+            Some(bytes) => (Some(bytes), LimitSource::Config),
+            None => cgroup.map_or((None, LimitSource::Config), |(bytes, source)| (Some(bytes), source)),
+        };
+        MemoryOptions {
+            limit_bytes,
+            source,
+            warn_at: self.memory.warn_at,
+            refuse_writes_at: self.memory.refuse_writes_at,
+        }
     }
 
     pub fn limit_config(&self) -> LimitConfig {
@@ -1161,7 +1224,12 @@ mod tests {
         let config = plain("data_dir = \"/tmp/x\"").unwrap();
         assert_eq!(config.listen.to_string(), DEFAULT_LISTEN);
         assert_eq!(config.limit_config(), LimitConfig::default());
-        assert_eq!(config.store_options(), StoreOptions::default());
+        // The memory limit is the cgroup's where there is one
+        assert_eq!(
+            StoreOptions { memory: MemoryOptions::default(), ..config.store_options() },
+            StoreOptions::default()
+        );
+        assert_eq!(config.memory_options_with(None), MemoryOptions::default());
         assert_eq!(config.drain_timeout(), Duration::from_secs(30));
         assert!(plain("listen = \"127.0.0.1:1\"").is_err());
     }

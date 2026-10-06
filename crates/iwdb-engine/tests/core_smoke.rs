@@ -296,6 +296,9 @@ fn files_without_the_binary_header_are_refused() {
     }
 }
 
+/// Upstream #61 (draft 25): the core can't count a payload's heap, so the
+/// database estimates it (`Namespace::payload_bytes`, ADR 0054). Fails
+/// once the core counts payloads: then remove the estimate.
 #[test]
 fn memory_usage_leaves_out_payloads() {
     let build = |text: &str| {

@@ -1032,6 +1032,7 @@ dependencies = [
  "ironweaver-core",
  "iwdb-engine",
  "iwdb-storage",
+ "log",
  "postcard",
  "proptest",
  "serde",

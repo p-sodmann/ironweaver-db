@@ -28,8 +28,16 @@
   const pct = (f) => (f == null ? '—' : (f * 100 >= 10 ? Math.round(f * 100) : (f * 100).toFixed(1)) + ' %');
 
   /* ------------------------------------------------------------------ the server's problems */
-  /** Memory use, as a fraction of the server's limit, at which the console warns (the limit comes with step 16d). */
-  const MEMORY_WARN = 0.85;
+  /**
+   * The server's memory against its limit (step 16d, ADR 0054), or null without a limit: the counted bytes as a
+   * fraction of the limit (`f`), the server's lines (`warnAt`, `refuseAt`), and where a meter turns (`meterWarnAt`):
+   * at the server's own state, which leaves `warn` only 5 % of the limit below the line.
+   */
+  function memory(m) {
+    if (!m || !m.limitBytes) return null;
+    const of = (b) => b / m.limitBytes;
+    return { f: of(m.usedBytes), warnAt: of(m.warnBytes), refuseAt: of(m.refuseWritesBytes), meterWarnAt: m.state === 'normal' ? of(m.warnBytes) : 0 };
+  }
   /** What is wrong with a server (a Source's `server()`), as sentences; none: healthy. */
   function problems(s) {
     if (!s) return [];
@@ -39,8 +47,9 @@
       if (n.readOnly) out.push(`${n.name} is read-only: ${n.readOnly}`);
       if (n.checkpointFailure) out.push(`${n.name}: the last checkpoint failed: ${n.checkpointFailure}`);
     });
-    const f = s.memory && s.memory.limitBytes ? s.memory.graphBytes / s.memory.limitBytes : 0;
-    if (f >= MEMORY_WARN) out.push(`memory at ${pct(f)} of the limit`);
+    const m = memory(s.memory);
+    if (m && s.memory.state === 'refusing_writes') out.push(`writes are refused: memory at ${pct(m.f)} of the limit, above ${pct(m.refuseAt)} (deletes, drops and reads go on)`);
+    else if (m && s.memory.state === 'warn') out.push(`memory at ${pct(m.f)} of the limit, above the warning line at ${pct(m.warnAt)}`);
     return out;
   }
 
@@ -279,7 +288,7 @@
     IW.ui = Object.assign(IW.ui || {}, { RailLinks, Palette, commonItems, Login, AuthGate });
   }
 
-  const ui = { group, num, bytes, ms, span, date, pct, MEMORY_WARN, problems, kindOf, TYPE, text, parseValue, plainToValue, caption, labelStyles, primaryLabel, layout, source, href, params, cycleTheme, store };
+  const ui = { group, num, bytes, ms, span, date, pct, memory, problems, kindOf, TYPE, text, parseValue, plainToValue, caption, labelStyles, primaryLabel, layout, source, href, params, cycleTheme, store };
   IW.ui = Object.assign(IW.ui || {}, ui);
   if (typeof module !== 'undefined' && module.exports) module.exports = ui;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

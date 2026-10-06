@@ -59,6 +59,11 @@ pub enum Code {
     /// The store can't take the request now: it is closed or shutting
     /// down, or too many requests are queued. Retry later.
     Unavailable,
+    /// The server's memory is above the line where it refuses writes
+    /// (ADR 0054): the write was refused before it was logged, and nothing
+    /// changed. Deletes, drops and reads still work. Retry with backoff
+    /// once memory has fallen.
+    ResourceExhausted,
     /// A file operation failed. A commit's outcome is unknown: retry it
     /// with the same idempotency key.
     Io,
@@ -70,7 +75,7 @@ pub enum Code {
 
 impl Code {
     /// Every code, in the order of `documentation/api/errors.md`.
-    pub const ALL: [Code; 16] = [
+    pub const ALL: [Code; 17] = [
         Code::InvalidArgument,
         Code::Unauthenticated,
         Code::PermissionDenied,
@@ -84,6 +89,7 @@ impl Code {
         Code::NotRetained,
         Code::ReadOnly,
         Code::Unavailable,
+        Code::ResourceExhausted,
         Code::Io,
         Code::Corrupt,
         Code::Internal,
@@ -105,6 +111,7 @@ impl Code {
             Code::NotRetained => "not_retained",
             Code::ReadOnly => "read_only",
             Code::Unavailable => "unavailable",
+            Code::ResourceExhausted => "resource_exhausted",
             Code::Io => "io",
             Code::Corrupt => "corrupt",
             Code::Internal => "internal",
@@ -238,6 +245,7 @@ impl From<iwdb_storage::Error> for Error {
             E::Io { .. } | E::CheckpointsDisabled { .. } => Code::Io,
             E::ReadOnly { .. } => Code::ReadOnly,
             E::Locked { .. } => Code::Unavailable,
+            E::MemoryLimit { .. } => Code::ResourceExhausted,
             E::Timeout { .. } => Code::Timeout,
             E::Cancelled => Code::Cancelled,
             E::NoSuchNamespace { .. } | E::NamespaceDropped { .. } => Code::NotFound,

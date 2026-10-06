@@ -21,6 +21,7 @@ Last checked: 2026-10-03 at core `7e7b7fa` (start of step 12: #57 fixed and adop
 | Issue | Finding | Needed before | Until fixed | When fixed |
 |---|---|---|---|---|
 | [#60](https://github.com/p-sodmann/Ironweaver/issues/60) | The core can't list a graph's labels, and has no count of edges by type (filed in step 16c-2) | nothing: no step depends on it | `read::schema` samples (ADR 0053): label names from the first `max_visited` nodes with exact counts (`label_count`), types counted in the first `max_edges` edges | List labels and types (with counts) from the core in `read::schema`, keep the sample for keys only; update `schema_is_bounded` (labels complete at any sample size), ADR 0053 and the guarantees' "schema is sampled" item |
+| [#61](https://github.com/p-sodmann/Ironweaver/issues/61) | `memory_usage` leaves out payloads' heap; an `IndexBuild` and a `RawProjection` report no memory (filed in step 16d) | nothing: step 16d works with its estimate; step 15d (per-namespace limits) gains from it | `Namespace::payload_bytes` (`DbRecord::heap_bytes`, kept per apply from the touched entities, ADR 0054); builds and raw projections charged per node and edge (`iwdb_storage::memory`) | Count payloads with the core's figure: remove `payload_bytes`, `Touched` and `heap_bytes` from `iwdb-engine`, fold the `payload` part into `graph` (metrics, status, console), use `IndexBuild::memory_usage` and `RawProjection::memory_usage` for `working`; turn `memory_usage_leaves_out_payloads` (`core_smoke.rs`) around; update ADR 0054 |
 
 ## Closed issues
 

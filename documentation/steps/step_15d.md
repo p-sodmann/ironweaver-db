@@ -12,7 +12,7 @@ One client or namespace over its limits can't starve the others.
 
 ## Tasks
 
-- [ ] Rate limits per principal (requests per second, token bucket) and concurrency limits (running requests) per principal and per namespace, refused with `resource_exhausted` (or the code 16d chose) before work starts.
+- [ ] Rate limits per principal (requests per second, token bucket) and concurrency limits (running requests) per principal and per namespace, refused with `resource_exhausted` (the code 16d chose, ADR 0054) before work starts.
 - [ ] Query budgets per principal: caps on `max_visited`, `max_results` and timeout below the server's caps, set per user or role.
 - [ ] Max memory per namespace on 16d's accounting: writes to a namespace above its limit are refused before they are logged, reads go on (a fault-injection test as in 16d, design rule 3).
 - [ ] Limits stored with the users and grants of 15a (one write path), configurable through the admin RPCs and `iwctl`; defaults in `[limits]`.

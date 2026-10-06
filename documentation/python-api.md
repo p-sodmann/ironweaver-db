@@ -264,6 +264,7 @@ Every error is an `iwdb.Error` (an `Exception`), with the Rust message as its te
 | `iwdb.BudgetExceededError` | a query reached `max_results`, `max_visited` or `max_edges` without `partial=True` (step 14) |
 | `iwdb.CursorExpiredError` | the namespace changed since a paginated query's first page: start again without the cursor (step 14) |
 | `iwdb.NotRetainedError` | `changes` was asked for a seq older than the oldest one still in the WAL |
+| `iwdb.ResourceExhaustedError` | the server's memory is above the line where it refuses writes ([ADR 0054](adr/0054-the-memory-limit.md)); nothing changed. Deletes, drops and reads still work: retry with backoff (step 16d). An embedded store has no memory limit |
 | `iwdb.UnavailableError` | a remote store can't reach its server (no connection, shutting down, overloaded): retry with backoff (step 14) |
 | `iwdb.UnauthenticatedError` | a remote store without valid credentials: none given, a wrong user or password, an unknown, expired or revoked token (step 15a) |
 | `iwdb.PermissionDeniedError` | a remote store's user lacks the role the call needs on the namespace (or the server-wide admin role); nothing changed (step 15a) |

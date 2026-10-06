@@ -67,6 +67,8 @@ pub struct Namespace {
     keys: KeyTable,
     marks: MarkTable,
     poisoned: bool,
+    /// The payloads' estimated heap ([`payload_bytes`](Self::payload_bytes)).
+    payload: usize,
 }
 
 /// An index being built off the write lock (ADR 0019), the core's
@@ -127,6 +129,25 @@ impl Prepared {
         &self.result
     }
 
+    /// Whether the commit only removes: nodes, edges, labels, attributes
+    /// (and the version bumps that come with them), or drops an index or a
+    /// constraint. Such commits free memory, so the memory limit lets them
+    /// through (ADR 0054). An empty record (a mark alone) counts as one.
+    pub fn only_removes(&self) -> bool {
+        match &self.record.change {
+            Change::Data(ops) => ops.iter().all(|op| match op {
+                Op::RemoveNode { .. } | Op::RemoveEdge { .. } | Op::RemoveLabel { .. } => true,
+                Op::SetNodeAttr { key, value, .. } | Op::SetEdgeAttr { key, value, .. } => {
+                    value.is_none() || key == crate::reserved::VERSION_KEY
+                }
+                _ => false,
+            }),
+            Change::Catalog(change) => {
+                matches!(change, CatalogChange::DropIndex(_) | CatalogChange::DropConstraint(_))
+            }
+        }
+    }
+
     /// Carry a mark: the record logs it, and applying it sets the mark.
     fn with_mark(mut self, update: &MarkUpdate) -> Self {
         self.record.mark = Some(Mark { name: update.name.clone(), position: update.position });
@@ -153,6 +174,7 @@ impl Namespace {
             keys: KeyTable::new(),
             marks: MarkTable::new(),
             poisoned: false,
+            payload: 0,
         }
     }
 
@@ -166,6 +188,8 @@ impl Namespace {
     /// way; [`new`](Self::new) only makes an empty one.
     pub fn from_loaded(loaded: codec::Loaded) -> Self {
         let codec::Loaded { graph, meta, index_changes: _ } = loaded;
+        let payload = graph.nodes().map(|(_, n)| n.data.heap_bytes()).sum::<usize>()
+            + graph.edges().map(|(_, e)| e.data.heap_bytes()).sum::<usize>();
         Namespace {
             name: meta.namespace,
             catalog: meta.catalog,
@@ -174,7 +198,23 @@ impl Namespace {
             keys: meta.keys,
             marks: meta.marks,
             poisoned: false,
+            payload,
         }
+    }
+
+    /// The estimated heap bytes of the graph's payloads (attribute and
+    /// meta maps, [`DbRecord::heap_bytes`]), which `Graph::memory_usage`
+    /// leaves out (ADR 0054). Kept up to date by every apply and replay in
+    /// O(entities the commit touches), computed in O(graph) when loaded. A
+    /// namespace and its replayed copy have the same estimate.
+    pub fn payload_bytes(&self) -> usize {
+        self.payload
+    }
+
+    /// The namespace's memory estimate: the core's `memory_usage` (graph
+    /// and indexes, O(number of indexes)) plus [`payload_bytes`](Self::payload_bytes).
+    pub fn memory_bytes(&self) -> usize {
+        self.graph.memory_usage() + self.payload
     }
 
     /// The graph meta a checkpoint of this namespace is saved with: its
@@ -503,8 +543,13 @@ impl Namespace {
             }
             return Err(error);
         }
+        let touched = Touched::of(&self.graph, &ops);
+        let before = touched.payload(&self.graph);
         match self.graph.apply_all(ops) {
-            Ok(_) => self.graph.flush_indexes(),
+            Ok(_) => {
+                self.payload = (self.payload + touched.payload(&self.graph)).saturating_sub(before);
+                self.graph.flush_indexes()
+            }
             Err((_, error)) => Err(error),
         }
     }
@@ -521,6 +566,61 @@ impl Namespace {
                 Err(Error::ApplyFailed { seq, error })
             }
         }
+    }
+}
+
+/// The nodes and edges a data record's ops may change the payload of: the
+/// ids they name, and the edges of removed nodes (removed with them). Their
+/// payloads summed before and after the apply give the change of
+/// [`Namespace::payload_bytes`] in O(touched).
+struct Touched {
+    nodes: Vec<String>,
+    edges: Vec<ironweaver_core::EdgeId>,
+}
+
+impl Touched {
+    fn of(graph: &DbGraph, ops: &[Op<DbRecord, DbRecord>]) -> Self {
+        let mut touched = Touched { nodes: Vec::new(), edges: Vec::new() };
+        for op in ops {
+            match op {
+                Op::AddNode { id, .. } | Op::SetNode { id, .. } | Op::SetNodeAttr { id, .. } => {
+                    touched.nodes.push(id.clone())
+                }
+                // A renamed node may be removed later in the record: its
+                // edges count as touched under either name
+                Op::RenameNode { id, new_id } => {
+                    for id in [id, new_id] {
+                        touched.node_and_edges(graph, id);
+                    }
+                }
+                Op::RemoveNode { id } => touched.node_and_edges(graph, id),
+                Op::AddEdge { id, .. }
+                | Op::RemoveEdge { id }
+                | Op::SetEdge { id, .. }
+                | Op::SetEdgeAttr { id, .. } => touched.edges.push(*id),
+                _ => {}
+            }
+        }
+        touched.nodes.sort_unstable();
+        touched.nodes.dedup();
+        touched.edges.sort_unstable();
+        touched.edges.dedup();
+        touched
+    }
+
+    fn node_and_edges(&mut self, graph: &DbGraph, id: &str) {
+        self.nodes.push(id.to_owned());
+        if let Some(node) = graph.node_by_id(id) {
+            let incident = node.out_edges().iter().chain(node.in_edges());
+            self.edges.extend(incident.filter_map(|&e| graph.edge(e)).map(|e| e.id()));
+        }
+    }
+
+    /// The payloads of the touched entities that exist in `graph`.
+    fn payload(&self, graph: &DbGraph) -> usize {
+        let nodes: usize = self.nodes.iter().filter_map(|id| graph.node_by_id(id)).map(|n| n.data.heap_bytes()).sum();
+        let edges = self.edges.iter().filter_map(|&id| graph.edge(graph.edge_ix(id)?)).map(|e| e.data.heap_bytes());
+        nodes + edges.sum::<usize>()
     }
 }
 

@@ -678,6 +678,39 @@ fn replay_rejects_gaps_and_repeats() {
     assert_eq!(ns.seq(), 2);
 }
 
+// Memory
+
+#[test]
+fn the_payload_estimate_follows_commits_and_counts_the_namespaces_memory() {
+    let mut ns = ns();
+    assert_eq!(ns.payload_bytes(), 0);
+    let text = Value::String("x".repeat(10_000));
+    ns.commit(&[upsert("a", &[], &[("text", text.clone())]), upsert("b", &[], &[])]).unwrap();
+    let one = ns.payload_bytes();
+    assert!(one > 10_000, "{}", one);
+    assert_eq!(ns.memory_bytes(), ns.graph().memory_usage() + one);
+
+    // An edge's payload, then the edge removed with its node
+    let r = ns
+        .commit(&[Mutation::AddEdge {
+            from: "b".into(),
+            to: "a".into(),
+            ty: None,
+            attr: attrs(&[("text", text)]),
+            meta: Attrs::new(),
+        }])
+        .unwrap();
+    assert!(ns.payload_bytes() > one + 10_000);
+    ns.commit(&[Mutation::DeleteNode { id: "b".into(), expected_version: None }]).unwrap();
+    assert!(ns.graph().edge_ix(r.edge_ids[0]).is_none());
+    assert_eq!(ns.payload_bytes(), one);
+
+    // An attribute removed
+    ns.commit(&[Mutation::RemoveAttr { target: Target::Node("a".into()), key: "text".into(), expected_version: None }])
+        .unwrap();
+    assert!(ns.payload_bytes() < 1000, "{}", ns.payload_bytes());
+}
+
 // Saved files
 
 #[test]
@@ -691,6 +724,8 @@ fn a_namespace_from_a_loaded_file_continues_where_the_original_was() {
     assert_eq!(loaded.name(), original.name());
     assert_eq!(loaded.catalog(), original.catalog());
     assert_eq!(canonical(loaded.graph()), canonical(original.graph()));
+    assert!(original.payload_bytes() > 0);
+    assert_eq!(loaded.payload_bytes(), original.payload_bytes(), "the payload estimate survives a save and load");
 
     // Same results, including edge ids, versions and the constraint
     let next = [upsert("b", &["P"], &[("k", Value::Int(2))]), edge("a", "b", Some("T"))];

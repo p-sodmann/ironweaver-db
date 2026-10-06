@@ -12,6 +12,8 @@ publish = false
 crc32c.workspace = true
 ironweaver-core.workspace = true
 iwdb-engine = { path = "../iwdb-engine" }
+# The memory limit's changes of state (step 16d); in the tree already (iwdb)
+log.workspace = true
 postcard.workspace = true
 serde.workspace = true
 serde_json.workspace = true

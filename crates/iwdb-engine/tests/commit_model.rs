@@ -378,6 +378,13 @@ fn catalog_paths(c: &NamespaceCatalog) -> BTreeSet<Vec<String>> {
     c.index_paths().into_iter().map(|p| p.keys().to_vec()).collect()
 }
 
+/// The payload estimate from scratch: every node's and edge's
+/// `DbRecord::heap_bytes`.
+fn payload_recounted(g: &DbGraph) -> usize {
+    g.nodes().map(|(_, n)| n.data.heap_bytes()).sum::<usize>()
+        + g.edges().map(|(_, e)| e.data.heap_bytes()).sum::<usize>()
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
 
@@ -418,6 +425,7 @@ proptest! {
             prop_assert_eq!(index_paths(ns.graph()), catalog_paths(ns.catalog()));
             prop_assert!(!ns.graph().indexes_dirty());
             prop_assert!(!ns.is_poisoned());
+            prop_assert_eq!(ns.payload_bytes(), payload_recounted(ns.graph()), "the payload estimate drifted");
         }
         prop_assert_eq!(log.len(), committed);
 
@@ -431,6 +439,7 @@ proptest! {
         }
         prop_assert_eq!(state(&replica), state(&ns));
         prop_assert_eq!(index_paths(replica.graph()), index_paths(ns.graph()));
+        prop_assert_eq!(replica.payload_bytes(), ns.payload_bytes());
 
         // The data ops alone, applied with the core's apply_all, give the same graph
         let mut raw = DbGraph::new();
