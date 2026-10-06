@@ -50,7 +50,7 @@ pub use model::{
     Node, Work,
 };
 pub use options::{Bounds, LimitConfig, Limits, QueryOptions};
-pub use read::{Explain, Lookup, Plan, ReadContext};
+pub use read::{Explain, KeyInfo, LabelInfo, Lookup, Plan, ReadContext, Schema, TypeInfo};
 pub use request::{
     AnalyticsRequest, CHANGES_BATCH_BYTES, ChangesRequest, ExplainRequest, FindRequest, Job, JobResult, MatchRequest,
     MatchRow, NeighbourhoodRequest, Order, Path, PathMethod, PathRequest, ProjectionSpec, Subgraph, SubgraphRequest,

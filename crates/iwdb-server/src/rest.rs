@@ -157,6 +157,14 @@ pub const ROUTES: &[Route] = &[
         "A namespace's catalog",
     ),
     route(
+        Method::GET,
+        "/v1/namespaces/{ns}/schema",
+        "GetSchema",
+        Input::Options,
+        "getSchema",
+        "A namespace's schema, sampled",
+    ),
+    route(
         Method::POST,
         "/v1/namespaces/{ns}/catalog",
         "CommitCatalog",
@@ -379,6 +387,7 @@ fn handler<D: Served>(r: &Route) -> MethodRouter<Arc<Shared<D>>> {
         "dropNamespace" => delete(drop_namespace::<D>),
         "getNamespaceStatus" => get(namespace_status::<D>),
         "getCatalog" => get(catalog::<D>),
+        "getSchema" => get(schema::<D>),
         "commitCatalog" => post(commit_catalog::<D>),
         "commit" => post(commit::<D>),
         "waitForSeq" => post(wait_for_seq::<D>),
@@ -674,6 +683,16 @@ async fn catalog<D: Served>(
 ) -> Answer {
     let r = pb::GetCatalogRequest { namespace: path(p)?, options: options(q)? };
     unary(ops::get_catalog(&s.db(&caller)?, r, None).await)
+}
+
+async fn schema<D: Served>(
+    State(s): St<D>,
+    caller: Caller_,
+    p: Result<Path<String>, PathRejection>,
+    q: Result<Query<OptionsQuery>, QueryRejection>,
+) -> Answer {
+    let r = pb::GetSchemaRequest { namespace: path(p)?, options: options(q)? };
+    unary(ops::get_schema(&s.db(&caller)?, r, None).await)
 }
 
 /// A handler that reads its body, takes the namespace from the path, and

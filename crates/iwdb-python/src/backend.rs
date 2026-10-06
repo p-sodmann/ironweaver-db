@@ -18,7 +18,7 @@ use iwdb_query::read::Explain;
 use iwdb_query::{
     AnalyticsRequest, Answer, Changes, ChangesRequest, CommitOptions, Database, Edge, Error, ExplainRequest,
     FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
-    QueryOptions, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
+    QueryOptions, Schema, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
 use iwdb_server::client::Remote;
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
@@ -233,6 +233,13 @@ impl Database for Backend {
         match self {
             Backend::Embedded(db) => db.catalog(namespace, options).await,
             Backend::Remote(db) => db.remote.catalog(namespace, db.read(namespace, options)).await,
+        }
+    }
+
+    async fn schema(&self, namespace: &str, options: QueryOptions) -> Result<Answer<Schema>, Error> {
+        match self {
+            Backend::Embedded(db) => db.schema(namespace, options).await,
+            Backend::Remote(db) => db.remote.schema(namespace, db.read(namespace, options)).await,
         }
     }
 

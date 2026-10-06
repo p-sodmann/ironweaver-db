@@ -28,7 +28,7 @@ use iwdb_query::{Accounts, Authenticate, NewToken, Principal, Role, Secret, Sess
 use iwdb_query::{
     AnalyticsRequest, Answer, CHANGES_BATCH_BYTES, ChangeEvent, Changes, ChangesRequest, Code, CommitOptions, Database,
     Edge, Error, Explain, ExplainRequest, FindRequest, JobResult, LimitConfig, MatchRequest, MatchRow, NamespaceStatus,
-    NeighbourhoodRequest, Node, Path, PathRequest, QueryOptions, Subgraph, SubgraphRequest, TraverseRequest,
+    NeighbourhoodRequest, Node, Path, PathRequest, QueryOptions, Schema, Subgraph, SubgraphRequest, TraverseRequest,
     WalkRequest, Work,
 };
 use iwdb_storage::io::{LogFs, StdFs};
@@ -530,6 +530,14 @@ where
         options: QueryOptions,
     ) -> impl Future<Output = Result<Answer<NamespaceCatalog>, Error>> + Send {
         self.read(namespace, options, |_, ns, _| Ok(Answer::at(ns.seq(), ns.catalog().clone())))
+    }
+
+    fn schema(
+        &self,
+        namespace: &str,
+        options: QueryOptions,
+    ) -> impl Future<Output = Result<Answer<Schema>, Error>> + Send {
+        self.read(namespace, options, |_, ns, cx| read::schema(ns, cx))
     }
 
     fn namespace_status(&self, namespace: &str) -> impl Future<Output = Result<NamespaceStatus, Error>> + Send {

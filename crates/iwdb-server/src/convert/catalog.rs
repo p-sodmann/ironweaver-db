@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 
 use iwdb_engine::catalog::{IndexChanges, NamespaceCatalog, NamespaceName};
-use iwdb_query::{Error, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus};
+use iwdb_query::{
+    Error, IndexSize, IndexState, IndexStatus, KeyInfo, LabelInfo, MarkStatus, NamespaceStatus, Schema, TypeInfo,
+};
 use iwdb_storage::format::Damage;
 use iwdb_storage::namespaces::{Event, EventKind, NamespaceInfo, NamespaceResult};
 use iwdb_storage::{CutTail, RecoveryReport, SkippedCheckpoint};
@@ -29,6 +31,67 @@ pub(crate) fn catalog_from_pb(catalog: Option<pb::NamespaceCatalog>) -> Result<N
         out.add_constraint(constraint_from_pb(Some(constraint))?);
     }
     Ok(out)
+}
+
+pub(crate) fn schema_to_pb(s: &Schema) -> pb::Schema {
+    pb::Schema {
+        labels: s
+            .labels
+            .iter()
+            .map(|l| pb::LabelInfo {
+                name: l.name.clone(),
+                count: wide(l.count),
+                sampled: wide(l.sampled),
+                keys: l
+                    .keys
+                    .iter()
+                    .map(|k| pb::KeyInfo {
+                        name: k.name.clone(),
+                        kinds: k
+                            .kinds
+                            .iter()
+                            .map(|(kind, n)| pb::KindCount { kind: kind.clone(), count: wide(*n) })
+                            .collect(),
+                    })
+                    .collect(),
+                more_keys: l.more_keys,
+            })
+            .collect(),
+        types: s.types.iter().map(|t| pb::TypeInfo { name: t.name.clone(), count: wide(t.count) }).collect(),
+        nodes: wide(s.nodes),
+        edges: wide(s.edges),
+        sampled_nodes: wide(s.sampled_nodes),
+        sampled_edges: wide(s.sampled_edges),
+    }
+}
+
+pub(crate) fn schema_from_pb(s: Option<pb::Schema>) -> Result<Schema, Error> {
+    let s = s.ok_or_else(|| missing("the schema"))?;
+    Ok(Schema {
+        labels: s
+            .labels
+            .into_iter()
+            .map(|l| LabelInfo {
+                name: l.name,
+                count: size(l.count),
+                sampled: size(l.sampled),
+                keys: l
+                    .keys
+                    .into_iter()
+                    .map(|k| KeyInfo {
+                        name: k.name,
+                        kinds: k.kinds.into_iter().map(|c| (c.kind, size(c.count))).collect(),
+                    })
+                    .collect(),
+                more_keys: l.more_keys,
+            })
+            .collect(),
+        types: s.types.into_iter().map(|t| TypeInfo { name: t.name, count: size(t.count) }).collect(),
+        nodes: size(s.nodes),
+        edges: size(s.edges),
+        sampled_nodes: size(s.sampled_nodes),
+        sampled_edges: size(s.sampled_edges),
+    })
 }
 
 fn index_status_to_pb(i: &IndexStatus) -> pb::IndexStatus {

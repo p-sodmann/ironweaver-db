@@ -43,6 +43,8 @@ service DatabaseService {
   rpc Watch(WatchRequest) returns (stream WatchResponse);
 
   rpc GetCatalog(GetCatalogRequest) returns (GetCatalogResponse);
+  // Labels (with exact counts), edge types and attribute keys, sampled.
+  rpc GetSchema(GetSchemaRequest) returns (GetSchemaResponse);
   rpc GetNamespaceStatus(GetNamespaceStatusRequest) returns (GetNamespaceStatusResponse);
   rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
   rpc CreateNamespace(CreateNamespaceRequest) returns (CreateNamespaceResponse);

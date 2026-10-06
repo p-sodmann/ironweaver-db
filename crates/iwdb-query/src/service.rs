@@ -12,7 +12,7 @@ use crate::read::Explain;
 use crate::{
     AnalyticsRequest, Answer, Changes, ChangesRequest, CommitOptions, Edge, Error, ExplainRequest, FindRequest,
     JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest, QueryOptions,
-    Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
+    Schema, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
 
 /// A graph database: namespaces, commits, bounded reads, analytics and the
@@ -225,6 +225,17 @@ pub trait Database: Send + Sync {
         namespace: &str,
         options: QueryOptions,
     ) -> impl Future<Output = Result<Answer<NamespaceCatalog>, Error>> + Send;
+
+    /// The namespace's labels (with exact counts), edge types and attribute
+    /// keys, from a sample of at most `max_visited` nodes and `max_edges`
+    /// edges in the core's order ([`Schema`]): complete when the sample
+    /// covers the namespace. Reaching a limit ends the sample, never the
+    /// read. O(sample + labels).
+    fn schema(
+        &self,
+        namespace: &str,
+        options: QueryOptions,
+    ) -> impl Future<Output = Result<Answer<Schema>, Error>> + Send;
 
     /// The namespace's state: seqs, counts, indexes (with builds in
     /// progress), memory.

@@ -104,6 +104,7 @@ The image runs as the user `iwdb` (uid 10001), keeps its data in the volume `/va
 | `MatchPattern` | `match_pattern` (paginated) | stream |
 | `Analyze` | `analyze` (ADR 0022) | stream |
 | `GetCatalog` | `catalog` | unary |
+| `GetSchema` | `schema` | unary |
 | `GetNamespaceStatus` | `namespace_status` | unary |
 | `ListNamespaces` | `namespaces` | unary |
 | `CreateNamespace`, `DropNamespace` | `create_namespace`, `drop_namespace` | unary |
@@ -193,7 +194,7 @@ On SIGINT or SIGTERM the server stops accepting connections and sends every HTTP
 
 | Role (per namespace) | Allows |
 |---|---|
-| `read` | `WaitForSeq`, `GetNodes`, `GetEdges`, `Find`, `Explain`, `Neighbourhood`, `Traverse`, `ShortestPath`, `RandomWalks`, `Subgraph`, `MatchPattern`, `Analyze`, `GetChanges`, `Watch`, `GetCatalog`, `GetNamespaceStatus` |
+| `read` | `WaitForSeq`, `GetNodes`, `GetEdges`, `Find`, `Explain`, `Neighbourhood`, `Traverse`, `ShortestPath`, `RandomWalks`, `Subgraph`, `MatchPattern`, `Analyze`, `GetChanges`, `Watch`, `GetCatalog`, `GetSchema`, `GetNamespaceStatus` |
 | `write` | `read`, and `Commit` |
 | `admin` | `write`, and `CommitCatalog`, `DropNamespace` |
 | server-wide admin | every role on every namespace, `CreateNamespace`, the user, grant and token RPCs for anyone, `GetLog`, and `ListRequests` and `CancelRequest` for anyone's requests |

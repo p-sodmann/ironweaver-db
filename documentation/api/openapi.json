@@ -1378,6 +1378,17 @@
         },
         "type": "object"
       },
+      "GetSchemaResponse": {
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/AnswerMeta"
+          },
+          "schema": {
+            "$ref": "#/components/schemas/Schema"
+          }
+        },
+        "type": "object"
+      },
       "GetServerStatusResponse": {
         "properties": {
           "status": {
@@ -1615,6 +1626,68 @@
           "JOB_RESULT_KIND_COUNTS"
         ],
         "type": "string"
+      },
+      "KeyInfo": {
+        "properties": {
+          "kinds": {
+            "description": "How many sampled nodes had a value of each kind, by kind.",
+            "items": {
+              "$ref": "#/components/schemas/KindCount"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "KindCount": {
+        "properties": {
+          "count": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "kind": {
+            "description": "As the value JSON tags it: `Int`, `String`, `Float`, `List`, ...",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LabelInfo": {
+        "properties": {
+          "count": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Nodes with the label: exact (the label index), not sampled."
+          },
+          "keys": {
+            "description": "The attribute keys of the sampled nodes with the label, by name.",
+            "items": {
+              "$ref": "#/components/schemas/KeyInfo"
+            },
+            "type": "array"
+          },
+          "moreKeys": {
+            "description": "The sampled nodes had more keys than the 256 listed.",
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sampled": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Sampled nodes with the label: what the keys count."
+          }
+        },
+        "type": "object"
       },
       "LabelPropagationJob": {
         "properties": {
@@ -3056,6 +3129,58 @@
         ],
         "type": "string"
       },
+      "Schema": {
+        "description": "A namespace's labels, edge types and attribute keys, from a sample of\nits nodes and edges in the core's order: complete when sampled_nodes is\nnodes and sampled_edges is edges.",
+        "properties": {
+          "edges": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Edges in the namespace."
+          },
+          "labels": {
+            "description": "The labels of the sampled nodes and of the constraints, by name.",
+            "items": {
+              "$ref": "#/components/schemas/LabelInfo"
+            },
+            "type": "array"
+          },
+          "nodes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Nodes in the namespace."
+          },
+          "sampledEdges": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Edges the sample read."
+          },
+          "sampledNodes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Nodes the sample read."
+          },
+          "types": {
+            "description": "The types of the sampled edges, by name (untyped first).",
+            "items": {
+              "$ref": "#/components/schemas/TypeInfo"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "Score": {
         "properties": {
           "id": {
@@ -3507,6 +3632,23 @@
       },
       "TrianglesJob": {
         "properties": {},
+        "type": "object"
+      },
+      "TypeInfo": {
+        "properties": {
+          "count": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Sampled edges of the type."
+          },
+          "name": {
+            "description": "Missing for untyped edges.",
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "Uint64": {
@@ -5612,6 +5754,120 @@
           }
         },
         "summary": "Random walks"
+      }
+    },
+    "/v1/namespaces/{ns}/schema": {
+      "get": {
+        "description": "Labels (with exact counts), edge types and attribute keys, sampled.",
+        "operationId": "getSchema",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Read-your-writes: wait until the namespace has applied this seq.",
+            "in": "query",
+            "name": "min_seq",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The history `min_seq` belongs to (32 hex digits).",
+            "in": "query",
+            "name": "history",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "How long the read may take, in milliseconds.",
+            "in": "query",
+            "name": "timeout_ms",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Most results in the answer.",
+            "in": "query",
+            "name": "max_results",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Most nodes the read may visit.",
+            "in": "query",
+            "name": "max_visited",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Most edges the read may examine.",
+            "in": "query",
+            "name": "max_edges",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Answer with what was found when a limit is reached.",
+            "in": "query",
+            "name": "partial",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Continue a paginated read: the `next` of the previous page.",
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetSchemaResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "A namespace's schema, sampled"
       }
     },
     "/v1/namespaces/{ns}/shortest-path": {
