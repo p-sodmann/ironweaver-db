@@ -94,6 +94,10 @@ metrics! {
     MEMORY_WARN: "iwdb_memory_warn_bytes", Gauge, [], "bytes", "From here on the server warns (`warn_at` of the limit); no sample without a limit.";
     MEMORY_REFUSE_WRITES: "iwdb_memory_refuse_writes_bytes", Gauge, [], "bytes", "From here on the server refuses writes with `resource_exhausted` (`refuse_writes_at` of the limit); no sample without a limit.";
     MEMORY_STATE: "iwdb_memory_state", Gauge, [], "", "0 normal, 1 above the warning line, 2 refusing writes. Each state is left 5 % of the limit below its line.";
+    BACKUP_RUNNING: "iwdb_backup_running", Gauge, [], "", "Backups copying now; checkpoints wait while it is above 0.";
+    BACKUP_BYTES: "iwdb_backup_bytes_total", Counter, [], "bytes", "Bytes written by backups, counted as they are written (a throttled backup's progress).";
+    BACKUPS: "iwdb_backups_total", Counter, ["outcome"], "", "Backups that ended, by outcome: `ok` or `failed`.";
+    LAST_BACKUP: "iwdb_last_backup_timestamp_seconds", Gauge, [], "seconds", "When the last successful backup finished, in seconds since 1970 (UTC); no sample without one.";
 }
 
 /// A metric's value in one sample.
@@ -257,11 +261,14 @@ mod tests {
             assert!(d.name.starts_with("iwdb_"), "{}", d.name);
             assert!(d.name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'), "{}", d.name);
             assert_eq!(d.kind == Kind::Counter, d.name.ends_with("_total"), "{}", d.name);
+            // The unit comes before a counter's `_total` (`_bytes_total`)
+            let base = d.name.strip_suffix("_total").unwrap_or(d.name);
             if !d.unit.is_empty() && d.unit != "commits" {
-                assert!(d.name.ends_with(&format!("_{}", d.unit)), "{} in {}", d.name, d.unit);
+                assert!(base.ends_with(&format!("_{}", d.unit)), "{} in {}", d.name, d.unit);
             }
             for label in d.labels {
-                assert!(["operation", "code", "lock", "namespace", "part", "version"].contains(label), "{}", label);
+                let bounded = ["operation", "code", "lock", "namespace", "part", "outcome", "version"];
+                assert!(bounded.contains(label), "{}", label);
             }
         }
     }

@@ -13,7 +13,8 @@
 //! The operator's reads and cancel (step 16c) are in the table too: who
 //! sees what of the status, the requests, the readers and the metrics is
 //! checked in their cells, and cancelling, which is always audited, names
-//! the request and its owner.
+//! the request and its owner. So are the admin writes (step 16e): a server
+//! admin's only, always audited, with the namespace or backup they name.
 //!
 //! The callers: no credentials, a user without grants, users with `read`,
 //! `write` and `admin` on the namespace under test, and a server-wide
@@ -150,6 +151,10 @@ enum Op {
     Consumers,
     Metrics,
     Log,
+    Checkpoint,
+    Backup,
+    Verify,
+    PruneArchive,
 }
 
 impl Op {
@@ -196,6 +201,10 @@ impl Op {
             Op::Consumers => Operation::Consumers,
             Op::Metrics => Operation::Metrics,
             Op::Log => Operation::Log,
+            Op::Checkpoint => Operation::Checkpoint,
+            Op::Backup => Operation::Backup,
+            Op::Verify => Operation::Verify,
+            Op::PruneArchive => Operation::PruneArchive,
         }
     }
 }
@@ -251,7 +260,17 @@ const TABLE: &[(Op, [Outcome; 6])] = &[
     (Op::Consumers, [U, A, A, A, A, A]),
     (Op::Metrics, [U, A, A, A, A, A]),
     (Op::Log, [U, D, D, D, D, A]),
+    // The admin writes: a server admin's, not a namespace admin's
+    (Op::Checkpoint, [U, D, D, D, D, A]),
+    (Op::Backup, [U, D, D, D, D, A]),
+    (Op::Verify, [U, D, D, D, D, A]),
+    (Op::PruneArchive, [U, D, D, D, D, A]),
 ];
+
+/// The backup the server's backup directory starts with (`PruneArchive`).
+const SEED_BACKUP: &str = "seed";
+/// The names of the backups the `Backup` cells take start so.
+const BACKUP_PREFIX: &str = "cell";
 
 /// What the test needs of a client, over gRPC or REST.
 trait Client: Database + Accounts + Admin {
@@ -324,7 +343,8 @@ fn node(id: &str) -> Mutation {
 impl World {
     fn new() -> World {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path(), options()).unwrap();
+        let options = iwdb::StoreOptions { archive: Some(dir.path().join("archive")), ..options() };
+        let store = Store::open(&dir.path().join("data"), options).unwrap();
         let users = store.users().with_params(FAST);
         for who in CALLERS.into_iter().filter(|w| *w != Who::Anonymous) {
             users.create(who.user(), &Secret::new(who.password()), who == Who::Admin).unwrap();
@@ -350,7 +370,14 @@ impl World {
             let token = (who != Who::Anonymous).then(|| users.create_token(who.user(), "test", None).unwrap().token);
             tokens.push((who, token));
         }
-        let db = Embedded::new(store, QueryConfig::default()).unwrap().with_auth(auth_settings());
+        let backups = dir.path().join("backups");
+        std::fs::create_dir(&backups).unwrap();
+        store.backup(&backups.join(SEED_BACKUP)).unwrap();
+        let db = Embedded::new(store, QueryConfig::default())
+            .unwrap()
+            .with_auth(auth_settings())
+            .with_backup_dir(&backups)
+            .unwrap();
         let audit = Captured::new();
         let sink = audit.clone();
         let server = Running::start_built(db, |s| s.auth(AuthMode { enabled: true }).audit(sink));
@@ -545,6 +572,17 @@ impl World {
                 Ok(())
             }
             Op::Log => block_on(c.log(0, Some(10))).map(drop),
+            Op::Checkpoint => block_on(c.checkpoint(Some(NS.into()))).map(drop),
+            Op::Backup => {
+                let request = iwdb_query::BackupRequest {
+                    name: format!("{}-{}", BACKUP_PREFIX, self.counter.fetch_add(1, Ordering::Relaxed)),
+                    max_bytes_per_second: None,
+                    verify: false,
+                };
+                block_on(c.backup(request)).map(drop)
+            }
+            Op::Verify => block_on(c.verify(iwdb_query::VerifyTarget::Store)).map(drop),
+            Op::PruneArchive => block_on(c.prune_archive(SEED_BACKUP.into(), true)).map(drop),
         }
     }
 
@@ -725,6 +763,9 @@ fn audit_problems(op: Op, who: Who, got: Outcome, entries: &[AuditEntry]) -> Vec
                     && e.subject.as_deref() == Some(someone_else(who).user())
                     && e.namespace.as_deref() == Some(NS),
             ),
+            Op::Checkpoint => expect("namespace", e.namespace.as_deref() == Some(NS)),
+            Op::Backup => expect("backup", e.backup.as_deref().is_some_and(|b| b.starts_with(BACKUP_PREFIX))),
+            Op::PruneArchive => expect("backup", e.backup.as_deref() == Some(SEED_BACKUP)),
             _ => {}
         }
     }

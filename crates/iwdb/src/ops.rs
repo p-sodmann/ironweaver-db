@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use iwdb_engine::catalog::NamespaceName;
-use iwdb_storage::archive::{ARCHIVE_MARKER_NAME, verify_archive};
+use iwdb_storage::archive::{ARCHIVE_MARKER_NAME, PruneReport, verify_archive};
 use iwdb_storage::io::{LogFs, StdFs};
 use iwdb_storage::{DirStatus, Error, Kind, RestoreReport, RestoreSources, RestoreTarget, VerifyReport, inspect};
 
@@ -76,6 +76,27 @@ pub fn restore_with_only<F: LogFs>(
         report.history,
         report.namespaces.iter().map(|n| format!("{} at seq {}", n.name, n.seq)).collect::<Vec<_>>().join(", ")
     );
+    Ok(report)
+}
+
+/// Remove from the WAL archive `archive` what no restore from the backup
+/// `backup` (or a later one) can need: per namespace the backup holds, the
+/// segments and imports' checkpoints wholly before its oldest checkpoint
+/// in the backup ([`iwdb_storage::archive::prune`] has the rule). With
+/// `dry_run`, nothing is removed and the report says what would be. A
+/// running store may keep archiving into it (ADR 0055).
+pub fn prune_archive(archive: &Path, backup: &Path, dry_run: bool) -> Result<PruneReport, Error> {
+    let report = iwdb_storage::archive::prune(&StdFs, archive, backup, dry_run)?;
+    if !dry_run {
+        let segments: usize = report.namespaces.iter().map(|n| n.removed_segments.len()).sum();
+        log::info!(
+            "pruned the archive '{}' before the backup '{}': {} segments, {} bytes",
+            archive.display(),
+            backup.display(),
+            segments,
+            report.bytes
+        );
+    }
     Ok(report)
 }
 

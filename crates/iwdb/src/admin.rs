@@ -1,5 +1,11 @@
 //! [`Admin`] on the embedded store (step 16c, ADR 0051): the operator's
-//! reads, implemented once here (design rule 8).
+//! reads, and the admin writes of step 16e (ADR 0055), implemented once
+//! here (design rule 8).
+//!
+//! The admin writes (checkpoint, backup, verify, pruning the archive) run
+//! on threads of their own, not on the workers: a throttled backup, or a
+//! checkpoint waiting for one, can take hours. Dropping their future
+//! doesn't stop them.
 //!
 //! The registry, the log, the request list, cancel, the readers and the
 //! metrics run on the caller's thread and take no namespace lock, so they
@@ -8,15 +14,18 @@
 //! namespace's status (a read lock each, for an instant) on a worker.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use iwdb_engine::metrics::HistogramSnapshot;
-use iwdb_query::admin::list_limit;
+use iwdb_query::admin::{PruneReport, VerifyReport, check_backup_name, list_limit};
+use iwdb_query::exec::{Pending, spawn};
 use iwdb_query::log::{LogTail, MAX_READ};
 use iwdb_query::metrics::{self as m, Metrics, Value};
 use iwdb_query::requests::{ConsumerInfo, RequestInfo, Requests};
 use iwdb_query::{Admin, Code, DiskStatus, Error, Listed, MemoryStatus, NamespaceStatus, RequestCounts, ServerStatus};
+use iwdb_query::{BackupDone, BackupRequest, Checkpointed, MemoryState, VerifyTarget};
 use iwdb_storage::FsyncPolicy;
 use iwdb_storage::io::LogFs;
 
@@ -128,6 +137,14 @@ where
         out.add(m::MEMORY_REFUSE_WRITES, &[], Value::Gauge(limit.refuse_writes as f64));
     }
     out.add(m::MEMORY_STATE, &[], Value::Gauge(memory.state as u8 as f64));
+    let backups = store.backup_stats();
+    out.add(m::BACKUP_RUNNING, &[], Value::Gauge(backups.running as f64));
+    out.add(m::BACKUP_BYTES, &[], Value::Counter(backups.bytes));
+    out.add(m::BACKUPS, &["ok"], Value::Counter(backups.ok));
+    out.add(m::BACKUPS, &["failed"], Value::Counter(backups.failed));
+    if let Some(t) = backups.last {
+        out.add(m::LAST_BACKUP, &[], Value::Gauge(seconds(t.micros())));
+    }
     out
 }
 
@@ -196,6 +213,85 @@ where
         std::future::ready(Ok(self.monitor.log.read(after, limit)))
     }
 
+    fn checkpoint(&self, namespace: Option<String>) -> impl Future<Output = Result<Vec<Checkpointed>, Error>> + Send {
+        let store = self.shared_store();
+        spawn("iwdb-admin-checkpoint", move || {
+            let outcomes = match namespace {
+                Some(name) => vec![(name.clone(), store.namespace(&name)?.checkpoint()?)],
+                None => store.checkpoint_all()?,
+            };
+            Ok(outcomes.into_iter().map(|(namespace, outcome)| Checkpointed { namespace, outcome }).collect())
+        })
+    }
+
+    fn backup(&self, request: BackupRequest) -> impl Future<Output = Result<BackupDone, Error>> + Send {
+        let dest = match self.backup_target(&request.name) {
+            Ok(dest) => dest,
+            Err(e) => return Pending::ready(Err(e)),
+        };
+        let store = self.shared_store();
+        spawn("iwdb-admin-backup", move || {
+            create_backup_dir(&dest)?;
+            let written = match request.max_bytes_per_second {
+                Some(rate) => store.backup_with(&dest, Some(rate)),
+                None => store.backup(&dest),
+            };
+            let report = match written {
+                Ok(report) => report,
+                Err(e) => {
+                    // The directory is ours, and a server's operator may have
+                    // no shell to remove it
+                    if let Err(removed) = std::fs::remove_dir_all(&dest) {
+                        log::warn!("can't remove the failed backup '{}': {}", dest.display(), removed);
+                    }
+                    return Err(e.into());
+                }
+            };
+            let verify = if request.verify { Some(crate::verify(&dest)?) } else { None };
+            Ok(BackupDone { report, verify })
+        })
+    }
+
+    fn verify(&self, target: VerifyTarget) -> impl Future<Output = Result<VerifyReport, Error>> + Send {
+        let memory = self.store().memory();
+        if memory.state == MemoryState::RefusingWrites {
+            let limit = memory.limit.map_or(0, |l| l.refuse_writes);
+            return Pending::ready(Err(Error::new(
+                Code::ResourceExhausted,
+                format!(
+                    "memory limit: verify is refused above {} bytes ({} in use), since it replays each namespace into memory the limit doesn't count; checkpoints and backups are accepted",
+                    limit,
+                    memory.used()
+                ),
+            )));
+        }
+        let path = match &target {
+            VerifyTarget::Store => None,
+            VerifyTarget::Backup(name) => match self.existing_backup(name) {
+                Ok(path) => Some(path),
+                Err(e) => return Pending::ready(Err(e)),
+            },
+            VerifyTarget::Archive => match self.archive() {
+                Ok(path) => Some(path),
+                Err(e) => return Pending::ready(Err(e)),
+            },
+        };
+        let store = self.shared_store();
+        spawn("iwdb-admin-verify", move || match path {
+            None => Ok(store.verify()?),
+            Some(path) => Ok(crate::verify(&path)?),
+        })
+    }
+
+    fn prune_archive(&self, before: String, dry_run: bool) -> impl Future<Output = Result<PruneReport, Error>> + Send {
+        let paths = self.archive().and_then(|archive| Ok((archive, self.existing_backup(&before)?)));
+        let (archive, backup) = match paths {
+            Ok(paths) => paths,
+            Err(e) => return Pending::ready(Err(e)),
+        };
+        spawn("iwdb-admin-prune", move || Ok(crate::prune_archive(&archive, &backup, dry_run)?))
+    }
+
     fn set_ready(&self, ready: bool) {
         self.monitor.ready.store(ready, Ordering::Release);
     }
@@ -203,4 +299,73 @@ where
     fn registry(&self) -> Option<Arc<Requests>> {
         Some(self.monitor.requests.clone())
     }
+}
+
+impl<F: LogFs + Clone + Send + Sync + 'static> Embedded<F>
+where
+    F::File: Send,
+{
+    /// The backup directory; `invalid_argument` without one.
+    fn backup_root(&self) -> Result<&std::path::Path, Error> {
+        self.backup_dir().ok_or_else(|| {
+            Error::invalid("the server has no backup directory: set [backup] dir (backups are written only there)")
+        })
+    }
+
+    /// Where a new backup `name` goes: `<backup dir>/<name>`, checked.
+    fn backup_target(&self, name: &str) -> Result<PathBuf, Error> {
+        check_backup_name(name)?;
+        Ok(self.backup_root()?.join(name))
+    }
+
+    /// The existing backup `name` in the backup directory: a directory, not
+    /// a symlink. Errors: `invalid_argument`, `not_found`.
+    fn existing_backup(&self, name: &str) -> Result<PathBuf, Error> {
+        let path = self.backup_target(name)?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.file_type().is_symlink() => {
+                Err(Error::invalid(format!("'{}' in the backup directory is a symbolic link", name)))
+            }
+            Ok(m) if m.is_dir() => Ok(path),
+            Ok(_) => Err(Error::invalid(format!("'{}' in the backup directory is not a backup", name))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(Error::new(Code::NotFound, format!("no backup '{}' in the backup directory", name)))
+            }
+            Err(e) => Err(Error::new(Code::Io, format!("can't read the backup '{}': {}", name, e))),
+        }
+    }
+
+    /// The store's WAL archive; `invalid_argument` without one.
+    fn archive(&self) -> Result<PathBuf, Error> {
+        self.store()
+            .archive_dir()
+            .map(std::path::Path::to_path_buf)
+            .ok_or_else(|| Error::invalid("the store has no WAL archive: set [store] archive"))
+    }
+}
+
+/// Create the directory of a new backup, refusing anything that is there
+/// already (a file, a directory, a symlink: `create_dir` doesn't follow
+/// one in the last component), and make its entry durable.
+fn create_backup_dir(dest: &std::path::Path) -> Result<(), Error> {
+    match std::fs::create_dir(dest) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let name = dest.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            return Err(Error::new(
+                Code::Conflict,
+                format!("'{}' exists in the backup directory: a backup never overwrites anything", name),
+            ));
+        }
+        Err(e) => return Err(Error::new(Code::Io, format!("can't create '{}': {}", dest.display(), e))),
+    }
+    if let Some(parent) = dest.parent() {
+        #[cfg(unix)]
+        std::fs::File::open(parent)
+            .and_then(|d| d.sync_all())
+            .map_err(|e| Error::new(Code::Io, format!("can't sync '{}': {}", parent.display(), e)))?;
+        #[cfg(not(unix))]
+        let _ = parent;
+    }
+    Ok(())
 }

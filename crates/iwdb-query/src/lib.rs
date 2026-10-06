@@ -39,7 +39,8 @@ mod service;
 pub mod conformance;
 
 pub use admin::{
-    Admin, DiskStatus, LimitSource, Listed, MemorySnapshot, MemoryState, MemoryStatus, RequestCounts, ServerStatus,
+    Admin, BackupDone, BackupRequest, Checkpointed, DiskStatus, LimitSource, Listed, MemorySnapshot, MemoryState,
+    MemoryStatus, RequestCounts, ServerStatus, VerifyTarget,
 };
 pub use auth::{
     Accounts, Audited, Authenticate, Authorized, NewToken, Operation, Principal, Requirement, Role, Secret, Session,

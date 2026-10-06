@@ -183,6 +183,71 @@
         },
         "type": "object"
       },
+      "BackupReport": {
+        "properties": {
+          "bytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Bytes copied."
+          },
+          "history": {
+            "description": "The store's history id (32 hex digits).",
+            "type": "string"
+          },
+          "namespaces": {
+            "description": "By namespace id.",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceBackup"
+            },
+            "type": "array"
+          },
+          "path": {
+            "description": "Where the backup is, on the server.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "BackupRequest": {
+        "properties": {
+          "maxBytesPerSecond": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Copy at most this many bytes per second; missing: the server's\n`[backup] max_bytes_per_second`; 0: unthrottled. Checkpoints wait for\nthe whole copy."
+          },
+          "name": {
+            "description": "The backup's name in the backup directory: 1 to 128 ASCII letters,\ndigits, `.`, `_` or `-`, not starting with `.`. Nothing may exist under\nit yet (`conflict`).",
+            "type": "string"
+          },
+          "noVerify": {
+            "description": "Don't verify the backup once written.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "BackupResponse": {
+        "properties": {
+          "backup": {
+            "$ref": "#/components/schemas/BackupReport"
+          },
+          "verify": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/VerifyReport"
+              }
+            ],
+            "description": "The backup's verification (missing with `no_verify`)."
+          }
+        },
+        "type": "object"
+      },
       "CancelRequestRequest": {
         "properties": {
           "id": {
@@ -357,6 +422,27 @@
               }
             ],
             "description": "Set a node's version."
+          }
+        },
+        "type": "object"
+      },
+      "CheckpointRequest": {
+        "properties": {
+          "namespace": {
+            "description": "Only this namespace; missing: every namespace.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CheckpointResponse": {
+        "properties": {
+          "namespaces": {
+            "description": "By namespace.",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceCheckpoint"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -1220,6 +1306,18 @@
               "$ref": "#/components/schemas/Node"
             },
             "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "Finding": {
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "description": "The file it is about.",
+            "type": "string"
           }
         },
         "type": "object"
@@ -2259,6 +2357,47 @@
         },
         "type": "object"
       },
+      "NamespaceBackup": {
+        "properties": {
+          "checkpoints": {
+            "description": "The seqs of the checkpoints copied.",
+            "items": {
+              "$ref": "#/components/schemas/Uint64"
+            },
+            "type": "array"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "segments": {
+            "description": "The first seqs of the WAL segments copied.",
+            "items": {
+              "$ref": "#/components/schemas/Uint64"
+            },
+            "type": "array"
+          },
+          "seq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The seq the backup reaches in the namespace (its synced seq then)."
+          },
+          "timeMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Int64"
+              }
+            ],
+            "description": "That commit's time, in microseconds since 1970 (UTC), if known."
+          }
+        },
+        "type": "object"
+      },
       "NamespaceCatalog": {
         "description": "A namespace's indexes and constraints, sorted.",
         "properties": {
@@ -2273,6 +2412,40 @@
               "$ref": "#/components/schemas/IndexDef"
             },
             "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "NamespaceCheckpoint": {
+        "properties": {
+          "namespace": {
+            "type": "string"
+          },
+          "removedCheckpoints": {
+            "description": "The seqs of the checkpoints removed.",
+            "items": {
+              "$ref": "#/components/schemas/Uint64"
+            },
+            "type": "array"
+          },
+          "removedSegments": {
+            "description": "The first seqs of the WAL segments removed.",
+            "items": {
+              "$ref": "#/components/schemas/Uint64"
+            },
+            "type": "array"
+          },
+          "seq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The seq of the newest checkpoint after the run."
+          },
+          "written": {
+            "description": "Whether a checkpoint was written (false: the newest was at the seq).",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -2351,6 +2524,42 @@
           },
           "name": {
             "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "NamespacePrune": {
+        "properties": {
+          "backupCheckpoint": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The namespace's oldest checkpoint in the backup (0: none, and nothing\nis removed). Every archived record after it is kept."
+          },
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "keptSegments": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "removedCheckpoints": {
+            "description": "The seqs of the archived (imports') checkpoints removed.",
+            "items": {
+              "$ref": "#/components/schemas/Uint64"
+            },
+            "type": "array"
+          },
+          "removedSegments": {
+            "description": "The first seqs of the segments removed.",
+            "items": {
+              "$ref": "#/components/schemas/Uint64"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -2466,6 +2675,41 @@
               }
             ],
             "description": "Commits applied but not known to be durable (seq - synced_seq);\nmissing when synced_seq is."
+          }
+        },
+        "type": "object"
+      },
+      "NamespaceVerify": {
+        "properties": {
+          "checkpoints": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "checkpointsChecked": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "firstSeq": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "lastSeq": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "records": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "segments": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "seq": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "timeMicros": {
+            "$ref": "#/components/schemas/Int64"
           }
         },
         "type": "object"
@@ -2815,6 +3059,63 @@
           },
           "direction": {
             "$ref": "#/components/schemas/Direction"
+          }
+        },
+        "type": "object"
+      },
+      "PruneArchiveRequest": {
+        "properties": {
+          "before": {
+            "description": "The oldest backup to keep, by name in the backup directory.",
+            "type": "string"
+          },
+          "dryRun": {
+            "description": "Remove nothing: report what would be removed.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "PruneArchiveResponse": {
+        "properties": {
+          "report": {
+            "$ref": "#/components/schemas/PruneReport"
+          }
+        },
+        "type": "object"
+      },
+      "PruneReport": {
+        "properties": {
+          "archive": {
+            "type": "string"
+          },
+          "backup": {
+            "type": "string"
+          },
+          "bytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Bytes removed (or that would be)."
+          },
+          "dryRun": {
+            "type": "boolean"
+          },
+          "namespaces": {
+            "description": "The namespaces the backup holds, by id.",
+            "items": {
+              "$ref": "#/components/schemas/NamespacePrune"
+            },
+            "type": "array"
+          },
+          "untouched": {
+            "description": "Namespaces of the archive the backup doesn't hold: left alone.",
+            "items": {
+              "$ref": "#/components/schemas/Uint64"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -3965,6 +4266,109 @@
         },
         "type": "object"
       },
+      "VerifyKind": {
+        "enum": [
+          "VERIFY_KIND_UNSPECIFIED",
+          "VERIFY_KIND_DATA_DIR",
+          "VERIFY_KIND_BACKUP",
+          "VERIFY_KIND_ARCHIVE"
+        ],
+        "type": "string"
+      },
+      "VerifyReport": {
+        "description": "What verify checked and found (as `iwctl verify` reports it).",
+        "properties": {
+          "checkpoints": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "checkpointsChecked": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "firstSeq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "With exactly one namespace: its first and last WAL record, the seq it\nrecovers to, and the last record's commit time (microseconds)."
+          },
+          "history": {
+            "description": "The history id (32 hex digits).",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/VerifyKind"
+          },
+          "lastSeq": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "namespaces": {
+            "description": "By namespace id.",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceVerify"
+            },
+            "type": "array"
+          },
+          "notes": {
+            "description": "What a crash or an interrupted cleanup leaves, which recovery handles:\nnot damage.",
+            "items": {
+              "$ref": "#/components/schemas/Finding"
+            },
+            "type": "array"
+          },
+          "path": {
+            "type": "string"
+          },
+          "problems": {
+            "description": "Damage: empty if intact.",
+            "items": {
+              "$ref": "#/components/schemas/Finding"
+            },
+            "type": "array"
+          },
+          "records": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "segments": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "seq": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "timeMicros": {
+            "$ref": "#/components/schemas/Int64"
+          },
+          "version": {
+            "description": "The layout version of a data directory or backup, the format version\nof an archive.",
+            "format": "int64",
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "VerifyRequest": {
+        "properties": {
+          "archive": {
+            "description": "The store's WAL archive. With neither, the running store.",
+            "type": "boolean"
+          },
+          "backup": {
+            "description": "A backup in the backup directory, by name.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "VerifyResponse": {
+        "properties": {
+          "report": {
+            "$ref": "#/components/schemas/VerifyReport"
+          }
+        },
+        "type": "object"
+      },
       "Version": {
         "description": "The new version of an entity a commit wrote.",
         "properties": {
@@ -4120,6 +4524,55 @@
         "summary": "The metrics in Prometheus' text format"
       }
     },
+    "/v1/archive/prune": {
+      "post": {
+        "description": "Remove from the store's WAL archive what no restore from a backup (in\nthe backup directory) or a later one can need.",
+        "operationId": "pruneArchive",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PruneArchiveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PruneArchiveResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Prune the WAL archive before a backup"
+      }
+    },
     "/v1/auth/login": {
       "post": {
         "description": "Check a user's password and start a session. Failed logins are slowed\ndown per user and per client address. Needs no token.",
@@ -4256,6 +4709,104 @@
           }
         },
         "summary": "The caller and its roles"
+      }
+    },
+    "/v1/backups": {
+      "post": {
+        "description": "Back up the store into the server's backup directory (`[backup] dir`),\nunder a new name; then verify the backup.",
+        "operationId": "backup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Back up the store into the backup directory"
+      }
+    },
+    "/v1/checkpoint": {
+      "post": {
+        "description": "Checkpoint a namespace, or every namespace: write a checkpoint at its\nseq and remove what is no longer kept (archived first, if the store\narchives its WAL). Waits for a running backup's copy.",
+        "operationId": "checkpoint",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckpointRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckpointResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Checkpoint a namespace, or every namespace"
       }
     },
     "/v1/consumers": {
@@ -6973,6 +7524,55 @@
           }
         },
         "summary": "Revoke an API token"
+      }
+    },
+    "/v1/verify": {
+      "post": {
+        "description": "Verify the running store, a backup in the backup directory, or the\nstore's WAL archive, without changing it. Damage is in the report.",
+        "operationId": "verify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Verify the store, a backup or the WAL archive"
       }
     }
   },

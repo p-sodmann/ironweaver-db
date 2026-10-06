@@ -11,6 +11,8 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::Error;
 
@@ -152,11 +154,70 @@ pub(crate) fn write_atomic<F: LogFs>(fs: &F, path: &Path, bytes: &[u8]) -> Resul
     fs.write_atomic(path, &mut |out| out.write_all(bytes)).map_err(|e| Error::io("write", path, e))
 }
 
+/// A limit on how fast a copy writes (online backups, ADR 0055), and a
+/// counter of the bytes it wrote. [`pass`](Self::pass) is called after
+/// each chunk: it sleeps while the bytes written so far are ahead of the
+/// rate, measured from the first call. So a burst is at most one chunk
+/// ([`CHUNK`]), and a copy of `n` bytes takes at least `(n - CHUNK) / rate`.
+#[derive(Debug)]
+pub struct Throttle<'a> {
+    /// Bytes per second; `None`: no limit.
+    rate: Option<u64>,
+    start: Option<Instant>,
+    written: u64,
+    /// Added to as bytes are written (the `iwdb_backup_bytes_total` metric).
+    progress: Option<&'a AtomicU64>,
+}
+
+impl<'a> Throttle<'a> {
+    /// At most `rate` bytes per second (`None` or 0: no limit), counting
+    /// into `progress` if given.
+    pub fn new(rate: Option<u64>, progress: Option<&'a AtomicU64>) -> Self {
+        Throttle { rate: rate.filter(|r| *r > 0), start: None, written: 0, progress }
+    }
+
+    /// No limit, no counter.
+    pub fn none() -> Self {
+        Throttle::new(None, None)
+    }
+
+    /// The bytes written so far.
+    pub fn written(&self) -> u64 {
+        self.written
+    }
+
+    /// `n` more bytes were written: wait until the rate allows them.
+    pub fn pass(&mut self, n: u64) {
+        let start = *self.start.get_or_insert_with(Instant::now);
+        self.written += n;
+        if let Some(progress) = self.progress {
+            progress.fetch_add(n, Ordering::Relaxed);
+        }
+        if let Some(rate) = self.rate {
+            let due = Duration::from_secs_f64(self.written as f64 / rate as f64);
+            if let Some(ahead) = due.checked_sub(start.elapsed()) {
+                std::thread::sleep(ahead);
+            }
+        }
+    }
+}
+
 /// Create `target` with `content`, in chunks, and fsync it.
 pub(crate) fn write_file<F: LogFs>(fs: &F, target: &Path, content: &[u8]) -> Result<(), Error> {
+    write_file_throttled(fs, target, content, &mut Throttle::none())
+}
+
+/// [`write_file`], each chunk through `throttle`.
+pub(crate) fn write_file_throttled<F: LogFs>(
+    fs: &F,
+    target: &Path,
+    content: &[u8],
+    throttle: &mut Throttle<'_>,
+) -> Result<(), Error> {
     let mut file = fs.create(target).map_err(|e| Error::io("create", target, e))?;
     for chunk in content.chunks(CHUNK) {
         file.write_all(chunk).map_err(|e| Error::io("write", target, e))?;
+        throttle.pass(chunk.len() as u64);
     }
     file.sync().map_err(|e| Error::io("fsync", target, e))
 }
@@ -164,6 +225,16 @@ pub(crate) fn write_file<F: LogFs>(fs: &F, target: &Path, content: &[u8]) -> Res
 /// Copy `source` to a new file `target` in chunks, and fsync it. Returns
 /// its length and CRC32C.
 pub(crate) fn copy_file<F: LogFs>(fs: &F, source: &Path, target: &Path) -> Result<(u64, u32), Error> {
+    copy_file_throttled(fs, source, target, &mut Throttle::none())
+}
+
+/// [`copy_file`], each chunk through `throttle`.
+pub(crate) fn copy_file_throttled<F: LogFs>(
+    fs: &F,
+    source: &Path,
+    target: &Path,
+    throttle: &mut Throttle<'_>,
+) -> Result<(u64, u32), Error> {
     let mut input = File::open(source).map_err(|e| Error::io("open", source, e))?;
     let mut file = fs.create(target).map_err(|e| Error::io("create", target, e))?;
     let mut buf = vec![0u8; CHUNK];
@@ -176,7 +247,35 @@ pub(crate) fn copy_file<F: LogFs>(fs: &F, source: &Path, target: &Path) -> Resul
         file.write_all(&buf[..n]).map_err(|e| Error::io("write", target, e))?;
         crc = crc32c::crc32c_append(crc, &buf[..n]);
         len += n as u64;
+        throttle.pass(n as u64);
     }
     file.sync().map_err(|e| Error::io("fsync", target, e))?;
     Ok((len, crc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_throttle_holds_a_copy_to_its_rate_and_counts() {
+        let progress = AtomicU64::new(0);
+        // 4 chunks at 8 chunks a second: the last three wait, about 0.5 s
+        let mut throttle = Throttle::new(Some(8 * CHUNK as u64), Some(&progress));
+        let start = Instant::now();
+        for _ in 0..4 {
+            throttle.pass(CHUNK as u64);
+        }
+        assert!(start.elapsed() >= Duration::from_millis(450), "{:?}", start.elapsed());
+        assert_eq!((throttle.written(), progress.load(Ordering::Relaxed)), (4 * CHUNK as u64, 4 * CHUNK as u64));
+        // No limit (and 0 is none): no waiting
+        for rate in [None, Some(0)] {
+            let mut free = Throttle::new(rate, None);
+            let start = Instant::now();
+            for _ in 0..64 {
+                free.pass(CHUNK as u64);
+            }
+            assert!(start.elapsed() < Duration::from_millis(200), "{:?}", start.elapsed());
+        }
+    }
 }

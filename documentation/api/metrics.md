@@ -4,7 +4,7 @@
 
 - **Pulled, never pushed.** The server opens no connection to send them anywhere ([SECURITY.md](../../SECURITY.md)). `/metrics` is served in every build, also without the REST API.
 - **Credentials.** `/metrics` needs a token like any route: give Prometheus an API token (`authorization: { credentials_file: ... }` in the scrape config), over TLS (`scheme: https`, `tls_config: { ca_file: ... }`). A caller sees the series of the namespaces it has a role on, and those of no namespace: a monitoring user without grants sees the server-wide ones; grant it `read` on a namespace for that namespace's.
-- **Labels are bounded**: `operation` (an RPC's name), `code` (`ok` or an error code of [errors.md](errors.md)), `lock` (`read`, `write`), `namespace` (a live namespace; its series go when it is dropped), `part` (`graph`, `payload`, `checkpoint`, `working`), `version`. Never an id, a user, a client or a value of the data.
+- **Labels are bounded**: `operation` (an RPC's name), `code` (`ok` or an error code of [errors.md](errors.md)), `lock` (`read`, `write`), `namespace` (a live namespace; its series go when it is dropped), `part` (`graph`, `payload`, `checkpoint`, `working`), `outcome` (`ok`, `failed`), `version`. Never an id, a user, a client or a value of the data.
 - **Histograms** have the same buckets, in seconds: 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 and `+Inf`.
 - **Since when.** Counters and histograms count from when the database started serving (`iwdb_start_time_seconds`); gauges are read when scraped. The per-namespace values are read without any lock of the namespace, so a scrape answers while commits wait for an fsync and while every worker is busy.
 
@@ -49,10 +49,15 @@ A test keeps this table equal to the metrics the server exports (`METRICS` in `c
 | `iwdb_memory_warn_bytes` | gauge | – | bytes | From here on the server warns (`warn_at` of the limit); no sample without a limit. |
 | `iwdb_memory_refuse_writes_bytes` | gauge | – | bytes | From here on the server refuses writes with `resource_exhausted` (`refuse_writes_at` of the limit); no sample without a limit. |
 | `iwdb_memory_state` | gauge | – | – | 0 normal, 1 above the warning line, 2 refusing writes. Each state is left 5 % of the limit below its line. |
+| `iwdb_backup_running` | gauge | – | – | Backups copying now; checkpoints wait while it is above 0. |
+| `iwdb_backup_bytes_total` | counter | – | bytes | Bytes written by backups, counted as they are written (a throttled backup's progress). |
+| `iwdb_backups_total` | counter | `outcome` | – | Backups that ended, by outcome: `ok` or `failed`. |
+| `iwdb_last_backup_timestamp_seconds` | gauge | – | seconds | When the last successful backup finished, in seconds since 1970 (UTC); no sample without one. |
 
 ## Examples
 
 - Commit latency, 99th percentile over 5 minutes: `histogram_quantile(0.99, rate(iwdb_commit_duration_seconds_bucket[5m]))`.
 - Rejected requests (a full queue, or draining): `rate(iwdb_requests_total{code="unavailable"}[5m])`; timed out: `code="timeout"`.
 - Memory: `sum(iwdb_memory_used_bytes) / iwdb_memory_limit_bytes` is the fraction of the limit in use ([ADR 0054](../adr/0054-the-memory-limit.md)); alert on `iwdb_memory_state >= 1`, and page on `iwdb_memory_state == 2` (writes refused: `rate(iwdb_requests_total{code="resource_exhausted"}[5m])`).
+- Backups ([ADR 0055](../adr/0055-admin-writes-and-iwctl-against-a-server.md)): a backup's copy rate is `rate(iwdb_backup_bytes_total[1m])`; checkpoints are held back while `iwdb_backup_running > 0`; alert on `time() - iwdb_last_backup_timestamp_seconds` above your backup interval, and on `increase(iwdb_backups_total{outcome="failed"}[1d]) > 0`.
 - A namespace that went read-only: `iwdb_namespace_read_only == 1`. Checkpoints falling behind: `iwdb_checkpoint_lag_commits`, `time() - iwdb_last_checkpoint_timestamp_seconds`.

@@ -35,6 +35,7 @@ pub fn options() -> StoreOptions {
         archive: None,
         retention: Default::default(),
         memory: Default::default(),
+        backup: Default::default(),
     }
 }
 
@@ -266,12 +267,19 @@ pub fn fresh_open_rest() -> Fresh<RestRemote> {
 }
 
 /// A store with the admin [`ADMIN`], served with authentication on, over
-/// TLS.
+/// TLS: its data in `data/`, its WAL archive in `archive/` and its backup
+/// directory `backups/` (step 16e).
 pub fn served() -> (Running<Embedded>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path(), options()).unwrap();
+    let options = StoreOptions { archive: Some(dir.path().join("archive")), ..options() };
+    let store = Store::open(&dir.path().join("data"), options).unwrap();
     store.users().with_params(FAST).create(ADMIN.0, &Secret::new(ADMIN.1), true).unwrap();
-    let db = Embedded::new(store, QueryConfig::default()).unwrap().with_auth(auth_settings());
+    std::fs::create_dir(dir.path().join("backups")).unwrap();
+    let db = Embedded::new(store, QueryConfig::default())
+        .unwrap()
+        .with_auth(auth_settings())
+        .with_backup_dir(&dir.path().join("backups"))
+        .unwrap();
     (Running::start_tls(db, AuthMode { enabled: true }, None), dir)
 }
 

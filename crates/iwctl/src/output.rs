@@ -6,8 +6,10 @@ use std::path::Path;
 use iwdb::import::{ExportReport, ImportReport, MergeReport};
 use iwdb::{
     BackupReport, CheckpointOutcome, CommitTime, Error, Finding, FsyncPolicy, HistoryId, IndexState, Kind,
-    NamespaceResult, NamespaceStatus, RecoveryReport, RestoreReport, Status, StoreRecovery, StoreStatus, VerifyReport,
+    NamespaceResult, NamespaceStatus, PruneReport, RecoveryReport, RestoreReport, Status, StoreRecovery, VerifyReport,
 };
+use iwdb_query::requests::RequestInfo;
+use iwdb_query::{Listed, MemoryState, ServerStatus};
 use serde_json::{Value, json};
 
 pub struct Out {
@@ -231,9 +233,11 @@ impl Out {
         self.print(value, &text);
     }
 
-    pub fn checkpoint(&self, dir: &Path, name: &str, o: &CheckpointOutcome) {
+    /// A namespace's checkpoint in `location` (a data directory, or a
+    /// server's endpoint).
+    pub fn checkpoint(&self, location: &str, name: &str, o: &CheckpointOutcome) {
         let value = json!({
-            "path": path(dir),
+            "path": location,
             "namespace": name,
             "seq": o.seq,
             "written": o.written,
@@ -308,9 +312,138 @@ impl Out {
         self.print(value, &text);
     }
 
-    pub fn namespaces(&self, status: &StoreStatus) {
-        let value = json!({"namespaces": status.namespaces.iter().map(ns_status_json).collect::<Vec<_>>()});
-        let text = status.namespaces.iter().map(ns_status_text).collect::<Vec<_>>().join("\n");
+    pub fn namespaces(&self, namespaces: &[NamespaceStatus]) {
+        let value = json!({"namespaces": namespaces.iter().map(ns_status_json).collect::<Vec<_>>()});
+        let text = namespaces.iter().map(ns_status_text).collect::<Vec<_>>().join("\n");
+        self.print(value, &text);
+    }
+
+    /// A server's error: its code and message (stderr; with `--json` also
+    /// `{"error": {"code", "message"}}` on stdout).
+    pub fn remote_error(&self, e: &iwdb_query::Error) {
+        if self.json {
+            println!("{}", json!({"error": {"code": e.code().as_str(), "message": e.message()}}));
+        }
+        eprintln!("iwctl: {}: {}", e.code(), e.message());
+    }
+
+    /// A server's status (`iwctl --server ... status`).
+    pub fn server_status(&self, endpoint: &str, s: &ServerStatus) {
+        let m = &s.memory;
+        let r = &s.requests;
+        let value = json!({
+            "server": endpoint,
+            "version": s.version,
+            "started": s.started.to_string(),
+            "ready": s.ready,
+            "fsync": s.fsync,
+            "memory": {
+                "graph_bytes": m.graph_bytes, "payload_bytes": m.payload_bytes, "checkpoint_bytes": m.checkpoint_bytes,
+                "working_bytes": m.working_bytes, "used_bytes": m.used_bytes, "limit_bytes": m.limit_bytes,
+                "warn_bytes": m.warn_bytes, "refuse_writes_bytes": m.refuse_writes_bytes,
+                "state": memory_state(m.state),
+            },
+            "disk": {"wal_bytes": s.disk.wal_bytes, "checkpoint_bytes": s.disk.checkpoint_bytes, "free_bytes": s.disk.free_bytes},
+            "requests": {
+                "active": r.active, "total": r.total, "timed_out": r.timed_out, "cancelled": r.cancelled,
+                "rejected": r.rejected, "denied": r.denied,
+            },
+            "namespaces": s.namespaces.iter().map(ns_status_json).collect::<Vec<_>>(),
+        });
+        let mib = |b: u64| format!("{:.1} MiB", b as f64 / (1 << 20) as f64);
+        let mut text = format!(
+            "server  {}\n  version {}, started {}, {}, fsync {}",
+            endpoint,
+            s.version,
+            s.started,
+            if s.ready { "ready" } else { "draining" },
+            s.fsync
+        );
+        text += &format!(
+            "\n  memory: {} used ({}){}",
+            mib(m.used_bytes),
+            memory_state(m.state),
+            m.limit_bytes.map_or(String::new(), |l| format!(" of a {} limit", mib(l)))
+        );
+        text += &format!(
+            "\n  disk: WAL {}, checkpoints {}{}",
+            mib(s.disk.wal_bytes),
+            mib(s.disk.checkpoint_bytes),
+            s.disk.free_bytes.map_or(String::new(), |f| format!(", {} free", mib(f)))
+        );
+        text += &format!(
+            "\n  requests: {} running, {} ended ({} timed out, {} cancelled, {} rejected, {} denied)",
+            r.active, r.total, r.timed_out, r.cancelled, r.rejected, r.denied
+        );
+        for n in &s.namespaces {
+            text += &format!("\n  {}", ns_status_text(n));
+        }
+        self.print(value, &text);
+    }
+
+    /// The running requests (`iwctl --server ... requests`).
+    pub fn requests(&self, list: &Listed<RequestInfo>) {
+        let value =
+            json!({"requests": list.items.iter().map(request_json).collect::<Vec<_>>(), "truncated": list.truncated});
+        let mut text = if list.items.is_empty() { "no running requests".to_owned() } else { String::new() };
+        let lines: Vec<String> = list.items.iter().map(request_text).collect();
+        text += &lines.join("\n");
+        if list.truncated {
+            text += "\n(more not shown)";
+        }
+        self.print(value, &text);
+    }
+
+    /// A cancelled request (`iwctl --server ... cancel`).
+    pub fn cancelled(&self, r: &RequestInfo) {
+        let value = json!({"cancelled": request_json(r)});
+        self.print(value, &format!("cancelled {}", request_text(r)));
+    }
+
+    /// What pruning an archive removed, or would remove.
+    pub fn prune(&self, r: &PruneReport) {
+        let value = json!({
+            "prune": {
+                "archive": path(&r.archive), "backup": path(&r.backup), "dry_run": r.dry_run, "bytes": r.bytes,
+                "untouched": r.untouched,
+                "namespaces": r.namespaces.iter().map(|n| json!({
+                    "id": n.id, "name": n.name, "backup_checkpoint": n.backup_checkpoint,
+                    "removed_segments": n.removed_segments, "removed_checkpoints": n.removed_checkpoints,
+                    "kept_segments": n.kept_segments,
+                })).collect::<Vec<_>>(),
+            }
+        });
+        let segments: usize = r.namespaces.iter().map(|n| n.removed_segments.len()).sum();
+        let mut text = format!(
+            "{} {} archived segments ({} bytes) of {} before the backup {}",
+            if r.dry_run { "would remove" } else { "removed" },
+            segments,
+            r.bytes,
+            r.archive.display(),
+            r.backup.display()
+        );
+        for n in &r.namespaces {
+            text += &format!(
+                "\n  {}: {} segments removed, {} kept (the backup's oldest checkpoint: {})",
+                n.name,
+                n.removed_segments.len(),
+                n.kept_segments,
+                if n.backup_checkpoint == 0 {
+                    "none, so nothing goes".to_owned()
+                } else {
+                    n.backup_checkpoint.to_string()
+                }
+            );
+            if !n.removed_checkpoints.is_empty() {
+                text += &format!(", archived checkpoints {} removed", seqs(&n.removed_checkpoints));
+            }
+        }
+        if !r.untouched.is_empty() {
+            text += &format!(
+                "\n  left alone (not in the backup): namespaces {}",
+                r.untouched.iter().map(u64::to_string).collect::<Vec<_>>().join(", ")
+            );
+        }
         self.print(value, &text);
     }
 
@@ -537,4 +670,33 @@ pub fn ns_status_text(n: &NamespaceStatus) -> String {
         text += &format!("\n  mark {:?} at {} (seq {})", m.name, m.position, m.seq);
     }
     text
+}
+
+fn memory_state(state: MemoryState) -> &'static str {
+    match state {
+        MemoryState::Normal => "normal",
+        MemoryState::Warn => "warn",
+        MemoryState::RefusingWrites => "refusing writes",
+    }
+}
+
+fn request_json(r: &RequestInfo) -> Value {
+    json!({
+        "id": r.id, "operation": r.operation.name(), "namespace": r.namespace, "user": r.user,
+        "client": r.client.map(|c| c.to_string()), "started": r.started.to_string(),
+        "elapsed_micros": u64::try_from(r.elapsed.as_micros()).unwrap_or(u64::MAX), "cancellable": r.cancellable,
+    })
+}
+
+fn request_text(r: &RequestInfo) -> String {
+    format!(
+        "request {}: {}{} by {}{}, running {:.1} s{}",
+        r.id,
+        r.operation.name(),
+        r.namespace.as_deref().map_or(String::new(), |n| format!(" on {}", n)),
+        r.user,
+        r.client.map_or(String::new(), |c| format!(" from {}", c)),
+        r.elapsed.as_secs_f64(),
+        if r.cancellable { "" } else { " (can't be cancelled)" }
+    )
 }

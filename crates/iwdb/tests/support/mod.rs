@@ -25,6 +25,7 @@ pub fn options(keep: usize) -> StoreOptions {
         archive: None,
         retention: Default::default(),
         memory: Default::default(),
+        backup: Default::default(),
     }
 }
 

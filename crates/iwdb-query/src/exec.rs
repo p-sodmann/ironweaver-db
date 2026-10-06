@@ -145,17 +145,7 @@ impl Pool {
         });
         let (job_token, job_slot, shared) = (token.clone(), slot.clone(), self.shared.clone());
         let run: Job = Box::new(move || {
-            let result = match panic::catch_unwind(AssertUnwindSafe(|| job(&job_token))) {
-                Ok(result) => result,
-                Err(payload) => {
-                    let message = payload
-                        .downcast_ref::<&str>()
-                        .map(|s| s.to_string())
-                        .or_else(|| payload.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "(no message)".into());
-                    Err(Error::internal(format!("internal error (a panic, please report it): {}", message)))
-                }
-            };
+            let result = catch(|| job(&job_token));
             if let Some(key) = timer {
                 lock(&shared.timers).due.remove(&key);
             }
@@ -243,6 +233,38 @@ fn time(shared: &Shared) {
             }
             None => timers = shared.timer_changed.wait(timers).unwrap_or_else(PoisonError::into_inner),
         }
+    }
+}
+
+/// Run `job`, turning a panic into an `internal` error.
+fn catch<T>(job: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+    match panic::catch_unwind(AssertUnwindSafe(job)) {
+        Ok(result) => result,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "(no message)".into());
+            Err(Error::internal(format!("internal error (a panic, please report it): {}", message)))
+        }
+    }
+}
+
+/// Run `job` on a new thread named `name`, not on a pool: for long jobs
+/// that would otherwise hold a worker (backups, checkpoints, ADR 0055).
+/// Dropping the future doesn't stop the job; its result is dropped then. A
+/// panic is an `internal` error, and a thread that can't start too.
+pub fn spawn<T: Send + 'static>(
+    name: &str,
+    job: impl FnOnce() -> Result<T, Error> + Send + 'static,
+) -> Pending<Result<T, Error>> {
+    let slot = Arc::new(Slot::default());
+    let filled = slot.clone();
+    let started = std::thread::Builder::new().name(name.to_owned()).spawn(move || filled.fill(catch(job)));
+    match started {
+        Ok(_) => Pending { slot, token: None },
+        Err(e) => Pending::ready(Err(Error::internal(format!("can't start a thread: {}", e)))),
     }
 }
 

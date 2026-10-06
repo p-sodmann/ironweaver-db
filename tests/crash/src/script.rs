@@ -71,6 +71,7 @@ pub fn child_options(policy: Policy, keep: usize, archive: Option<&Path>) -> Sto
         archive: archive.map(Path::to_path_buf),
         retention: Default::default(),
         memory: Default::default(),
+        backup: Default::default(),
     }
 }
 
@@ -84,6 +85,7 @@ pub fn check_options(policy: Policy, keep: usize, archive: Option<&Path>) -> Sto
         archive: archive.map(Path::to_path_buf),
         retention: Default::default(),
         memory: Default::default(),
+        backup: Default::default(),
     }
 }
 

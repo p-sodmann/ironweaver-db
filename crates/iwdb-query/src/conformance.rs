@@ -95,7 +95,8 @@ macro_rules! conformance_tests {
 /// like [`conformance_tests!`] (`$fixture` dereferences to a
 /// [`Database`] and [`Admin`] whose calls are registered: a server's
 /// client, or the embedded store through
-/// [`Authorized`](crate::Authorized)).
+/// [`Authorized`](crate::Authorized)). The store must archive its WAL
+/// and have a backup directory (step 16e), both empty.
 #[macro_export]
 macro_rules! admin_conformance_tests {
     ($fixture:expr) => {
@@ -105,6 +106,10 @@ macro_rules! admin_conformance_tests {
             a_running_request_is_listed_and_cancelled,
             admin_reads_are_bounded,
             consumers_report_their_lag,
+            checkpoints_are_written_and_reported,
+            backups_are_named_verified_and_never_overwrite,
+            the_running_store_verifies,
+            the_archive_is_pruned_before_a_backup,
         );
     };
 }
@@ -978,4 +983,82 @@ pub async fn consumers_report_their_lag<D: Database + Admin>(db: &D) {
     commit(db, vec![node("d", &["P"], &[])]).await;
     commit(db, vec![node("e", &["P"], &[])]).await;
     assert_eq!(reader(db.consumers().await.unwrap()).lag, 2);
+}
+
+// ---- the admin writes (step 16e, `Admin`) ----
+
+pub async fn checkpoints_are_written_and_reported<D: Database + Admin>(db: &D) {
+    let seq = commit(db, vec![node("a", &["P"], &[])]).await;
+    let all = db.checkpoint(None).await.unwrap();
+    let default = all.iter().find(|c| c.namespace == NS).expect("the default namespace");
+    assert_eq!((default.outcome.seq, default.outcome.written), (seq, true), "{:?}", all);
+    // Nothing new: nothing written
+    let again = db.checkpoint(Some(NS.into())).await.unwrap();
+    assert_eq!(again.len(), 1);
+    assert_eq!((again[0].namespace.as_str(), again[0].outcome.written), (NS, false));
+    assert_eq!(code(db.checkpoint(Some("nope".into())).await), Code::NotFound);
+    let status = db.namespace_status(NS).await.unwrap();
+    assert_eq!((status.checkpoint, status.since_checkpoint), (Some(seq), 0));
+}
+
+pub async fn backups_are_named_verified_and_never_overwrite<D: Database + Admin>(db: &D) {
+    let seq = commit(db, vec![node("a", &["P"], &[])]).await;
+    let request = |name: &str| crate::BackupRequest { name: name.into(), max_bytes_per_second: None, verify: true };
+    let done = db.backup(request("b-1")).await.unwrap();
+    let ns = done.report.namespace(NS).expect("the default namespace");
+    assert_eq!(ns.seq, seq);
+    assert!(done.report.path.ends_with("b-1") && done.report.bytes > 0, "{:?}", done.report);
+    let verified = done.verify.expect("verified");
+    assert!(verified.is_ok() && verified.kind == crate::admin::Kind::Backup, "{:?}", verified);
+    // Never over anything
+    assert_eq!(code(db.backup(request("b-1")).await), Code::Conflict);
+    for bad in ["", "../b", "a/b", ".hidden", "..", "b\\c", "/abs", &"x".repeat(129)] {
+        assert_eq!(code(db.backup(request(bad)).await), Code::InvalidArgument, "{:?}", bad);
+    }
+    // Throttled, and unverified
+    let slow = crate::BackupRequest { name: "b-2".into(), max_bytes_per_second: Some(1 << 30), verify: false };
+    assert!(db.backup(slow).await.unwrap().verify.is_none());
+    // Verified again by name; a missing one isn't found
+    let again = db.verify(crate::VerifyTarget::Backup("b-1".into())).await.unwrap();
+    let named = again.namespaces.iter().find(|n| n.name == NS).map(|n| n.seq);
+    assert!(again.is_ok() && named == Some(Some(seq)), "{:?}", again);
+    assert_eq!(code(db.verify(crate::VerifyTarget::Backup("missing".into())).await), Code::NotFound);
+    assert_eq!(code(db.verify(crate::VerifyTarget::Backup("../b-1".into())).await), Code::InvalidArgument);
+}
+
+pub async fn the_running_store_verifies<D: Database + Admin>(db: &D) {
+    let seq = commit(db, vec![node("a", &["P"], &[])]).await;
+    db.checkpoint(None).await.unwrap();
+    commit(db, vec![node("b", &["P"], &[])]).await;
+    let report = db.verify(crate::VerifyTarget::Store).await.unwrap();
+    assert!(report.is_ok(), "{:#?}", report.problems);
+    assert_eq!(report.kind, crate::admin::Kind::DataDir);
+    let ns = report.namespaces.iter().find(|n| n.name == NS).expect("the default namespace");
+    assert_eq!((ns.seq, ns.checkpoints_checked), (Some(seq + 1), 1), "{:?}", ns);
+    let archive = db.verify(crate::VerifyTarget::Archive).await.unwrap();
+    assert!(archive.is_ok() && archive.kind == crate::admin::Kind::Archive, "{:?}", archive);
+}
+
+pub async fn the_archive_is_pruned_before_a_backup<D: Database + Admin>(db: &D) {
+    // Segments reach the archive when checkpoints remove them
+    for round in 0..4 {
+        for i in 0..20 {
+            let id = format!("n{}-{}", round, i);
+            commit(db, vec![node(&id, &["P"], &[("pad", Value::String("x".repeat(200)))])]).await;
+        }
+        db.checkpoint(Some(NS.into())).await.unwrap();
+    }
+    let request = crate::BackupRequest { name: "kept".into(), max_bytes_per_second: None, verify: false };
+    db.backup(request).await.unwrap();
+    let dry = db.prune_archive("kept".into(), true).await.unwrap();
+    assert!(dry.dry_run && dry.backup.ends_with("kept"), "{:?}", dry);
+    let pruned = db.prune_archive("kept".into(), false).await.unwrap();
+    assert!(!pruned.dry_run);
+    assert_eq!(pruned.namespaces, dry.namespaces, "a dry run says what goes");
+    let again = db.prune_archive("kept".into(), false).await.unwrap();
+    assert!(again.namespaces.iter().all(|n| n.removed_segments.is_empty()), "{:?}", again);
+    let archive = db.verify(crate::VerifyTarget::Archive).await.unwrap();
+    assert!(archive.is_ok(), "{:#?}", archive.problems);
+    assert_eq!(code(db.prune_archive("missing".into(), false).await), Code::NotFound);
+    assert_eq!(code(db.prune_archive("..".into(), false).await), Code::InvalidArgument);
 }

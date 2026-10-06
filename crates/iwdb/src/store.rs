@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use std::thread::JoinHandle;
 
@@ -13,13 +13,13 @@ use iwdb_engine::{CatalogChange, CommitResult, CommitTime, IdempotencyKey, Mutat
 use iwdb_query::{CommitOptions, Edge, NamespaceStatus, Node, ProjectionSpec};
 use iwdb_storage::archive::{Archive, ArchiveHandle};
 use iwdb_storage::backup::{self, NamespaceSource};
-use iwdb_storage::io::{LogFs, StdFs};
+use iwdb_storage::io::{LogFs, StdFs, Throttle};
 use iwdb_storage::layout::{DataDir, NsPaths, create_ns_dir, remove_ns_dir};
 use iwdb_storage::memory::{Memory, MemorySnapshot};
 use iwdb_storage::namespaces::{DEFAULT_NAME, EventKind, NamespaceInfo, NamespaceLog, NamespaceResult, Plan};
 use iwdb_storage::{
-    BackupReport, CheckpointOutcome, Checkpointer, Error, FsyncPolicy, HistoryId, LockStats, LoggedNamespace,
-    OffsetIndex, Recovered, RecoveryReport, StoreRecovery, read_namespace, recover, start_namespace,
+    BackupReport, CheckpointOutcome, Checkpointer, Error, FsyncPolicy, HistoryId, Kind, LockStats, LoggedNamespace,
+    OffsetIndex, Recovered, RecoveryReport, StoreRecovery, VerifyReport, read_namespace, recover, start_namespace,
 };
 
 use crate::StoreOptions;
@@ -151,6 +151,35 @@ struct Shared<F: LogFs> {
     auth: Mutex<()>,
     /// What the store's memory holds, and its limit (ADR 0054).
     memory: Arc<Memory>,
+    /// Backups so far (the metrics, ADR 0055).
+    backups: Backups,
+}
+
+/// Backups of a store since it opened: what the metrics report (ADR 0055).
+#[derive(Debug, Default)]
+struct Backups {
+    /// Backups copying now.
+    running: AtomicU64,
+    /// Bytes written by backups, counted as they are written.
+    bytes: AtomicU64,
+    ok: AtomicU64,
+    failed: AtomicU64,
+    /// When the last successful one finished.
+    last: Mutex<Option<CommitTime>>,
+}
+
+/// Backups of a store since it opened ([`Store::backup_stats`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BackupStats {
+    /// Backups copying now (checkpoints wait for them).
+    pub running: u64,
+    /// Bytes written by backups, counted as they are written.
+    pub bytes: u64,
+    /// Backups that finished, and that failed.
+    pub ok: u64,
+    pub failed: u64,
+    /// When the last successful backup finished.
+    pub last: Option<CommitTime>,
 }
 
 /// Lock a mutex whatever a panicking holder left. The store's own state
@@ -327,6 +356,7 @@ where
             projections: Mutex::new(Vec::new()),
             auth: Mutex::new(()),
             memory,
+            backups: Backups::default(),
         });
         let mut threads = Vec::new();
         let checkpoint = &shared.options.checkpoint;
@@ -698,7 +728,120 @@ where
     /// `dest` is inside the data directory; [`Error::Io`]; a WAL read error
     /// if a segment it copies is damaged; a failed fsync of a WAL (then
     /// that namespace is read-only, as after any failed fsync).
+    ///
+    /// The copy runs at most at [`BackupOptions::max_bytes_per_second`](crate::BackupOptions)
+    /// ([`backup_with`](Self::backup_with) sets another rate).
     pub fn backup(&self, dest: &Path) -> Result<BackupReport, Error> {
+        self.backup_with(dest, self.shared.options.backup.max_bytes_per_second)
+    }
+
+    /// [`backup`](Self::backup), copying at most `max_bytes_per_second`
+    /// (`None` or 0: unthrottled). Checkpoints wait for the whole copy, so
+    /// a slower one holds them back longer (ADR 0055).
+    pub fn backup_with(&self, dest: &Path, max_bytes_per_second: Option<u64>) -> Result<BackupReport, Error> {
+        let stats = &self.shared.backups;
+        stats.running.fetch_add(1, Ordering::AcqRel);
+        let result = self.backup_now(dest, max_bytes_per_second);
+        stats.running.fetch_sub(1, Ordering::AcqRel);
+        match &result {
+            Ok(_) => {
+                stats.ok.fetch_add(1, Ordering::Relaxed);
+                *lock(&stats.last) = Some(CommitTime::now());
+            }
+            Err(_) => {
+                stats.failed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
+    }
+
+    /// Backups since the store opened: running, bytes copied, outcomes.
+    pub fn backup_stats(&self) -> BackupStats {
+        let b = &self.shared.backups;
+        BackupStats {
+            running: b.running.load(Ordering::Acquire),
+            bytes: b.bytes.load(Ordering::Relaxed),
+            ok: b.ok.load(Ordering::Relaxed),
+            failed: b.failed.load(Ordering::Relaxed),
+            last: *lock(&b.last),
+        }
+    }
+
+    /// Verify the open store without stopping it (ADR 0055): per namespace,
+    /// [`verify`](crate::verify)'s checks of its checkpoints and WAL, with
+    /// the WAL read up to the namespace's synced seq (it is fsynced first,
+    /// as for a backup), then the live state's invariants, and the live
+    /// state against the replayed one if nothing was committed meanwhile.
+    /// Damage is reported in [`VerifyReport::problems`], not as an error.
+    /// The namespace log isn't read (the store holds it).
+    ///
+    /// - **Waiting**: each namespace's checkpoints wait while it is checked
+    ///   (its checkpointer's lock is held, so that no file vanishes), and
+    ///   its commits wait for the fsync and for the read lock at the end.
+    /// - **Memory**: a replayed copy of the namespace being checked plus
+    ///   one checkpoint, which the memory limit doesn't count.
+    ///
+    /// Errors: a failed fsync of a WAL (the namespace is then read-only, as
+    /// after any failed fsync); [`Error::Io`] for a directory that can't be
+    /// listed.
+    pub fn verify(&self) -> Result<VerifyReport, Error> {
+        let root = self.dir.root();
+        let mut report = VerifyReport::new(root, Kind::DataDir);
+        if let Ok(Some(marker)) = iwdb_storage::layout::read_marker(root) {
+            report.version = Some(marker.version);
+            report.history = marker.history;
+        }
+        let mut states = self.shared.states();
+        states.sort_by_key(|s| s.info.id);
+        for state in states {
+            let guard = lock(&state.checkpointer);
+            let live = &state.live;
+            // A read-only namespace appends nothing more: read it to its end
+            let until = if live.read_only().is_none() {
+                or_abort("an fsync of the WAL", || live.sync())?;
+                live.wal().synced_seq().min(live.seq())
+            } else {
+                u64::MAX
+            };
+            let (mut sub, replayed) =
+                iwdb_storage::verify::verify_open_namespace(root, &state.info.name, &state.paths, until)?;
+            drop(guard);
+            live.read(|ns| {
+                for violation in iwdb_engine::invariants::check(ns) {
+                    sub.problem(None, format!("the live state at seq {}: {}", ns.seq(), violation));
+                }
+                if let Some(replayed) = replayed.as_ref().filter(|r| r.seq() == ns.seq())
+                    && let Err(difference) = iwdb_engine::invariants::compare(replayed, ns)
+                {
+                    sub.problem(
+                        None,
+                        format!("the live state differs from the WAL replayed to seq {}: {}", ns.seq(), difference),
+                    );
+                }
+            });
+            report.merge(state.info.id, state.info.name.as_str(), true, sub);
+        }
+        report.summarize();
+        log::info!(
+            "{}: verified the open store: {}",
+            root.display(),
+            if report.is_ok() { "ok".to_owned() } else { format!("{} problems", report.problems.len()) }
+        );
+        Ok(report)
+    }
+
+    /// The data directory.
+    pub fn root(&self) -> &Path {
+        self.dir.root()
+    }
+
+    /// The WAL archive the store copies segments into
+    /// ([`StoreOptions::archive`]), if it has one.
+    pub fn archive_dir(&self) -> Option<&Path> {
+        self.shared.options.archive.as_deref()
+    }
+
+    fn backup_now(&self, dest: &Path, max_bytes_per_second: Option<u64>) -> Result<BackupReport, Error> {
         let catalog = lock(&self.shared.catalog);
         let mut states = self.shared.states();
         states.sort_by_key(|s| s.info.id);
@@ -726,7 +869,16 @@ where
             path: catalog.log.path().to_path_buf(),
             source: e,
         })?;
-        let report = backup::write_backup(&self.shared.fs, self.dir.root(), self.history(), &namespaces, &log, dest)?;
+        let mut throttle = Throttle::new(max_bytes_per_second, Some(&self.shared.backups.bytes));
+        let report = backup::write_backup(
+            &self.shared.fs,
+            self.dir.root(),
+            self.history(),
+            &namespaces,
+            &log,
+            dest,
+            &mut throttle,
+        )?;
         log::info!(
             "{}: backed up {} namespaces into '{}'",
             self.dir.root().display(),

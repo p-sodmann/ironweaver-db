@@ -30,6 +30,7 @@ fn options(fsync: FsyncPolicy, retention: WalRetention) -> StoreOptions {
         archive: None,
         retention,
         memory: Default::default(),
+        backup: Default::default(),
     }
 }
 

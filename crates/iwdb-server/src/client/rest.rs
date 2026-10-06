@@ -23,6 +23,7 @@ use hyper_util::rt::TokioExecutor;
 use ironweaver_core::EdgeId;
 use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation};
+use iwdb_query::admin::{PruneReport, VerifyReport};
 use iwdb_query::log::LogTail;
 use iwdb_query::metrics::Metrics;
 use iwdb_query::read::Explain;
@@ -33,6 +34,7 @@ use iwdb_query::{
     FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
     QueryOptions, Schema, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
+use iwdb_query::{BackupDone, BackupRequest, Checkpointed, VerifyTarget};
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -756,6 +758,43 @@ impl Admin for RestRemote {
             ]);
             let response: pb::GetLogResponse = c.get(format!("{}/v1/log{}", c.base, q)).await?;
             log_from_pb(response).map_err(bad_answer)
+        })
+    }
+
+    fn checkpoint(&self, namespace: Option<String>) -> impl Future<Output = Result<Vec<Checkpointed>, Error>> + Send {
+        self.call(move |c| async move {
+            let url = format!("{}/v1/checkpoint", c.base);
+            let response: pb::CheckpointResponse = c.post(url, &pb::CheckpointRequest { namespace }).await?;
+            Ok(checkpoints_from_pb(response))
+        })
+    }
+
+    fn backup(&self, request: BackupRequest) -> impl Future<Output = Result<BackupDone, Error>> + Send {
+        self.call(move |c| async move {
+            let request = pb::BackupRequest {
+                name: request.name,
+                max_bytes_per_second: request.max_bytes_per_second,
+                no_verify: !request.verify,
+            };
+            let response: pb::BackupResponse = c.post(format!("{}/v1/backups", c.base), &request).await?;
+            backup_from_pb(response).map_err(bad_answer)
+        })
+    }
+
+    fn verify(&self, target: VerifyTarget) -> impl Future<Output = Result<VerifyReport, Error>> + Send {
+        self.call(move |c| async move {
+            let url = format!("{}/v1/verify", c.base);
+            let response: pb::VerifyResponse = c.post(url, &verify_target_to_pb(&target)).await?;
+            verify_from_pb(response.report.ok_or_else(|| bad_answer(Error::invalid("the report is missing")))?)
+                .map_err(bad_answer)
+        })
+    }
+
+    fn prune_archive(&self, before: String, dry_run: bool) -> impl Future<Output = Result<PruneReport, Error>> + Send {
+        self.call(move |c| async move {
+            let url = format!("{}/v1/archive/prune", c.base);
+            let response: pb::PruneArchiveResponse = c.post(url, &pb::PruneArchiveRequest { before, dry_run }).await?;
+            prune_from_pb(response).map_err(bad_answer)
         })
     }
 }

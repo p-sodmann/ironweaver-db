@@ -5,11 +5,19 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use iwdb_engine::metrics::{BUCKETS, BUCKETS_MICROS, HistogramSnapshot};
+use iwdb_query::admin::{
+    BackupReport, CheckpointOutcome, Finding, Kind as VerifyKind, NamespaceBackup, NamespacePrune, NamespaceVerify,
+    PruneReport, VerifyReport,
+};
 use iwdb_query::auth::Operation;
 use iwdb_query::log::{Level, LogEvent, LogTail};
 use iwdb_query::metrics::{Family, Kind, Metrics, Sample, Value};
 use iwdb_query::requests::{ConsumerInfo, RequestInfo};
-use iwdb_query::{DiskStatus, Error, LimitSource, Listed, MemoryState, MemoryStatus, RequestCounts, ServerStatus};
+use iwdb_query::{
+    BackupDone, Checkpointed, DiskStatus, Error, LimitSource, Listed, MemoryState, MemoryStatus, RequestCounts,
+    ServerStatus, VerifyTarget,
+};
+use iwdb_storage::HistoryId;
 
 use super::{missing, status_from_pb, status_to_pb, time_from_pb};
 use crate::proto as pb;
@@ -339,6 +347,254 @@ pub(crate) fn log_from_pb(r: pb::GetLogResponse) -> Result<LogTail, Error> {
     Ok(LogTail { events, last_seq: r.last_seq, missed: r.missed })
 }
 
+// ---- the admin writes (step 16e, ADR 0055) ----
+
+fn count(n: usize) -> u64 {
+    n as u64
+}
+
+fn uncount(n: u64) -> usize {
+    usize::try_from(n).unwrap_or(usize::MAX)
+}
+
+fn history_from_pb(text: &str) -> Result<HistoryId, Error> {
+    text.parse().map_err(|_| Error::invalid(format!("invalid history id '{}'", text)))
+}
+
+pub(crate) fn checkpoints_to_pb(list: &[Checkpointed]) -> pb::CheckpointResponse {
+    pb::CheckpointResponse {
+        namespaces: list
+            .iter()
+            .map(|c| pb::NamespaceCheckpoint {
+                namespace: c.namespace.clone(),
+                seq: c.outcome.seq,
+                written: c.outcome.written,
+                removed_checkpoints: c.outcome.removed_checkpoints.clone(),
+                removed_segments: c.outcome.removed_segments.clone(),
+            })
+            .collect(),
+    }
+}
+
+pub(crate) fn checkpoints_from_pb(r: pb::CheckpointResponse) -> Vec<Checkpointed> {
+    r.namespaces
+        .into_iter()
+        .map(|c| Checkpointed {
+            namespace: c.namespace,
+            outcome: CheckpointOutcome {
+                seq: c.seq,
+                written: c.written,
+                removed_checkpoints: c.removed_checkpoints,
+                removed_segments: c.removed_segments,
+            },
+        })
+        .collect()
+}
+
+fn backup_report_to_pb(r: &BackupReport) -> pb::BackupReport {
+    pb::BackupReport {
+        path: r.path.display().to_string(),
+        history: r.history.to_string(),
+        namespaces: r
+            .namespaces
+            .iter()
+            .map(|n| pb::NamespaceBackup {
+                id: n.id,
+                name: n.name.clone(),
+                seq: n.seq,
+                time_micros: n.time.map(|t| t.0),
+                checkpoints: n.checkpoints.clone(),
+                segments: n.segments.clone(),
+            })
+            .collect(),
+        bytes: r.bytes,
+    }
+}
+
+fn backup_report_from_pb(r: Option<pb::BackupReport>) -> Result<BackupReport, Error> {
+    let r = r.ok_or_else(|| missing("the backup report"))?;
+    Ok(BackupReport {
+        path: r.path.into(),
+        history: history_from_pb(&r.history)?,
+        namespaces: r
+            .namespaces
+            .into_iter()
+            .map(|n| NamespaceBackup {
+                id: n.id,
+                name: n.name,
+                seq: n.seq,
+                time: n.time_micros.map(time_from_pb),
+                checkpoints: n.checkpoints,
+                segments: n.segments,
+            })
+            .collect(),
+        bytes: r.bytes,
+    })
+}
+
+pub(crate) fn backup_to_pb(b: &BackupDone) -> pb::BackupResponse {
+    pb::BackupResponse { backup: Some(backup_report_to_pb(&b.report)), verify: b.verify.as_ref().map(verify_to_pb) }
+}
+
+pub(crate) fn backup_from_pb(r: pb::BackupResponse) -> Result<BackupDone, Error> {
+    Ok(BackupDone { report: backup_report_from_pb(r.backup)?, verify: r.verify.map(verify_from_pb).transpose()? })
+}
+
+fn finding_to_pb(f: &Finding) -> pb::Finding {
+    pb::Finding { path: f.path.as_ref().map(|p| p.display().to_string()), message: f.message.clone() }
+}
+
+fn finding_from_pb(f: pb::Finding) -> Finding {
+    Finding { path: f.path.map(Into::into), message: f.message }
+}
+
+pub(crate) fn verify_to_pb(r: &VerifyReport) -> pb::VerifyReport {
+    let kind = match r.kind {
+        VerifyKind::DataDir => pb::VerifyKind::DataDir,
+        VerifyKind::Backup => pb::VerifyKind::Backup,
+        VerifyKind::Archive => pb::VerifyKind::Archive,
+    };
+    pb::VerifyReport {
+        path: r.path.display().to_string(),
+        kind: kind as i32,
+        version: r.version,
+        history: r.history.map(|h| h.to_string()),
+        problems: r.problems.iter().map(finding_to_pb).collect(),
+        notes: r.notes.iter().map(finding_to_pb).collect(),
+        checkpoints: count(r.checkpoints),
+        checkpoints_checked: count(r.checkpoints_checked),
+        segments: count(r.segments),
+        records: r.records,
+        first_seq: r.first_seq,
+        last_seq: r.last_seq,
+        seq: r.seq,
+        time_micros: r.time.map(|t| t.0),
+        namespaces: r
+            .namespaces
+            .iter()
+            .map(|n| pb::NamespaceVerify {
+                id: n.id,
+                name: n.name.clone(),
+                checkpoints: count(n.checkpoints),
+                checkpoints_checked: count(n.checkpoints_checked),
+                segments: count(n.segments),
+                records: n.records,
+                first_seq: n.first_seq,
+                last_seq: n.last_seq,
+                seq: n.seq,
+                time_micros: n.time.map(|t| t.0),
+            })
+            .collect(),
+    }
+}
+
+pub(crate) fn verify_from_pb(r: pb::VerifyReport) -> Result<VerifyReport, Error> {
+    let kind = match pb::VerifyKind::try_from(r.kind) {
+        Ok(pb::VerifyKind::DataDir) => VerifyKind::DataDir,
+        Ok(pb::VerifyKind::Backup) => VerifyKind::Backup,
+        Ok(pb::VerifyKind::Archive) => VerifyKind::Archive,
+        _ => return Err(Error::invalid(format!("unknown verify kind {}", r.kind))),
+    };
+    Ok(VerifyReport {
+        path: r.path.into(),
+        kind,
+        version: r.version,
+        history: r.history.as_deref().map(history_from_pb).transpose()?,
+        problems: r.problems.into_iter().map(finding_from_pb).collect(),
+        notes: r.notes.into_iter().map(finding_from_pb).collect(),
+        checkpoints: uncount(r.checkpoints),
+        checkpoints_checked: uncount(r.checkpoints_checked),
+        segments: uncount(r.segments),
+        records: r.records,
+        first_seq: r.first_seq,
+        last_seq: r.last_seq,
+        seq: r.seq,
+        time: r.time_micros.map(time_from_pb),
+        namespaces: r
+            .namespaces
+            .into_iter()
+            .map(|n| NamespaceVerify {
+                id: n.id,
+                name: n.name,
+                checkpoints: uncount(n.checkpoints),
+                checkpoints_checked: uncount(n.checkpoints_checked),
+                segments: uncount(n.segments),
+                records: n.records,
+                first_seq: n.first_seq,
+                last_seq: n.last_seq,
+                seq: n.seq,
+                time: n.time_micros.map(time_from_pb),
+            })
+            .collect(),
+    })
+}
+
+/// A verify request's target. Errors: `invalid_argument` for both a backup
+/// and the archive.
+pub(crate) fn verify_target_from_pb(r: pb::VerifyRequest) -> Result<VerifyTarget, Error> {
+    match (r.backup, r.archive) {
+        (Some(_), true) => Err(Error::invalid("verify a backup or the archive, not both")),
+        (Some(name), false) => Ok(VerifyTarget::Backup(name)),
+        (None, true) => Ok(VerifyTarget::Archive),
+        (None, false) => Ok(VerifyTarget::Store),
+    }
+}
+
+pub(crate) fn verify_target_to_pb(t: &VerifyTarget) -> pb::VerifyRequest {
+    match t {
+        VerifyTarget::Store => pb::VerifyRequest { backup: None, archive: false },
+        VerifyTarget::Backup(name) => pb::VerifyRequest { backup: Some(name.clone()), archive: false },
+        VerifyTarget::Archive => pb::VerifyRequest { backup: None, archive: true },
+    }
+}
+
+pub(crate) fn prune_to_pb(r: &PruneReport) -> pb::PruneArchiveResponse {
+    pb::PruneArchiveResponse {
+        report: Some(pb::PruneReport {
+            archive: r.archive.display().to_string(),
+            backup: r.backup.display().to_string(),
+            dry_run: r.dry_run,
+            namespaces: r
+                .namespaces
+                .iter()
+                .map(|n| pb::NamespacePrune {
+                    id: n.id,
+                    name: n.name.clone(),
+                    backup_checkpoint: n.backup_checkpoint,
+                    removed_segments: n.removed_segments.clone(),
+                    removed_checkpoints: n.removed_checkpoints.clone(),
+                    kept_segments: count(n.kept_segments),
+                })
+                .collect(),
+            untouched: r.untouched.clone(),
+            bytes: r.bytes,
+        }),
+    }
+}
+
+pub(crate) fn prune_from_pb(r: pb::PruneArchiveResponse) -> Result<PruneReport, Error> {
+    let r = r.report.ok_or_else(|| missing("the prune report"))?;
+    Ok(PruneReport {
+        archive: r.archive.into(),
+        backup: r.backup.into(),
+        dry_run: r.dry_run,
+        namespaces: r
+            .namespaces
+            .into_iter()
+            .map(|n| NamespacePrune {
+                id: n.id,
+                name: n.name,
+                backup_checkpoint: n.backup_checkpoint,
+                removed_segments: n.removed_segments,
+                removed_checkpoints: n.removed_checkpoints,
+                kept_segments: uncount(n.kept_segments),
+            })
+            .collect(),
+        untouched: r.untouched,
+        bytes: r.bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use iwdb_engine::CommitTime;
@@ -380,5 +636,87 @@ mod tests {
             cancellable: true,
         };
         assert_eq!(request_from_pb(Some(request_to_pb(&r))), Ok(r));
+    }
+
+    #[test]
+    fn admin_writes_round_trip() {
+        let checkpoints = vec![Checkpointed {
+            namespace: "social".into(),
+            outcome: CheckpointOutcome {
+                seq: 7,
+                written: true,
+                removed_checkpoints: vec![3],
+                removed_segments: vec![1, 4],
+            },
+        }];
+        assert_eq!(checkpoints_from_pb(checkpoints_to_pb(&checkpoints)), checkpoints);
+        let finding = |path: Option<&str>| Finding { path: path.map(Into::into), message: "m".into() };
+        let report = VerifyReport {
+            path: "/b/x".into(),
+            kind: VerifyKind::Backup,
+            version: Some(5),
+            history: Some(HistoryId([7; 16])),
+            problems: vec![finding(Some("/b/x/IWDB"))],
+            notes: vec![finding(None)],
+            checkpoints: 2,
+            checkpoints_checked: 1,
+            segments: 3,
+            records: 9,
+            first_seq: Some(1),
+            last_seq: Some(9),
+            seq: Some(9),
+            time: Some(CommitTime(11)),
+            namespaces: vec![NamespaceVerify {
+                id: 1,
+                name: "default".into(),
+                checkpoints: 2,
+                checkpoints_checked: 1,
+                segments: 3,
+                records: 9,
+                first_seq: Some(1),
+                last_seq: Some(9),
+                seq: Some(9),
+                time: None,
+            }],
+        };
+        let done = BackupDone {
+            report: BackupReport {
+                path: "/b/x".into(),
+                history: HistoryId([7; 16]),
+                namespaces: vec![NamespaceBackup {
+                    id: 1,
+                    name: "default".into(),
+                    seq: 9,
+                    time: Some(CommitTime(11)),
+                    checkpoints: vec![5],
+                    segments: vec![6, 8],
+                }],
+                bytes: 1234,
+            },
+            verify: Some(report.clone()),
+        };
+        assert_eq!(backup_from_pb(backup_to_pb(&done)), Ok(done));
+        assert_eq!(verify_from_pb(verify_to_pb(&report)), Ok(report));
+        let prune = PruneReport {
+            archive: "/a".into(),
+            backup: "/b/x".into(),
+            dry_run: true,
+            namespaces: vec![NamespacePrune {
+                id: 1,
+                name: "default".into(),
+                backup_checkpoint: 5,
+                removed_segments: vec![1, 3],
+                removed_checkpoints: vec![1],
+                kept_segments: 2,
+            }],
+            untouched: vec![4],
+            bytes: 99,
+        };
+        assert_eq!(prune_from_pb(prune_to_pb(&prune)), Ok(prune));
+        for target in [VerifyTarget::Store, VerifyTarget::Archive, VerifyTarget::Backup("b".into())] {
+            assert_eq!(verify_target_from_pb(verify_target_to_pb(&target)), Ok(target));
+        }
+        let both = pb::VerifyRequest { backup: Some("b".into()), archive: true };
+        assert!(verify_target_from_pb(both).is_err());
     }
 }

@@ -13,9 +13,9 @@ iwdb-server --check-config --config server.toml       # validate; print the effe
 
 - **Names.** A setting's variable is `IWDB_` and its path in the file in upper case, with `.` as `_`: `store.fsync` is `IWDB_STORE_FSYNC`, `limits.max.timeout_ms` is `IWDB_LIMITS_MAX_TIMEOUT_MS`.
 - **Values.** Numbers as digits (fractions like `0.9`), booleans as `true`/`false` (or `1`/`0`), choices by name (`group`), paths and addresses as they are.
-- **Typos are errors.** A variable that starts like a section (`IWDB_STORE_`, `IWDB_SERVER_`, `IWDB_MEMORY_`, `IWDB_LIMITS_`, `IWDB_LOG_`, `IWDB_CONSOLE_`, `IWDB_AUTH_`, `IWDB_TLS_`, `IWDB_AUDIT_`) but names no setting stops the server (apart from the two bootstrap variables below). Other `IWDB_*` variables (test harnesses use some) are ignored.
+- **Typos are errors.** A variable that starts like a section (`IWDB_STORE_`, `IWDB_SERVER_`, `IWDB_MEMORY_`, `IWDB_LIMITS_`, `IWDB_LOG_`, `IWDB_CONSOLE_`, `IWDB_AUTH_`, `IWDB_TLS_`, `IWDB_AUDIT_`, `IWDB_BACKUP_`) but names no setting stops the server (apart from the two bootstrap variables below). Other `IWDB_*` variables (test harnesses use some) are ignored.
 - **Every problem at once.** Startup checks the file and the variables before it opens the store, and lists every problem with where it came from (the file, a variable), then exits with code 2. A TOML syntax or type error in the file is reported with its line; the file's other checks wait until it parses.
-- **Relative paths** (`data_dir`, `tls.cert`, `tls.key`, `tls.client_ca`, `audit.dir`). From the file: relative to the file's directory. From a variable: relative to the working directory.
+- **Relative paths** (`data_dir`, `tls.cert`, `tls.key`, `tls.client_ca`, `audit.dir`, `store.archive`, `backup.dir`). From the file: relative to the file's directory. From a variable: relative to the working directory.
 - **Projections** (`[[projection]]`, [projections.md](projections.md)) are set in the file only; a projection's Postgres URL can come from a variable of your choice (`url_env`).
 
 ## Settings
@@ -30,6 +30,7 @@ iwdb-server --check-config --config server.toml       # validate; print the effe
 | `store.checkpoint_on_shutdown` | `IWDB_STORE_CHECKPOINT_ON_SHUTDOWN` | `true` | Checkpoint every namespace when the server stops, so the next start replays nothing. |
 | `store.retain_records` | `IWDB_STORE_RETAIN_RECORDS` | `0` | WAL kept for the change stream: the last N commits ([changes.md](changes.md)). |
 | `store.retain_age_secs` | `IWDB_STORE_RETAIN_AGE_SECS` | `0` | ... and the commits younger than this. |
+| `store.archive` | `IWDB_STORE_ARCHIVE` | `unset` | The WAL archive: every WAL segment is copied there, durably, before a checkpoint removes it, so a backup plus the archive restores to any later seq ([ADR 0009](../adr/0009-backup-archive-restore.md)). Created if missing; it must belong to the store's history (a restored store needs a new one). Pruned with `iwctl archive prune` (see [Backups](#backups)). |
 | `server.drain_timeout_secs` | `IWDB_SERVER_DRAIN_TIMEOUT_SECS` | `30` | How long running calls may finish on shutdown. |
 | `server.max_message_bytes` | `IWDB_SERVER_MAX_MESSAGE_BYTES` | `67108864` | Largest request or answer message (REST: request body); at least 1024. |
 | `server.workers` | `IWDB_SERVER_WORKERS` | `0` | Threads running requests (0: one per CPU). |
@@ -63,6 +64,8 @@ iwdb-server --check-config --config server.toml       # validate; print the effe
 | `tls.client_auth` | `IWDB_TLS_CLIENT_AUTH` | `"optional"` | With `tls.client_ca`: `optional` (a client may present a certificate) or `required` (every request but health and the console's pages needs one). |
 | `audit.dir` | `IWDB_AUDIT_DIR` | `unset` | Also write the audit log to a file per UTC day here (`audit-YYYY-MM-DD.jsonl`, JSON lines, mode 0600; the directory is made with 0700). Unset: the audit log is only in the log ([ADR 0049](../adr/0049-audit-log.md)). |
 | `audit.retention_days` | `IWDB_AUDIT_RETENTION_DAYS` | `30` | Days of audit files to keep, today included; older ones are deleted at start and at each new day. `0`: keep them all. |
+| `backup.dir` | `IWDB_BACKUP_DIR` | `unset` | The backup directory: the only place remote backups (`Backup`, `iwctl --server ... backup <name>`) are written, as `<dir>/<name>`, and where `Verify` and `PruneArchive` find backups by name. It must exist and not be inside the data directory. Unset: remote backups are refused ([ADR 0055](../adr/0055-admin-writes-and-iwctl-against-a-server.md)). |
+| `backup.max_bytes_per_second` | `IWDB_BACKUP_MAX_BYTES_PER_SECOND` | `0` | Copy backups at most this fast (`0`: as fast as the disks go); a `Backup` request can set another rate. Checkpoints wait for a backup's whole copy, so a slower backup holds them back longer, and the WAL grows meanwhile. |
 
 A test keeps this table equal to the code's list (`iwdb_server::config::KEYS`).
 
@@ -111,12 +114,22 @@ The REST body is the `Health` message: `{"state": "HEALTH_STATE_RECOVERING"}`, `
 
 `iwdb-server --probe [--config <file>]` asks the readiness route of the configured server (file and `IWDB_*` variables: the `listen` port, a wildcard address as loopback, over TLS unless `tls.enabled = false`) and exits 0 when ready, 1 otherwise, 2 for a configuration it can't read: the Docker image's `HEALTHCHECK`, with no curl needed. `iwdb-server --probe https://<host:port>` (or `http://`) asks that address instead. Over TLS the probe doesn't verify the server's certificate: it sends no credentials and reads only readiness. A Kubernetes pod can use the gRPC probe or `httpGet` on `/v1/health/ready` for readiness and `/v1/health/live` for liveness.
 
+## Backups
+
+An operator backs up, checkpoints, verifies and prunes a running server with `iwctl --server` ([iwctl.md](../iwctl.md)), the `AdminService` RPCs ([grpc.md](grpc.md)) or REST ([rest.md](rest.md#admin-writes)); all need a server-wide admin, and every call is audited ([ADR 0055](../adr/0055-admin-writes-and-iwctl-against-a-server.md)).
+
+- **Where backups go.** Only into `backup.dir`, by name: one path component of 1 to 128 ASCII letters, digits, `.`, `_` or `-`, not starting with `.`. A name under which anything exists (a file, a directory, a symlink) is refused with `conflict`: a backup never overwrites. A backup that fails is removed. Keep the directory writable only by the server's user.
+- **Throttling.** `backup.max_bytes_per_second` (or the request's rate). Checkpoints wait for the whole copy: at 10 MiB/s, a 50 GiB store holds them back about 85 minutes, and the WAL grows by everything committed meanwhile. `iwdb_backup_running` shows it, and `rate(iwdb_backup_bytes_total[1m])` the copy's speed ([metrics.md](metrics.md)).
+- **Under the memory limit** checkpoints, backups and pruning go on; verifying is refused with `resource_exhausted` while writes are refused (it replays each namespace into memory the limit doesn't count).
+- **Restore is offline**: `iwctl restore` on the server's host into a new directory, then start a server on it.
+- **The archive.** With `store.archive`, `iwctl --server <endpoint> archive prune --before <backup>` removes what no restore from that backup (or a later one) needs; keep the oldest backup you want to restore from.
+
 ## Audit log
 
-Every login (and failed login), logout, user, grant, token, namespace and catalog change, every cancelled request (`CancelRequest`, step 16c), and every refused request (`unauthenticated`, `permission_denied`), leaves one audit entry ([ADR 0049](../adr/0049-audit-log.md)). Reads and data commits don't (the change stream is for those).
+Every login (and failed login), logout, user, grant, token, namespace and catalog change, every cancelled request (`CancelRequest`, step 16c), every admin write (`Checkpoint`, `Backup`, `Verify`, `PruneArchive`, step 16e), and every refused request (`unauthenticated`, `permission_denied`), leaves one audit entry ([ADR 0049](../adr/0049-audit-log.md)). Reads and data commits don't (the change stream is for those).
 
 - **In the log.** Entries are log events of target `iwdb::audit` at `info`, in the log's format. They pass whatever `log.level` says unless the level names `iwdb::audit` itself (`warn,iwdb::audit=off` turns them off in the log).
 - **In files** with `audit.dir`: the same entries as JSON lines, one file per UTC day, the files older than `audit.retention_days` deleted.
 - **How long they are kept.** The audit files: `audit.retention_days` (30 by default). Entries in the log (stderr) are kept as long as whatever collects it keeps them: set its limits there (Docker: the log driver's `max-size` and `max-file`; journald: `MaxRetentionSec`, `SystemMaxUse`).
-- **Fields** (absent ones left out): `operation` (the RPC: `Login`, `CreateUser`, `CommitCatalog`, ...), `outcome` (`success` or `failure`), `code` (the error code of a failure), `user`, `auth` (`session`, `api_token`, `certificate`, `off`), `client` (the client's IP address), `namespace`, `subject` (the user an account change is about), `token_name`, `role`, `admin`, `seq` (a catalog change's commit), `namespace_event` (a namespace's creation or drop), `request` (the id of the request a `CancelRequest` cancels; its owner is the `subject`). Never a password, a token or its hash, a certificate, an error message or a value of the data.
+- **Fields** (absent ones left out): `operation` (the RPC: `Login`, `CreateUser`, `CommitCatalog`, ...), `outcome` (`success` or `failure`), `code` (the error code of a failure), `user`, `auth` (`session`, `api_token`, `certificate`, `off`), `client` (the client's IP address), `namespace`, `subject` (the user an account change is about), `token_name`, `role`, `admin`, `seq` (a catalog change's commit), `namespace_event` (a namespace's creation or drop), `request` (the id of the request a `CancelRequest` cancels; its owner is the `subject`), `backup` (the backup a `Backup`, `Verify` or `PruneArchive` names, by its name in the backup directory). Never a password, a token or its hash, a certificate, an error message or a value of the data.
 - **Best effort.** An entry is written after the outcome is known, without fsync: a crash can lose the last entries, never the changes, which are in the WAL.

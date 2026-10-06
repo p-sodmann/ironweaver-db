@@ -25,6 +25,7 @@ fn options(fsync: FsyncPolicy) -> StoreOptions {
         archive: None,
         retention: Default::default(),
         memory: Default::default(),
+        backup: Default::default(),
     }
 }
 

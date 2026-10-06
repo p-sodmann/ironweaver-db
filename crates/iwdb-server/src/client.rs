@@ -33,6 +33,7 @@ use std::time::Duration;
 use ironweaver_core::EdgeId;
 use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation};
+use iwdb_query::admin::{PruneReport, VerifyReport};
 use iwdb_query::log::LogTail;
 use iwdb_query::metrics::Metrics;
 use iwdb_query::read::Explain;
@@ -43,6 +44,7 @@ use iwdb_query::{
     FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
     QueryOptions, Schema, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
+use iwdb_query::{BackupDone, BackupRequest, Checkpointed, VerifyTarget};
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 use tokio::runtime::{Handle, Runtime};
 use tokio::task::JoinHandle;
@@ -796,6 +798,40 @@ impl Admin for Remote {
             let response =
                 client.get_log(pb::GetLogRequest { after, limit: limit_to_pb(limit) }).await.map_err(status)?;
             log_from_pb(response.into_inner()).map_err(bad_answer)
+        })
+    }
+
+    fn checkpoint(&self, namespace: Option<String>) -> impl Future<Output = Result<Vec<Checkpointed>, Error>> + Send {
+        self.call_admin(move |mut client| async move {
+            let response = client.checkpoint(pb::CheckpointRequest { namespace }).await.map_err(status)?;
+            Ok(checkpoints_from_pb(response.into_inner()))
+        })
+    }
+
+    fn backup(&self, request: BackupRequest) -> impl Future<Output = Result<BackupDone, Error>> + Send {
+        self.call_admin(move |mut client| async move {
+            let request = pb::BackupRequest {
+                name: request.name,
+                max_bytes_per_second: request.max_bytes_per_second,
+                no_verify: !request.verify,
+            };
+            let response = client.backup(request).await.map_err(status)?;
+            backup_from_pb(response.into_inner()).map_err(bad_answer)
+        })
+    }
+
+    fn verify(&self, target: VerifyTarget) -> impl Future<Output = Result<VerifyReport, Error>> + Send {
+        self.call_admin(move |mut client| async move {
+            let response = client.verify(verify_target_to_pb(&target)).await.map_err(status)?.into_inner();
+            verify_from_pb(response.report.ok_or_else(|| bad_answer(Error::invalid("the report is missing")))?)
+                .map_err(bad_answer)
+        })
+    }
+
+    fn prune_archive(&self, before: String, dry_run: bool) -> impl Future<Output = Result<PruneReport, Error>> + Send {
+        self.call_admin(move |mut client| async move {
+            let response = client.prune_archive(pb::PruneArchiveRequest { before, dry_run }).await.map_err(status)?;
+            prune_from_pb(response.into_inner()).map_err(bad_answer)
         })
     }
 }

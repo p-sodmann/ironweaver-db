@@ -1,5 +1,7 @@
 // Ironweaver DB gRPC contract, version 1: the operator's reads and
-// cancelling a request (step 16c, ADRs 0050 to 0052).
+// cancelling a request (step 16c, ADRs 0050 to 0052), and the admin writes
+// (step 16e, ADR 0055): checkpoints, backups, verifying, pruning the WAL
+// archive.
 //
 // One RPC per operation of the `Admin` trait (crates/iwdb-query), with the
 // same semantics: the server only translates. Every list is bounded. Who
@@ -7,6 +9,9 @@
 // metrics and the change-stream readers, narrowed to the namespaces it has
 // a role on, and lists and cancels its own requests; a server-wide admin
 // sees and cancels everyone's and reads the log. Cancelling is audited.
+// The admin writes are a server-wide admin's, and every call is audited.
+// They can't be cancelled, and have no deadline: a throttled backup runs
+// as long as its copy takes.
 //
 // Nothing here holds a secret, a token, a certificate or a value of the
 // data: names, numbers and the server's own log lines (which hold none).
@@ -35,6 +40,19 @@ service AdminService {
   rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
   // The server's last log events (server-wide admin).
   rpc GetLog(GetLogRequest) returns (GetLogResponse);
+  // Checkpoint a namespace, or every namespace: write a checkpoint at its
+  // seq and remove what is no longer kept (archived first, if the store
+  // archives its WAL). Waits for a running backup's copy.
+  rpc Checkpoint(CheckpointRequest) returns (CheckpointResponse);
+  // Back up the store into the server's backup directory (`[backup] dir`),
+  // under a new name; then verify the backup.
+  rpc Backup(BackupRequest) returns (BackupResponse);
+  // Verify the running store, a backup in the backup directory, or the
+  // store's WAL archive, without changing it. Damage is in the report.
+  rpc Verify(VerifyRequest) returns (VerifyResponse);
+  // Remove from the store's WAL archive what no restore from a backup (in
+  // the backup directory) or a later one can need.
+  rpc PruneArchive(PruneArchiveRequest) returns (PruneArchiveResponse);
 }
 
 message GetServerStatusRequest {}
@@ -295,4 +313,170 @@ enum LogLevel {
   LOG_LEVEL_INFO = 3;
   LOG_LEVEL_WARN = 4;
   LOG_LEVEL_ERROR = 5;
+}
+
+message CheckpointRequest {
+  // Only this namespace; missing: every namespace.
+  optional string namespace = 1;
+}
+
+message CheckpointResponse {
+  // By namespace.
+  repeated NamespaceCheckpoint namespaces = 1;
+}
+
+message NamespaceCheckpoint {
+  string namespace = 1;
+  // The seq of the newest checkpoint after the run.
+  uint64 seq = 2;
+  // Whether a checkpoint was written (false: the newest was at the seq).
+  bool written = 3;
+  // The seqs of the checkpoints removed.
+  repeated uint64 removed_checkpoints = 4;
+  // The first seqs of the WAL segments removed.
+  repeated uint64 removed_segments = 5;
+}
+
+message BackupRequest {
+  // The backup's name in the backup directory: 1 to 128 ASCII letters,
+  // digits, `.`, `_` or `-`, not starting with `.`. Nothing may exist under
+  // it yet (`conflict`).
+  string name = 1;
+  // Copy at most this many bytes per second; missing: the server's
+  // `[backup] max_bytes_per_second`; 0: unthrottled. Checkpoints wait for
+  // the whole copy.
+  optional uint64 max_bytes_per_second = 2;
+  // Don't verify the backup once written.
+  bool no_verify = 3;
+}
+
+message BackupResponse {
+  BackupReport backup = 1;
+  // The backup's verification (missing with `no_verify`).
+  optional VerifyReport verify = 2;
+}
+
+message BackupReport {
+  // Where the backup is, on the server.
+  string path = 1;
+  // The store's history id (32 hex digits).
+  string history = 2;
+  // By namespace id.
+  repeated NamespaceBackup namespaces = 3;
+  // Bytes copied.
+  uint64 bytes = 4;
+}
+
+message NamespaceBackup {
+  uint64 id = 1;
+  string name = 2;
+  // The seq the backup reaches in the namespace (its synced seq then).
+  uint64 seq = 3;
+  // That commit's time, in microseconds since 1970 (UTC), if known.
+  optional int64 time_micros = 4;
+  // The seqs of the checkpoints copied.
+  repeated uint64 checkpoints = 5;
+  // The first seqs of the WAL segments copied.
+  repeated uint64 segments = 6;
+}
+
+message VerifyRequest {
+  // A backup in the backup directory, by name.
+  optional string backup = 1;
+  // The store's WAL archive. With neither, the running store.
+  bool archive = 2;
+}
+
+message VerifyResponse {
+  VerifyReport report = 1;
+}
+
+// What verify checked and found (as `iwctl verify` reports it).
+message VerifyReport {
+  string path = 1;
+  VerifyKind kind = 2;
+  // The layout version of a data directory or backup, the format version
+  // of an archive.
+  optional uint32 version = 3;
+  // The history id (32 hex digits).
+  optional string history = 4;
+  // Damage: empty if intact.
+  repeated Finding problems = 5;
+  // What a crash or an interrupted cleanup leaves, which recovery handles:
+  // not damage.
+  repeated Finding notes = 6;
+  uint64 checkpoints = 7;
+  uint64 checkpoints_checked = 8;
+  uint64 segments = 9;
+  uint64 records = 10;
+  // With exactly one namespace: its first and last WAL record, the seq it
+  // recovers to, and the last record's commit time (microseconds).
+  optional uint64 first_seq = 11;
+  optional uint64 last_seq = 12;
+  optional uint64 seq = 13;
+  optional int64 time_micros = 14;
+  // By namespace id.
+  repeated NamespaceVerify namespaces = 15;
+}
+
+enum VerifyKind {
+  VERIFY_KIND_UNSPECIFIED = 0;
+  VERIFY_KIND_DATA_DIR = 1;
+  VERIFY_KIND_BACKUP = 2;
+  VERIFY_KIND_ARCHIVE = 3;
+}
+
+message Finding {
+  // The file it is about.
+  optional string path = 1;
+  string message = 2;
+}
+
+message NamespaceVerify {
+  uint64 id = 1;
+  string name = 2;
+  uint64 checkpoints = 3;
+  uint64 checkpoints_checked = 4;
+  uint64 segments = 5;
+  uint64 records = 6;
+  optional uint64 first_seq = 7;
+  optional uint64 last_seq = 8;
+  optional uint64 seq = 9;
+  optional int64 time_micros = 10;
+}
+
+message PruneArchiveRequest {
+  // The oldest backup to keep, by name in the backup directory.
+  string before = 1;
+  // Remove nothing: report what would be removed.
+  bool dry_run = 2;
+}
+
+message PruneArchiveResponse {
+  PruneReport report = 1;
+}
+
+message PruneReport {
+  string archive = 1;
+  string backup = 2;
+  bool dry_run = 3;
+  // The namespaces the backup holds, by id.
+  repeated NamespacePrune namespaces = 4;
+  // Namespaces of the archive the backup doesn't hold: left alone.
+  repeated uint64 untouched = 5;
+  // Bytes removed (or that would be).
+  uint64 bytes = 6;
+}
+
+message NamespacePrune {
+  uint64 id = 1;
+  string name = 2;
+  // The namespace's oldest checkpoint in the backup (0: none, and nothing
+  // is removed). Every archived record after it is kept.
+  uint64 backup_checkpoint = 3;
+  // The first seqs of the segments removed.
+  repeated uint64 removed_segments = 4;
+  // The seqs of the archived (imports') checkpoints removed.
+  repeated uint64 removed_checkpoints = 5;
+  uint64 kept_segments = 6;
 }
