@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use iwdb_engine::catalog::{IndexChanges, NamespaceName};
 use iwdb_engine::codec::{self, Loaded};
@@ -21,6 +22,7 @@ use crate::archive::ArchiveHandle;
 use crate::changes::{self, WalRetention};
 use crate::io::LogFs;
 use crate::layout::NsPaths;
+use crate::memory::{Charge, Memory, Part};
 use crate::{Error, WalReader, reader};
 
 /// Suffix of checkpoint file names: `<seq, 20 digits>.ckpt`.
@@ -224,6 +226,9 @@ pub struct Checkpointer<F: LogFs> {
     disabled: Option<String>,
     archive: Option<ArchiveHandle<F>>,
     retention: WalRetention,
+    /// The copy's memory, charged to the store's [`Memory`] (ADR 0054)
+    /// after each run.
+    charge: Option<Charge>,
 }
 
 impl<F: LogFs> std::fmt::Debug for Checkpointer<F> {
@@ -263,6 +268,7 @@ impl<F: LogFs> Checkpointer<F> {
             disabled: None,
             archive: None,
             retention: WalRetention::default(),
+            charge: None,
         }
     }
 
@@ -270,6 +276,14 @@ impl<F: LogFs> Checkpointer<F> {
     /// need them (ADR 0031).
     pub fn set_retention(&mut self, retention: WalRetention) {
         self.retention = retention;
+    }
+
+    /// Charge the copy of the namespace to `memory`'s checkpoint part
+    /// (ADR 0054): its graph and payloads, as of each run.
+    pub fn set_memory(&mut self, memory: &Arc<Memory>) {
+        let charge = memory.charge(Part::Checkpoint);
+        charge.set(self.namespace.as_ref().map_or(0, |ns| ns.memory_bytes() as u64));
+        self.charge = Some(charge);
     }
 
     /// Archive WAL segments into `archive` before removing them (see the
@@ -303,6 +317,14 @@ impl<F: LogFs> Checkpointer<F> {
     /// synced seq of the log. A target at or below the checkpointer's own
     /// seq writes nothing new.
     pub fn run(&mut self, target: u64) -> Result<CheckpointOutcome, Error> {
+        let result = self.run_once(target);
+        if let Some(charge) = &self.charge {
+            charge.set(self.namespace.as_ref().map_or(0, |ns| ns.memory_bytes() as u64));
+        }
+        result
+    }
+
+    fn run_once(&mut self, target: u64) -> Result<CheckpointOutcome, Error> {
         if let Some(cause) = &self.disabled {
             return Err(Error::CheckpointsDisabled { cause: cause.clone() });
         }

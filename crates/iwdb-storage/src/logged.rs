@@ -13,6 +13,7 @@ use iwdb_engine::metrics::{Histogram, HistogramSnapshot};
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, IndexBuild, MarkUpdate, Mutation, Namespace, Prepare};
 
 use crate::io::{LogFs, StdFs};
+use crate::memory::{Charge, Memory, Part};
 use crate::{Error, Wal};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -50,6 +51,15 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// ([`iwdb_engine::Error::ApplyFailed`]), every further commit fails with
 /// [`Error::ReadOnly`] until the namespace is reopened from its checkpoint
 /// and log. Reads still work, and see every applied commit.
+///
+/// **Memory** (ADR 0054). The namespace charges its graph and payloads to a
+/// [`Memory`] ([`with_memory`](Self::with_memory); its own unlimited one
+/// otherwise). While that refuses writes, a commit that adds anything
+/// fails with [`Error::MemoryLimit`] after it is prepared and before it is
+/// logged, so it never reaches the WAL; commits that only remove
+/// ([`Prepared::only_removes`](iwdb_engine::Prepared::only_removes)),
+/// duplicates of keyed commits and the system namespace's commits go
+/// through.
 #[derive(Debug)]
 pub struct LoggedNamespace<F: LogFs = StdFs> {
     namespace: RwLock<Namespace>,
@@ -84,6 +94,14 @@ pub struct LoggedNamespace<F: LogFs = StdFs> {
     nodes: AtomicUsize,
     edges: AtomicUsize,
     memory: AtomicUsize,
+    /// The graph's and the payloads' charges ([`Part::Graph`],
+    /// [`Part::Payload`]), set with each apply.
+    graph_charge: Charge,
+    payload_charge: Charge,
+    /// Whether the memory limit applies: every namespace but the system
+    /// namespace (users, grants, session tokens), so that an operator can
+    /// still log in and act.
+    limited: bool,
 }
 
 /// A namespace's size as of its last apply ([`LoggedNamespace::sizes`]).
@@ -97,6 +115,12 @@ pub struct Sizes {
 
 /// Rows scanned per read-lock hold of an online index build.
 pub const BUILD_CHUNK: usize = 2048;
+
+/// The memory an index build is charged (ADR 0054): its node handles, and
+/// an estimate per node scanned, between the measured 75 (an integer key)
+/// and 216 bytes (an email). The core reports no figure (upstream #61).
+const BUILD_HANDLE_BYTES: usize = 8;
+const BUILD_ENTRY_BYTES: usize = 96;
 
 /// An online index build in progress ([`LoggedNamespace::builds`]).
 #[derive(Debug)]
@@ -187,7 +211,14 @@ impl<F: LogFs> LoggedNamespace<F> {
         let fsyncs = wal.fsyncs();
         let g = namespace.graph();
         let (nodes, edges, memory) = (g.node_count(), g.edge_count(), g.memory_usage());
+        let accounting = Memory::unlimited();
+        let (graph_charge, payload_charge) = (accounting.charge(Part::Graph), accounting.charge(Part::Payload));
+        graph_charge.set(memory as u64);
+        payload_charge.set(namespace.payload_bytes() as u64);
         Ok(LoggedNamespace {
+            limited: !namespace.name().is_reserved(),
+            graph_charge,
+            payload_charge,
             fsyncs,
             nodes: AtomicUsize::new(nodes),
             edges: AtomicUsize::new(edges),
@@ -205,6 +236,22 @@ impl<F: LogFs> LoggedNamespace<F> {
             builds: Mutex::new(Vec::new()),
             applies_waiting: AtomicUsize::new(0),
         })
+    }
+
+    /// Charge this namespace's memory to `memory` (the store's), whose
+    /// limit then refuses its writes (see the type docs).
+    pub fn with_memory(mut self, memory: &Arc<Memory>) -> Self {
+        let (graph, payload) = (memory.charge(Part::Graph), memory.charge(Part::Payload));
+        graph.set(self.graph_charge.bytes());
+        payload.set(self.payload_charge.bytes());
+        self.graph_charge = graph;
+        self.payload_charge = payload;
+        self
+    }
+
+    /// The memory this namespace charges to.
+    pub fn memory(&self) -> &Arc<Memory> {
+        self.graph_charge.memory()
     }
 
     /// Commit a data transaction: all mutations or none. Returns once the
@@ -256,7 +303,11 @@ impl<F: LogFs> LoggedNamespace<F> {
         // An index the graph lacks is built first, reading the nodes a
         // chunk at a time under the read lock, so that neither commits nor
         // reads wait for the whole build (ADR 0019)
-        let build = self.build_index(&change, key)?;
+        let (build, _charge) = match self.build_index(&change, key)? {
+            Some((build, charge)) => (Some(build), Some(charge)),
+            None => (None, None),
+        };
+        // The build's charge is released once the index is in the graph
         self.log_and_apply_built(build, |ns| ns.prepare_catalog_keyed(change, key))
     }
 
@@ -265,13 +316,23 @@ impl<F: LogFs> LoggedNamespace<F> {
         lock(&self.builds).clone()
     }
 
-    fn build_index(&self, change: &CatalogChange, key: Option<&IdempotencyKey>) -> Result<Option<IndexBuild>, Error> {
+    /// Build the index `change` needs, if any, charged to the memory's
+    /// working part (an estimate per node, ADR 0054) until the returned
+    /// charge is dropped. Refused while the memory refuses writes.
+    fn build_index(
+        &self,
+        change: &CatalogChange,
+        key: Option<&IdempotencyKey>,
+    ) -> Result<Option<(IndexBuild, Charge)>, Error> {
         let mut build = {
             let mut ns = self.namespace.write().unwrap_or_else(PoisonError::into_inner);
             if key.is_some_and(|k| ns.keys().get(k).is_some()) {
                 return Ok(None);
             }
             let Some(path) = ns.index_needed(change) else { return Ok(None) };
+            if self.limited {
+                self.memory().check_write()?;
+            }
             // O(1). A path the core refuses is left to the commit, whose
             // validation reports it
             match ns.begin_index_build(path) {
@@ -284,6 +345,9 @@ impl<F: LogFs> LoggedNamespace<F> {
         let handles = self.namespace().node_handles();
         let progress =
             Arc::new(BuildProgress { path: build.path().clone(), total: handles.len(), scanned: AtomicU64::new(0) });
+        let charge = self.memory().charge(Part::Working);
+        let estimate = |scanned: usize| (BUILD_HANDLE_BYTES * handles.len() + BUILD_ENTRY_BYTES * scanned) as u64;
+        charge.set(estimate(0));
         lock(&self.builds).push(progress.clone());
         let mut result = Ok(());
         for chunk in handles.chunks(BUILD_CHUNK) {
@@ -298,10 +362,11 @@ impl<F: LogFs> LoggedNamespace<F> {
             if result.is_err() {
                 break;
             }
-            progress.scanned.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            let scanned = progress.scanned.fetch_add(chunk.len() as u64, Ordering::Relaxed) as usize + chunk.len();
+            charge.set(estimate(scanned));
         }
         lock(&self.builds).retain(|b| !Arc::ptr_eq(b, &progress));
-        result.map(|()| Some(build))
+        result.map(|()| Some((build, charge)))
     }
 
     /// Mark the namespace dropped: further commits fail with
@@ -551,6 +616,11 @@ impl<F: LogFs> LoggedNamespace<F> {
             (Ok(Prepare::New(prepared)), None) => prepared,
             (Err(e), None) => return Err(e.into()),
         };
+        // The memory limit (ADR 0054): refused before the log, so a refused
+        // commit is never in the WAL
+        if self.limited && !prepared.only_removes() {
+            self.memory().check_write()?;
+        }
         let appended = wal.append(prepared.record());
         self.note_failure(&wal, &appended);
         let time = appended?;
@@ -567,6 +637,8 @@ impl<F: LogFs> LoggedNamespace<F> {
         self.nodes.store(g.node_count(), Ordering::Relaxed);
         self.edges.store(g.edge_count(), Ordering::Relaxed);
         self.memory.store(g.memory_usage(), Ordering::Relaxed);
+        self.graph_charge.set(g.memory_usage() as u64);
+        self.payload_charge.set(namespace.payload_bytes() as u64);
         drop(namespace);
         self.stats.record(start.elapsed());
         match applied {

@@ -34,6 +34,7 @@ pub fn options() -> StoreOptions {
         create_if_missing: true,
         archive: None,
         retention: Default::default(),
+        memory: Default::default(),
     }
 }
 

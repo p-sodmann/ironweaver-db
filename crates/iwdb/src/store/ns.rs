@@ -14,6 +14,7 @@ use iwdb_query::{
     CommitOptions, Edge, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus, Node, ProjectionSpec,
 };
 use iwdb_storage::io::LogFs;
+use iwdb_storage::memory::Part;
 use iwdb_storage::{
     BatchLimits, ChangeBatch, CheckpointOutcome, Error, FsyncPolicy, LockStats, LoggedNamespace, Sizes, Wait,
 };
@@ -274,7 +275,12 @@ where
     ) -> Result<Analysis<R>, Error> {
         let deadline = options.deadline();
         let (token, _scheduled) = self.start(options, &deadline, "the analytics job")?;
+        // Working memory (ADR 0054): an estimate while the projection is
+        // collected, then its own size until the job ends
+        let charge = self.store.shared.memory.charge(Part::Working);
         let (raw, seq) = self.read(|ns| {
+            let g = ns.graph();
+            charge.set(projection_estimate(g.node_count(), g.edge_count(), g.node_bound()));
             let raw = Projection::collect::<_, _, GraphError>(
                 ns.graph(),
                 spec.direction,
@@ -287,8 +293,10 @@ where
         let raw = raw.map_err(iwdb_engine::Error::from)?;
         let outcome = cancel::run(&token, || {
             let projection = raw.finish();
+            charge.set(projection.memory_usage() as u64);
             job(&projection)
         });
+        drop(charge);
         match outcome {
             Ok(Ok(value)) => Ok(Analysis { seq, value }),
             Ok(Err(GraphError::Interrupted)) | Err(GraphError::Interrupted) => {
@@ -573,4 +581,12 @@ fn dir_bytes(dir: &std::path::Path) -> u64 {
         .filter_map(|e| e.ok()?.metadata().ok())
         .filter(|m| m.is_file())
         .fold(0u64, |total, m| total.saturating_add(m.len()))
+}
+
+/// Bytes a projection of a graph holds while it is collected (ADR 0054):
+/// per edge its row entry (16), per node its handle, id and offsets (48),
+/// per node slot its dense index (4). Within 6 % of the measured peaks; the
+/// core reports no figure for a raw projection (upstream #61).
+fn projection_estimate(nodes: usize, edges: usize, slots: usize) -> u64 {
+    (16 * edges as u64).saturating_add(48 * nodes as u64).saturating_add(4 * slots as u64)
 }

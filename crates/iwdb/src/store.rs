@@ -15,6 +15,7 @@ use iwdb_storage::archive::{Archive, ArchiveHandle};
 use iwdb_storage::backup::{self, NamespaceSource};
 use iwdb_storage::io::{LogFs, StdFs};
 use iwdb_storage::layout::{DataDir, NsPaths, create_ns_dir, remove_ns_dir};
+use iwdb_storage::memory::{Memory, MemorySnapshot};
 use iwdb_storage::namespaces::{DEFAULT_NAME, EventKind, NamespaceInfo, NamespaceLog, NamespaceResult, Plan};
 use iwdb_storage::{
     BackupReport, CheckpointOutcome, Checkpointer, Error, FsyncPolicy, HistoryId, LockStats, LoggedNamespace,
@@ -148,6 +149,8 @@ struct Shared<F: LogFs> {
     /// Serializes changes to users, grants and tokens (`crate::auth`): each
     /// reads the system namespace and commits what it read plus the change.
     auth: Mutex<()>,
+    /// What the store's memory holds, and its limit (ADR 0054).
+    memory: Arc<Memory>,
 }
 
 /// Lock a mutex whatever a panicking holder left. The store's own state
@@ -270,6 +273,18 @@ where
     /// inject faults with it).
     pub fn open_with(fs: F, dir: &Path, options: StoreOptions) -> Result<Self, Error> {
         options.checkpoint.check()?;
+        options.memory.check().map_err(Error::InvalidOptions)?;
+        let memory = Memory::new(&options.memory);
+        if let Some(limit) = memory.limit() {
+            log::info!(
+                "{}: memory limit {} bytes ({}): warning at {} bytes, refusing writes at {} bytes",
+                dir.display(),
+                limit.bytes,
+                limit.source.as_str(),
+                limit.warn,
+                limit.refuse_writes
+            );
+        }
         let Recovered { dir, log, namespaces, report } =
             recover(fs.clone(), dir, options.create_if_missing, options.wal.clone())?;
         log_report(dir.root(), &report);
@@ -291,6 +306,7 @@ where
             let state = Arc::new(new_state(
                 &fs,
                 &options,
+                &memory,
                 &archive,
                 recovered.info,
                 recovered.paths,
@@ -310,6 +326,7 @@ where
             options,
             projections: Mutex::new(Vec::new()),
             auth: Mutex::new(()),
+            memory,
         });
         let mut threads = Vec::new();
         let checkpoint = &shared.options.checkpoint;
@@ -341,6 +358,12 @@ where
     /// The namespace `name`, as a handle. Errors: [`Error::NoSuchNamespace`]
     /// (also for the reserved system namespace, which only
     /// [`users`](Self::users) reads and writes, ADR 0043).
+    /// What the store's memory holds, its limit and state (ADR 0054). O(1),
+    /// no lock.
+    pub fn memory(&self) -> MemorySnapshot {
+        self.shared.memory.snapshot()
+    }
+
     /// The WALs' fsync policy.
     pub fn fsync_policy(&self) -> FsyncPolicy {
         self.shared.options.wal.fsync
@@ -467,6 +490,12 @@ where
             Plan::Duplicate(event) => return Ok(NamespaceResult { event, deduplicated: true }),
             Plan::New { id } => id,
         };
+        // The memory limit (ADR 0054), before the namespace is logged.
+        // `default` is only created when a store opens without one, the
+        // system namespace with the first user, which must work at any time
+        if name.as_str() != NAMESPACE && !name.is_reserved() {
+            self.shared.memory.check_write()?;
+        }
         let paths = create_ns_dir(&self.shared.fs, &self.shared.root, id)?;
         let event = catalog.log.append(EventKind::Create, id, name, key)?;
         self.open_created(catalog, name, paths, event)
@@ -498,8 +527,17 @@ where
         let info =
             catalog.log.table().get(name).cloned().ok_or_else(|| Error::NoSuchNamespace { name: name.to_string() })?;
         let size_trigger = shared.options.checkpoint.wal_size.unwrap_or(u64::MAX);
-        let state =
-            Arc::new(new_state(&shared.fs, &shared.options, &catalog.archive, info, paths, live, report, size_trigger));
+        let state = Arc::new(new_state(
+            &shared.fs,
+            &shared.options,
+            &shared.memory,
+            &catalog.archive,
+            info,
+            paths,
+            live,
+            report,
+            size_trigger,
+        ));
         shared.namespaces.write().unwrap_or_else(PoisonError::into_inner).insert(name.to_string(), state);
         Ok(NamespaceResult { event, deduplicated: false })
     }
@@ -878,6 +916,7 @@ fn unreachable_default() -> ! {
 fn new_state<F: LogFs + Clone>(
     fs: &F,
     options: &StoreOptions,
+    memory: &Arc<Memory>,
     archive: &Option<Arc<Archive<F>>>,
     info: NamespaceInfo,
     paths: NsPaths,
@@ -897,6 +936,8 @@ fn new_state<F: LogFs + Clone>(
         checkpointer.set_archive(ArchiveHandle::new(archive.clone(), info.id));
     }
     checkpointer.set_retention(options.retention);
+    checkpointer.set_memory(memory);
+    let live = live.with_memory(memory);
     let last_checkpoint = recovery.checkpoint.and_then(|seq| checkpoint_time(&paths, seq));
     let checkpoint_seq = AtomicU64::new(checkpointer.newest().unwrap_or(NO_CHECKPOINT));
     NsState {

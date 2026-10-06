@@ -17,6 +17,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use iwdb_engine::CommitTime;
+pub use iwdb_storage::memory::{LimitSource, MemorySnapshot, MemoryState};
 
 use crate::log::LogTail;
 use crate::metrics::Metrics;
@@ -44,14 +45,48 @@ pub struct ServerStatus {
     pub namespaces: Vec<NamespaceStatus>,
 }
 
-/// Memory, as the database counts it.
+/// Memory, as the database counts it, and its limit (ADR 0054). Server
+/// wide: every namespace's, the system namespace's included.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemoryStatus {
-    /// The namespaces' graphs, indexes included (the sum of their
-    /// `memory_bytes`).
+    /// The live graphs, indexes included: the core's estimate (the sum of
+    /// the namespaces' `memory_bytes`).
     pub graph_bytes: u64,
-    /// The configured memory limit; `None`: none (step 16d adds it).
+    /// The live graphs' payloads (attribute maps), estimated.
+    pub payload_bytes: u64,
+    /// The checkpointers' copies of the namespaces.
+    pub checkpoint_bytes: u64,
+    /// Analytics projections and index builds while they run.
+    pub working_bytes: u64,
+    /// The sum of the parts: what the limit counts.
+    pub used_bytes: u64,
+    /// The memory limit; `None`: none.
     pub limit_bytes: Option<u64>,
+    /// Where the warning starts, and where writes are refused; `None`
+    /// without a limit.
+    pub warn_bytes: Option<u64>,
+    pub refuse_writes_bytes: Option<u64>,
+    pub state: MemoryState,
+    /// Where the limit came from; `None` without a limit.
+    pub limit_source: Option<LimitSource>,
+}
+
+impl MemoryStatus {
+    /// The status of `memory`'s snapshot.
+    pub fn of(m: &MemorySnapshot) -> Self {
+        MemoryStatus {
+            graph_bytes: m.graph,
+            payload_bytes: m.payload,
+            checkpoint_bytes: m.checkpoint,
+            working_bytes: m.working,
+            used_bytes: m.used(),
+            limit_bytes: m.limit.map(|l| l.bytes),
+            warn_bytes: m.limit.map(|l| l.warn),
+            refuse_writes_bytes: m.limit.map(|l| l.refuse_writes),
+            state: m.state,
+            limit_source: m.limit.map(|l| l.source),
+        }
+    }
 }
 
 /// Disk use of the data directory.

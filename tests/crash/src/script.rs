@@ -70,6 +70,7 @@ pub fn child_options(policy: Policy, keep: usize, archive: Option<&Path>) -> Sto
         create_if_missing: true,
         archive: archive.map(Path::to_path_buf),
         retention: Default::default(),
+        memory: Default::default(),
     }
 }
 
@@ -82,6 +83,7 @@ pub fn check_options(policy: Policy, keep: usize, archive: Option<&Path>) -> Sto
         create_if_missing: true,
         archive: archive.map(Path::to_path_buf),
         retention: Default::default(),
+        memory: Default::default(),
     }
 }
 

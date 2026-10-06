@@ -53,7 +53,9 @@ pub trait Database: Send + Sync {
     /// Commit a transaction: all mutations or none, validated against the
     /// state after all of them; durable per the store's fsync policy when
     /// it returns. Errors: `invalid_argument`, `not_found`, `conflict`,
-    /// `constraint_violation`, `read_only`, `io` (outcome unknown).
+    /// `constraint_violation`, `read_only`, `io` (outcome unknown),
+    /// `resource_exhausted` (above the memory limit, ADR 0054: nothing
+    /// was logged; commits that only remove still pass).
     fn commit(
         &self,
         namespace: &str,
@@ -245,7 +247,8 @@ pub trait Database: Send + Sync {
     fn namespaces(&self) -> impl Future<Output = Result<Vec<NamespaceInfo>, Error>> + Send;
 
     /// Create a namespace. With a key, a retry returns the original event.
-    /// Errors: `conflict` if it exists, `invalid_argument` for a bad name.
+    /// Errors: `conflict` if it exists, `invalid_argument` for a bad name,
+    /// `resource_exhausted` above the memory limit (ADR 0054).
     fn create_namespace(
         &self,
         name: &str,

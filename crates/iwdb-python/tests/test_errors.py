@@ -14,6 +14,7 @@ ALL = [
     iwdb.NotFoundError,
     iwdb.InvalidError,
     iwdb.ReadOnlyError,
+    iwdb.ResourceExhaustedError,
     iwdb.LockedError,
     iwdb.IoError,
     iwdb.CorruptError,

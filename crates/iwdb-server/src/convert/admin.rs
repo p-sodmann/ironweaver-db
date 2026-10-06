@@ -9,7 +9,7 @@ use iwdb_query::auth::Operation;
 use iwdb_query::log::{Level, LogEvent, LogTail};
 use iwdb_query::metrics::{Family, Kind, Metrics, Sample, Value};
 use iwdb_query::requests::{ConsumerInfo, RequestInfo};
-use iwdb_query::{DiskStatus, Error, Listed, MemoryStatus, RequestCounts, ServerStatus};
+use iwdb_query::{DiskStatus, Error, LimitSource, Listed, MemoryState, MemoryStatus, RequestCounts, ServerStatus};
 
 use super::{missing, status_from_pb, status_to_pb, time_from_pb};
 use crate::proto as pb;
@@ -29,7 +29,7 @@ pub(crate) fn server_status_to_pb(s: &ServerStatus) -> pb::ServerStatus {
         started_micros: s.started.0,
         ready: s.ready,
         fsync: s.fsync.clone(),
-        memory: Some(pb::MemoryStatus { graph_bytes: s.memory.graph_bytes, limit_bytes: s.memory.limit_bytes }),
+        memory: Some(memory_to_pb(&s.memory)),
         disk: Some(pb::DiskStatus {
             wal_bytes: s.disk.wal_bytes,
             checkpoint_bytes: s.disk.checkpoint_bytes,
@@ -47,6 +47,59 @@ pub(crate) fn server_status_to_pb(s: &ServerStatus) -> pb::ServerStatus {
     }
 }
 
+fn memory_to_pb(m: &MemoryStatus) -> pb::MemoryStatus {
+    let state = match m.state {
+        MemoryState::Normal => pb::MemoryState::Normal,
+        MemoryState::Warn => pb::MemoryState::Warn,
+        MemoryState::RefusingWrites => pb::MemoryState::RefusingWrites,
+    };
+    let source = match m.limit_source {
+        None => pb::MemoryLimitSource::Unspecified,
+        Some(LimitSource::Config) => pb::MemoryLimitSource::Config,
+        Some(LimitSource::CgroupV2) => pb::MemoryLimitSource::CgroupV2,
+        Some(LimitSource::CgroupV1) => pb::MemoryLimitSource::CgroupV1,
+    };
+    pb::MemoryStatus {
+        graph_bytes: m.graph_bytes,
+        limit_bytes: m.limit_bytes,
+        payload_bytes: m.payload_bytes,
+        checkpoint_bytes: m.checkpoint_bytes,
+        working_bytes: m.working_bytes,
+        used_bytes: m.used_bytes,
+        warn_bytes: m.warn_bytes,
+        refuse_writes_bytes: m.refuse_writes_bytes,
+        state: state.into(),
+        limit_source: source.into(),
+    }
+}
+
+fn memory_from_pb(m: pb::MemoryStatus) -> MemoryStatus {
+    // An unknown state (a newer server) reads as the nearest known one
+    let state = match pb::MemoryState::try_from(m.state) {
+        Ok(pb::MemoryState::Warn) => MemoryState::Warn,
+        Ok(pb::MemoryState::RefusingWrites) => MemoryState::RefusingWrites,
+        _ => MemoryState::Normal,
+    };
+    let limit_source = match pb::MemoryLimitSource::try_from(m.limit_source) {
+        Ok(pb::MemoryLimitSource::Config) => Some(LimitSource::Config),
+        Ok(pb::MemoryLimitSource::CgroupV2) => Some(LimitSource::CgroupV2),
+        Ok(pb::MemoryLimitSource::CgroupV1) => Some(LimitSource::CgroupV1),
+        _ => None,
+    };
+    MemoryStatus {
+        graph_bytes: m.graph_bytes,
+        payload_bytes: m.payload_bytes,
+        checkpoint_bytes: m.checkpoint_bytes,
+        working_bytes: m.working_bytes,
+        used_bytes: m.used_bytes,
+        limit_bytes: m.limit_bytes,
+        warn_bytes: m.warn_bytes,
+        refuse_writes_bytes: m.refuse_writes_bytes,
+        state,
+        limit_source,
+    }
+}
+
 pub(crate) fn server_status_from_pb(s: Option<pb::ServerStatus>) -> Result<ServerStatus, Error> {
     let s = s.ok_or_else(|| missing("the server status"))?;
     let memory = s.memory.unwrap_or_default();
@@ -57,7 +110,7 @@ pub(crate) fn server_status_from_pb(s: Option<pb::ServerStatus>) -> Result<Serve
         started: time_from_pb(s.started_micros),
         ready: s.ready,
         fsync: s.fsync,
-        memory: MemoryStatus { graph_bytes: memory.graph_bytes, limit_bytes: memory.limit_bytes },
+        memory: memory_from_pb(memory),
         disk: DiskStatus {
             wal_bytes: disk.wal_bytes,
             checkpoint_bytes: disk.checkpoint_bytes,

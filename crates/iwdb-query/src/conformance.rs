@@ -871,8 +871,13 @@ pub async fn server_status_reports_the_database<D: Database + Admin>(db: &D) {
     assert_eq!((now.seq, now.nodes), (seq, was.nodes + 1));
     assert_eq!(now.since_checkpoint, now.seq - now.checkpoint.unwrap_or(0));
     assert!(after.disk.wal_bytes > 0, "{:?}", after.disk);
+    // Memory is server-wide: the listed namespaces, the system namespace
+    // and those the caller can't see (ADR 0054)
+    let m = &after.memory;
     let graphs: u64 = after.namespaces.iter().map(|n| n.memory_bytes as u64).sum();
-    assert_eq!(after.memory.graph_bytes, graphs);
+    assert!(m.graph_bytes >= graphs, "{:?}", m);
+    assert_eq!(m.used_bytes, m.graph_bytes + m.payload_bytes + m.checkpoint_bytes + m.working_bytes);
+    assert_eq!(m.limit_bytes.is_some(), m.refuse_writes_bytes.is_some());
     // The commit and the first status at least
     assert!(after.requests.total >= before.requests.total + 2, "{:?} then {:?}", before.requests, after.requests);
     assert!(after.requests.active >= 1, "this call runs");

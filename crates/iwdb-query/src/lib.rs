@@ -38,7 +38,9 @@ mod service;
 #[cfg(feature = "conformance")]
 pub mod conformance;
 
-pub use admin::{Admin, DiskStatus, Listed, MemoryStatus, RequestCounts, ServerStatus};
+pub use admin::{
+    Admin, DiskStatus, LimitSource, Listed, MemorySnapshot, MemoryState, MemoryStatus, RequestCounts, ServerStatus,
+};
 pub use auth::{
     Accounts, Audited, Authenticate, Authorized, NewToken, Operation, Principal, Requirement, Role, Secret, Session,
     TokenInfo, UserInfo, Via,

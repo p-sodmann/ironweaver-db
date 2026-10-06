@@ -72,6 +72,12 @@ pub mod exc {
         Error,
         "The server can't take the request now (no connection, shutting down, overloaded): retry with backoff."
     );
+    create_exception!(
+        iwdb,
+        ResourceExhaustedError,
+        Error,
+        "The server's memory is above the line where it refuses writes: nothing changed. Deletes, drops and reads still work; retry with backoff."
+    );
     create_exception!(iwdb, InternalError, Error, "A bug: a Rust panic outside the commit path.");
     create_exception!(
         iwdb,
@@ -90,7 +96,7 @@ pub mod exc {
 use exc::{
     BudgetExceededError, ClosedError, ConflictError, ConstraintError, CorruptError, CursorExpiredError, InternalError,
     InvalidError, IoError, LockedError, NotFoundError, NotRetainedError, PermissionDeniedError, ReadOnlyError,
-    TimeoutError, UnauthenticatedError, UnavailableError,
+    ResourceExhaustedError, TimeoutError, UnauthenticatedError, UnavailableError,
 };
 
 /// Register the exceptions in the module.
@@ -112,6 +118,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CursorExpiredError", py.get_type::<CursorExpiredError>())?;
     m.add("NotRetainedError", py.get_type::<NotRetainedError>())?;
     m.add("UnavailableError", py.get_type::<UnavailableError>())?;
+    m.add("ResourceExhaustedError", py.get_type::<ResourceExhaustedError>())?;
     m.add("UnauthenticatedError", py.get_type::<UnauthenticatedError>())?;
     m.add("PermissionDeniedError", py.get_type::<PermissionDeniedError>())?;
     Ok(())
@@ -124,6 +131,7 @@ pub fn to_py(error: Error) -> PyErr {
         Error::Engine(engine) => engine_error(engine, message),
         Error::ReadOnly { .. } => ReadOnlyError::new_err(message),
         Error::Locked { .. } => LockedError::new_err(message),
+        Error::MemoryLimit { .. } => ResourceExhaustedError::new_err(message),
         Error::Io { .. } | Error::CheckpointsDisabled { .. } => IoError::new_err(message),
         Error::InvalidOptions(_) => InvalidError::new_err(message),
         Error::NoSuchNamespace { .. } | Error::NamespaceDropped { .. } => NotFoundError::new_err(message),
@@ -173,6 +181,7 @@ pub fn query_to_py(error: iwdb_query::Error) -> PyErr {
         Code::CursorExpired => CursorExpiredError::new_err(message),
         Code::NotRetained => NotRetainedError::new_err(message),
         Code::Unavailable => UnavailableError::new_err(message),
+        Code::ResourceExhausted => ResourceExhaustedError::new_err(message),
         Code::Unauthenticated => UnauthenticatedError::new_err(message),
         Code::PermissionDenied => PermissionDeniedError::new_err(message),
         // Python has no way to cancel a request

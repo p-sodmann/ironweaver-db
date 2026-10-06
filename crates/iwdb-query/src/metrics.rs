@@ -80,7 +80,7 @@ metrics! {
     LOCK_HOLD: "iwdb_lock_hold_seconds", Histogram, ["lock"], "seconds", "How long namespace locks were held: `write` by commits (apply and index flush), `read` by reads.";
     NAMESPACE_NODES: "iwdb_namespace_nodes", Gauge, ["namespace"], "", "Nodes in the namespace.";
     NAMESPACE_EDGES: "iwdb_namespace_edges", Gauge, ["namespace"], "", "Edges in the namespace.";
-    NAMESPACE_MEMORY: "iwdb_namespace_memory_bytes", Gauge, ["namespace"], "bytes", "Approximate bytes the namespace's graph uses, indexes included (attribute payloads not counted).";
+    NAMESPACE_MEMORY: "iwdb_namespace_memory_bytes", Gauge, ["namespace"], "bytes", "Approximate bytes the namespace's graph uses, indexes included (attribute payloads not counted; see `iwdb_memory_used_bytes`).";
     WAL_BYTES: "iwdb_wal_bytes", Gauge, ["namespace"], "bytes", "Bytes of the namespace's WAL segments on disk.";
     CHECKPOINT_BYTES: "iwdb_checkpoint_bytes", Gauge, ["namespace"], "bytes", "Bytes of the namespace's checkpoints on disk.";
     CHECKPOINT_LAG: "iwdb_checkpoint_lag_commits", Gauge, ["namespace"], "commits", "Commits since the namespace's newest checkpoint: what recovery would replay.";
@@ -89,6 +89,11 @@ metrics! {
     READ_ONLY: "iwdb_namespace_read_only", Gauge, ["namespace"], "", "1 if the namespace is read-only after a failure (until the server restarts).";
     CHECKPOINT_FAILED: "iwdb_checkpoint_failed", Gauge, ["namespace"], "", "1 if the namespace's last checkpoint failed.";
     DISK_FREE: "iwdb_disk_free_bytes", Gauge, [], "bytes", "Bytes free for the server on the data directory's file system; no sample where it can't be read.";
+    MEMORY_USED: "iwdb_memory_used_bytes", Gauge, ["part"], "bytes", "Memory the server counts against its limit, by part: `graph` (the live graphs and indexes), `payload` (their attributes, estimated), `checkpoint` (the checkpointers' copies), `working` (analytics projections and index builds, estimated).";
+    MEMORY_LIMIT: "iwdb_memory_limit_bytes", Gauge, [], "bytes", "The memory limit (`[memory] limit_bytes`, or the cgroup's); no sample without one.";
+    MEMORY_WARN: "iwdb_memory_warn_bytes", Gauge, [], "bytes", "From here on the server warns (`warn_at` of the limit); no sample without a limit.";
+    MEMORY_REFUSE_WRITES: "iwdb_memory_refuse_writes_bytes", Gauge, [], "bytes", "From here on the server refuses writes with `resource_exhausted` (`refuse_writes_at` of the limit); no sample without a limit.";
+    MEMORY_STATE: "iwdb_memory_state", Gauge, [], "", "0 normal, 1 above the warning line, 2 refusing writes. Each state is left 5 % of the limit below its line.";
 }
 
 /// A metric's value in one sample.
@@ -256,7 +261,7 @@ mod tests {
                 assert!(d.name.ends_with(&format!("_{}", d.unit)), "{} in {}", d.name, d.unit);
             }
             for label in d.labels {
-                assert!(["operation", "code", "lock", "namespace", "version"].contains(label), "{}", label);
+                assert!(["operation", "code", "lock", "namespace", "part", "version"].contains(label), "{}", label);
             }
         }
     }

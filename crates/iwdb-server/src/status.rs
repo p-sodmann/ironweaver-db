@@ -22,7 +22,7 @@ pub fn grpc_code(code: Code) -> tonic::Code {
         Code::NotFound => tonic::Code::NotFound,
         Code::Conflict => tonic::Code::Aborted,
         Code::ConstraintViolation => tonic::Code::FailedPrecondition,
-        Code::BudgetExceeded => tonic::Code::ResourceExhausted,
+        Code::BudgetExceeded | Code::ResourceExhausted => tonic::Code::ResourceExhausted,
         Code::Timeout => tonic::Code::DeadlineExceeded,
         Code::Cancelled => tonic::Code::Cancelled,
         Code::CursorExpired => tonic::Code::FailedPrecondition,
@@ -49,7 +49,7 @@ pub fn http_status(code: Code) -> http::StatusCode {
         Code::Timeout => S::GATEWAY_TIMEOUT,
         Code::Cancelled => S::from_u16(499).unwrap_or(S::BAD_REQUEST),
         Code::CursorExpired | Code::NotRetained => S::GONE,
-        Code::ReadOnly | Code::Unavailable | Code::Io => S::SERVICE_UNAVAILABLE,
+        Code::ReadOnly | Code::Unavailable | Code::ResourceExhausted | Code::Io => S::SERVICE_UNAVAILABLE,
         Code::Corrupt | Code::Internal => S::INTERNAL_SERVER_ERROR,
         // A code added later: its own string still travels in the body
         _ => S::INTERNAL_SERVER_ERROR,
@@ -121,7 +121,7 @@ mod tests {
 
     /// The table of `documentation/api/errors.md`, written out again: a
     /// change to either must change this test.
-    const TABLE: [(Code, tonic::Code); 16] = [
+    const TABLE: [(Code, tonic::Code); 17] = [
         (Code::InvalidArgument, tonic::Code::InvalidArgument),
         (Code::Unauthenticated, tonic::Code::Unauthenticated),
         (Code::PermissionDenied, tonic::Code::PermissionDenied),
@@ -135,6 +135,7 @@ mod tests {
         (Code::NotRetained, tonic::Code::OutOfRange),
         (Code::ReadOnly, tonic::Code::Unavailable),
         (Code::Unavailable, tonic::Code::Unavailable),
+        (Code::ResourceExhausted, tonic::Code::ResourceExhausted),
         (Code::Io, tonic::Code::Unavailable),
         (Code::Corrupt, tonic::Code::DataLoss),
         (Code::Internal, tonic::Code::Internal),
@@ -153,7 +154,7 @@ mod tests {
     }
 
     /// The HTTP column of errors.md.
-    const HTTP: [(Code, u16); 16] = [
+    const HTTP: [(Code, u16); 17] = [
         (Code::InvalidArgument, 400),
         (Code::Unauthenticated, 401),
         (Code::PermissionDenied, 403),
@@ -167,6 +168,7 @@ mod tests {
         (Code::NotRetained, 410),
         (Code::ReadOnly, 503),
         (Code::Unavailable, 503),
+        (Code::ResourceExhausted, 503),
         (Code::Io, 503),
         (Code::Corrupt, 500),
         (Code::Internal, 500),

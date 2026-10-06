@@ -27,6 +27,8 @@
 //! - [`import`](mod@import): the files of an import, a namespace made from one
 //!   checkpoint (ADR 0033).
 //! - [`inspect`]: a quick, read-only look at a directory.
+//! - [`memory`]: what the server's memory holds, and the limit that
+//!   refuses writes before it runs out (ADR 0054).
 //! - [`HistoryId`] and [`CommitTime`]: which history a directory holds, and
 //!   when a commit was appended (ADR 0009, ADR 0010).
 //!
@@ -64,6 +66,7 @@ mod inspect;
 pub mod io;
 pub mod layout;
 mod logged;
+pub mod memory;
 pub mod namespaces;
 mod reader;
 mod recovery;

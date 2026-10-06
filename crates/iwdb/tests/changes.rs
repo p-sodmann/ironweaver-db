@@ -29,6 +29,7 @@ fn options(fsync: FsyncPolicy, retention: WalRetention) -> StoreOptions {
         create_if_missing: true,
         archive: None,
         retention,
+        memory: Default::default(),
     }
 }
 

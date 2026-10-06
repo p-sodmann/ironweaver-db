@@ -2019,15 +2019,44 @@
         },
         "type": "object"
       },
+      "MemoryLimitSource": {
+        "description": "- `MEMORY_LIMIT_SOURCE_CONFIG`: `[memory] limit_bytes`.\n\n- `MEMORY_LIMIT_SOURCE_CGROUP_V2`: The cgroup v2 `memory.max` of the server's process.\n\n- `MEMORY_LIMIT_SOURCE_CGROUP_V1`: The cgroup v1 `memory.limit_in_bytes` of the server's process.",
+        "enum": [
+          "MEMORY_LIMIT_SOURCE_UNSPECIFIED",
+          "MEMORY_LIMIT_SOURCE_CONFIG",
+          "MEMORY_LIMIT_SOURCE_CGROUP_V2",
+          "MEMORY_LIMIT_SOURCE_CGROUP_V1"
+        ],
+        "type": "string"
+      },
+      "MemoryState": {
+        "description": "The memory state. Each state is left only once memory is 5 % of the limit\nbelow its line.\n\n- `MEMORY_STATE_NORMAL`: Below the warning line, or no limit.\n\n- `MEMORY_STATE_WARN`: At or above the warning line: writes are accepted.\n\n- `MEMORY_STATE_REFUSING_WRITES`: At or above the refusal line: writes that add are refused.",
+        "enum": [
+          "MEMORY_STATE_UNSPECIFIED",
+          "MEMORY_STATE_NORMAL",
+          "MEMORY_STATE_WARN",
+          "MEMORY_STATE_REFUSING_WRITES"
+        ],
+        "type": "string"
+      },
       "MemoryStatus": {
+        "description": "Memory as the server counts it, and its limit (ADR 0054). The limit\ncounts `used_bytes`: the graphs, their payloads, the checkpointers' copies\nand the working memory.",
         "properties": {
+          "checkpointBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The checkpointers' copies of the namespaces, graphs and payloads."
+          },
           "graphBytes": {
             "allOf": [
               {
                 "$ref": "#/components/schemas/Uint64"
               }
             ],
-            "description": "The namespaces' graphs, indexes included."
+            "description": "The live graphs (the core's estimate), indexes included."
           },
           "limitBytes": {
             "allOf": [
@@ -2035,7 +2064,58 @@
                 "$ref": "#/components/schemas/Uint64"
               }
             ],
-            "description": "The configured memory limit; missing: none."
+            "description": "The memory limit; missing: none."
+          },
+          "limitSource": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MemoryLimitSource"
+              }
+            ],
+            "description": "Where the limit came from; unspecified without a limit."
+          },
+          "payloadBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The live graphs' attribute payloads, estimated."
+          },
+          "refuseWritesBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "From here on the server refuses writes (`resource_exhausted`); missing\nwithout a limit."
+          },
+          "state": {
+            "$ref": "#/components/schemas/MemoryState"
+          },
+          "usedBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The sum of the parts: what the limit counts."
+          },
+          "warnBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "From here on the server warns; missing without a limit."
+          },
+          "workingBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Analytics projections and index builds while they run, estimated."
           }
         },
         "type": "object"

@@ -37,11 +37,53 @@ impl DbRecord {
         DbRecord { attr: attr.into_iter().map(|(k, v)| (k.into(), v)).collect(), ..DbRecord::default() }
     }
 
+    /// Estimated heap bytes the record owns: its attribute and meta maps,
+    /// their keys and the values' strings, lists, maps and bytes (ADR 0054).
+    /// The core's `Graph::memory_usage` counts the record's inline size,
+    /// not these (upstream draft 25).
+    ///
+    /// Computed from lengths, not capacities, so a record decoded from the
+    /// WAL or a checkpoint has the same estimate as the one it was written
+    /// from. O(size of the record).
+    pub fn heap_bytes(&self) -> usize {
+        attrs_heap(&self.attr) + attrs_heap(&self.meta)
+    }
+
     /// The core's path lookup (`record::lookup`), so that `DbRecord`
     /// answers every `Attributes` method exactly like `Record` for the same
     /// attribute map (checked by `tests/db_record.rs`).
     fn at(&self, path: &[String]) -> Option<&Value> {
         ironweaver_core::record::lookup(&self.attr, path)
+    }
+}
+
+/// The heap of a map: its hash table (std's layout: a power of two of
+/// buckets, at most 7/8 full, one control byte per bucket and a group of
+/// 16), and what its keys and values own.
+fn attrs_heap(attrs: &Attrs) -> usize {
+    if attrs.is_empty() {
+        return 0;
+    }
+    let entries: usize = attrs.iter().map(|(k, v)| k.len() + value_heap(v)).sum();
+    table_bytes(attrs.len(), std::mem::size_of::<(String, Value)>()) + entries
+}
+
+fn table_bytes(len: usize, entry: usize) -> usize {
+    let buckets = match len {
+        0..=3 => 4,
+        4..=7 => 8,
+        _ => (len * 8 / 7).next_power_of_two(),
+    };
+    buckets * (entry + 1) + 16
+}
+
+fn value_heap(value: &Value) -> usize {
+    match value {
+        Value::String(s) => s.len(),
+        Value::Bytes(b) => b.len(),
+        Value::List(items) => items.len() * std::mem::size_of::<Value>() + items.iter().map(value_heap).sum::<usize>(),
+        Value::Dict(map) => attrs_heap(map),
+        _ => 0,
     }
 }
 
@@ -127,6 +169,22 @@ impl AttrPatch for DbRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heap_bytes_counts_maps_strings_and_nesting_by_length() {
+        assert_eq!(DbRecord::default().heap_bytes(), 0);
+        let small = DbRecord::with_attr([("k", Value::Int(1))]);
+        let text = DbRecord::with_attr([("k", Value::String("x".repeat(1000)))]);
+        assert_eq!(text.heap_bytes(), small.heap_bytes() + 1000);
+        let nested = DbRecord::with_attr([("k", Value::List(vec![Value::String("x".repeat(1000)); 3]))]);
+        assert!(nested.heap_bytes() > small.heap_bytes() + 3000);
+
+        // Capacity doesn't count: a map that grew and shrank has the estimate of a fresh one
+        let mut grown = small.clone();
+        (0..100).for_each(|i| drop(grown.set_attr(&format!("x{}", i), Some(Value::Int(i)))));
+        (0..100).for_each(|i| drop(grown.set_attr(&format!("x{}", i), None)));
+        assert_eq!(grown.heap_bytes(), small.heap_bytes());
+    }
 
     #[test]
     fn set_attr_changes_only_attributes() {
