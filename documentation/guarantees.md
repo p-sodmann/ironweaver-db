@@ -229,6 +229,27 @@ What it doesn't guarantee:
 - **The schema is sampled** ([ADR 0053](adr/0053-the-schema-read.md)): label counts are exact, but a label only nodes outside the sample carry isn't listed, and keys and edge-type counts are the sample's. It is complete when `sampled_nodes` equals `nodes` and `sampled_edges` equals `edges` (upstream [#60](https://github.com/p-sodmann/Ironweaver/issues/60)).
 - **The log tail is in memory**: a restart empties it, and older events fall out once `[log] tail_events` are kept.
 
+## The memory limit (step 16d)
+
+[ADR 0054](adr/0054-the-memory-limit.md); [api/config.md](api/config.md) (`[memory]`), [api/errors.md](api/errors.md) (`resource_exhausted`), [api/metrics.md](api/metrics.md).
+
+What it guarantees:
+
+- **A refused write is never logged.** Above `refuse_writes_at` of the limit, a commit, an index or constraint creation, a namespace creation or an import fails with `resource_exhausted` before anything reaches the WAL or the namespace log. Nothing changes, and recovery finds none of it. `a_refused_commit_is_never_logged_and_one_below_the_line_is_durable` (`crates/iwdb-storage/tests/memory.rs`) fails every write and fsync from the refusal on and finds none attempted. `a_crash_after_a_refused_commit_recovers_exactly_the_accepted_ones` (`crates/iwdb/tests/memory.rs`) does the same through the store, then crashes and recovers.
+- **A commit accepted below the line is durable** like any other, per the fsync policy (the same tests).
+- **One check, in the commit pipeline** (design rule 2): every adapter gets the same answer (`over_grpc`, `over_rest` in `crates/iwdb-server/tests/memory.rs`).
+- **What goes on while writes are refused:** reads, `analyze` included; commits that only remove (nodes, edges, labels, attributes); dropping an index, a constraint or a namespace; the system namespace (users, grants, logins); repeats of keyed commits, which answer their original result.
+- **Hysteresis:** the state rises when memory reaches a line, and falls only once memory is 5 % of the limit below it, so a store at the line doesn't flip between accepting and refusing (`writes_resume_only_once_memory_is_below_the_band`).
+- **Visible:** the status and the metrics report the counted parts, the limit, the lines, the state and where the limit came from; each change of state is logged once.
+
+What it doesn't guarantee:
+
+- **The accounting is an estimate.** It counts the live graphs (the core's figure), their payloads (ours, from lengths: 3–8 % above the measured heap), the checkpointers' copies, and projections and index builds while they run (by a formula per node and edge). It doesn't count request buffers, the WAL's buffer, the allocator's slack or the runtime. The process's resident memory can be higher than `used`; the 10 % between the refusal line and the limit is for that.
+- **One commit can cross the line.** A commit is admitted on the state before it, so `used` can pass the line by one commit (a WAL record is at most 64 MiB). The next one is refused.
+- **Reads aren't limited by memory.** An `analyze` is counted, and can push the store into refusing writes, but it isn't refused.
+- **An embedded store has no limit** unless `StoreOptions::memory` sets one: it can't see the memory of the application it runs in. Without a limit nothing is refused.
+- **Per-namespace and per-client limits** are step 15d's, and nothing is evicted to disk.
+
 ## The change stream (step 13)
 
 The change stream ([api/changes.md](api/changes.md), [ADR 0031](adr/0031-change-stream.md)) returns a namespace's commits from a seq on, as logged:
