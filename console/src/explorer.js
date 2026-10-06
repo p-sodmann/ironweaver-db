@@ -42,25 +42,26 @@
         status.readOnly && h('div', { className: 'cs-struct__alert' }, h('span', { className: 'iw-state is-failed' }, '✕ READ-ONLY'), h('span', { className: 'iw-small' }, ' ' + status.readOnly)),
         status.checkpointFailure && h('div', { className: 'cs-struct__alert' }, h('span', { className: 'iw-state is-failed' }, '✕ CHECKPOINT FAILED'), h('span', { className: 'iw-small' }, ' ' + status.checkpointFailure))),
       h('section', null, h('h2', { className: 'iw-cap' }, 'LABELS AND THEIR KEYS'),
-        schema.sampled && h('p', { className: 'iw-small iw-muted cs-struct__note' }, `Counted from the first ${U.num(schema.sample)} nodes: the server has no schema read yet (step 16).`),
+        schema.sampledNodes < schema.nodes && h('p', { className: 'iw-small iw-muted cs-struct__note' }, `Node counts are exact; keys are from the first ${U.num(schema.sampledNodes)} of ${U.num(schema.nodes)} nodes.`),
         T([['LABEL'], ['KEY'], ['VALUES'], ['PRESENT', true], ['INDEX'], ['']],
           schema.labels.flatMap((l) => {
             const keys = Object.entries(l.keys).sort(([a], [b]) => (a < b ? -1 : 1));
             const head = h('tr', { key: l.name, className: 'cs-struct__group' },
               h('td', null, h('span', { className: 'cs-struct__label' }, h(I.ShapeGlyph, { label: l.name }), h('b', null, l.name))),
-              h('td', { colSpan: 4, className: 'iw-mono-s iw-muted' }, U.num(l.count) + ' nodes · ' + keys.length + ' keys'),
+              h('td', { colSpan: 4, className: 'iw-mono-s iw-muted' }, U.num(l.count) + ' nodes · ' + keys.length + (l.moreKeys ? '+' : '') + ' keys' + (l.sampled < l.count ? ' in ' + U.num(l.sampled) + ' sampled' : '')),
               h('td', { className: 'is-num' }, h(I.Button, { variant: 'ghost', onClick: () => onBrowse(l.name) }, 'BROWSE')));
             return [head].concat(keys.map(([k, kinds]) => {
               const n = Object.values(kinds).reduce((a, b) => a + b, 0);
               return h('tr', { key: l.name + '.' + k },
                 h('td', null), h('td', { className: 'iw-mono' }, k),
                 h('td', { className: 'iw-mono-s' }, Object.entries(kinds).sort((a, b) => b[1] - a[1]).map(([kind, c]) => U.TYPE[kind] + (Object.keys(kinds).length > 1 ? ' ' + c : '')).join(' · ')),
-                h('td', { className: 'is-num iw-mono-s' }, U.pct(n / l.count)),
+                h('td', { className: 'is-num iw-mono-s' }, U.pct(n / Math.max(1, l.sampled))),
                 h('td', null, idxState(ix.get(k))), h('td', null));
             }));
           }), 'No labels yet.')),
       h('section', null, h('h2', { className: 'iw-cap' }, 'EDGE TYPES'),
-        T([['TYPE'], ['EDGES', true]], schema.types.map((t) => h('tr', { key: t.name }, h('td', { className: 'iw-mono iw-accent' }, '→ ' + t.name), h('td', { className: 'is-num iw-mono-s' }, U.num(t.count)))), 'No edges yet.')),
+        schema.sampledEdges < schema.edges && h('p', { className: 'iw-small iw-muted cs-struct__note' }, `Counted in the first ${U.num(schema.sampledEdges)} of ${U.num(schema.edges)} edges.`),
+        T([['TYPE'], ['EDGES', true]], schema.types.map((t) => h('tr', { key: t.name || '' }, h('td', { className: 'iw-mono iw-accent' }, '→ ' + (t.name || '(untyped)')), h('td', { className: 'is-num iw-mono-s' }, U.num(t.count)))), 'No edges yet.')),
       h('section', null, h('h2', { className: 'iw-cap' }, 'INDEXES'),
         T([['PATH'], ['STATE'], ['WHY'], ['ENTRIES', true], ['DISTINCT', true], ['MEMORY', true]],
           status.indexes.map((x) => h('tr', { key: x.path.join('.') },
@@ -164,11 +165,11 @@
         remember(res.nodes);
         const sub = await src.subgraph(name, res.nodes.map((n) => n.id));
         const elapsed = performance.now() - t0; const t = tableOfNodes(res.nodes);
-        // The server reports no match count: on a first page with no more, the page is it
-        const e = { ...ex.explain, matched: ex.explain.matched ?? (res.total != null ? res.total : !cursor && !res.meta.next ? res.nodes.length : undefined) };
-        const counted = res.total != null ? `${U.num(res.total)} node${res.total === 1 ? '' : 's'} match` : `${U.num(res.nodes.length)} node${res.nodes.length === 1 ? '' : 's'} on this page${res.meta.next ? ', more on the next' : ''}`;
+        // No read counts the matches (an unbounded count, design rule 5): on a first page with no more, the page is it
+        const e = { ...ex.explain, matched: !cursor && !res.meta.next ? res.nodes.length : undefined };
+        const counted = `${U.num(res.nodes.length)} node${res.nodes.length === 1 ? '' : 's'} on this page${res.meta.next ? ', more on the next' : ''}`;
         return {
-          kind: 'find', filter: c.filter, limit, graph: graphOf(res.nodes, sub.edges), ...t, total: res.total, next: res.meta.next,
+          kind: 'find', filter: c.filter, limit, graph: graphOf(res.nodes, sub.edges), ...t, next: res.meta.next,
           footer: `${counted} · ${U.num(res.meta.work.visited)} candidates checked · seq ${U.num(res.meta.seq)} · ${U.ms(elapsed)}`,
           plan: Q.planRows(e, c.filter, elapsed),
           summary: [['EST. CANDIDATES', U.num(e.estimatedCandidates)], ['CANDIDATES', U.num(e.candidates)], ['MATCH', U.num(e.matched)], ['NODES', U.num(e.nodes)], ['PLAN', Object.keys(e.plan)[0].toUpperCase()]],
@@ -258,7 +259,8 @@
       stage({ m: { setAttr: { target: { node: n.id }, key, value: v } }, desc: `set ${n.id}.${key} = ${U.text(v)}` });
       addLog('INFO', `staged · set ${n.id}.${key} = ${U.text(v)} (${U.TYPE[U.kindOf(v)]})`);
     };
-    const connectType = schema && schema.types.length ? schema.types.slice().sort((a, b) => b.count - a.count)[0].name : 'RELATES_TO';
+    const typed = schema ? schema.types.filter((t) => t.name) : []; // untyped edges have no name to navigate by
+    const connectType = typed.length ? typed.slice().sort((a, b) => b.count - a.count)[0].name : 'RELATES_TO';
     const onConnect = (e) => stage({ m: { addEdge: { from: e.s, to: e.t, type: e.type } }, tmp: e.id, desc: `add ${e.s} -[:${e.type}]-> ${e.t}` });
     const onDetach = (e) => setPending((ps) => (ps.some((p) => p.tmp === e.id) ? ps.filter((p) => p.tmp !== e.id) : ps.concat({ m: { deleteEdge: { id: e.id } }, desc: `delete edge ${e.id}` })));
     const discard = () => { if (!pending.length) return; setPending([]); setCanvasKey((k) => k + 1); addLog('INFO', `discarded ${pending.length} staged change${pending.length > 1 ? 's' : ''}`); };
@@ -285,7 +287,7 @@
       return [
         { id: 'ns', title: 'Namespaces', items: nss.map((x) => { const s = st.get(x.name); const bad = s && (s.readOnly || s.checkpointFailure); return { id: 'ns:' + x.name, name: x.name, glyph: 'db', active: x.name === ns, state: bad ? 'FAILED' : undefined, stateLabel: bad ? (s.readOnly ? '✕ READ-ONLY' : '✕ CHECKPOINT') : undefined, count: bad ? undefined : s && s.nodes }; }) },
         { id: 'labels', title: 'Labels', items: (schema ? schema.labels : []).map((l) => ({ id: 'lb:' + l.name, name: l.name, label: l.name, count: l.count })) },
-        { id: 'types', title: 'Edge types', items: (schema ? schema.types : []).map((t) => ({ id: 'rt:' + t.name, name: t.name, rel: true, count: t.count })) },
+        { id: 'types', title: 'Edge types', items: typed.map((t) => ({ id: 'rt:' + t.name, name: t.name, rel: true, count: t.count })) },
         { id: 'idx', title: 'Indexes', collapsed: true, items: (status ? status.indexes : []).map((x) => ({ id: 'ix:' + x.path.join('.'), name: '[' + x.path.join('.') + ']', meta: x.unique ? 'unique' : 'index', state: x.building ? 'POPULATING' : 'ONLINE', stateLabel: x.building ? U.pct(x.building.scanned / Math.max(1, x.building.total)) : x.unique ? 'UNIQUE' : 'READY' })) },
         { id: 'con', title: 'Constraints', collapsed: true, items: (schema ? schema.constraints : []).map((c, i) => ({ id: 'c:' + i, name: c.label + '.' + c.path.join('.'), meta: c.kind })) },
       ];
@@ -326,7 +328,7 @@
       const items = [];
       nss.forEach((x) => items.push({ group: 'Namespace', title: x.name, detail: x.name === ns ? 'current' : 'switch', mono: true, run: () => switchNs(x.name) }));
       (schema ? schema.labels : []).forEach((l) => items.push({ group: 'Label', title: l.name, detail: U.num(l.count) + ' nodes · browse', label: l.name, run: () => browse(l.name) }));
-      (schema ? schema.types : []).forEach((t) => items.push({ group: 'Edge type', title: t.name, detail: U.num(t.count) + ' edges', rel: true, mono: true, run: () => run(`match (a)-[e:${t.name}]->(b)\n\\limit 60`, { view: 'graph' }).catch(() => {}) }));
+      typed.forEach((t) => items.push({ group: 'Edge type', title: t.name, detail: U.num(t.count) + ' edges', rel: true, mono: true, run: () => run(`match (a)-[e:${t.name}]->(b)\n\\limit 60`, { view: 'graph' }).catch(() => {}) }));
       cache.current.forEach((n) => items.push({ group: 'Node', title: U.caption(n), detail: n.id + ' · :' + n.labels.join(':'), label: U.primaryLabel(n, counts.current), run: () => { setSelId(n.id); } }));
       [['Graph', 'graph', '1'], ['Table', 'table', '2'], ['Plan', 'plan', '3'], ['Structure', 'structure', '4']].forEach(([t, v, key]) => items.push({ group: 'View', title: t, detail: key, run: () => go(v) }));
       if (pending.length) { items.push({ group: 'Command', title: 'Commit staged changes', detail: pending.length + ' · ⌘S', run: commit }); items.push({ group: 'Command', title: 'Discard staged changes', detail: String(pending.length), run: discard }); }
@@ -339,7 +341,7 @@
     /* ---------------------------------------------------------------- render */
     const page = result && result.kind === 'find' ? result : null;
     const pager = page && {
-      page: page.page, pages: page.total != null ? Math.max(1, Math.ceil(page.total / page.limit)) : page.page + (page.next ? 1 : 0),
+      page: page.page, pages: page.page + (page.next ? 1 : 0),
       onPrev: () => { const cs = page.cursors; run(query, { cursor: cs[page.page - 2], page: page.page - 1, cursors: cs, view: 'table' }).catch(() => {}); },
       onNext: () => { if (!page.next) return; const cs = page.cursors.slice(0, page.page).concat(page.next); run(query, { cursor: page.next, page: page.page + 1, cursors: cs, view: 'table' }).catch(() => {}); },
     };
@@ -351,26 +353,28 @@
     };
     const rowSel = result && selId ? (result.rows.find((r) => r.id === selId) || result.rows.find((r) => r.node === selId) || {}).id : null;
     const mem = server && server.memory;
-    const lag = status && status.checkpoint != null ? status.seq - status.checkpoint : null;
     const drawer = status && [
       h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'NODES'), h('span', { className: 'iw-mono-s' }, U.num(status.nodes))),
       h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'EDGES'), h('span', { className: 'iw-mono-s' }, U.num(status.edges))),
-      mem && h(I.Meter, { caption: 'MEMORY', value: mem.usedBytes, max: mem.limitBytes, warnAt: mem.warnAt, readout: U.bytes(mem.usedBytes) + ' / ' + U.bytes(mem.limitBytes) }),
+      mem && (mem.limitBytes
+        ? h(I.Meter, { caption: 'MEMORY', value: mem.graphBytes, max: mem.limitBytes, warnAt: U.MEMORY_WARN, readout: U.bytes(mem.graphBytes) + ' / ' + U.bytes(mem.limitBytes) })
+        : h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'GRAPH MEMORY'), h('span', { className: 'iw-mono-s' }, U.bytes(mem.graphBytes)))),
       h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'SEQ'), h('span', { className: 'iw-mono-s' }, U.num(status.seq))),
-      h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'UNSYNCED'), h('span', { className: 'iw-mono-s' }, status.syncedSeq == null ? 'fsync off' : U.num(status.seq - status.syncedSeq))),
-      h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'SINCE CHECKPOINT'), h('span', { className: 'iw-mono-s' }, lag == null ? '—' : U.num(lag) + ' commits')),
-      server && server.series && h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'COMMIT P99'), h('span', { className: 'iw-mono-s' }, U.ms(server.series.commitP99.slice(-1)[0]))),
+      h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'UNSYNCED'), h('span', { className: 'iw-mono-s' }, status.unsynced == null ? 'fsync off' : U.num(status.unsynced))),
+      h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'SINCE CHECKPOINT'), h('span', { className: 'iw-mono-s' }, U.num(status.sinceCheckpoint) + ' commits')),
+      server && server.series.commitP99.length > 0 && h('span', { className: 'iw-rail__m' }, h('span', { className: 'iw-cap' }, 'COMMIT P99'), h('span', { className: 'iw-mono-s' }, U.ms(server.series.commitP99.slice(-1)[0]))),
     ].filter(Boolean);
-    const health = server ? (server.ready ? server.health : 'danger') : 'off';
+    const serverOk = server && !server.error && U.problems(server).length === 0;
+    const health = server ? (server.ready ? (serverOk ? 'ok' : 'warn') : 'danger') : 'off';
     const nsBad = status && (status.readOnly || status.checkpointFailure);
     const plan = result && result.plan;
 
     return h('div', { className: 'iw-wb cs-wb' + (selNode ? ' has-insp' : '') + (qOpen || logOpen ? ' has-bottom' : '') },
       h(I.StatusRail, {
         key: ns, db: ns || '…', tx: status ? status.seq : undefined, activity: busy, txOpen: pending.length, health: nsBad ? 'warn' : health,
-        word: server ? (busy ? 'Writing' : !server.ready ? 'Recovering' : nsBad ? (status.readOnly ? 'Read-only' : 'Degraded') : server.health === 'ok' ? 'Healthy' : 'Degraded') : 'Connecting',
+        word: server ? (busy ? 'Writing' : !server.ready ? 'Not ready' : nsBad ? (status.readOnly ? 'Read-only' : 'Degraded') : serverOk ? 'Healthy' : 'Degraded') : 'Connecting',
         open: instr, onToggle: setInstr, onCommand: () => setPalette({}), onHelp: () => setSheet(true), onDb: () => setPalette({ initial: '' }),
-        drawer, footer: server ? (src.kind === 'mock' ? `mock · gRPC ${server.endpoints.grpc} · REST ${server.endpoints.rest} · v${server.version}` : `server ${server.endpoints.rest}${server.version ? ' · API ' + server.version : ''}`) : '',
+        drawer, footer: server ? (src.kind === 'mock' ? `mock · v${server.version}` : `server ${src.endpoint}${server.version ? ' · v' + server.version : ''}`) : '',
       }, h(U.RailLinks, { page: 'explore' })),
       h('div', { className: 'iw-wb__nav' }, h(I.SchemaNavigator, { key: ns, sections, onSelect: (it) => onNav(it, false), onActivate: (it) => onNav(it, true) })),
       h('main', { className: 'iw-wb__main' },
