@@ -31,6 +31,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 23 | [A search's progress, readable while it runs](#23-a-searchs-progress-readable-while-it-runs) | not filed: a feature proposal (step 16c), held for the owner's decision |
 | 24 | [List a graph's labels, and count its edges by type](#24-list-a-graphs-labels-and-count-its-edges-by-type) | filed: [#60](https://github.com/p-sodmann/Ironweaver/issues/60) |
 | 25 | [`memory_usage` can't count payloads, and an index build reports no memory](#25-memory_usage-cant-count-payloads-and-an-index-build-reports-no-memory) | filed: [#61](https://github.com/p-sodmann/Ironweaver/issues/61) |
+| 26 | [Algorithms report no progress while they run](#26-algorithms-report-no-progress-while-they-run) | filed: [#62](https://github.com/p-sodmann/Ironweaver/issues/62) |
 
 ---
 
@@ -625,3 +626,42 @@ Step 16d refuses writes before the server runs out of memory (ADR 0054), and nee
 
 That duplicates bookkeeping the graph already does for its own heap, and costs an extra pass over the touched entities per commit. Index builds and raw projections are charged by a formula per node and edge.
 
+---
+
+## 26. Algorithms report no progress while they run
+
+Status: filed as [#62](https://github.com/p-sodmann/Ironweaver/issues/62) on 2026-10-06. A finding from step 16f: a missing hook, not a bug. Checked against `7e7b7fa`; pinned by `algorithms_report_no_progress` (`core_smoke.rs`).
+
+**Problem**
+
+The algorithms in `algo` (PageRank, label propagation, Leiden, core number, triangles, the components) read one thing from outside while they run: the stop flag of `cancel::stop()`. They report nothing back. A caller that runs a long one (a database running an analytics job in the background for minutes or hours) can say that it is running, but not how far it has got: which PageRank iteration it is on, how many label-propagation rounds are done, which Leiden run.
+
+The poll hook of `cancel::run_polling` doesn't help either: the algorithms check `Stop::requested`, never `Stop::poll`, so the hook isn't called even across hundreds of iterations.
+
+```rust
+use std::{cell::Cell, rc::Rc};
+use ironweaver_core::{algo, cancel};
+// p: a finished Projection of a graph with a few thousand nodes
+let heard = Rc::new(Cell::new(0));
+let h = heard.clone();
+let hook = Rc::new(move || { h.set(h.get() + 1); false });
+let opts = algo::PageRank { tol: 0.0, max_iter: 300, ..Default::default() };
+cancel::run_polling(&cancel::Token::new(), hook, || algo::pagerank(&p, &opts)).unwrap().unwrap();
+assert_eq!(heard.get(), 0); // 300 iterations, nothing heard
+```
+
+**Proposal**
+
+A progress channel beside the stop flag, fetched the same way, so no algorithm's signature changes:
+
+- `cancel::progress() -> Progress`, a thread-local handle set by a `cancel::run_with_progress(token, progress, f)` (or a field on what `run` installs), cheap to clone into rayon closures like `Stop`.
+- `Progress` holds two `AtomicU64`s, `done` and `total`, plus a small phase name. An algorithm sets `total` when it knows it (PageRank: `max_iter`; label propagation: `max_iter`; Leiden: `max_iter` runs, or the nodes of a level; triangles and core number: nodes) and adds to `done` as it goes (per iteration, round or batch of nodes). Relaxed stores, at the points where it checks the stop flag already. Absent, it costs a branch.
+- The caller reads the atomics from another thread while the algorithm runs.
+
+A smaller alternative: call `Stop::poll` once per iteration or round, and pass the iteration to the hook. That only works on the calling thread and only every 256th poll, so the shared atomics are better.
+
+This fits draft 23's `Budget` progress counter (a search's visited nodes and edges); one `Progress` type could serve both.
+
+**Why the database needs it**
+
+Ironweaver DB runs analytics jobs in the background (step 16f, ADR 0056): started, listed, cancelled and fetched by id, for jobs longer than any request's timeout. An operator watching a job, or deciding whether to cancel it, wants to know how far it has got. Until the core reports progress, a job reports only its phase (queued, collecting the projection, running, done), and a running PageRank looks the same at its first iteration as at its last.

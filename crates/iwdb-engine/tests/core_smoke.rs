@@ -568,3 +568,41 @@ fn traversals_take_a_direction_and_an_edge_filter() {
     let expanded = expand_limited(&g, [b], 1, Direction::Both, Budget::UNLIMITED, only_ab).expect("expand");
     assert_eq!(ids(&g, expanded.value), ["a", "b"]);
 }
+
+/// Upstream #62 (draft 26): the core's algorithms report nothing while they
+/// run. They read only the stop flag, with `Stop::requested`, so not even
+/// the poll hook of `run_polling` hears from them, however many iterations
+/// they run. A managed job (ADR 0056) therefore reports its phase, not how
+/// far its algorithm has got. Fails once the core reports progress through
+/// the poll hook; if it adds another channel, replace this test with one
+/// that reads it, and fill the job's progress.
+#[test]
+fn algorithms_report_no_progress() {
+    use ironweaver_core::algo;
+    let mut g = G::new();
+    let ids: Vec<_> = (0..2_000).map(|i| g.add_node(format!("n{}", i), Record::default()).expect("add")).collect();
+    for (i, &a) in ids.iter().enumerate() {
+        g.add_edge(a, ids[(i + 1) % ids.len()], Record::default()).expect("edge");
+        g.add_edge(a, ids[(i * 7 + 3) % ids.len()], Record::default()).expect("edge");
+    }
+    let p = Projection::collect::<_, _, GraphError>(&g, Direction::Out, &EdgeCost::Unit, |_, _| Ok(true), |_, _| Ok(true))
+        .expect("collect")
+        .finish();
+    let heard = std::rc::Rc::new(Cell::new(0usize));
+    let hook = {
+        let heard = heard.clone();
+        std::rc::Rc::new(move || {
+            heard.set(heard.get() + 1);
+            false
+        })
+    };
+    let token = Token::new();
+    // 300 iterations each: a poll per iteration would reach the hook
+    // (it runs at every 256th poll)
+    let ranks = algo::PageRank { tol: 0.0, max_iter: 300, ..algo::PageRank::default() };
+    cancel::run_polling(&token, hook.clone(), || algo::pagerank(&p, &ranks)).expect("run").expect("pagerank");
+    cancel::run_polling(&token, hook.clone(), || algo::label_propagation(&p, 300)).expect("run");
+    let leiden = algo::Leiden { max_iter: 300, ..algo::Leiden::default() };
+    cancel::run_polling(&token, hook, || algo::leiden(&p, &leiden)).expect("run").expect("leiden");
+    assert_eq!(heard.get(), 0, "an algorithm called the poll hook: the core may report progress now");
+}

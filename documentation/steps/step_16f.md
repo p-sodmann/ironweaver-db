@@ -6,6 +6,8 @@ Depends on: steps 16c (registry, cancel, status) and 16e (`iwctl` against a serv
 
 Split out of step 16 on 2026-10-04 (see its "Plan change"); moved to step 16 from step 10 by [ADR 0022](../adr/0022-analytics-jobs.md).
 
+Starts with the [upstream check](upstream-check.md): the core's algorithms report no progress ([#62](https://github.com/p-sodmann/Ironweaver/issues/62), filed in this step), so jobs report phases only until it is fixed.
+
 ## Goal
 
 Analytics that outlive a request's timeout: started, watched, cancelled and collected by id.
