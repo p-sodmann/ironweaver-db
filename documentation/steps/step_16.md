@@ -15,11 +15,11 @@ Operators can configure, monitor and administer the server without reading the c
 - [x] Prometheus metrics: commit latency, fsync time, WAL size, checkpoint duration and lag, memory per namespace, query latency per operation, rejected and timed-out requests, lock hold times (16c).
 - [ ] OpenTelemetry traces (16g) and structured JSON logs (`tracing`; done in 16b).
 - [x] `status` views (like `pg_stat_*`): namespaces, sizes, indexes, active requests, replication/stream consumers (16c).
-- [ ] `iwctl` against a running server: status, checkpoint, backup, restore, verify, index and constraint management, namespaces, cancel a request.
-- [ ] Memory-limit behaviour: reject writes and alert before the OS kills the process.
+- [x] `iwctl` against a running server: status, checkpoint, backup, restore, verify, index and constraint management, namespaces, cancel a request (16e; restore stays offline, ADR 0055).
+- [x] Memory-limit behaviour: reject writes and alert before the OS kills the process (16d).
 - [ ] Windows (moved here from step 7, [ADR 0013](../adr/0013-python-bindings.md)): a directory fsync (`FILE_FLAG_BACKUP_SEMANTICS` and `FlushFileBuffers`, checked on NTFS), a CI job that builds and tests the workspace and the Python bindings on Windows, a crash harness mode that kills with `TerminateProcess`, then Windows wheels and the platform row in [guarantees.md](../guarantees.md).
-- [ ] A WAL archive pruning command (`iwctl archive prune --before <backup>`), and optionally recording the store's archive in the data directory so that `iwctl checkpoint` needn't be told ([ADR 0012](../adr/0012-iwctl.md)).
-- [ ] Throttling for online backups of large stores (checkpoints wait for a backup's copy, ADR 0009).
+- [x] A WAL archive pruning command (`iwctl archive prune --before <backup>`), and optionally recording the store's archive in the data directory so that `iwctl checkpoint` needn't be told ([ADR 0012](../adr/0012-iwctl.md)) (16e; the archive isn't recorded: `iwctl --server ... checkpoint` asks the store, ADR 0055).
+- [x] Throttling for online backups of large stores (checkpoints wait for a backup's copy, ADR 0009) (16e).
 - [ ] Managed analytics jobs (moved here from step 10, [ADR 0022](../adr/0022-analytics-jobs.md)): jobs that outlive a request's timeout, with an id, progress, cancellation, results kept for a while (and limited), and `iwctl` to list and cancel them. Step 10's `Database::analyze` runs a job within one request.
 - [ ] Finish connecting the operator console (step 16a, [ADR 0037](../adr/0037-operator-console.md)). Its REST Source and Flask proxy exist; add the reads `console/src/source.js` marks "new" (`schema` with label and type counts, `server` from the status views and metrics, `cancel`, the server log) and use them in `console/src/rest.js`, and decide whether `iwdb-server` serves `console/` itself (behind step 15's authentication). Decided in 16b: it does, opt-in (ADR 0041).
 - [ ] Operations guide `documentation/operations.md`.
