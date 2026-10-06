@@ -68,6 +68,7 @@ pub use iwdb_query::{
     CommitOptions, Edge, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus, Node, ProjectionSpec,
 };
 pub use iwdb_query::{NewToken, Role, Secret, TokenInfo, UserInfo};
+pub use iwdb_storage::archive::{NamespacePrune, PruneReport};
 pub use iwdb_storage::io::{LogFs, StdFs};
 pub use iwdb_storage::memory::{self, LimitSource, MemoryOptions, MemorySnapshot, MemoryState, cgroup_limit};
 pub use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
@@ -77,7 +78,7 @@ pub use iwdb_storage::{
     RecoveryReport, RestoreReport, RestoreSources, RestoreTarget, SkippedCheckpoint, StoreRecovery, VerifyReport,
     WalOptions, WalRetention,
 };
-pub use ops::{Status, restore, restore_namespaces, restore_with, restore_with_only, status, verify};
-pub use options::{CheckpointOptions, StoreOptions};
+pub use ops::{Status, prune_archive, restore, restore_namespaces, restore_with, restore_with_only, status, verify};
+pub use options::{BackupOptions, CheckpointOptions, StoreOptions};
 pub use request::{DEFAULT_TIMEOUT, ReadOptions};
-pub use store::{Analysis, DiskUsage, NAMESPACE, NamespaceHistograms, Ns, Store, StoreStatus};
+pub use store::{Analysis, BackupStats, DiskUsage, NAMESPACE, NamespaceHistograms, Ns, Store, StoreStatus};

@@ -31,6 +31,10 @@ use crate::namespaces::{
 use crate::verify::{Kind, VerifyReport};
 use crate::{Error, WalReader, format, reader};
 
+mod prune;
+
+pub use prune::{NamespacePrune, PruneReport, prune};
+
 /// The archive marker's name.
 pub const ARCHIVE_MARKER_NAME: &str = "IWDBARCH";
 /// The first 8 bytes of the archive marker.

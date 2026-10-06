@@ -116,7 +116,7 @@ pub struct NamespaceVerify {
 }
 
 impl VerifyReport {
-    pub(crate) fn new(path: &Path, kind: Kind) -> Self {
+    pub fn new(path: &Path, kind: Kind) -> Self {
         VerifyReport {
             path: path.to_path_buf(),
             kind,
@@ -138,7 +138,7 @@ impl VerifyReport {
 
     /// Add a namespace's findings: its problems and notes, prefixed with
     /// its name if `prefix`, and its counts.
-    pub(crate) fn merge(&mut self, id: u64, name: &str, prefix: bool, sub: VerifyReport) {
+    pub fn merge(&mut self, id: u64, name: &str, prefix: bool, sub: VerifyReport) {
         let tag = |f: Finding| {
             if prefix { Finding { path: f.path, message: format!("namespace '{}': {}", name, f.message) } } else { f }
         };
@@ -163,7 +163,7 @@ impl VerifyReport {
     }
 
     /// Set the single-namespace fields (see [`namespaces`](Self::namespaces)).
-    pub(crate) fn summarize(&mut self) {
+    pub fn summarize(&mut self) {
         if let [only] = self.namespaces.as_slice() {
             self.first_seq = only.first_seq;
             self.last_seq = only.last_seq;
@@ -182,7 +182,7 @@ impl VerifyReport {
         self.problems.is_empty()
     }
 
-    pub(crate) fn problem(&mut self, path: Option<&Path>, message: impl Into<String>) {
+    pub fn problem(&mut self, path: Option<&Path>, message: impl Into<String>) {
         self.problems.push(Finding::new(path, message));
     }
 
@@ -407,6 +407,36 @@ fn list_root_files(report: &mut VerifyReport, root: &Path, layout4: bool) -> Res
 /// Check one namespace's directories, files, coverage and replay into
 /// `report`. Returns whether its directories exist.
 fn verify_namespace(report: &mut VerifyReport, name: &NamespaceName, paths: &NsPaths) -> Result<bool, Error> {
+    verify_namespace_until(report, name, paths, u64::MAX).map(|(present, _)| present)
+}
+
+/// Verify one namespace of a store that has its directory open (ADR 0055):
+/// [`verify`]'s checks of its files, with the WAL read only up to `until`,
+/// a seq whose records are synced, so that records the writer appends
+/// meanwhile are never decoded. Returns the namespace's report (its
+/// counts, problems and notes) and the state the WAL replays to, if the
+/// replay reached its end.
+///
+/// The caller holds the namespace's checkpointer lock, so that no file it
+/// reads is removed meanwhile, and takes no lock on the directory (the
+/// store holds it). Memory: the replayed namespace plus one checkpoint.
+pub fn verify_open_namespace(
+    root: &Path,
+    name: &NamespaceName,
+    paths: &NsPaths,
+    until: u64,
+) -> Result<(VerifyReport, Option<Namespace>), Error> {
+    let mut report = VerifyReport::new(root, Kind::DataDir);
+    let (_, replayed) = verify_namespace_until(&mut report, name, paths, until)?;
+    Ok((report, replayed))
+}
+
+fn verify_namespace_until(
+    report: &mut VerifyReport,
+    name: &NamespaceName,
+    paths: &NsPaths,
+    until: u64,
+) -> Result<(bool, Option<Namespace>), Error> {
     let mut present = true;
     for dir in [&paths.checkpoints, &paths.wal] {
         if !dir.is_dir() {
@@ -427,8 +457,8 @@ fn verify_namespace(report: &mut VerifyReport, name: &NamespaceName, paths: &NsP
     report.segments = segments.len();
 
     check_coverage(report, &checkpoints, &segments);
-    replay(report, name, &checkpoints, &segments);
-    Ok(present)
+    let replayed = replay(report, name, &checkpoints, &segments, until);
+    Ok((present, replayed))
 }
 
 fn list_other_files(report: &mut VerifyReport, paths: &NsPaths) -> Result<(), Error> {
@@ -490,15 +520,17 @@ fn check_coverage(report: &mut VerifyReport, checkpoints: &[(u64, PathBuf)], seg
     }
 }
 
-/// Read the WAL from its first segment; replay it onto the oldest
-/// checkpoint that loads, checking each newer checkpoint against the
-/// replayed state when the replay reaches its seq.
+/// Read the WAL from its first segment up to `until`; replay it onto the
+/// oldest checkpoint that loads, checking each newer checkpoint against
+/// the replayed state when the replay reaches its seq. Returns the
+/// replayed state if the replay reached the end.
 fn replay(
     report: &mut VerifyReport,
     name: &NamespaceName,
     checkpoints: &[(u64, PathBuf)],
     segments: &[(u64, PathBuf)],
-) {
+    until: u64,
+) -> Option<Namespace> {
     let mut pending = checkpoints.iter().peekable();
     // The base: the oldest checkpoint that loads (each one before it is a problem)
     let mut namespace = None;
@@ -512,11 +544,11 @@ fn replay(
     let base = namespace.seq();
     let mut replaying = true;
     if let Some(&(first_seq, _)) = segments.first() {
-        let mut reader = match WalReader::from_segments(segments.to_vec(), first_seq, u64::MAX) {
+        let mut reader = match WalReader::from_segments(segments.to_vec(), first_seq, until) {
             Ok(reader) => reader,
             Err(e) => {
                 report.problem(None, e.to_string());
-                return;
+                return None;
             }
         };
         while let Some(record) = reader.next_timed() {
@@ -610,7 +642,9 @@ fn replay(
             report.problem(None, format!("the state at seq {}: {}", namespace.seq(), violation));
         }
         report.seq = Some(namespace.seq());
+        return Some(namespace);
     }
+    None
 }
 
 /// Load a checkpoint and check it on its own: loads, no index changes, the

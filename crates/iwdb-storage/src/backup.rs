@@ -25,7 +25,9 @@ use iwdb_engine::catalog::NamespaceName;
 
 use crate::checkpoint::{checkpoint_name, list_checkpoints};
 use crate::history::HistoryId;
-use crate::io::{LogFs, copy_file, create_dir, sync_dir, write_atomic, write_file};
+use crate::io::{
+    LogFs, Throttle, copy_file_throttled, create_dir, sync_dir, write_atomic, write_file, write_file_throttled,
+};
 use crate::layout::{BACKUP_NAME, CHECKPOINT_DIR, MARKER_NAME, NsPaths, WAL_DIR, encode_marker};
 use crate::namespaces::{NAMESPACES_NAME, NS_DIR, ns_dir_name};
 use crate::{Error, format, reader};
@@ -141,6 +143,10 @@ pub struct NamespaceSource<'a> {
 /// they are. Errors: [`Error::DestinationNotEmpty`], [`Error::Io`], any
 /// reader error for a damaged segment, [`Error::MissingRecords`] if a WAL
 /// doesn't reach back to the oldest checkpoint at or below its seq.
+///
+/// Every byte of the namespaces' files and the log goes through
+/// `throttle`, which caps the rate of the copy (ADR 0055); the caller's
+/// locks are held for as long as it takes.
 pub fn write_backup<F: LogFs>(
     fs: &F,
     source: &Path,
@@ -148,6 +154,7 @@ pub fn write_backup<F: LogFs>(
     namespaces: &[NamespaceSource<'_>],
     log: &[u8],
     dest: &Path,
+    throttle: &mut Throttle<'_>,
 ) -> Result<BackupReport, Error> {
     check_destination(source, dest)?;
     let mut plans = Vec::new();
@@ -177,7 +184,7 @@ pub fn write_backup<F: LogFs>(
         let prefix = format!("{}/{}", NS_DIR, ns_dir_name(ns.paths.id));
         for (ckpt, path) in &plan.checkpoints {
             let name = checkpoint_name(*ckpt);
-            let (len, crc) = copy_file(fs, path, &target.checkpoints.join(&name))?;
+            let (len, crc) = copy_file_throttled(fs, path, &target.checkpoints.join(&name), throttle)?;
             files.push(ManifestFile { path: format!("{}/{}/{}", prefix, CHECKPOINT_DIR, name), len, crc32c: crc });
             bytes += len;
         }
@@ -185,7 +192,7 @@ pub fn write_backup<F: LogFs>(
         for (first, path, last) in &plan.segments {
             let (content, last_time) = reader::segment_prefix(path, *first, *last)?;
             let name = format::segment_name(*first);
-            write_file(fs, &target.wal.join(&name), &content)?;
+            write_file_throttled(fs, &target.wal.join(&name), &content, throttle)?;
             let crc = crc32c::crc32c(&content);
             files.push(ManifestFile {
                 path: format!("{}/{}/{}", prefix, WAL_DIR, name),
@@ -207,7 +214,7 @@ pub fn write_backup<F: LogFs>(
             segments: plan.segments.iter().map(|(s, _, _)| *s).collect(),
         });
     }
-    write_file(fs, &dest.join(NAMESPACES_NAME), log)?;
+    write_file_throttled(fs, &dest.join(NAMESPACES_NAME), log, throttle)?;
     files.push(ManifestFile { path: NAMESPACES_NAME.to_owned(), len: log.len() as u64, crc32c: crc32c::crc32c(log) });
     bytes += log.len() as u64;
     for target in &targets {

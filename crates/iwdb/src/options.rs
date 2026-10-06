@@ -34,6 +34,19 @@ pub struct StoreOptions {
     /// can't see the memory of the application it runs in. The server sets
     /// it from `[memory]`, or from its cgroup.
     pub memory: MemoryOptions,
+    /// Online backups ([`Store::backup`](crate::Store::backup)): how fast
+    /// they copy.
+    pub backup: BackupOptions,
+}
+
+/// Options of online backups (ADR 0055).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BackupOptions {
+    /// Copy at most this many bytes per second (default `None`: as fast as
+    /// the disks go; 0 is the same). Checkpoints wait for a backup's whole
+    /// copy (ADR 0009), so a throttled backup holds them back longer, and
+    /// the WALs grow meanwhile.
+    pub max_bytes_per_second: Option<u64>,
 }
 
 impl Default for StoreOptions {
@@ -45,6 +58,7 @@ impl Default for StoreOptions {
             archive: None,
             retention: WalRetention::default(),
             memory: MemoryOptions::default(),
+            backup: BackupOptions::default(),
         }
     }
 }
