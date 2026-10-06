@@ -30,6 +30,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 22 | [`Value` / `Expr` serde can't be read from JSON beyond 64 levels, and skips unknown fields](#22-value--expr-serde-cant-be-read-from-json-beyond-64-levels-and-skips-unknown-fields) | fixed upstream (`7e7b7fa`): [#57](https://github.com/p-sodmann/Ironweaver/issues/57) |
 | 23 | [A search's progress, readable while it runs](#23-a-searchs-progress-readable-while-it-runs) | not filed: a feature proposal (step 16c), held for the owner's decision |
 | 24 | [List a graph's labels, and count its edges by type](#24-list-a-graphs-labels-and-count-its-edges-by-type) | filed: [#60](https://github.com/p-sodmann/Ironweaver/issues/60) |
+| 25 | [`memory_usage` can't count payloads, and an index build reports no memory](#25-memory_usage-cant-count-payloads-and-an-index-build-reports-no-memory) | filed: [#61](https://github.com/p-sodmann/Ironweaver/issues/61) |
 
 ---
 
@@ -577,4 +578,50 @@ assert_eq!(g.label_count("Person"), 1); // O(1), but only for a name we already 
 **Why the database needs it**
 
 Step 16c-2's `schema` read (ADR 0053) lists a namespace's labels and edge types for the operator console. Without a list, it finds label names in a sample of nodes (the counts are exact, through `label_count`) and counts types in a sample of edges, so a large namespace's schema can miss a rare label and its type counts are only the sample's. With the proposal, the labels and types become complete and exact in O(labels + types), and only the attribute keys stay sampled.
+
+---
+
+## 25. `memory_usage` can't count payloads, and an index build reports no memory
+
+Status: filed as [#61](https://github.com/p-sodmann/Ironweaver/issues/61) on 2026-10-06. A finding from step 16d: a missing guarantee, not a bug (the gap is documented). Checked against `7e7b7fa`.
+
+**Problem**
+
+`Graph::memory_usage` counts a payload's inline size but not the heap it owns: attribute maps, their keys, strings and lists. That is documented, and there is no way for the caller to plug the payload's size in, so the figure is a third to a half of what a graph with attributes really uses. Measured under a counting allocator: 100 000 nodes with four numeric attributes and 400 000 edges with one hold 306 MiB, of which `memory_usage` reports 120 MiB. With a few short strings per node it reports 124 of 353 MiB.
+
+```rust
+use ironweaver_core::{Graph, Record, Value};
+let build = |text: &str| {
+    let mut g = Graph::<Record, Record>::new();
+    for i in 0..100 {
+        let rec = Record::with_attr([("text", Value::String(text.repeat(1000)))]);
+        g.add_node(format!("n{i}"), rec).unwrap();
+    }
+    g
+};
+// 100 KB of strings more, the same figure
+assert_eq!(build("").memory_usage(), build("x").memory_usage());
+```
+
+Two related gaps:
+
+- An `IndexBuild` in progress reports no memory. It holds 7.5 MiB (an integer key) to 21.6 MiB (a 25-byte string key) for 100 000 nodes before `install_index`.
+- `Projection::collect` returns a `RawProjection` without `memory_usage`. It peaks at about 1.8 times the finished projection.
+
+**Proposal**
+
+- A trait the payload may implement, `HeapSize { fn heap_bytes(&self) -> usize; }`, with an implementation for `Record` and `()`. The graph adds and subtracts it in the same places it keeps `heap` today: add and remove node and edge, `SetNode` / `SetEdge`, `SetNodeAttr` / `SetEdgeAttr` (before and after the patch), the loaders, and `recount`. `memory_usage` stays O(1) and becomes the whole graph.
+  - To avoid a breaking change, the graph could count payloads only when `N: HeapSize` (a second method, `memory_usage_with_payloads`), or the trait could have a default of 0.
+  - `heap_bytes` should be computed from lengths rather than capacities, so that a graph and its replayed copy agree.
+- `IndexBuild::memory_usage()` (O(1), counted as it is filled) and `RawProjection::memory_usage()`.
+
+**Why the database needs it**
+
+Step 16d refuses writes before the server runs out of memory (ADR 0054), and needs to know what its graphs use. Until the core counts payloads, the database keeps its own estimate:
+
+- `DbRecord::heap_bytes`, summed per namespace;
+- updated on every apply and replay by summing the payloads of the entities each record touches, before and after;
+- recomputed in O(graph) on load.
+
+That duplicates bookkeeping the graph already does for its own heap, and costs an extra pass over the touched entities per commit. Index builds and raw projections are charged by a formula per node and edge.
 
