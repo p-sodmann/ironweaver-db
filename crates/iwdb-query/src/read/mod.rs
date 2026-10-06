@@ -17,6 +17,7 @@ mod explain;
 mod graph;
 mod lookup;
 mod matching;
+mod schema;
 
 use std::collections::BinaryHeap;
 
@@ -32,6 +33,7 @@ pub use explain::{Explain, Lookup, Plan, explain};
 pub use graph::{neighbourhood, random_walks, shortest_path, subgraph, traverse};
 pub use lookup::{find, get_edges, get_nodes};
 pub use matching::match_pattern;
+pub use schema::{KeyInfo, LabelInfo, MAX_KEYS_PER_LABEL, Schema, TypeInfo, schema};
 
 /// What a read may do and where it continues: the resolved limits, the
 /// options, and the namespace's identity for cursors.

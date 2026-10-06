@@ -49,13 +49,13 @@ test('filters: the core\'s Expr JSON', async () => {
   const s = fresh();
   const all = (await s.find('social', { Label: 'Person' }, { limit: 1000 })).nodes;
   const old = await s.find('social', { And: [{ Label: 'Person' }, { Compare: { path: ['age'], op: 'Ge', value: { Int: 60 } } }] }, { limit: 1000 });
-  assert.equal(old.total, all.filter((n) => n.attr.age.Int >= 60).length);
+  assert.equal(old.nodes.length, all.filter((n) => n.attr.age.Int >= 60).length);
   assert.ok(old.nodes.every((n) => n.attr.age.Int >= 60));
   const noMail = await s.find('social', { And: [{ Label: 'Person' }, { Not: { Exists: { path: ['email'] } } }] }, { limit: 1000 });
-  assert.equal(noMail.total, all.filter((n) => !n.attr.email).length);
+  assert.equal(noMail.nodes.length, all.filter((n) => !n.attr.email).length);
   // Int and Float compare as numbers
   const f = await s.find('social', { Compare: { path: ['age'], op: 'Gt', value: { Float: 59.5 } } }, { limit: 1000 });
-  assert.equal(f.total, all.filter((n) => n.attr.age.Int >= 60).length);
+  assert.equal(f.nodes.length, all.filter((n) => n.attr.age.Int >= 60).length);
   await rejects(s.find('social', { Bogus: 1 }), 'invalid_argument');
   await rejects(s.find('social', { Compare: { path: ['age'], op: 'Like', value: { Int: 1 } } }), 'invalid_argument');
   await rejects(s.find('nowhere', { Label: 'Person' }), 'not_found');
@@ -139,28 +139,33 @@ test('an index is built online and becomes ready', async () => {
   assert.ok(ready.ready && ready.size.entries > 0);
 });
 
-test('the server status: health, series, problems in the degraded scenario', async () => {
+test('the server status: series, problems in the degraded scenario', async () => {
   const calm = await fresh().server();
-  assert.equal(calm.health, 'ok'); assert.equal(calm.ready, true);
+  assert.deepEqual(U.problems(calm), []); assert.equal(calm.ready, true);
   assert.equal(calm.series.commitsPerSec.length, 90);
-  assert.ok(calm.namespaces.every((n) => !n.readOnly && !n.checkpointFailure));
+  assert.equal(calm.memory.limitBytes, null, 'no memory limit before step 16d');
   const s = fresh({ scenario: 'degraded' }); const d = await s.server();
-  assert.equal(d.health, 'warn');
+  assert.equal(U.problems(d).length, 2);
   assert.ok(d.namespaces.find((n) => n.name === 'archive_2025').readOnly);
   assert.ok(d.namespaces.find((n) => n.name === 'orders').checkpointFailure);
-  assert.ok(d.memory.usedBytes / d.memory.limitBytes >= d.memory.warnAt);
+  assert.ok(U.problems({ ...d, namespaces: [], memory: { graphBytes: 90, limitBytes: 100 } })[0].includes('90 %'));
   // A failed checkpoint stops checkpoints: the lag grows
   const lag0 = d.namespaces.find((n) => n.name === 'orders'); for (let k = 0; k < 30; k++) s.tick();
   const lag1 = (await s.server()).namespaces.find((n) => n.name === 'orders');
-  assert.ok(lag1.seq - lag1.checkpoint > lag0.seq - lag0.checkpoint);
+  assert.ok(lag1.sinceCheckpoint > lag0.sinceCheckpoint);
 });
 
-test('cancel ends an active request and is logged', async () => {
+test('cancel ends a running read and is logged; a commit can\'t be cancelled', async () => {
   const s = fresh(); const seen = []; s.onLog((e) => seen.push(e));
-  const { active } = await s.server(); await s.cancel(active[0].id);
-  assert.ok(!(await s.server()).active.some((q) => q.id === active[0].id));
-  assert.ok(seen.some((e) => e.msg.includes(active[0].id)));
-  await rejects(s.cancel('req-0'), 'not_found');
+  for (let k = 0; k < 40 && !(await s.server()).active.some((q) => !q.cancellable); k++) s.tick();
+  const { active } = await s.server();
+  const read = active.find((q) => q.cancellable); const commit = active.find((q) => !q.cancellable);
+  const r = await s.cancel(read.id);
+  assert.equal(r.request.id, read.id);
+  assert.ok(!(await s.server()).active.some((q) => q.id === read.id));
+  assert.ok(seen.some((e) => e.msg.includes('id=' + read.id)));
+  await rejects(s.cancel(commit.id), 'invalid_argument');
+  await rejects(s.cancel(0), 'not_found');
 });
 
 test('the query line parses the shell\'s commands', () => {
@@ -245,7 +250,7 @@ test('the REST Source implements the contract', () => {
 
 test('REST answers become the contract\'s shapes: numbers, absent defaults, paths', async () => {
   const { fetch, calls } = fakeServer({
-    'GET /v1/namespaces/s': [200, { status: { id: '2', name: 's', createdMicros: '17', seq: '5', syncedSeq: '5', nodes: '2', edges: '1', memoryBytes: '300', indexes: [{ path: { keys: ['age'] }, declared: true, size: { entries: '1', distinctKeys: '1', memoryBytes: '9' }, ready: {} }, { path: { keys: ['x'] }, building: { scanned: '1', total: '2' } }], constraints: '1', recovery: {} } }],
+    'GET /v1/namespaces/s': [200, { status: { id: '2', name: 's', createdMicros: '17', seq: '5', syncedSeq: '5', unsynced: '0', sinceCheckpoint: '5', nodes: '2', edges: '1', memoryBytes: '300', indexes: [{ path: { keys: ['age'] }, declared: true, size: { entries: '1', distinctKeys: '1', memoryBytes: '9' }, ready: {} }, { path: { keys: ['x'] }, building: { scanned: '1', total: '2' } }], constraints: '1', recovery: {} } }],
     'POST /v1/namespaces/s/subgraph': (b) => [200, { nodes: [{ id: 'ann', labels: ['P'], version: '1' }, { id: 'bob', version: '1' }], edges: [{ from: 'ann', to: 'bob', type: 'K', version: '1' }, { id: '3', from: 'bob', to: 'ann', version: '1' }], meta: { seq: '5' } }],
     'POST /v1/namespaces/s/match': [200, { rows: [{ nodes: ['ann', 'bob'], edges: [{ ids: ['0'] }] }], meta: { seq: '5', next: 'c' } }],
     'POST /v1/namespaces/s/explain': [200, { explain: { plan: { index: { path: { keys: ['age'] }, lookup: 'LOOKUP_RANGE' } }, estimatedCandidates: '4', nodes: '9' } }],
@@ -255,6 +260,7 @@ test('REST answers become the contract\'s shapes: numbers, absent defaults, path
   const st = await s.namespaceStatus('s');
   assert.equal(st.seq, 5); assert.equal(st.checkpoint, null); assert.deepEqual(st.indexes[0].path, ['age']); assert.equal(st.indexes[0].size.entries, 1);
   assert.deepEqual(st.indexes[1].building, { scanned: 1, total: 2 }); assert.equal(st.recovery.checkpoint, null);
+  assert.deepEqual([st.unsynced, st.sinceCheckpoint, st.lastCheckpointMicros], [0, 5, null]);
   const nb = await s.neighbours('s', 'ann');
   assert.deepEqual(nb.nodes.map((x) => x.id), ['bob']); assert.deepEqual(nb.edges.map((e) => e.id), [0, 3], 'an absent id is edge 0');
   assert.deepEqual(calls.at(-1).body, { seeds: ['ann'], depth: 1, direction: 'DIRECTION_BOTH', options: { limits: { maxVisited: 5000 }, partial: true } });
@@ -265,21 +271,117 @@ test('REST answers become the contract\'s shapes: numbers, absent defaults, path
   await rejects(s.find('s', { Bogus: 1 }), 'invalid_argument');
   assert.equal(calls.find((c) => c.method === 'POST').headers['content-type'], 'application/json', 'bodies are JSON, or the server refuses them (415)');
   assert.ok(s.log().some((e) => e.level === 'WARN' && e.msg.includes('400')));
-  await rejects(s.cancel('req-1'), 'unavailable');
 });
 
-test('the REST Source reports the server\'s readiness (step 16b)', async () => {
-  let ready = false;
-  const { fetch } = fakeServer({
-    'GET /v1/health/ready': () => (ready ? [200, { state: 'HEALTH_STATE_READY', ready: true }] : [503, { state: 'HEALTH_STATE_RECOVERING' }]),
-    'GET /v1/namespaces': [200, { namespaces: [] }],
+/* Answers as the server gives them (proto3 JSON: 64-bit numbers as strings, zeros and empty lists absent). */
+const H = (counts) => ({ histogram: { boundsSeconds: [0.001, 0.01, 0.1], counts: counts.map(String) } });
+const metrics = (commits, finds) => ({ families: [
+  { name: 'iwdb_requests_active', kind: 'METRIC_KIND_GAUGE', samples: [{ gauge: 2 }] },
+  { name: 'iwdb_requests_total', kind: 'METRIC_KIND_COUNTER', samples: [
+    { labels: [{ name: 'operation', value: 'Find' }, { name: 'code', value: 'ok' }], counter: String(finds) },
+    { labels: [{ name: 'operation', value: 'Find' }, { name: 'code', value: 'timeout' }], counter: '1' },
+    { labels: [{ name: 'operation', value: 'Commit' }, { name: 'code', value: 'ok' }], counter: String(commits) }] },
+  { name: 'iwdb_request_duration_seconds', kind: 'METRIC_KIND_HISTOGRAM', samples: [
+    { labels: [{ name: 'operation', value: 'Find' }], ...H([0, finds + 1, 0, 0]) },
+    { labels: [{ name: 'operation', value: 'Commit' }], ...H([0, 0, commits, 0]) }] },
+  { name: 'iwdb_commit_duration_seconds', kind: 'METRIC_KIND_HISTOGRAM', samples: [H([0, commits, 0, 0])] },
+  { name: 'iwdb_wal_fsync_duration_seconds', kind: 'METRIC_KIND_HISTOGRAM', samples: [H([commits, 0, 0, 0])] },
+] });
+function statusServer(o = {}) {
+  let commits = 10; let finds = 4;
+  const routes = {
+    'GET /v1/status': () => [200, { status: { version: '0.1.0', startedMicros: '1791260391767612', ready: true, fsync: 'always', memory: { graphBytes: '648086' }, disk: { walBytes: '84369', freeBytes: '74012971008' }, requests: { active: '1', total: '18' },
+      namespaces: [{ id: '1', name: 'default', createdMicros: '1791260391478630', syncedSeq: '0', memoryBytes: '432', recovery: {}, unsynced: '0' }] } }],
+    'GET /v1/requests?limit=100': [200, { requests: [{ id: '20', operation: 'Find', namespace: 'default', user: 'admin', client: '127.0.0.1', startedMicros: '1791260399290946', elapsedMicros: '23', cancellable: true }] }],
+    'GET /v1/consumers': [200, { consumers: [{ namespace: 'default', user: 'ann', nextSeq: '4', lag: '2', lastPollMicros: '1791260399290946', polls: '3' }] }],
+    'GET /v1/metrics': () => [200, metrics(commits, finds)],
+    'POST /v1/requests/20/cancel': [200, { request: { id: '20', operation: 'Find', user: 'admin', startedMicros: '1', elapsedMicros: '9', cancellable: true } }],
+    ...(o.admin === false
+      ? { 'GET /v1/log?after=0&limit=1000': [403, { code: 'permission_denied', message: 'reading the log needs a server-wide admin' }] }
+      : {
+        'GET /v1/log?after=0&limit=1000': [200, { events: [{ seq: '1', timeMicros: '1791260391467275', level: 'LOG_LEVEL_WARN', target: 'iwdb_server', message: 'TLS is off' }, { seq: '2', timeMicros: '1791260391469957', level: 'LOG_LEVEL_INFO', target: 'iwdb_server::serve', message: 'listening', fields: [{ name: 'address', value: '127.0.0.1:7655' }] }], lastSeq: '2' }],
+        'GET /v1/log?after=2&limit=1000': [200, { lastSeq: '2' }],
+      }),
+  };
+  const f = fakeServer(routes);
+  return { ...f, more: (c, q) => { commits += c; finds += q; } };
+}
+/** Assert that two answers have the same keys, recursively (lists by their first items, when both have one);
+ *  values may differ, and be null on either side (no limit set, no free-space reading). */
+function agree(a, b, at = 'server()') {
+  if (Array.isArray(a) && Array.isArray(b)) { if (a.length && b.length) agree(a[0], b[0], at + '[0]'); return; }
+  if (a && b && typeof a === 'object' && typeof b === 'object') {
+    assert.deepEqual(Object.keys(a).sort(), Object.keys(b).sort(), at);
+    for (const k of Object.keys(a)) agree(a[k], b[k], at + '.' + k);
+  }
+}
+
+test('the mock\'s server() and the REST Source\'s on a server answer in one shape', async () => {
+  const srv = statusServer(); const s = rest.create({ fetch: srv.fetch });
+  await s.server(); srv.more(3, 2);
+  const real = await s.server();
+  const mocked = await fresh().server();
+  agree(real, mocked);
+  for (const k of Object.keys(real.series)) assert.ok(real.series[k].length && mocked.series[k].length, k);
+});
+
+test('the REST Source reads the status views: numbers, series from the metrics, operations', async () => {
+  const srv = statusServer();
+  const s = rest.create({ fetch: srv.fetch });
+  const first = await s.server();
+  assert.equal(first.version, '0.1.0'); assert.equal(first.memory.graphBytes, 648086); assert.equal(first.memory.limitBytes, null);
+  assert.equal(first.disk.checkpointBytes, 0); assert.equal(first.requests.total, 18); assert.equal(first.requests.denied, 0);
+  assert.deepEqual(first.active[0], { id: 20, operation: 'Find', namespace: 'default', user: 'admin', client: '127.0.0.1', startedMicros: 1791260399290946, elapsedMicros: 23, cancellable: true });
+  assert.deepEqual(first.consumers[0], { namespace: 'default', user: 'ann', client: null, nextSeq: 4, lag: 2, lastPollMicros: 1791260399290946, polls: 3 });
+  assert.equal(first.series.commitsPerSec.length, 0, 'a series needs two answers');
+  const find = first.operations.find((o) => o.operation === 'Find');
+  assert.deepEqual([find.calls, find.errors], [5, 1]);
+  assert.ok(find.p50Ms > 1 && find.p50Ms <= 10, 'within the bucket (1 ms, 10 ms]');
+  srv.more(6, 0);
+  const second = await s.server();
+  assert.equal(second.series.commitsPerSec.length, 1); assert.ok(second.series.commitsPerSec[0] > 0);
+  assert.ok(second.series.commitP99[0] > 1 && second.series.commitP99[0] <= 10);
+  assert.equal(second.series.queryP99[0], 0, 'no queries since the last answer');
+  assert.equal(second.series.active[0], 2); assert.equal(second.series.walBytes[0], 84369);
+  const r = await s.cancel(20); assert.equal(r.request.id, 20);
+});
+
+test('the REST Source shows the server\'s log to an admin, and this page\'s requests to anyone else', async () => {
+  const admin = rest.create({ fetch: statusServer().fetch }); const seen = []; admin.onLog((e) => seen.push(e));
+  assert.equal(admin.logKind(), 'page');
+  await admin.server(); await admin.server();
+  assert.equal(admin.logKind(), 'server');
+  assert.deepEqual(admin.log().map((e) => [e.level, e.msg]), [['WARN', 'TLS is off'], ['INFO', 'listening · address=127.0.0.1:7655']]);
+  assert.equal(seen.length, 2, 'each event once');
+  const other = rest.create({ fetch: statusServer({ admin: false }).fetch });
+  await other.server();
+  assert.equal(other.logKind(), 'page');
+  assert.ok(!other.log().some((e) => e.msg.includes('403')), 'a refused log is not a failure to report');
+});
+
+test('histogram quantiles: linear within the bucket, as Prometheus estimates them', () => {
+  const h = { bounds: [0.001, 0.01, 0.1], counts: [0, 10, 0, 0] };
+  const near = (a, b, why) => assert.ok(Math.abs(a - b) < 1e-9, `${why || ''} ${a} is not ${b}`);
+  near(rest.quantile(h, 0.5), 5.5); near(rest.quantile(h, 1), 10);
+  near(rest.quantile({ bounds: [0.001], counts: [0, 3] }, 0.99), 1, '+Inf: the highest bound');
+  assert.equal(rest.quantile({ bounds: [0.001], counts: [0, 0] }, 0.5), 0, 'no observations');
+});
+
+test('the REST Source reads the schema: exact label counts, sampled keys and types', async () => {
+  const { fetch, calls } = fakeServer({
+    'GET /v1/namespaces/s/schema?max_visited=10000&max_edges=100000': [200, { schema: { labels: [{ name: 'Person', count: '64', sampled: '40', keys: [{ name: 'age', kinds: [{ kind: 'Int', count: '40' }] }] }, { name: 'Robot' }], types: [{ count: '2' }, { name: 'KNOWS', count: '60' }], nodes: '82', edges: '272', sampledNodes: '82', sampledEdges: '272' } }],
+    'GET /v1/namespaces/s/catalog': [200, { catalog: { constraints: [{ kind: 'CONSTRAINT_KIND_REQUIRED', label: 'Robot', path: { keys: ['serial'] } }] } }],
   });
-  const s = rest.create({ fetch });
-  const recovering = await s.server();
-  assert.equal(recovering.ready, false); assert.equal(recovering.health, 'warn');
-  ready = true;
-  const up = await s.server();
-  assert.equal(up.ready, true); assert.equal(up.health, 'ok');
+  const sc = await rest.create({ fetch }).schema('s');
+  assert.deepEqual(sc.labels, [{ name: 'Person', count: 64, sampled: 40, moreKeys: false, keys: { age: { Int: 40 } } }, { name: 'Robot', count: 0, sampled: 0, moreKeys: false, keys: {} }]);
+  assert.deepEqual(sc.types, [{ name: null, count: 2 }, { name: 'KNOWS', count: 60 }]);
+  assert.deepEqual(sc.constraints, [{ kind: 'required', label: 'Robot', path: ['serial'] }]);
+  assert.deepEqual([sc.nodes, sc.edges, sc.sampledNodes, sc.sampledEdges], [82, 272, 82, 272]);
+  assert.equal(calls.length, 2);
+  // The mock has the same shape
+  const m = await fresh().schema('social');
+  assert.deepEqual(Object.keys(m).sort(), Object.keys(sc).sort());
+  assert.deepEqual(Object.keys(m.labels[0]).sort(), Object.keys(sc.labels[0]).sort());
 });
 
 test('a server that doesn\'t answer is unavailable', async () => {

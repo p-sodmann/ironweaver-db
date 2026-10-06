@@ -156,7 +156,7 @@
   const COMPANIES = [['acme', 'Acme Rail', 1952, 'transport'], ['helio', 'Helio Grid', 2011, 'energy'], ['quill', 'Quill & Ink', 1987, 'publishing'], ['nordlys', 'Nordlys Bio', 2016, 'health'], ['tessel', 'Tessel Works', 2003, 'manufacturing'], ['ferro', 'Ferro Logistics', 1979, 'transport'], ['mosaic', 'Mosaic Labs', 2019, 'software'], ['basalt', 'Basalt Insurance', 1931, 'finance']];
 
   function emptyNs(id, name, created) {
-    return { id, name, created, createdSeq: id * 3 - 2, nodes: new Map(), edges: new Map(), nextEdge: 0, seq: 0, synced: 0, checkpoint: null, readOnly: null, checkpointFailure: null, indexes: [], constraints: [], marks: [], recovery: { checkpoint: null, replayed: 0, seq: 0 }, lastCheckpointMs: 0 };
+    return { id, name, created, createdSeq: id * 3 - 2, nodes: new Map(), edges: new Map(), nextEdge: 0, seq: 0, synced: 0, checkpoint: null, readOnly: null, checkpointFailure: null, indexes: [], constraints: [], marks: [], recovery: { checkpoint: null, replayed: 0, seq: 0 }, lastCheckpointAgoS: null };
   }
   function put(ns, id, labels, attr) { ns.nodes.set(id, { id, labels: labels.slice().sort(), attr: Object.fromEntries(Object.entries(attr).filter(([, v]) => v !== undefined).map(([k, v]) => [k, valueOf(v)])), meta: {}, version: 1 }); }
   function link(ns, from, to, type, attr = {}) { const id = ns.nextEdge++; ns.edges.set(id, { id, from, to, type, attr: Object.fromEntries(Object.entries(attr).map(([k, v]) => [k, valueOf(v)])), meta: {}, version: 1 }); return id; }
@@ -183,7 +183,7 @@
     ns.nodes.get('ann').labels = ['Admin', 'Person'];
     ns.indexes = [{ path: ['email'], declared: false, unique: true }, { path: ['age'], declared: true, unique: false }, { path: ['name'], declared: true, unique: false }];
     ns.constraints = [{ kind: 'unique', label: 'Person', path: ['email'] }];
-    ns.seq = 4120; ns.synced = 4120; ns.checkpoint = 4096; ns.lastCheckpointMs = 31.2; ns.recovery = { checkpoint: 4032, replayed: 61, seq: 4093 };
+    ns.seq = 4120; ns.synced = 4120; ns.checkpoint = 4096; ns.lastCheckpointAgoS = 312; ns.recovery = { checkpoint: 4032, replayed: 61, seq: 4093 };
     return ns;
   }
 
@@ -203,7 +203,7 @@
     }
     ns.indexes = [{ path: ['sku'], declared: false, unique: true }, { path: ['price'], declared: true, unique: false }];
     ns.constraints = [{ kind: 'unique', label: 'Part', path: ['sku'] }, { kind: 'unique', label: 'Product', path: ['sku'] }];
-    ns.seq = 911; ns.synced = 911; ns.checkpoint = 896; ns.lastCheckpointMs = 12.8; ns.recovery = { checkpoint: 896, replayed: 0, seq: 896 };
+    ns.seq = 911; ns.synced = 911; ns.checkpoint = 896; ns.lastCheckpointAgoS = 4210; ns.recovery = { checkpoint: 896, replayed: 0, seq: 896 };
     return ns;
   }
 
@@ -230,13 +230,14 @@
     const r = prng(31); const ns = emptyNs(4, 'archive_2025', Date.UTC(2025, 0, 2, 0, 0) * 1000);
     for (let k = 0; k < 24; k++) put(ns, 'evt-' + (k + 1), ['Event'], { kind: pick(r, ['login', 'export', 'grant', 'revoke']), at: undefined });
     for (let k = 1; k < 24; k++) link(ns, 'evt-' + k, 'evt-' + (k + 1), 'NEXT');
-    ns.seq = 2400; ns.synced = 2400; ns.checkpoint = 2400; ns.lastCheckpointMs = 6.1; ns.recovery = { checkpoint: 2400, replayed: 0, seq: 2400 };
+    ns.seq = 2400; ns.synced = 2400; ns.checkpoint = 2400; ns.lastCheckpointAgoS = 86400 * 40; ns.recovery = { checkpoint: 2400, replayed: 0, seq: 2400 };
     return ns;
   }
 
   /* ------------------------------------------------------------------ the mock server */
-  const OPS = ['getNodes', 'find', 'explain', 'neighbourhood', 'traverse', 'shortestPath', 'subgraph', 'matchPattern', 'commit', 'changes'];
-  const BASE_P50 = { getNodes: 0.18, find: 1.4, explain: 0.12, neighbourhood: 0.9, traverse: 2.6, shortestPath: 3.1, subgraph: 1.1, matchPattern: 4.8, commit: 1.9, changes: 0.3 };
+  // Operations by their RPC names, as the server's metrics label them
+  const OPS = ['GetNodes', 'Find', 'Explain', 'Neighbourhood', 'Traverse', 'ShortestPath', 'Subgraph', 'MatchPattern', 'Commit', 'GetChanges'];
+  const BASE_P50 = { GetNodes: 0.18, Find: 1.4, Explain: 0.12, Neighbourhood: 0.9, Traverse: 2.6, ShortestPath: 3.1, Subgraph: 1.1, MatchPattern: 4.8, Commit: 1.9, GetChanges: 0.3 };
 
   /**
    * A mock Source. `scenario`: 'calm' (default) or 'degraded' (a read-only namespace, a failed checkpoint and
@@ -258,27 +259,26 @@
     const byName = new Map(spaces.map((s) => [s.name, s]));
     const t0 = opts.now || Date.now();
     const server = {
-      version: '0.3.0-dev', startedMicros: (t0 - 3 * 86400e3 - 4 * 3600e3 - 17 * 60e3) * 1000,
-      endpoints: { grpc: '0.0.0.0:7600', rest: '0.0.0.0:7601', metrics: '0.0.0.0:9600' },
-      dataDir: '/var/lib/iwdb', fsync: 'always', memoryLimit: 8 * 2 ** 30,
+      version: '0.3.0-dev', startedMicros: (t0 - 3 * 86400e3 - 4 * 3600e3 - 17 * 60e3) * 1000, fsync: 'always',
       ticks: 0, series: {}, opStats: Object.fromEntries(OPS.map((o) => [o, { calls: between(r, 2000, 90000), errors: between(r, 0, 12), p50: BASE_P50[o], p99: BASE_P50[o] * 6.5 }])),
-      rejected: 3, timedOut: 11, cancelled: 2, active: [], nextReq: 4100, jobs: [], consumers: [], log: [], listeners: new Set(),
-      walBytes: 182 * 2 ** 20, checkpointBytes: 61 * 2 ** 20, diskFree: 212 * 2 ** 30, rssBase: 1.42 * 2 ** 30,
+      total: 412000, rejected: 3, timedOut: 11, cancelled: 2, denied: 5, active: [], nextReq: 4100, consumers: [], log: [], listeners: new Set(),
+      walBytes: 182 * 2 ** 20, checkpointBytes: 61 * 2 ** 20, diskFree: 212 * 2 ** 30,
     };
+    // The mock's clock: a simulated second per tick
+    const nowMicros = () => (t0 + server.ticks * 1000) * 1000;
     if (scenario === 'degraded') {
       const a = byName.get('archive_2025'); a.readOnly = 'a WAL write failed: No space left on device (os error 28)'; a.synced = 2398;
       const o = byName.get('orders'); o.checkpointFailure = 'writing checkpoint 18176: Permission denied (os error 13)';
-      server.rssBase = 6.9 * 2 ** 30; server.diskFree = 3.1 * 2 ** 30;
+      server.diskFree = 3.1 * 2 ** 30;
     }
     server.consumers = [
-      { name: 'search-indexer', namespace: 'social', client: '10.4.2.17:51022', atSeq: 4118, since: '2026-10-04T06:02:11Z' },
-      { name: 'warehouse-sync', namespace: 'orders', client: '10.4.2.31:40991', atSeq: 18190, since: '2026-10-03T22:40:00Z' },
+      { namespace: 'social', user: 'search-indexer', client: '10.4.2.17', nextSeq: 4119, lastPollTicks: 0, polls: 81233 },
+      { namespace: 'orders', user: 'warehouse-sync', client: '10.4.2.31', nextSeq: 18191, lastPollTicks: 0, polls: 40210 },
     ];
-    server.jobs = [{ id: 'job-17', kind: 'pagerank', namespace: 'social', state: 'running', progress: 0.12, started: '2026-10-04T09:30:02Z' }];
     // A build in progress, so the status page shows one (social: an index on ["joined"])
     byName.get('social').indexes.push({ path: ['joined'], declared: true, unique: false, building: { scanned: 4, total: byName.get('social').nodes.size } });
 
-    const series = ['commitsPerSec', 'commitP50', 'commitP99', 'fsyncP99', 'queryP50', 'queryP99', 'memory', 'active', 'walBytes'];
+    const series = ['commitsPerSec', 'commitP50', 'commitP99', 'fsyncP99', 'queryP50', 'queryP99', 'active', 'graphBytes', 'walBytes'];
     series.forEach((k) => { server.series[k] = []; });
     const emit = (level, msg) => {
       const d = new Date(); const e = { t: d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0'), level, msg };
@@ -289,7 +289,7 @@
       let b = 0; ns.nodes.forEach((n) => { b += 96 + n.id.length + 24 * n.labels.length; });
       return b + ns.edges.size * 64 + ns.indexes.length * ns.nodes.size * 40;
     };
-    const rss = () => server.rssBase + spaces.reduce((a, s) => a + memoryOf(s) * 900, 0) + Math.sin(server.ticks / 9) * 40 * 2 ** 20;
+    const graphBytes = () => spaces.reduce((a, s) => a + memoryOf(s), 0);
 
     /* One simulated second of traffic; the status page calls tick() on its timer, the tests call it directly. */
     function tick() {
@@ -302,7 +302,7 @@
       }
       spaces.forEach((s) => {
         if (s.readOnly || s.checkpointFailure) return;
-        if (s.seq - (s.checkpoint || 0) > 256) { s.checkpoint = s.seq; s.lastCheckpointMs = 18 + r() * 30; emit('INFO', `checkpoint ${s.name} · seq ${s.seq} · ${s.lastCheckpointMs.toFixed(1)} ms`); }
+        if (s.seq - (s.checkpoint || 0) > 256) { s.checkpoint = s.seq; s.lastCheckpointAgoS = 0; emit('INFO', `checkpoint ${s.name} · seq ${s.seq} · ${(18 + r() * 30).toFixed(1)} ms`); } else if (s.lastCheckpointAgoS != null) s.lastCheckpointAgoS++;
       });
       if (o.checkpointFailure && server.ticks % 15 === 0) emit('ERROR', `checkpoint orders failed · ${o.checkpointFailure}`);
       const spike = r() < 0.06 ? 3 + r() * 5 : 1;
@@ -310,21 +310,19 @@
       if (spike > 1) emit('WARN', `slow commit · orders · ${p99.toFixed(1)} ms (p99 budget 10 ms)`);
       const push = (k, v) => { const a = server.series[k]; a.push(v); if (a.length > 90) a.shift(); };
       push('commitsPerSec', commits); push('commitP50', p50); push('commitP99', p99); push('fsyncP99', p99 * 0.62);
-      push('queryP50', 1.1 + r() * 0.6); push('queryP99', 9 + r() * 6 * spike); push('memory', rss());
+      push('queryP50', 1.1 + r() * 0.6); push('queryP99', 9 + r() * 6 * spike); push('graphBytes', graphBytes());
       server.walBytes += commits * 380; if (server.ticks % 40 === 0) server.walBytes = Math.round(server.walBytes * 0.6);
       push('walBytes', server.walBytes);
-      OPS.forEach((op) => { const st = server.opStats[op]; st.calls += between(r, 0, op === 'commit' ? commits : 20); st.p50 = BASE_P50[op] * (0.85 + r() * 0.3); st.p99 = st.p50 * (5 + r() * 3) * (op === 'commit' ? spike : 1); });
+      OPS.forEach((op) => { const st = server.opStats[op]; const n = between(r, 0, op === 'Commit' ? commits : 20); st.calls += n; server.total += n; st.p50 = BASE_P50[op] * (0.85 + r() * 0.3); st.p99 = st.p50 * (5 + r() * 3) * (op === 'Commit' ? spike : 1); });
       // Requests come and go
       server.active = server.active.filter((q) => (q.leftTicks -= 1) > 0);
       while (server.active.length < 2 + Math.floor(r() * 4)) {
-        const op = pick(r, ['find', 'matchPattern', 'traverse', 'neighbourhood', 'changes', 'subgraph']);
-        server.active.push({ id: 'req-' + server.nextReq++, op, namespace: pick(r, ['social', 'inventory', 'orders']), client: pick(r, ['10.4.2.17', '10.4.2.31', '10.4.3.8', '127.0.0.1']) + ':' + between(r, 40000, 60000), startedTicks: server.ticks, visited: 0, leftTicks: between(r, 1, op === 'changes' ? 60 : 6) });
+        const op = pick(r, ['Find', 'MatchPattern', 'Traverse', 'Neighbourhood', 'GetChanges', 'Subgraph', 'Commit']);
+        server.active.push({ id: server.nextReq++, operation: op, namespace: pick(r, ['social', 'inventory', 'orders']), user: pick(r, ['admin', 'search-indexer', 'reporting']), client: pick(r, ['10.4.2.17', '10.4.2.31', '10.4.3.8', '127.0.0.1']), startedTicks: server.ticks, leftTicks: between(r, 1, op === 'GetChanges' ? 30 : 6) });
       }
-      server.active.forEach((q) => { q.visited += between(r, 10, 4000); });
       push('active', server.active.length);
-      if (r() < 0.02) { server.timedOut++; emit('WARN', 'request timed out · matchPattern · social · 30 s · visited 1 000 000'); }
-      server.consumers.forEach((c) => { const ns = byName.get(c.namespace); c.atSeq = Math.min(ns.seq, c.atSeq + Math.round(commits * (0.7 + r() * 0.5))); });
-      server.jobs.forEach((j) => { if (j.state === 'running') { j.progress = Math.min(1, j.progress + 0.004); if (j.progress >= 1) { j.state = 'done'; emit('INFO', `job ${j.id} ${j.kind} done · ${j.namespace}`); } } });
+      if (r() < 0.02) { server.timedOut++; emit('WARN', 'request timed out · MatchPattern · social · 30 s'); }
+      server.consumers.forEach((c) => { const ns = byName.get(c.namespace); c.nextSeq = Math.min(ns.seq + 1, c.nextSeq + Math.round(commits * (0.7 + r() * 0.5))); c.polls++; c.lastPollTicks = server.ticks; });
       spaces.forEach((s) => s.indexes.forEach((ix) => {
         if (!ix.building) return;
         if (server.ticks % 3) return; // an online build reads in batches between commits (ADR 0019)
@@ -336,8 +334,8 @@
     for (let k = 0; k < 90; k++) tick(); // a minute and a half of history before the first look
     server.log = [];
     emit('INFO', 'recovery done · 4 namespaces · 190 records replayed · 212 ms');
-    emit('INFO', 'serving gRPC on 0.0.0.0:7600 and REST on 0.0.0.0:7601');
-    if (scenario === 'degraded') { emit('ERROR', 'archive_2025 is read-only · a WAL write failed: No space left on device (os error 28)'); emit('WARN', 'memory at 87 % of the limit · writes are refused at 95 %'); }
+    emit('INFO', 'serving 0.0.0.0:7600 · gRPC, REST, health and the console');
+    if (scenario === 'degraded') emit('ERROR', 'archive_2025 is read-only · a WAL write failed: No space left on device (os error 28)');
 
     /* ------------------------------------------------------------------ the Source */
     const wait = () => new Promise((res) => setTimeout(res, latency[0] + Math.random() * (latency[1] - latency[0])));
@@ -359,9 +357,16 @@
     };
     const sortedNodes = (ns) => [...ns.nodes.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
 
+    const requestOut = (q) => ({
+      id: q.id, operation: q.operation, namespace: q.namespace, user: q.user, client: q.client, startedMicros: nowMicros() - (server.ticks - q.startedTicks) * 1e6 - 120e3,
+      elapsedMicros: (server.ticks - q.startedTicks) * 1e6 + 120e3, cancellable: q.operation !== 'Commit',
+    });
+
     function statusOf(ns) {
       return {
         id: ns.id, name: ns.name, createdMicros: ns.created, seq: ns.seq, syncedSeq: ns.synced, checkpoint: ns.checkpoint,
+        unsynced: ns.seq - ns.synced, sinceCheckpoint: ns.seq - (ns.checkpoint || 0),
+        lastCheckpointMicros: ns.lastCheckpointAgoS == null ? null : nowMicros() - ns.lastCheckpointAgoS * 1e6,
         readOnly: ns.readOnly, checkpointFailure: ns.checkpointFailure, nodes: ns.nodes.size, edges: ns.edges.size, memoryBytes: memoryOf(ns),
         indexes: ns.indexes.slice().sort((a, b) => (a.path.join('.') < b.path.join('.') ? -1 : 1)).map((ix) => {
           const out = { path: ix.path, declared: ix.declared, unique: ix.unique };
@@ -372,7 +377,7 @@
           }
           return out;
         }),
-        constraints: ns.constraints.length, marks: clone(ns.marks), recovery: clone(ns.recovery), lastCheckpointMs: ns.lastCheckpointMs,
+        constraints: ns.constraints.length, marks: clone(ns.marks), recovery: clone(ns.recovery),
       };
     }
 
@@ -458,38 +463,42 @@
     }
 
     return {
-      kind: 'mock', scenario,
+      kind: 'mock', scenario, endpoint: 'mock data',
       /** Namespaces, by name. */
-      namespaces: () => call('namespaces', () => spaces.map((s) => ({ id: s.id, name: s.name, createdMicros: s.created, createdSeq: s.createdSeq }))),
-      namespaceStatus: (name) => call('namespaceStatus', () => statusOf(nsOf(name))),
-      /** Labels and edge types with counts, and the attribute keys (with value kinds) seen per label. */
-      schema: (name) => call('schema', () => {
+      namespaces: () => call('ListNamespaces', () => spaces.map((s) => ({ id: s.id, name: s.name, createdMicros: s.created, createdSeq: s.createdSeq }))),
+      namespaceStatus: (name) => call('GetNamespaceStatus', () => statusOf(nsOf(name))),
+      /** Labels and edge types with counts, and the attribute keys (with value kinds) seen per label. The mock's
+       *  namespaces are small: its sample is every node and edge. */
+      schema: (name) => call('GetSchema', () => {
         const ns = nsOf(name); const labels = new Map(); const types = new Map();
         ns.nodes.forEach((n) => n.labels.forEach((l) => {
-          const e = labels.get(l) || labels.set(l, { name: l, count: 0, keys: {} }).get(l); e.count++;
+          const e = labels.get(l) || labels.set(l, { name: l, count: 0, sampled: 0, keys: {}, moreKeys: false }).get(l); e.count++; e.sampled++;
           Object.entries(n.attr).forEach(([k, v]) => { const kinds = e.keys[k] || (e.keys[k] = {}); kinds[kindOf(v)] = (kinds[kindOf(v)] || 0) + 1; });
         }));
         ns.edges.forEach((e) => { const t = types.get(e.type) || types.set(e.type, { name: e.type, count: 0 }).get(e.type); t.count++; });
         const byName2 = (a, b) => (a.name < b.name ? -1 : 1);
-        return { labels: [...labels.values()].sort(byName2), types: [...types.values()].sort(byName2), constraints: clone(ns.constraints) };
+        return {
+          labels: [...labels.values()].sort(byName2), types: [...types.values()].sort(byName2), constraints: clone(ns.constraints),
+          nodes: ns.nodes.size, edges: ns.edges.size, sampledNodes: ns.nodes.size, sampledEdges: ns.edges.size,
+        };
       }),
-      getNodes: (name, ids) => call('getNodes', () => { const ns = nsOf(name); return { nodes: ids.map((id) => (ns.nodes.has(id) ? nodeOut(ns.nodes.get(id)) : null)), meta: meta(ns) }; }),
-      find: (name, filter, o = {}) => call('find', () => {
+      getNodes: (name, ids) => call('GetNodes', () => { const ns = nsOf(name); return { nodes: ids.map((id) => (ns.nodes.has(id) ? nodeOut(ns.nodes.get(id)) : null)), meta: meta(ns) }; }),
+      find: (name, filter, o = {}) => call('Find', () => {
         const ns = nsOf(name); checkFilter(filter);
         const plan = planOf(ns, filter); const cands = candidates(ns, plan).sort((a, b) => (a.id < b.id ? -1 : 1));
         const hits = cands.filter((n) => test(filter, n));
         const { slice, next } = pageOf(hits, Math.min(o.limit || 100, 10000), o.cursor);
-        return { nodes: slice.map(nodeOut), total: hits.length, meta: meta(ns, { next, work: { visited: cands.length, edges: 0 } }) };
+        return { nodes: slice.map(nodeOut), meta: meta(ns, { next, work: { visited: cands.length, edges: 0 } }) };
       }),
-      explain: (name, filter, o = {}) => call('explain', () => {
+      explain: (name, filter, o = {}) => call('Explain', () => {
         const ns = nsOf(name); checkFilter(filter); const plan = planOf(ns, filter);
         const cands = candidates(ns, plan);
         const est = plan.scan ? ns.nodes.size : Math.max(1, Math.round(cands.length * (0.8 + 0.4 * ((cands.length * 7) % 10) / 10)));
-        return { explain: { plan, estimatedCandidates: est, candidates: o.analyze ? cands.length : undefined, matched: o.analyze ? cands.filter((n) => test(filter, n)).length : undefined, nodes: ns.nodes.size, building: buildingPaths(ns, filter) }, meta: meta(ns, { work: { visited: o.analyze ? cands.length : 0, edges: 0 } }) };
+        return { explain: { plan, estimatedCandidates: est, candidates: o.analyze ? cands.length : undefined, nodes: ns.nodes.size, building: buildingPaths(ns, filter) }, meta: meta(ns, { work: { visited: o.analyze ? cands.length : 0, edges: 0 } }) };
       }),
-      /** A node's neighbours (either direction) and the edges between the node and them. Composed from
-       *  `neighbourhood` (depth 1) and `subgraph` once it talks to a server. */
-      neighbours: (name, id, o = {}) => call('neighbourhood', () => {
+      /** A node's neighbours (either direction) and the edges between the node and them (the REST Source reads
+       *  a depth-1 `subgraph`). */
+      neighbours: (name, id, o = {}) => call('Subgraph', () => {
         const ns = nsOf(name); if (!ns.nodes.has(id)) fail('not_found', `no node ${JSON.stringify(id)}`);
         const limit = o.limit || 24; const edges = [...ns.edges.values()].filter((e) => e.from === id || e.to === id).sort((a, b) => a.id - b.id);
         const ids = []; edges.forEach((e) => { const other = e.from === id ? e.to : e.from; if (!ids.includes(other)) ids.push(other); });
@@ -497,41 +506,41 @@
         return { nodes: [...keep].map((x) => nodeOut(ns.nodes.get(x))), edges: edges.filter((e) => keep.has(e.from === id ? e.to : e.from)).map(edgeOut), truncated: ids.length > limit, meta: meta(ns) };
       }),
       /** The edges among a set of nodes (the induced subgraph). */
-      subgraph: (name, ids) => call('subgraph', () => { const ns = nsOf(name); const s = new Set(ids); return { edges: [...ns.edges.values()].filter((e) => s.has(e.from) && s.has(e.to)).map(edgeOut), meta: meta(ns) }; }),
-      getEdges: (name, ids) => call('getEdges', () => { const ns = nsOf(name); return { edges: ids.map((id) => (ns.edges.has(id) ? edgeOut(ns.edges.get(id)) : null)), meta: meta(ns) }; }),
-      matchPattern: (name, pattern, o = {}) => call('matchPattern', () => matchIn(nsOf(name), pattern, Math.min(o.limit || 200, 10000))),
-      commit: (name, mutations) => call('commit', () => { const res = applyMutations(nsOf(name), mutations); emit('INFO', `commit ${name} · seq ${res.seq} · ${mutations.length} mutation${mutations.length > 1 ? 's' : ''}`); return res; }),
+      subgraph: (name, ids) => call('Subgraph', () => { const ns = nsOf(name); const s = new Set(ids); return { edges: [...ns.edges.values()].filter((e) => s.has(e.from) && s.has(e.to)).map(edgeOut), meta: meta(ns) }; }),
+      getEdges: (name, ids) => call('GetEdges', () => { const ns = nsOf(name); return { edges: ids.map((id) => (ns.edges.has(id) ? edgeOut(ns.edges.get(id)) : null)), meta: meta(ns) }; }),
+      matchPattern: (name, pattern, o = {}) => call('MatchPattern', () => matchIn(nsOf(name), pattern, Math.min(o.limit || 200, 10000))),
+      commit: (name, mutations) => call('Commit', () => { const res = applyMutations(nsOf(name), mutations); emit('INFO', `commit ${name} · seq ${res.seq} · ${mutations.length} mutation${mutations.length > 1 ? 's' : ''}`); return res; }),
       /** Catalog operations; the mock knows createIndex. */
-      createIndex: (name, path) => call('commitCatalog', () => {
+      createIndex: (name, path) => call('CommitCatalog', () => {
         const ns = nsOf(name); if (ns.readOnly) fail('read_only', `namespace ${name} is read-only: ${ns.readOnly}`);
         if (ns.indexes.some((ix) => ix.path.join('.') === path.join('.'))) fail('conflict', `an index on [${path.join(', ')}] exists`);
         ns.indexes.push({ path, declared: true, unique: false, building: { scanned: 0, total: ns.nodes.size } }); ns.seq++;
         emit('INFO', `index ${name} [${path.join('.')}] building · online (ADR 0019)`);
         return { seq: ns.seq };
       }),
-      /** What the server reports about itself (the step 16 status views and metrics). */
-      server: () => call('status', () => {
-        const ss = spaces.map(statusOf); const mem = rss();
-        const problems = ss.filter((s) => s.readOnly || s.checkpointFailure).length + (mem / server.memoryLimit > 0.85 ? 1 : 0);
-        return {
-          version: server.version, startedMicros: server.startedMicros, ready: true, health: problems ? 'warn' : 'ok', fsync: server.fsync,
-          endpoints: clone(server.endpoints), dataDir: server.dataDir,
-          memory: { usedBytes: Math.round(mem), limitBytes: server.memoryLimit, refuseWritesAt: 0.95, warnAt: 0.85 },
-          disk: { walBytes: server.walBytes, checkpointBytes: server.checkpointBytes, freeBytes: server.diskFree },
-          requests: { active: server.active.length, rejected: server.rejected, timedOut: server.timedOut, cancelled: server.cancelled },
-          series: clone(server.series), tickMs: 1000,
-          operations: OPS.map((op) => ({ op, ...server.opStats[op] })),
-          active: server.active.map((q) => ({ id: q.id, op: q.op, namespace: q.namespace, client: q.client, elapsedMs: (server.ticks - q.startedTicks) * 1000 + 120, visited: q.visited })),
-          consumers: server.consumers.map((c) => ({ ...c, lag: byName.get(c.namespace).seq - c.atSeq })),
-          jobs: clone(server.jobs), namespaces: ss,
-        };
-      }),
-      cancel: (id) => call('cancel', () => {
-        const k = server.active.findIndex((q) => q.id === id); if (k < 0) fail('not_found', `no request ${id}`);
-        const q = server.active.splice(k, 1)[0]; server.cancelled++; emit('WARN', `request ${q.id} cancelled by an operator · ${q.op} · ${q.namespace}`); return {};
+      /** What the server reports about itself: the shape of the REST Source's (step 16c, source.js). */
+      server: () => call('GetServerStatus', () => ({
+        version: server.version, startedMicros: server.startedMicros, ready: true, fsync: server.fsync,
+        memory: { graphBytes: graphBytes(), limitBytes: null },
+        disk: { walBytes: server.walBytes, checkpointBytes: server.checkpointBytes, freeBytes: server.diskFree },
+        requests: { active: server.active.length, total: server.total, timedOut: server.timedOut, cancelled: server.cancelled, rejected: server.rejected, denied: server.denied },
+        namespaces: spaces.map(statusOf),
+        active: server.active.map(requestOut),
+        consumers: server.consumers.map((c) => ({ namespace: c.namespace, user: c.user, client: c.client, nextSeq: c.nextSeq, lag: Math.max(0, byName.get(c.namespace).seq + 1 - c.nextSeq), lastPollMicros: nowMicros() - (server.ticks - c.lastPollTicks) * 1e6, polls: c.polls })),
+        operations: OPS.map((op) => ({ operation: op, calls: server.opStats[op].calls, errors: server.opStats[op].errors, p50Ms: server.opStats[op].p50, p99Ms: server.opStats[op].p99 })),
+        series: clone(server.series), tickMs: 1000,
+      })),
+      /** Cancel a running read; commits can't be (as on the server). */
+      cancel: (id) => call('CancelRequest', () => {
+        const k = server.active.findIndex((q) => q.id === id); if (k < 0) fail('not_found', `no running request ${id}`);
+        const q = server.active[k];
+        if (q.operation === 'Commit') fail('invalid_argument', `request ${id} is a commit: cancelling it would only make its outcome unknown`);
+        server.active.splice(k, 1); server.cancelled++; emit('WARN', `request cancelled · id=${q.id} · operation=${q.operation} · namespace=${q.namespace}`);
+        return { request: requestOut(q) };
       }),
       log: () => server.log.slice(),
       onLog: (f) => { server.listeners.add(f); return () => server.listeners.delete(f); },
+      logKind: () => 'server',
       tick,
       /** The mock's login (step 15a): MOCK_USERS, remembered for the tab (sessionStorage; a mock flag, not a
        *  credential). Data calls don't check it: the pages show the login until session() answers. */

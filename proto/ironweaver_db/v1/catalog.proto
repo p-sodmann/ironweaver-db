@@ -25,6 +25,67 @@ message GetCatalogResponse {
   AnswerMeta meta = 2;
 }
 
+message GetSchemaRequest {
+  string namespace = 1;
+  // `max_visited` is the nodes the sample reads, `max_edges` its edges;
+  // reaching them ends the sample, not the read.
+  QueryOptions options = 2;
+}
+
+message GetSchemaResponse {
+  Schema schema = 1;
+  AnswerMeta meta = 2;
+}
+
+// A namespace's labels, edge types and attribute keys, from a sample of
+// its nodes and edges in the core's order: complete when sampled_nodes is
+// nodes and sampled_edges is edges.
+message Schema {
+  // The labels of the sampled nodes and of the constraints, by name.
+  repeated LabelInfo labels = 1;
+  // The types of the sampled edges, by name (untyped first).
+  repeated TypeInfo types = 2;
+  // Nodes in the namespace.
+  uint64 nodes = 3;
+  // Edges in the namespace.
+  uint64 edges = 4;
+  // Nodes the sample read.
+  uint64 sampled_nodes = 5;
+  // Edges the sample read.
+  uint64 sampled_edges = 6;
+}
+
+message LabelInfo {
+  string name = 1;
+  // Nodes with the label: exact (the label index), not sampled.
+  uint64 count = 2;
+  // The attribute keys of the sampled nodes with the label, by name.
+  repeated KeyInfo keys = 3;
+  // The sampled nodes had more keys than the 256 listed.
+  bool more_keys = 4;
+  // Sampled nodes with the label: what the keys count.
+  uint64 sampled = 5;
+}
+
+message KeyInfo {
+  string name = 1;
+  // How many sampled nodes had a value of each kind, by kind.
+  repeated KindCount kinds = 2;
+}
+
+message KindCount {
+  // As the value JSON tags it: `Int`, `String`, `Float`, `List`, ...
+  string kind = 1;
+  uint64 count = 2;
+}
+
+message TypeInfo {
+  // Missing for untyped edges.
+  optional string name = 1;
+  // Sampled edges of the type.
+  uint64 count = 2;
+}
+
 message GetNamespaceStatusRequest {
   string namespace = 1;
 }

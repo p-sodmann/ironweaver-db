@@ -5,8 +5,11 @@
  * It turns the proto3 JSON of the answers into the contract's shapes: 64-bit numbers (strings) into numbers,
  * absent defaults (edge id 0, empty lists, false) into values, AttrPath {keys} into lists.
  *
- * What the server can't answer yet (step 16): `schema` is sampled from the first SAMPLE nodes; `server` has the
- * namespaces' status and no metrics; `cancel` fails with `unavailable`; the log is this page's own requests.
+ * `server()` reads the status views (step 16c, ADR 0051): status, running requests, change-stream readers and the
+ * metrics. The series of the last minute and a half are the differences between one call's metrics and the last's
+ * (the server keeps no history); the latencies are estimated from the histograms' buckets, as Prometheus'
+ * histogram_quantile does. It also polls the server's log, which needs a server-wide admin: for anyone else the log is
+ * this page's own requests (`logKind()`).
  *
  * The session (step 15a, ADR 0046) is the server's HttpOnly cookie, set by `login` and sent by the browser on the
  * page's own origin; this script never sees the token. Every request carries `X-Iwdb-Csrf`, which the server
@@ -16,7 +19,12 @@
 (function (root) {
   'use strict';
 
-  const SAMPLE = 2000;           // nodes `schema` reads to count labels and keys
+  const SAMPLE_NODES = 10000;    // nodes `schema` samples for keys (label counts are exact)
+  const SAMPLE_EDGES = 100000;   // edges it samples for types
+  const SERIES = 30;             // values a series keeps: 90 s at the status page's 3 s
+  const LOG_KEEP = 200;          // log events kept
+  // Reads whose latency is the "query" series: not commits, not the change stream's long polls, not the operator's
+  const QUERY_OPS = new Set(['GetNodes', 'GetEdges', 'Find', 'Explain', 'Neighbourhood', 'Traverse', 'ShortestPath', 'RandomWalks', 'Subgraph', 'MatchPattern', 'Analyze', 'GetCatalog', 'GetSchema', 'GetNamespaceStatus', 'ListNamespaces']);
   const VISIT = 5000;            // nodes a neighbourhood may visit
   class SourceError extends Error { constructor(code, message) { super(message); this.code = code; } }
 
@@ -32,6 +40,7 @@
     return {
       id: n(s.id), name: s.name, createdMicros: n(s.createdMicros), seq: n(s.seq),
       syncedSeq: s.syncedSeq != null ? n(s.syncedSeq) : n(s.seq) === 0 ? 0 : null, checkpoint: opt(s.checkpoint),
+      unsynced: opt(s.unsynced), sinceCheckpoint: n(s.sinceCheckpoint), lastCheckpointMicros: opt(s.lastCheckpointMicros),
       readOnly: s.readOnly || null, checkpointFailure: s.checkpointFailure || null,
       nodes: n(s.nodes), edges: n(s.edges), memoryBytes: n(s.memoryBytes),
       indexes: (s.indexes || []).map((ix) => {
@@ -43,7 +52,58 @@
       constraints: n(s.constraints),
       marks: (s.marks || []).map((m) => ({ name: m.name, position: n(m.position), seq: n(m.seq) })),
       recovery: { checkpoint: opt(s.recovery && s.recovery.checkpoint), replayed: n(s.recovery && s.recovery.replayed), seq: n(s.recovery && s.recovery.seq) },
-      lastCheckpointMs: null,
+    };
+  }
+  const request = (q) => ({
+    id: n(q.id), operation: q.operation, namespace: q.namespace ?? null, user: q.user || '', client: q.client ?? null,
+    startedMicros: n(q.startedMicros), elapsedMicros: n(q.elapsedMicros), cancellable: !!q.cancellable,
+  });
+  const consumer = (c) => ({ namespace: c.namespace, user: c.user || '', client: c.client ?? null, nextSeq: n(c.nextSeq), lag: n(c.lag), lastPollMicros: n(c.lastPollMicros), polls: n(c.polls) });
+
+  /* ---- the metrics (GET /v1/metrics, documentation/api/metrics.md) */
+  const labelOf = (sample, name) => ((sample.labels || []).find((l) => l.name === name) || {}).value;
+  const family = (m, name) => ((m.families || []).find((f) => f.name === name) || { samples: [] }).samples || [];
+  const hist = (sample) => { const x = (sample && sample.histogram) || {}; return { bounds: x.boundsSeconds || [], counts: (x.counts || []).map(n) }; };
+  /** The sum of histograms (same buckets), or of the difference of two (`minus`, counters only grow). */
+  function addHist(into, h, sign = 1) {
+    if (!into.bounds.length) into.bounds = h.bounds;
+    h.counts.forEach((c, i) => { into.counts[i] = (into.counts[i] || 0) + sign * c; });
+    return into;
+  }
+  /** The q-quantile of a histogram (counts per bucket, not cumulative; the last for +Inf), in ms: linear within
+   *  its bucket, as Prometheus' histogram_quantile; the highest bound if it falls in +Inf; 0 without observations. */
+  function quantile(h, q) {
+    const total = h.counts.reduce((a, b) => a + Math.max(0, b), 0); if (!total) return 0;
+    const rank = q * total; let seen = 0;
+    for (let i = 0; i < h.counts.length; i++) {
+      const c = Math.max(0, h.counts[i]);
+      if (seen + c >= rank && c > 0) {
+        if (i >= h.bounds.length) return h.bounds[h.bounds.length - 1] * 1000;
+        const lo = i === 0 ? 0 : h.bounds[i - 1];
+        return (lo + (h.bounds[i] - lo) * ((rank - seen) / c)) * 1000;
+      }
+      seen += c;
+    }
+    return h.bounds.length ? h.bounds[h.bounds.length - 1] * 1000 : 0;
+  }
+  const countOf = (h) => h.counts.reduce((a, b) => a + b, 0);
+  /** What one metrics answer holds for the status page: cumulative histograms and the per-operation table. */
+  function digest(m) {
+    const queries = { bounds: [], counts: [] }; const byOp = new Map();
+    family(m, 'iwdb_request_duration_seconds').forEach((s) => {
+      const op = labelOf(s, 'operation'); const h = hist(s);
+      byOp.set(op, { operation: op, calls: 0, errors: 0, hist: h });
+      if (QUERY_OPS.has(op)) addHist(queries, h);
+    });
+    family(m, 'iwdb_requests_total').forEach((s) => {
+      const op = labelOf(s, 'operation'); const e = byOp.get(op) || byOp.set(op, { operation: op, calls: 0, errors: 0, hist: { bounds: [], counts: [] } }).get(op);
+      const c = n(s.counter); e.calls += c; if (labelOf(s, 'code') !== 'ok') e.errors += c;
+    });
+    const gauge = (name) => { const s = family(m, name)[0]; return s ? Number(s.gauge || 0) : 0; };
+    return {
+      commit: hist(family(m, 'iwdb_commit_duration_seconds')[0]), fsync: hist(family(m, 'iwdb_wal_fsync_duration_seconds')[0]), queries,
+      active: gauge('iwdb_requests_active'),
+      operations: [...byOp.values()].filter((o) => o.calls > 0).map((o) => ({ operation: o.operation, calls: o.calls, errors: o.errors, p50Ms: quantile(o.hist, 0.5), p99Ms: quantile(o.hist, 0.99) })),
     };
   }
   function plan(p) {
@@ -66,20 +126,32 @@
   }
   const ROLES = { ROLE_READ: 'read', ROLE_WRITE: 'write', ROLE_ADMIN: 'admin' };
   const user = (u = {}) => ({ name: u.name || '', admin: !!u.admin, grants: Object.fromEntries(Object.entries(u.grants || {}).map(([ns, r]) => [ns, ROLES[r] || r])) });
-  const unavailable = (what) => new SourceError('unavailable', `${what} needs the server's status views (step 16)`);
+  const LEVELS = { LOG_LEVEL_TRACE: 'TRACE', LOG_LEVEL_DEBUG: 'DEBUG', LOG_LEVEL_INFO: 'INFO', LOG_LEVEL_WARN: 'WARN', LOG_LEVEL_ERROR: 'ERROR' };
+  const clock = (d) => d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+  /** A server log event as a log line: the message, then its fields. */
+  const logLine = (e) => ({
+    t: clock(new Date(n(e.timeMicros) / 1000)), level: LEVELS[e.level] || 'INFO',
+    msg: [e.message || ''].concat((e.fields || []).map((f) => f.name + '=' + f.value)).filter(Boolean).join(' · '),
+  });
 
   /** A Source over the REST API at `base` ('' for the page's origin). `fetch` can be passed in for tests. */
   function create(opts = {}) {
     const base = opts.base || '';
     const doFetch = opts.fetch || root.fetch.bind(root);
-    const log = []; const listeners = new Set(); const auth = new Set();
-    const emit = (level, msg) => {
-      const d = new Date(); const e = { t: d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0'), level, msg };
-      log.push(e); if (log.length > 200) log.shift(); listeners.forEach((f) => { try { f(e); } catch (_) { /* its own */ } });
-    };
+    // Two logs: this page's requests, and the server's once a server-wide admin's poll has read it
+    const pageLog = []; const serverLog = []; const listeners = new Set(); const auth = new Set();
+    let logKind = 'page'; let logAfter = 0; let logDenied = false;
+    const tell = (e) => listeners.forEach((f) => { try { f(e); } catch (_) { /* its own */ } });
+    const keep = (list, e) => { list.push(e); if (list.length > LOG_KEEP) list.shift(); };
+    const emit = (level, msg) => { const e = { t: clock(new Date()), level, msg }; keep(pageLog, e); if (logKind === 'page') tell(e); };
     let config = null;
+    let last = null; // the previous call's metrics: {at, commit, fsync, queries}
+    const series = { commitsPerSec: [], commitP50: [], commitP99: [], fsyncP99: [], queryP50: [], queryP99: [], active: [], graphBytes: [], walBytes: [] };
+    let tickMs = 3000;
+    const push = (k, v) => { const a = series[k]; a.push(v); if (a.length > SERIES) a.shift(); };
 
-    async function call(method, path, body, quiet) {
+    /** `quiet`: no line for a success; `expected`: statuses that are answers here, not failures to log. */
+    async function call(method, path, body, quiet, expected = []) {
       const t0 = Date.now(); let res;
       try {
         const headers = { accept: 'application/json', 'x-iwdb-csrf': '1' };
@@ -95,7 +167,7 @@
       if (!res.ok) {
         const code = (json && json.code) || (res.status === 502 || res.status === 504 ? 'unavailable' : 'internal');
         const message = (json && json.message) || `HTTP ${res.status} from ${path}`;
-        emit(res.status >= 500 ? 'ERROR' : 'WARN', `${method} ${path} · ${res.status} ${code} · ${ms} ms`);
+        if (!expected.includes(res.status)) emit(res.status >= 500 ? 'ERROR' : 'WARN', `${method} ${path} · ${res.status} ${code} · ${ms} ms`);
         // The session ended (or there was none): the pages ask for a login, not report an outage
         if (res.status === 401 && path !== '/v1/auth/login') auth.forEach((f) => { try { f(null); } catch (_) { /* its own */ } });
         throw new SourceError(res.status === 401 ? 'unauthenticated' : code, message);
@@ -105,28 +177,51 @@
     }
     const ns = (name) => '/v1/namespaces/' + enc(name);
 
+    /** The server's new log events, if this caller may read them (a server-wide admin). */
+    async function pollLog() {
+      if (logDenied) return;
+      try {
+        const r = await call('GET', `/v1/log?after=${logAfter}&limit=1000`, undefined, true, [403]);
+        const events = r.events || [];
+        if (logKind === 'page') logKind = 'server';
+        events.forEach((e) => { const line = logLine(e); keep(serverLog, line); tell(line); });
+        logAfter = n(r.lastSeq) || logAfter;
+      } catch (e) {
+        if (e.code === 'permission_denied') logDenied = true; // stays this page's requests
+      }
+    }
+    /** One step of the series: the differences to the previous call's metrics. */
+    function step(d, status) {
+      const now = Date.now();
+      if (last) {
+        const dt = Math.max(1, now - last.at) / 1000; tickMs = Math.round(dt * 1000);
+        const delta = (a, b) => addHist(addHist({ bounds: [], counts: [] }, a), b, -1);
+        const commits = delta(d.commit, last.commit); const fsyncs = delta(d.fsync, last.fsync); const queries = delta(d.queries, last.queries);
+        push('commitsPerSec', countOf(commits) / dt);
+        push('commitP50', quantile(commits, 0.5)); push('commitP99', quantile(commits, 0.99)); push('fsyncP99', quantile(fsyncs, 0.99));
+        push('queryP50', quantile(queries, 0.5)); push('queryP99', quantile(queries, 0.99));
+        push('active', d.active); push('graphBytes', n(status.memory && status.memory.graphBytes)); push('walBytes', n(status.disk && status.disk.walBytes));
+      }
+      last = { at: now, commit: d.commit, fsync: d.fsync, queries: d.queries };
+    }
+
     const src = {
       kind: 'rest',
       namespaces: async () => ((await call('GET', '/v1/namespaces')).namespaces || []).map((x) => ({ id: n(x.id), name: x.name, createdMicros: n(x.createdMicros), createdSeq: n(x.createdSeq) })),
       namespaceStatus: async (name) => status((await call('GET', ns(name))).status),
-      /** Labels, edge types and keys of the first SAMPLE nodes (exact when the namespace is smaller): the server
-       *  has no such read yet. */
+      /** Labels with their exact counts; keys and edge types from a sample (step 16c, ADR 0053). */
       schema: async (name) => {
-        const [found, cat] = await Promise.all([call('POST', ns(name) + '/find', { filter: { Const: true }, options: { limits: { maxResults: SAMPLE } } }), call('GET', ns(name) + '/catalog')]);
-        const nodes = (found.nodes || []).map(node);
-        const sub = nodes.length ? await call('POST', ns(name) + '/subgraph', { seeds: nodes.map((x) => x.id), depth: 0 }) : { edges: [] };
-        const labels = new Map(); const types = new Map();
-        nodes.forEach((x) => x.labels.forEach((l) => {
-          const e = labels.get(l) || labels.set(l, { name: l, count: 0, keys: {} }).get(l); e.count++;
-          Object.entries(x.attr).forEach(([k, v]) => { const kind = v === 'None' ? 'None' : Object.keys(v)[0]; const kk = e.keys[k] || (e.keys[k] = {}); kk[kind] = (kk[kind] || 0) + 1; });
-        }));
-        (sub.edges || []).forEach((e) => { const t = e.type || '(untyped)'; const x = types.get(t) || types.set(t, { name: t, count: 0 }).get(t); x.count++; });
-        const byName = (a, b) => (a.name < b.name ? -1 : 1);
+        const [r, cat] = await Promise.all([call('GET', ns(name) + `/schema?max_visited=${SAMPLE_NODES}&max_edges=${SAMPLE_EDGES}`), call('GET', ns(name) + '/catalog')]);
+        const s = r.schema || {};
         const c = (cat.catalog && cat.catalog.constraints) || [];
         return {
-          labels: [...labels.values()].sort(byName), types: [...types.values()].sort(byName),
+          labels: (s.labels || []).map((l) => ({
+            name: l.name, count: n(l.count), sampled: n(l.sampled), moreKeys: !!l.moreKeys,
+            keys: Object.fromEntries((l.keys || []).map((k) => [k.name, Object.fromEntries((k.kinds || []).map((x) => [x.kind, n(x.count)]))])),
+          })),
+          types: (s.types || []).map((t) => ({ name: t.name ?? null, count: n(t.count) })),
           constraints: c.map((x) => ({ kind: x.kind === 'CONSTRAINT_KIND_REQUIRED' ? 'required' : 'unique', label: x.label, path: keys(x.path) })),
-          sampled: !!(found.meta && found.meta.next), sample: nodes.length,
+          nodes: n(s.nodes), edges: n(s.edges), sampledNodes: n(s.sampledNodes), sampledEdges: n(s.sampledEdges),
         };
       },
       getNodes: async (name, ids) => { const r = await call('POST', ns(name) + '/get-nodes', { ids }); return { nodes: (r.nodes || []).map((m) => (m.node ? node(m.node) : null)), meta: meta(r.meta) }; },
@@ -134,11 +229,11 @@
       find: async (name, filter, o = {}) => {
         const options = { limits: { maxResults: o.limit || 100 } }; if (o.cursor) options.cursor = o.cursor;
         const r = await call('POST', ns(name) + '/find', { filter, options });
-        return { nodes: (r.nodes || []).map(node), total: undefined, meta: meta(r.meta) };
+        return { nodes: (r.nodes || []).map(node), meta: meta(r.meta) };
       },
       explain: async (name, filter, o = {}) => {
         const r = await call('POST', ns(name) + '/explain', { filter, analyze: !!o.analyze }); const e = r.explain || {};
-        return { explain: { plan: plan(e.plan), estimatedCandidates: n(e.estimatedCandidates), candidates: opt(e.candidates) ?? undefined, matched: undefined, nodes: n(e.nodes), building: (e.building || []).map(keys) }, meta: meta(r.meta) };
+        return { explain: { plan: plan(e.plan), estimatedCandidates: n(e.estimatedCandidates), candidates: opt(e.candidates) ?? undefined, nodes: n(e.nodes), building: (e.building || []).map(keys) }, meta: meta(r.meta) };
       },
       /** A node's neighbours (either direction) and the edges to them: a depth-1 subgraph, bounded. */
       neighbours: async (name, id, o = {}) => {
@@ -162,25 +257,38 @@
       },
       commit: async (name, mutations) => { const r = (await call('POST', ns(name) + '/commit', { mutations })).result || {}; return { seq: n(r.seq), edgeIds: (r.edgeIds || []).map(Number), timeMicros: n(r.timeMicros) }; },
       createIndex: async (name, path) => { const r = (await call('POST', ns(name) + '/catalog', { change: { createIndex: { path: { keys: path } } } })).result || {}; return { seq: n(r.seq) }; },
-      /** What the server reports: its readiness and every namespace's status; the metrics come with step 16c. */
+      /** The server's status views (step 16c): status, running requests, change-stream readers, metrics. */
       server: async () => {
         // Relative to the page: the proxy serves it at /, the server at /console/ (ADR 0041)
-        if (!config) config = await doFetch(base ? base + '/console-config.json' : 'console-config.json').then((r) => (r.ok ? r.json() : {}), () => ({}));
-        // Readiness (step 16b): 503 is an answer here, not a failure
-        const health = await doFetch(base + '/v1/health/ready', { method: 'GET', headers: { accept: 'application/json' } }).then((r) => r.json().catch(() => ({})), () => ({}));
-        const list = await call('GET', '/v1/namespaces', undefined, true);
-        const spaces = await Promise.all((list.namespaces || []).map((x) => call('GET', ns(x.name), undefined, true).then((r) => status(r.status))));
-        const problems = spaces.some((s) => s.readOnly || s.checkpointFailure);
+        if (!config) {
+          config = await doFetch(base ? base + '/console-config.json' : 'console-config.json').then((r) => (r.ok ? r.json() : {}), () => ({}));
+          if (config && config.upstream) src.endpoint = config.upstream;
+        }
+        const [st, rq, co, m] = await Promise.all([
+          call('GET', '/v1/status', undefined, true), call('GET', '/v1/requests?limit=100', undefined, true),
+          call('GET', '/v1/consumers', undefined, true), call('GET', '/v1/metrics', undefined, true),
+        ]);
+        await pollLog();
+        const s = st.status || {}; const d = digest(m); step(d, s);
+        const r = s.requests || {};
         return {
-          version: config.version || null, startedMicros: null, ready: health.ready === true, health: problems || health.ready !== true ? 'warn' : 'ok', fsync: null,
-          endpoints: { rest: config.upstream || base || 'this origin' }, dataDir: null,
-          memory: null, disk: null, requests: null, series: null, tickMs: null,
-          operations: null, active: null, consumers: null, jobs: null, namespaces: spaces, partial: true,
+          version: s.version || null, startedMicros: n(s.startedMicros), ready: !!s.ready, fsync: s.fsync || null,
+          memory: { graphBytes: n(s.memory && s.memory.graphBytes), limitBytes: opt(s.memory && s.memory.limitBytes) },
+          disk: { walBytes: n(s.disk && s.disk.walBytes), checkpointBytes: n(s.disk && s.disk.checkpointBytes), freeBytes: opt(s.disk && s.disk.freeBytes) },
+          requests: { active: n(r.active), total: n(r.total), timedOut: n(r.timedOut), cancelled: n(r.cancelled), rejected: n(r.rejected), denied: n(r.denied) },
+          namespaces: (s.namespaces || []).map(status),
+          active: (rq.requests || []).map(request), consumers: (co.consumers || []).map(consumer),
+          operations: d.operations, series: JSON.parse(JSON.stringify(series)), tickMs,
         };
       },
-      cancel: async () => { throw unavailable('cancelling a request'); },
-      log: () => log.slice(),
+      /** Cancel a running read (commits can't be: `invalid_argument`); its caller gets `cancelled`. */
+      cancel: async (id) => {
+        const r = await call('POST', `/v1/requests/${enc(String(id))}/cancel`, {});
+        return { request: request(r.request || {}) };
+      },
+      log: () => (logKind === 'server' ? serverLog : pageLog).slice(),
       onLog: (f) => { listeners.add(f); return () => listeners.delete(f); },
+      logKind: () => logKind,
       tick: () => {},
       /** Who the server takes this page for: {authEnabled, user}; rejects `unauthenticated` without a session. */
       session: async () => {
@@ -195,11 +303,13 @@
       logout: async () => { await call('POST', '/v1/auth/logout', {}); auth.forEach((f) => { try { f(null); } catch (_) { /* its own */ } }); return {}; },
       onAuth: (f) => { auth.add(f); return () => auth.delete(f); },
     };
+    // Where it reads from: this origin (the server's /console/), or the proxy's server once server() read it
+    src.endpoint = base || 'this origin';
     emit('INFO', `REST source on ${base || 'this origin'}`);
     return src;
   }
 
-  const api = { create, SourceError, columns, plan, status };
+  const api = { create, SourceError, columns, plan, status, quantile, digest };
   root.IW = root.IW || {}; root.IW.rest = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

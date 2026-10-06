@@ -1,6 +1,6 @@
 # Step 16c: Metrics, status views, cancel and the console
 
-Status: in progress (16c-1 done, 16c-2 to do)
+Status: done
 Milestone: M4 Production 1.0
 Depends on: step 16b (the lifecycle and logs these report on)
 
@@ -25,6 +25,13 @@ Decided before the work started (ADRs 0050 to 0052):
 
 16c-1 done on 2026-10-05 (ADRs 0050, 0051, 0052): the boxes of the instrumentation, the admin reads and the docs are ticked; the console's stay for 16c-2.
 
+16c-2 done on 2026-10-06 (ADR 0053). Two things turned out differently from the expectation in the first console task:
+
+- **The core can count a label but not list the labels**: `label_count` is O(1), but nothing enumerates the labels a graph has, and edge types have no count at all. So the new `schema` read (a `Database` method, `GetSchema`, `GET /v1/namespaces/{ns}/schema`) takes label names from a sample of nodes and gives each its exact count, and counts types in a sample of edges. Upstream draft 24 proposes the missing API, filed as [#60](https://github.com/p-sodmann/Ironweaver/issues/60).
+- **The series need no server history**: the console's REST Source derives them from the differences between two polls of the metrics, and the latency per operation from the histograms.
+
+The Python bindings don't expose `schema` (they don't have the `Admin` reads either); that is left for whoever adds those.
+
 ## Goal
 
 An operator sees what the server is doing: Prometheus metrics, `status` views like `pg_stat_*`, the running requests with a way to cancel one, and the operator console showing all of it from a real server.
@@ -42,9 +49,9 @@ An operator sees what the server is doing: Prometheus metrics, `status` views li
 - [x] One metric name list in code, documented as a table (name, type, labels, unit, meaning) in `documentation/api/metrics.md`; a test that every exported metric is documented and every documented one exported.
 
 ### The console
-- [ ] For each read `console/src/source.js` marks "new" (`schema` with label and type counts and keys, `server` beyond the readiness 16b added, `cancel`, the log, `find` total, explain `matched`, `lastCheckpointMs`): add it on the server and use it in `console/src/rest.js`, or drop it from the pages and the mock, and update `source.js`. Expected: `find` total and explain `matched` are dropped (unbounded counts, design rule 5); label and type counts come from the core's label index if it has an O(1) count; per-label keys stay sampled.
-- [ ] The mock's `server()` shape and the server's answer agree (change both where needed); `npm test`, `npm run check`, `pytest console/test` green; `status.html` checked with `serve.py` against a real server.
-- [ ] Check the console on the server's own `/console/` (step 16b serves it, ADR 0041) as well as through `serve.py`.
+- [x] For each read `console/src/source.js` marks "new" (`schema` with label and type counts and keys, `server` beyond the readiness 16b added, `cancel`, the log, `find` total, explain `matched`, `lastCheckpointMs`): add it on the server and use it in `console/src/rest.js`, or drop it from the pages and the mock, and update `source.js`. Expected: `find` total and explain `matched` are dropped (unbounded counts, design rule 5); label and type counts come from the core's label index if it has an O(1) count; per-label keys stay sampled. Done: `schema` added on the server (sampled, label counts exact; ADR 0053), `server` from the status views and metrics, `cancel` and the log from 16c-1's reads, `lastCheckpointMs` replaced by the status' `lastCheckpointMicros`, `unsynced` and `sinceCheckpoint`; `find` total and explain `matched` dropped.
+- [x] The mock's `server()` shape and the server's answer agree (change both where needed); `npm test`, `npm run check`, `pytest console/test` green; `status.html` checked with `serve.py` against a real server. Done: a test compares the keys of both Sources' answers; checked with Playwright against a seeded server, under commit load, cancelling a long poll from the page (its caller got 499 `cancelled`).
+- [x] Check the console on the server's own `/console/` (step 16b serves it, ADR 0041) as well as through `serve.py`. Done: the same check on `/console/status.html?source=rest`.
 
 ### Docs
 - [x] ADRs: metrics library (or none: hand-written text exposition), the status-view API shape, request ids and cancel.

@@ -31,7 +31,7 @@ use iwdb_query::{Accounts, Admin, Listed, NewToken, Role, Secret, ServerStatus, 
 use iwdb_query::{
     AnalyticsRequest, Answer, Changes, ChangesRequest, CommitOptions, Database, Edge, Error, ExplainRequest,
     FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
-    QueryOptions, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
+    QueryOptions, Schema, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 use serde::Serialize;
@@ -634,6 +634,15 @@ impl Database for RestRemote {
             let response: pb::GetCatalogResponse = c.get(c.url(&namespace, &format!("/catalog{}", query(&o)))).await?;
             let catalog = catalog_from_pb(response.catalog).map_err(bad_answer)?;
             Ok(answer_from_pb(catalog, response.meta.unwrap_or_default()))
+        })
+    }
+
+    fn schema(&self, namespace: &str, o: QueryOptions) -> impl Future<Output = Result<Answer<Schema>, Error>> + Send {
+        let namespace = namespace.to_owned();
+        self.call(move |c| async move {
+            let response: pb::GetSchemaResponse = c.get(c.url(&namespace, &format!("/schema{}", query(&o)))).await?;
+            let schema = schema_from_pb(response.schema).map_err(bad_answer)?;
+            Ok(answer_from_pb(schema, response.meta.unwrap_or_default()))
         })
     }
 

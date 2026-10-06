@@ -71,6 +71,8 @@ macro_rules! conformance_tests {
             analytics_rank_their_results,
             analytics_are_bounded,
             catalog_changes_show_in_catalog_and_status,
+            schema_counts_labels_and_samples_keys_and_types,
+            schema_is_bounded,
             namespaces_are_created_and_dropped_once,
             changes_return_every_commit_as_logged,
             changes_resume_in_batches_without_gaps,
@@ -293,6 +295,7 @@ pub async fn every_read_times_out<D: Database>(db: &D) {
             .await,
         ),
         code(db.catalog(NS, o()).await),
+        code(db.schema(NS, o()).await),
         code(db.wait_for_seq(NS, 1, o()).await),
         code(db.changes(NS, ChangesRequest { from_seq: 1, wait: false }, o()).await),
     ];
@@ -679,6 +682,44 @@ pub async fn catalog_changes_show_in_catalog_and_status<D: Database>(db: &D) {
     assert_eq!((status.name.as_str(), status.seq, status.nodes, status.edges), (NS, first.seq, 5, 6));
     let index = status.indexes.iter().find(|i| i.path == path).expect("index status");
     assert_eq!(index.size.map(|s| s.entries), Some(4));
+}
+
+pub async fn schema_counts_labels_and_samples_keys_and_types<D: Database>(db: &D) {
+    people(db).await;
+    let robot = Label::new("Robot").expect("label");
+    let path = AttrPath::new(["serial"]).expect("path");
+    let change = CatalogChange::AddConstraint(Constraint { kind: ConstraintKind::Required, label: robot, path });
+    let seq = db.commit_catalog(NS, change, CommitOptions::default()).await.expect("constraint").seq;
+    let answer = db.schema(NS, QueryOptions::min_seq(seq)).await.expect("schema");
+    let s = &answer.value;
+    assert_eq!((answer.seq, answer.truncated), (seq, false));
+    assert_eq!((s.nodes, s.edges, s.sampled_nodes, s.sampled_edges), (5, 6, 5, 6));
+    // Every label, the constraint's too, with its exact count
+    let labels: Vec<(&str, usize)> = s.labels.iter().map(|l| (l.name.as_str(), l.count)).collect();
+    assert_eq!(labels, [("Company", 1), ("Person", 4), ("Robot", 0)]);
+    let person = &s.labels[1];
+    assert_eq!((person.sampled, person.keys.len()), (4, 1));
+    assert_eq!((person.keys[0].name.as_str(), person.keys[0].kinds.clone()), ("age", vec![("Int".to_owned(), 4)]));
+    assert!(s.labels[0].keys.is_empty() && !person.more_keys);
+    let types: Vec<(Option<&str>, usize)> = s.types.iter().map(|t| (t.name.as_deref(), t.count)).collect();
+    assert_eq!(types, [(Some("knows"), 4), (Some("works_at"), 2)]);
+}
+
+pub async fn schema_is_bounded<D: Database>(db: &D) {
+    hub(db, 50).await;
+    // A limit ends the sample, not the read; label counts stay exact
+    let answer = db.schema(NS, limits(None, Some(3), Some(2))).await.expect("sampled");
+    let s = &answer.value;
+    assert_eq!((s.nodes, s.edges, s.sampled_nodes, s.sampled_edges), (51, 50, 3, 2));
+    assert_eq!((answer.work.visited, answer.work.edges, answer.truncated), (3, 2, false));
+    assert!(!s.labels.is_empty());
+    for label in &s.labels {
+        assert_eq!(label.count, if label.name == "Hub" { 1 } else { 50 }, "{}", label.name);
+    }
+    assert_eq!(s.types.iter().map(|t| t.count).sum::<usize>(), 2);
+    let all = db.schema(NS, options()).await.expect("all").value;
+    assert_eq!((all.sampled_nodes, all.sampled_edges, all.labels.len()), (51, 50, 2));
+    assert_eq!(code(db.schema(NS, limits(None, Some(0), None)).await), Code::InvalidArgument);
 }
 
 pub async fn namespaces_are_created_and_dropped_once<D: Database>(db: &D) {

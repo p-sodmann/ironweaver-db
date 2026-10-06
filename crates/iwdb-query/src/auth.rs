@@ -38,7 +38,7 @@ use crate::requests::{Call, ConsumerInfo, RequestInfo, Requests};
 use crate::{
     AnalyticsRequest, Answer, Changes, ChangesRequest, Code, CommitOptions, Database, Edge, Error, ExplainRequest,
     FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
-    QueryOptions, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
+    QueryOptions, Schema, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
 
 /// A password or a token. Its `Debug` and `Display` print `***`; only
@@ -387,6 +387,7 @@ operations! {
     Analyze => "Analyze", Namespace(Role::Read), Refusals;
     Changes => "GetChanges", Namespace(Role::Read), Refusals;
     Catalog => "GetCatalog", Namespace(Role::Read), Refusals;
+    Schema => "GetSchema", Namespace(Role::Read), Refusals;
     NamespaceStatus => "GetNamespaceStatus", Namespace(Role::Read), Refusals;
     Namespaces => "ListNamespaces", Authenticated, Refusals;
     CreateNamespace => "CreateNamespace", ServerAdmin, Always;
@@ -728,6 +729,15 @@ impl<D: Database + Accounts> Database for Authorized<D> {
     ) -> impl Future<Output = Result<Answer<NamespaceCatalog>, Error>> + Send {
         let checked = self.check(Operation::Catalog, namespace, on(namespace));
         run!(self, checked, self.inner.catalog(namespace, options), no_seq)
+    }
+
+    fn schema(
+        &self,
+        namespace: &str,
+        options: QueryOptions,
+    ) -> impl Future<Output = Result<Answer<Schema>, Error>> + Send {
+        let checked = self.check(Operation::Schema, namespace, on(namespace));
+        run!(self, checked, self.inner.schema(namespace, options), no_seq)
     }
 
     fn namespace_status(&self, namespace: &str) -> impl Future<Output = Result<NamespaceStatus, Error>> + Send {

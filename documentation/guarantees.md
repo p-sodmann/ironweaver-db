@@ -215,7 +215,7 @@ What it doesn't guarantee:
 What it guarantees:
 
 - **Every metric is documented, and every documented one exported**: `metrics.md`'s table equals the code's list, and a scrape of the binary's `/metrics` holds exactly those metrics. Labels are bounded (operation, outcome code, lock kind, live namespace, version), never an id, a user, a client or a data value.
-- **Every status read is bounded** (requests and log events at most 1000 per read, readers at most 1024, the rest O(namespaces)) and implemented once (`Embedded`); gRPC and REST give the same answers (the `Admin` conformance suite).
+- **Every status read is bounded** (requests and log events at most 1000 per read, readers at most 1024, the rest O(namespaces)) and implemented once (`Embedded`); gRPC and REST give the same answers (the `Admin` conformance suite). The `schema` read (step 16c-2) is O(sample) with the sample bounded by `max_visited` and `max_edges`, and in the `Database` conformance suite.
 - **The operator's reads don't wait** for a namespace lock or a worker: requests, cancel, readers, metrics and the log answer while every worker is busy and while a commit waits for an fsync.
 - **Cancel**: a running read cancelled with `CancelRequest` ends with `cancelled` for its caller, unless its answer was ready first; a cancel of a request that has ended is `not_found`. Commits and other changes can't be cancelled (`invalid_argument`). Users see and cancel only their own requests; server admins anyone's. Every cancel is audited.
 - **The log tail holds what the log holds, no more**: the same events after the same level filter, so no secret (`no_secret_reaches_the_logs` reads the whole tail too). Only server admins read it.
@@ -226,6 +226,7 @@ What it doesn't guarantee:
 - **The status isn't one consistent cut across namespaces**: each namespace's part is consistent on its own.
 - **Counts start when the database starts serving**, and calls made on an embedded store in-process aren't counted or listed.
 - **A running request's visited count isn't reported** (the core counts it only inside a search; upstream draft 23).
+- **The schema is sampled** ([ADR 0053](adr/0053-the-schema-read.md)): label counts are exact, but a label only nodes outside the sample carry isn't listed, and keys and edge-type counts are the sample's. It is complete when `sampled_nodes` equals `nodes` and `sampled_edges` equals `edges` (upstream [#60](https://github.com/p-sodmann/Ironweaver/issues/60)).
 - **The log tail is in memory**: a restart empties it, and older events fall out once `[log] tail_events` are kept.
 
 ## The change stream (step 13)

@@ -271,6 +271,16 @@ pub(crate) async fn get_catalog<D: Database>(
     Ok(pb::GetCatalogResponse { catalog: Some(catalog_to_pb(&answer.value)), meta: Some(meta_to_pb(&answer)) })
 }
 
+pub(crate) async fn get_schema<D: Database>(
+    db: &D,
+    r: pb::GetSchemaRequest,
+    deadline: Option<Duration>,
+) -> Result<pb::GetSchemaResponse, Error> {
+    let options = options_from_pb(r.options, deadline)?;
+    let answer = db.schema(&r.namespace, options).await?;
+    Ok(pb::GetSchemaResponse { schema: Some(schema_to_pb(&answer.value)), meta: Some(meta_to_pb(&answer)) })
+}
+
 pub(crate) async fn get_namespace_status<D: Database>(
     db: &D,
     r: pb::GetNamespaceStatusRequest,

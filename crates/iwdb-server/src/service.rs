@@ -392,6 +392,11 @@ impl<D: Served> DatabaseService for Adapter<D> {
         Ok(Response::new(ops::get_catalog(&self.db(&request)?, request.into_inner(), deadline).await.map_err(fail)?))
     }
 
+    async fn get_schema(&self, request: Request<pb::GetSchemaRequest>) -> Res<pb::GetSchemaResponse> {
+        let deadline = grpc_timeout(request.metadata());
+        Ok(Response::new(ops::get_schema(&self.db(&request)?, request.into_inner(), deadline).await.map_err(fail)?))
+    }
+
     async fn get_namespace_status(
         &self,
         request: Request<pb::GetNamespaceStatusRequest>,

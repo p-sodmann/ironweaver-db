@@ -41,7 +41,7 @@ use iwdb_query::{Accounts, Admin, Listed, NewToken, Role, Secret, ServerStatus, 
 use iwdb_query::{
     AnalyticsRequest, Answer, Changes, ChangesRequest, CommitOptions, Database, Edge, Error, ExplainRequest,
     FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
-    QueryOptions, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
+    QueryOptions, Schema, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 use tokio::runtime::{Handle, Runtime};
@@ -684,6 +684,16 @@ impl Database for Remote {
             let response = client.get_catalog(request).await.map_err(status)?.into_inner();
             let catalog = catalog_from_pb(response.catalog).map_err(bad_answer)?;
             Ok(answer_from_pb(catalog, response.meta.unwrap_or_default()))
+        })
+    }
+
+    fn schema(&self, namespace: &str, o: QueryOptions) -> impl Future<Output = Result<Answer<Schema>, Error>> + Send {
+        let namespace = namespace.to_owned();
+        self.call(move |mut client| async move {
+            let request = pb::GetSchemaRequest { namespace, options: options(&o) };
+            let response = client.get_schema(request).await.map_err(status)?.into_inner();
+            let schema = schema_from_pb(response.schema).map_err(bad_answer)?;
+            Ok(answer_from_pb(schema, response.meta.unwrap_or_default()))
         })
     }
 

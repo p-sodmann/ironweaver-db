@@ -27,6 +27,23 @@
   const date = (micros) => (micros ? new Date(micros / 1000).toISOString().slice(0, 16).replace('T', ' ') : '—');
   const pct = (f) => (f == null ? '—' : (f * 100 >= 10 ? Math.round(f * 100) : (f * 100).toFixed(1)) + ' %');
 
+  /* ------------------------------------------------------------------ the server's problems */
+  /** Memory use, as a fraction of the server's limit, at which the console warns (the limit comes with step 16d). */
+  const MEMORY_WARN = 0.85;
+  /** What is wrong with a server (a Source's `server()`), as sentences; none: healthy. */
+  function problems(s) {
+    if (!s) return [];
+    const out = [];
+    if (!s.ready) out.push('the server is not ready: it is shutting down');
+    s.namespaces.forEach((n) => {
+      if (n.readOnly) out.push(`${n.name} is read-only: ${n.readOnly}`);
+      if (n.checkpointFailure) out.push(`${n.name}: the last checkpoint failed: ${n.checkpointFailure}`);
+    });
+    const f = s.memory && s.memory.limitBytes ? s.memory.graphBytes / s.memory.limitBytes : 0;
+    if (f >= MEMORY_WARN) out.push(`memory at ${pct(f)} of the limit`);
+    return out;
+  }
+
   /* ------------------------------------------------------------------ the core's values (REST JSON form) */
   const kindOf = (v) => (v === 'None' || v == null ? 'None' : Object.keys(v)[0]);
   const TYPE = { String: 'STRING', Int: 'INT', Float: 'FLOAT', Bool: 'BOOL', None: 'NONE', List: 'LIST', Dict: 'DICT', Bytes: 'BYTES', Date: 'DATE', DateTime: 'DATETIME' };
@@ -262,7 +279,7 @@
     IW.ui = Object.assign(IW.ui || {}, { RailLinks, Palette, commonItems, Login, AuthGate });
   }
 
-  const ui = { group, num, bytes, ms, span, date, pct, kindOf, TYPE, text, parseValue, plainToValue, caption, labelStyles, primaryLabel, layout, source, href, params, cycleTheme, store };
+  const ui = { group, num, bytes, ms, span, date, pct, MEMORY_WARN, problems, kindOf, TYPE, text, parseValue, plainToValue, caption, labelStyles, primaryLabel, layout, source, href, params, cycleTheme, store };
   IW.ui = Object.assign(IW.ui || {}, ui);
   if (typeof module !== 'undefined' && module.exports) module.exports = ui;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
