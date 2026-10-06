@@ -20,6 +20,7 @@ use crate::convert::watch_response;
 use crate::health::{Health, Phase};
 use crate::ops;
 use crate::proto as pb;
+use crate::proto::admin_service_server::{AdminService, AdminServiceServer};
 use crate::proto::auth_service_server::{AuthService, AuthServiceServer};
 use crate::proto::database_service_server::{DatabaseService, DatabaseServiceServer};
 use crate::status::to_status;
@@ -149,6 +150,13 @@ impl<D: Served> Server<D> {
             .max_encoding_message_size(self.max_message_bytes)
     }
 
+    /// The tonic service of `AdminService` (step 16c).
+    pub fn admin_service(&self) -> AdminServiceServer<Adapter<D>> {
+        AdminServiceServer::from_arc(self.adapter())
+            .max_decoding_message_size(self.max_message_bytes)
+            .max_encoding_message_size(self.max_message_bytes)
+    }
+
     /// The tonic service of `AuthService` (step 15a).
     pub fn auth_service(&self) -> AuthServiceServer<Adapter<D>> {
         AuthServiceServer::from_arc(self.adapter())
@@ -187,6 +195,7 @@ impl<D: Served> Server<D> {
             self.audit.clone(),
             self.service(),
             self.auth_service(),
+            self.admin_service(),
             self.rest_router(),
         )
     }
@@ -194,11 +203,18 @@ impl<D: Served> Server<D> {
     /// gRPC alone, as [`serve`](Self::serve) serves it without `rest`.
     #[cfg(not(feature = "rest"))]
     pub(crate) fn http_service(&self) -> crate::serve::Dispatch<D> {
-        crate::serve::Dispatch::new(self.db.clone(), self.auth, self.audit.clone(), self.service(), self.auth_service())
+        crate::serve::Dispatch::new(
+            self.db.clone(),
+            self.auth,
+            self.audit.clone(),
+            self.service(),
+            self.auth_service(),
+            self.admin_service(),
+        )
     }
 }
 
-/// The handlers of `DatabaseService` and `AuthService` over a database
+/// The handlers of `DatabaseService`, `AuthService` and `AdminService` over a database
 /// ([`Server::service`]). Every call runs through [`Authorized`], built from
 /// the [`Caller`] the gate attached (design rule 8, ADR 0045).
 pub struct Adapter<D> {
@@ -208,7 +224,7 @@ pub struct Adapter<D> {
     audit: Arc<dyn AuditSink>,
 }
 
-impl<D> Adapter<D> {
+impl<D: iwdb_query::Admin> Adapter<D> {
     /// The database as the request's caller may use it.
     fn db<T>(&self, request: &Request<T>) -> Result<Authorized<D>, Status> {
         authorized(&self.db, self.mode, request.extensions().get::<Caller>(), &self.audit).map_err(fail)
@@ -455,6 +471,36 @@ impl<D: Served> AuthService for Adapter<D> {
 
     async fn list_tokens(&self, request: Request<pb::ListTokensRequest>) -> Res<pb::ListTokensResponse> {
         Ok(Response::new(ops::list_tokens(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
+}
+
+#[tonic::async_trait]
+impl<D: Served> AdminService for Adapter<D> {
+    async fn get_server_status(
+        &self,
+        request: Request<pb::GetServerStatusRequest>,
+    ) -> Res<pb::GetServerStatusResponse> {
+        Ok(Response::new(ops::get_server_status(&self.db(&request)?).await.map_err(fail)?))
+    }
+
+    async fn list_requests(&self, request: Request<pb::ListRequestsRequest>) -> Res<pb::ListRequestsResponse> {
+        Ok(Response::new(ops::list_requests(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
+
+    async fn cancel_request(&self, request: Request<pb::CancelRequestRequest>) -> Res<pb::CancelRequestResponse> {
+        Ok(Response::new(ops::cancel_request(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
+
+    async fn list_consumers(&self, request: Request<pb::ListConsumersRequest>) -> Res<pb::ListConsumersResponse> {
+        Ok(Response::new(ops::list_consumers(&self.db(&request)?).await.map_err(fail)?))
+    }
+
+    async fn get_metrics(&self, request: Request<pb::GetMetricsRequest>) -> Res<pb::GetMetricsResponse> {
+        Ok(Response::new(ops::get_metrics(&self.db(&request)?).await.map_err(fail)?))
+    }
+
+    async fn get_log(&self, request: Request<pb::GetLogRequest>) -> Res<pb::GetLogResponse> {
+        Ok(Response::new(ops::get_log(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
     }
 }
 

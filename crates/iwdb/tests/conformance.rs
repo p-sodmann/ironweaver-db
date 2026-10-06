@@ -1,11 +1,15 @@
 //! The conformance suite of the `Database` trait (`iwdb_query::conformance`)
-//! against the embedded store.
+//! against the embedded store, and of the `Admin` trait through the
+//! authorisation point, which registers the calls (as a server does).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::ops::Deref;
+use std::sync::Arc;
 
 use iwdb::{Embedded, QueryConfig, Store};
+use iwdb_query::audit::Audit;
+use iwdb_query::{Authorized, Principal};
 
 mod support;
 
@@ -30,3 +34,28 @@ fn fresh() -> Fresh {
 }
 
 iwdb_query::conformance_tests!(fresh());
+
+/// A fresh store as a server-wide admin sees it through the authorisation
+/// point.
+struct FreshAuthorized {
+    db: Authorized<Embedded>,
+    _dir: tempfile::TempDir,
+}
+
+impl Deref for FreshAuthorized {
+    type Target = Authorized<Embedded>;
+
+    fn deref(&self) -> &Authorized<Embedded> {
+        &self.db
+    }
+}
+
+fn fresh_authorized() -> FreshAuthorized {
+    let Fresh { db, _dir } = fresh();
+    FreshAuthorized { db: Authorized::new(Arc::new(db), Arc::new(Principal::unauthenticated()), Audit::none()), _dir }
+}
+
+mod admin {
+    use super::fresh_authorized;
+    iwdb_query::admin_conformance_tests!(fresh_authorized());
+}

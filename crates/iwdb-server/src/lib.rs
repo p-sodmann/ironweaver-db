@@ -49,6 +49,7 @@ mod console;
 mod convert;
 pub mod health;
 pub mod logging;
+pub mod metrics;
 mod ops;
 #[cfg(feature = "rest")]
 pub mod rest;

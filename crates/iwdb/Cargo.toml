@@ -31,6 +31,11 @@ getrandom = "0.4"
 postgres = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
+# The data directory's free space for the status views (step 16c), from
+# `statvfs` without unsafe code (already in the tree, through tempfile)
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["fs", "std"] }
+
 [features]
 # `projection::postgres::PostgresSource` (ADR 0032)
 postgres = ["dep:postgres", "dep:serde_json"]

@@ -19,6 +19,7 @@ use prost_types::{DescriptorProto, FileDescriptorSet, MethodDescriptorProto};
 use serde_json::{Map, Value as Json, json};
 
 use super::{CHANGES_PARAMETERS, EVENT_STREAM, Input, NDJSON, OPTION_PARAMETERS, ROUTES, Route};
+use crate::metrics::PROMETHEUS_TEXT;
 use crate::proto::DESCRIPTORS;
 
 const PACKAGE: &str = "ironweaver_db.v1";
@@ -259,9 +260,12 @@ impl Protos {
             // Health, login and this document need no credentials
             operation.insert("security".into(), json!([]));
         }
-        for name in ["user", "ns", "token", "id"].into_iter().filter(|p| route.path.contains(&format!("{{{}}}", p))) {
+        for name in
+            ["user", "ns", "token", "id", "request"].into_iter().filter(|p| route.path.contains(&format!("{{{}}}", p)))
+        {
             let (schema, description) = match (name, route.rpc) {
                 ("ns", _) => (json!({ "type": "string" }), "The namespace."),
+                ("request", _) => (json!({ "type": "string", "pattern": "^[0-9]+$" }), "The request's id."),
                 ("user", _) => (json!({ "type": "string" }), "The user."),
                 ("token", _) => (json!({ "type": "string" }), "The API token's name."),
                 (_, Some("GetEdges")) => (json!({ "type": "string", "pattern": "^[0-9]+$" }), "The edge's id."),
@@ -276,6 +280,7 @@ impl Protos {
             Input::Changes { stream } => {
                 CHANGES_PARAMETERS.iter().filter(|(name, ..)| !stream || *name != "wait").collect()
             }
+            Input::Query(parameters) => parameters.iter().collect(),
             _ => Vec::new(),
         };
         for (name, kind, description) in query {
@@ -344,7 +349,12 @@ impl Protos {
         let response = reference(short(rpc.output_type()));
         let mut content = json!({ "application/json": { "schema": response } });
         let mut answer = "The answer.".to_owned();
-        if route.input == (Input::Changes { stream: true }) {
+        if route.operation == "prometheusMetrics" {
+            content = json!({ PROMETHEUS_TEXT: { "schema": { "type": "string" } } });
+            answer = "The metrics in Prometheus' text exposition format, version 0.0.4 \
+                      (documentation/api/metrics.md). Served in every build, also without the REST API."
+                .to_owned();
+        } else if route.input == (Input::Changes { stream: true }) {
             content = json!({ EVENT_STREAM: { "schema": { "type": "string" } } });
             answer = "Server-Sent Events: a `change` event per commit, its `id` the seq and its `data` a \
                       `ChangeEvent` in JSON; a comment line as heartbeat; an `error` event with an `Error` \

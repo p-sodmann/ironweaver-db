@@ -10,6 +10,11 @@
 //! leaves one success entry; any other call none. No entry holds a
 //! password or token.
 //!
+//! The operator's reads and cancel (step 16c) are in the table too: who
+//! sees what of the status, the requests, the readers and the metrics is
+//! checked in their cells, and cancelling, which is always audited, names
+//! the request and its owner.
+//!
 //! The callers: no credentials, a user without grants, users with `read`,
 //! `write` and `admin` on the namespace under test, and a server-wide
 //! admin. They authenticate with API tokens, which survive the password
@@ -32,7 +37,7 @@ use iwdb_query::{
     MatchRequest, NeighbourhoodRequest, Order, PathRequest, ProjectionSpec, QueryOptions, Role, Secret,
     SubgraphRequest, TraverseRequest, UserInfo, WalkRequest,
 };
-use iwdb_query::{Audited, Operation, Via};
+use iwdb_query::{Admin, Audited, Operation, Via};
 use iwdb_server::auth::AuthMode;
 use iwdb_server::client::Remote;
 #[cfg(feature = "rest")]
@@ -89,9 +94,12 @@ enum Outcome {
     U,
     /// `permission_denied`.
     D,
+    /// `not_found`: allowed, but there is nothing the caller may act on
+    /// (cancelling a request that isn't its own).
+    N,
 }
 
-use Outcome::{A, D, U};
+use Outcome::{A, D, N, U};
 
 /// Every authorised operation (and login), each a call the test can make.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,6 +142,13 @@ enum Op {
     WhoAmI,
     Logout,
     Login,
+    ServerStatus,
+    ActiveRequests,
+    CancelOwnRequest,
+    CancelOthersRequest,
+    Consumers,
+    Metrics,
+    Log,
 }
 
 impl Op {
@@ -173,6 +188,12 @@ impl Op {
             Op::WhoAmI => Operation::WhoAmI,
             Op::Logout => Operation::Logout,
             Op::Login => Operation::Login,
+            Op::ServerStatus => Operation::ServerStatus,
+            Op::ActiveRequests => Operation::ActiveRequests,
+            Op::CancelOwnRequest | Op::CancelOthersRequest => Operation::CancelRequest,
+            Op::Consumers => Operation::Consumers,
+            Op::Metrics => Operation::Metrics,
+            Op::Log => Operation::Log,
         }
     }
 }
@@ -218,10 +239,19 @@ const TABLE: &[(Op, [Outcome; 6])] = &[
     (Op::WhoAmI, [U, A, A, A, A, A]),
     (Op::Logout, [U, A, A, A, A, A]),
     (Op::Login, [A, A, A, A, A, A]),
+    (Op::ServerStatus, [U, A, A, A, A, A]),
+    (Op::ActiveRequests, [U, A, A, A, A, A]),
+    // A user without grants can't start a request worth cancelling: it
+    // cancels one that isn't running
+    (Op::CancelOwnRequest, [U, N, A, A, A, A]),
+    (Op::CancelOthersRequest, [U, N, N, N, N, A]),
+    (Op::Consumers, [U, A, A, A, A, A]),
+    (Op::Metrics, [U, A, A, A, A, A]),
+    (Op::Log, [U, D, D, D, D, A]),
 ];
 
 /// What the test needs of a client, over gRPC or REST.
-trait Client: Database + Accounts {
+trait Client: Database + Accounts + Admin {
     fn whoami(&self) -> Result<UserInfo, Error>;
     fn logout(&self) -> Result<(), Error>;
     fn login(&self, user: &str, password: &str) -> Result<(), Error>;
@@ -453,6 +483,96 @@ impl World {
             }
             Op::Logout => c.logout(),
             Op::Login => c.login(Who::Read.user(), &Who::Read.password()),
+            Op::ServerStatus => {
+                let status = block_on(c.server_status())?;
+                let names: Vec<&str> = status.namespaces.iter().map(|n| n.name.as_str()).collect();
+                assert_eq!(names, self.visible(who), "{:?}", who);
+                assert!(status.ready && !status.version.is_empty());
+                Ok(())
+            }
+            Op::ActiveRequests => {
+                let list = block_on(c.active_requests(None, None))?;
+                // At least this very call; only the caller's own unless it
+                // is a server admin
+                assert!(list.items.iter().any(|r| r.operation == Operation::ActiveRequests && r.user == me));
+                if who != Who::Admin {
+                    assert!(list.items.iter().all(|r| r.user == me), "{:?}: {:?}", who, list.items);
+                }
+                Ok(())
+            }
+            Op::CancelOwnRequest if who == Who::NoGrant => block_on(c.cancel_request(u64::MAX, None)).map(drop),
+            Op::CancelOwnRequest | Op::CancelOthersRequest => {
+                let owner = if op == Op::CancelOwnRequest { who } else { someone_else(who) };
+                // The owner's long poll, cancelled here (or, if this call
+                // may not, by the admin afterwards)
+                let (id, poll) = self.long_poll(if who == Who::Anonymous { Who::Read } else { owner });
+                let result = block_on(c.cancel_request(id, None));
+                if result.is_err() {
+                    self.audit.paused(|| block_on(self.admin.cancel_request(id, None))).unwrap();
+                }
+                let polled = poll.join().unwrap();
+                assert_eq!(polled.map(drop).unwrap_err().code(), Code::Cancelled);
+                result.map(|r| {
+                    assert_eq!((r.id, r.user.as_str(), r.namespace.as_deref()), (id, owner.user(), Some(NS)));
+                })
+            }
+            Op::Consumers => {
+                // A reader of NS, seen by those who can read NS
+                self.audit.paused(|| {
+                    block_on(self.admin.changes(NS, ChangesRequest { from_seq: 1, wait: false }, o())).unwrap()
+                });
+                let list = block_on(c.consumers())?;
+                let seen = list.iter().any(|r| r.namespace == NS && r.user == Who::Admin.user());
+                assert_eq!(seen, who != Who::NoGrant, "{:?}: {:?}", who, list);
+                assert!(list.iter().all(|r| self.visible(who).contains(&r.namespace.as_str())), "{:?}", list);
+                Ok(())
+            }
+            Op::Metrics => {
+                let metrics = block_on(c.metrics())?;
+                let mut names: Vec<&str> = metrics
+                    .family(iwdb_query::metrics::NAMESPACE_NODES)
+                    .unwrap()
+                    .samples
+                    .iter()
+                    .filter_map(|s| s.label("namespace"))
+                    .collect();
+                names.sort_unstable();
+                assert_eq!(names, self.visible(who), "{:?}", who);
+                Ok(())
+            }
+            Op::Log => block_on(c.log(0, Some(10))).map(drop),
+        }
+    }
+
+    /// The namespaces `who` has a role on, by name.
+    fn visible(&self, who: Who) -> Vec<&'static str> {
+        match who {
+            Who::Admin => vec!["default", NS],
+            Who::NoGrant | Who::Anonymous => vec![],
+            _ => vec![NS],
+        }
+    }
+
+    /// A long poll of NS's changes by `who` on a thread of its own (from a
+    /// seq no commit reaches), and its request id once it runs.
+    fn long_poll(
+        &self,
+        who: Who,
+    ) -> (u64, std::thread::JoinHandle<Result<iwdb_query::Answer<iwdb_query::Changes>, Error>>) {
+        let client = self.grpc(who);
+        let poll = std::thread::spawn(move || {
+            let options = QueryOptions { timeout: Some(std::time::Duration::from_secs(30)), ..QueryOptions::default() };
+            block_on(client.changes(NS, ChangesRequest { from_seq: 1 << 40, wait: true }, options))
+        });
+        let start = std::time::Instant::now();
+        loop {
+            let list =
+                self.audit.paused(|| block_on(self.admin.active_requests(Some(who.user().into()), None))).unwrap();
+            if let Some(r) = list.items.iter().find(|r| r.operation == Operation::Changes) {
+                return (r.id, poll);
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(10), "the long poll never ran");
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 
@@ -534,7 +654,18 @@ const NOT_AUDITED: &[Operation] = &[
     Operation::Users,
     Operation::Tokens,
     Operation::WhoAmI,
+    Operation::ServerStatus,
+    Operation::ActiveRequests,
+    Operation::Consumers,
+    Operation::Metrics,
+    Operation::Log,
 ];
+
+/// A user other than `who` with a role on NS: whose request
+/// `CancelOthersRequest` cancels.
+fn someone_else(who: Who) -> Who {
+    if who == Who::Read { Who::Write } else { Who::Read }
+}
 
 /// What is wrong with the audit entries of `op` run by `who` with outcome
 /// `got` (empty: nothing).
@@ -559,6 +690,7 @@ fn audit_problems(op: Op, who: Who, got: Outcome, entries: &[AuditEntry]) -> Vec
         A => None,
         U => Some(Code::Unauthenticated),
         D => Some(Code::PermissionDenied),
+        N => Some(Code::NotFound),
     };
     expect("code", e.code == code);
     match (got, op) {
@@ -578,8 +710,21 @@ fn audit_problems(op: Op, who: Who, got: Outcome, entries: &[AuditEntry]) -> Vec
             Op::CreateOwnToken | Op::RevokeOwnToken => {
                 expect("token", e.subject.as_deref() == Some(who.user()) && e.token_name.is_some())
             }
+            Op::CancelOwnRequest => expect(
+                "request",
+                e.request.is_some() && e.subject.as_deref() == Some(who.user()) && e.namespace.as_deref() == Some(NS),
+            ),
+            Op::CancelOthersRequest => expect(
+                "request",
+                e.request.is_some()
+                    && e.subject.as_deref() == Some(someone_else(who).user())
+                    && e.namespace.as_deref() == Some(NS),
+            ),
             _ => {}
         }
+    }
+    if got == N {
+        expect("request", e.request.is_some() && e.subject.is_none());
     }
     problems
 }
@@ -595,6 +740,7 @@ fn check(transport: &str, world: &World, run: impl Fn(Op, Who) -> Result<(), Err
                 Ok(()) => A,
                 Err(e) if e.code() == Code::Unauthenticated => U,
                 Err(e) if e.code() == Code::PermissionDenied => D,
+                Err(e) if e.code() == Code::NotFound => N,
                 Err(e) => {
                     failures.push(format!(
                         "{} {:?} as {:?}: unexpected error {} ({})",

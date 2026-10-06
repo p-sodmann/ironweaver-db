@@ -12,14 +12,18 @@
 use std::future::Future;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use ironweaver_core::EdgeId;
 use ironweaver_core::cancel::Token;
+use iwdb_engine::CommitTime;
 use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation, Namespace};
 use iwdb_query::exec::{Pending, Pool};
+use iwdb_query::log::LogRing;
 use iwdb_query::read::{self, ReadContext};
+use iwdb_query::requests::Requests;
 use iwdb_query::{Accounts, Authenticate, NewToken, Principal, Role, Secret, Session, TokenInfo, UserInfo, Via};
 use iwdb_query::{
     AnalyticsRequest, Answer, CHANGES_BATCH_BYTES, ChangeEvent, Changes, ChangesRequest, Code, CommitOptions, Database,
@@ -72,6 +76,18 @@ where
     pool: Pool,
     config: QueryConfig,
     auth: Arc<AuthState>,
+    pub(crate) monitor: Arc<Monitor>,
+}
+
+/// What the operator's reads report beyond the store (step 16c): the
+/// request registry, the log tail, when serving started, and whether it
+/// still serves.
+#[derive(Debug)]
+pub(crate) struct Monitor {
+    pub(crate) requests: Arc<Requests>,
+    pub(crate) log: Arc<LogRing>,
+    pub(crate) started: CommitTime,
+    pub(crate) ready: AtomicBool,
 }
 
 /// Logins: the settings, the sessions and the slowdown of failures.
@@ -100,7 +116,27 @@ where
     pub fn new(store: Store<F>, config: QueryConfig) -> Result<Self, Error> {
         config.limits.check()?;
         let pool = Pool::new("iwdb-query", config.workers, config.queue)?;
-        Ok(Embedded { store: Arc::new(store), pool, config, auth: Arc::default() })
+        let monitor = Monitor {
+            requests: Requests::new(),
+            log: Arc::new(LogRing::new(0)),
+            started: CommitTime::now(),
+            ready: AtomicBool::new(true),
+        };
+        Ok(Embedded { store: Arc::new(store), pool, config, auth: Arc::default(), monitor: Arc::new(monitor) })
+    }
+
+    /// Serve `log` as the log tail (`Admin::log`): the ring the process's
+    /// logger fills (the server's, step 16c). Without one the tail is
+    /// empty.
+    pub fn with_log(mut self, log: Arc<LogRing>) -> Self {
+        let monitor = Monitor {
+            requests: self.monitor.requests.clone(),
+            log,
+            started: self.monitor.started,
+            ready: AtomicBool::new(self.monitor.ready.load(Ordering::Acquire)),
+        };
+        self.monitor = Arc::new(monitor);
+        self
     }
 
     /// Log in with `settings` (session lifetime, login slowdown, hash
@@ -178,7 +214,7 @@ where
     }
 
     /// Run `f` on a worker with the store.
-    fn run<T: Send + 'static>(
+    pub(crate) fn run<T: Send + 'static>(
         &self,
         f: impl FnOnce(&Store<F>, &Token) -> Result<T, Error> + Send + 'static,
     ) -> Pending<Result<T, Error>> {

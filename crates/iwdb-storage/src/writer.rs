@@ -1,9 +1,11 @@
 //! Writing the log: [`Wal`], its [`FsyncPolicy`] and [`WalOptions`].
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iwdb_engine::CommitRecord;
+use iwdb_engine::metrics::Histogram;
 
 use crate::format::{self, FORMAT_VERSION, FRAME_HEADER_LEN, FrameHeader, SEGMENT_HEADER_LEN};
 use crate::io::{LogFile, LogFs, StdFs};
@@ -120,6 +122,8 @@ pub struct Wal<F: LogFs = StdFs> {
     /// The commit time of the last record in the log, as far as this
     /// writer knows: the floor for the next one.
     last_time: CommitTime,
+    /// How long the segment fsyncs took (the metrics, ADR 0050).
+    fsyncs: Arc<Histogram>,
 }
 
 impl<F: LogFs> std::fmt::Debug for Wal<F> {
@@ -203,6 +207,7 @@ impl<F: LogFs> Wal<F> {
             frame: Vec::new(),
             appended: 0,
             last_time,
+            fsyncs: Arc::default(),
         })
     }
 
@@ -317,6 +322,12 @@ impl<F: LogFs> Wal<F> {
         self.synced_seq
     }
 
+    /// How long this writer's fsyncs of its segment took: shared, so it
+    /// can be read without the writer's lock.
+    pub fn fsyncs(&self) -> Arc<Histogram> {
+        self.fsyncs.clone()
+    }
+
     /// Bytes of record frames appended by this writer since it was
     /// created (the log's growth; the checkpointer's size trigger).
     pub fn appended_bytes(&self) -> u64 {
@@ -364,7 +375,10 @@ impl<F: LogFs> Wal<F> {
             self.failed = Some(e.to_string());
             return Err(e);
         }
-        if let Err(e) = self.file.sync() {
+        let start = Instant::now();
+        let synced = self.file.sync();
+        self.fsyncs.observe(start.elapsed());
+        if let Err(e) = synced {
             return Err(self.fail("fsync", e));
         }
         if self.options.fsync == FsyncPolicy::Off

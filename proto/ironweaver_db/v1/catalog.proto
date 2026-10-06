@@ -64,6 +64,15 @@ message NamespaceStatus {
   // The namespace's marks (ADR 0032), by name: how far each projection
   // has committed its source's events.
   repeated MarkStatus marks = 15;
+  // Commits applied but not known to be durable (seq - synced_seq);
+  // missing when synced_seq is.
+  optional uint64 unsynced = 16;
+  // Commits since the newest checkpoint (seq - checkpoint, or seq without
+  // one): what recovery would replay.
+  uint64 since_checkpoint = 17;
+  // When the newest checkpoint was written, in microseconds since 1970
+  // (UTC); missing without one.
+  optional int64 last_checkpoint_micros = 18;
 }
 
 // A mark: the position in an external log up to which a projection's

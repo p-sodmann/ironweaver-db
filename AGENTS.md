@@ -95,3 +95,9 @@ This applies to new findings. Drafts that the user holds back explicitly (such a
 
 - Small, focused commits. Reference the step in the message, e.g. `step 3: add WAL record CRC`.
 - A PR should cover one step or a clearly separable part of one, and list which acceptance criteria it satisfies.
+- Before pushing, refresh the "By the numbers" table in the README (and its "as of" month). It counts git-tracked files and non-blank lines, without vendored code (`console/vendor/`, `console/design-system/`):
+  ```
+  count() { git ls-files "$@" | grep -v -e console/vendor/ -e console/design-system/ | tee >(wc -l >&2) | xargs cat | grep -cv '^\s*$'; }
+  count '*.rs'; count '*.py' '*.pyi'; count '*.js' '*.jsx' '*.mjs'
+  ```
+  Each `count` call prints the number of files, then the number of lines.

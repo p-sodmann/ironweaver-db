@@ -49,6 +49,8 @@ pub struct AuditEntry {
     /// The event number of a namespace's creation or drop in the
     /// namespaces log.
     pub namespace_event: Option<u64>,
+    /// The request a `CancelRequest` cancels (its id).
+    pub request: Option<u64>,
 }
 
 impl AuditEntry {

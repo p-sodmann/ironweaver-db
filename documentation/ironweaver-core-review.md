@@ -199,5 +199,7 @@ Checked at `d15a7ec` while building the gRPC server.
 
 ## Notes (not upstream requests yet)
 
+- Step 16c: a running search's visited count can't be read until it ends (`Budget` counts internally), so `ListRequests` doesn't report it. Proposal drafted as [draft 23](upstream-issues.md#23-a-searchs-progress-readable-while-it-runs), not filed: a feature, held for the owner's decision. Nothing to work around: the field is left out.
+
 - `format::to_binary` / `from_binary` doc comments say "bincode"; format 2 is postcard (bincode is only used to read format-1 files). Documentation nit, still present at `a14149e`. Upstream issue: [#30](https://github.com/p-sodmann/Ironweaver/issues/30), *fixed in `3b15149`*.
 - `bincode` 1.x is flagged unmaintained (RUSTSEC-2025-0141) and reaches us through the core's format-1 reader. It is still an unconditional dependency at `a14149e`, so `deny.toml` keeps ignoring it, with that reason; revisit on each core bump. Upstream issue: [#30](https://github.com/p-sodmann/Ironweaver/issues/30), *fixed in `3b15149`* (bincode behind a `format-v1` feature).

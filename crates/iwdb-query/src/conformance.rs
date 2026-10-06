@@ -27,6 +27,10 @@ use iwdb_engine::reserved::VERSION_KEY;
 use iwdb_engine::{CatalogChange, Change, DbRecord, IdempotencyKey, Mutation, Target};
 use iwdb_storage::HistoryId;
 
+use crate::admin::MAX_LIST;
+use crate::auth::Operation;
+use crate::metrics::{self as m, METRICS};
+use crate::{Admin, Listed};
 use crate::{
     AnalyticsRequest, Answer, ChangeEvent, ChangesRequest, Code, CommitOptions, Database, Error, ExplainRequest,
     FindRequest, Job, JobResult, MatchRequest, NeighbourhoodRequest, Order, PathMethod, PathRequest, Plan,
@@ -82,6 +86,24 @@ macro_rules! conformance_tests {
                 $crate::conformance::block_on($crate::conformance::$case(&*fixture));
             }
         )*
+    };
+}
+
+/// Expand to one `#[test]` per case of the [`Admin`] conformance suite,
+/// like [`conformance_tests!`] (`$fixture` dereferences to a
+/// [`Database`] and [`Admin`] whose calls are registered: a server's
+/// client, or the embedded store through
+/// [`Authorized`](crate::Authorized)).
+#[macro_export]
+macro_rules! admin_conformance_tests {
+    ($fixture:expr) => {
+        $crate::conformance_tests!(@cases $fixture;
+            server_status_reports_the_database,
+            metrics_hold_every_metric,
+            a_running_request_is_listed_and_cancelled,
+            admin_reads_are_bounded,
+            consumers_report_their_lag,
+        );
     };
 }
 
@@ -789,4 +811,125 @@ pub async fn changes_report_their_errors<D: Database>(db: &D) {
     let other = QueryOptions { history: Some(HistoryId::random()), ..QueryOptions::default() };
     assert_eq!(code(db.changes(NS, changes_from(1), other).await), Code::InvalidArgument);
     assert_eq!(code(db.changes(NS, changes_from(1), limits(Some(0), None, None)).await), Code::InvalidArgument);
+}
+
+// ---- the operator's reads (step 16c, `Admin`) ----
+
+fn namespace<'a>(status: &'a crate::ServerStatus, name: &str) -> &'a crate::NamespaceStatus {
+    status.namespaces.iter().find(|n| n.name == name).expect("the namespace's status")
+}
+
+pub async fn server_status_reports_the_database<D: Database + Admin>(db: &D) {
+    let before = db.server_status().await.unwrap();
+    assert!(!before.version.is_empty() && before.ready, "{:?}", before);
+    assert!(["always", "group", "off"].contains(&before.fsync.as_str()), "{}", before.fsync);
+    let seq = commit(db, vec![node("a", &["P"], &[])]).await;
+    let after = db.server_status().await.unwrap();
+    assert_eq!(after.started, before.started);
+    let (was, now) = (namespace(&before, NS), namespace(&after, NS));
+    assert_eq!((now.seq, now.nodes), (seq, was.nodes + 1));
+    assert_eq!(now.since_checkpoint, now.seq - now.checkpoint.unwrap_or(0));
+    assert!(after.disk.wal_bytes > 0, "{:?}", after.disk);
+    let graphs: u64 = after.namespaces.iter().map(|n| n.memory_bytes as u64).sum();
+    assert_eq!(after.memory.graph_bytes, graphs);
+    // The commit and the first status at least
+    assert!(after.requests.total >= before.requests.total + 2, "{:?} then {:?}", before.requests, after.requests);
+    assert!(after.requests.active >= 1, "this call runs");
+}
+
+pub async fn metrics_hold_every_metric<D: Database + Admin>(db: &D) {
+    commit(db, vec![node("a", &["P"], &[])]).await;
+    let metrics = db.metrics().await.unwrap();
+    let names: Vec<&str> = metrics.families.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.iter().copied().eq(METRICS.iter().map(|d| d.name)), "{:?}", names);
+    for (family, def) in metrics.families.iter().zip(METRICS) {
+        assert_eq!(family.kind, def.kind, "{}", def.name);
+        for sample in &family.samples {
+            let labels: Vec<&str> = sample.labels.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(labels, def.labels, "{}", def.name);
+        }
+    }
+    let gauge = |name: &str, ns: &str| {
+        let family = metrics.family(name).unwrap();
+        match family.samples.iter().find(|s| s.label("namespace") == Some(ns)).map(|s| &s.value) {
+            Some(m::Value::Gauge(x)) => *x,
+            other => panic!("{} of {}: {:?}", name, ns, other),
+        }
+    };
+    assert_eq!(gauge(m::NAMESPACE_NODES, NS), 1.0);
+    assert!(gauge(m::WAL_BYTES, NS) > 0.0);
+    let commits = metrics.family(m::COMMIT_DURATION).unwrap();
+    assert!(matches!(&commits.samples[0].value, m::Value::Histogram(h) if h.count() >= 1), "{:?}", commits);
+    let ok_commits = metrics.family(m::REQUESTS).unwrap().samples.iter().any(|s| {
+        s.label("operation") == Some(Operation::Commit.name())
+            && s.label("code") == Some("ok")
+            && matches!(s.value, m::Value::Counter(n) if n >= 1)
+    });
+    assert!(ok_commits, "{:?}", metrics.family(m::REQUESTS));
+    let text = metrics.to_prometheus();
+    for def in METRICS {
+        assert!(text.contains(&format!("# TYPE {} {}", def.name, def.kind.as_str())), "{}", def.name);
+    }
+}
+
+pub async fn a_running_request_is_listed_and_cancelled<D: Database + Admin>(db: &D) {
+    let seq = commit(db, vec![node("a", &["P"], &[])]).await;
+    std::thread::scope(|s| {
+        // A long poll from a seq no commit reaches: it runs until cancelled
+        let poll = s.spawn(|| {
+            let options = QueryOptions { timeout: Some(Duration::from_secs(30)), ..options() };
+            block_on(db.changes(NS, ChangesRequest { from_seq: seq + 1_000_000, wait: true }, options))
+        });
+        let start = std::time::Instant::now();
+        let running = loop {
+            let Listed { items, .. } = block_on(db.active_requests(None, None)).unwrap();
+            if let Some(r) = items.into_iter().find(|r| r.operation == Operation::Changes) {
+                break r;
+            }
+            assert!(start.elapsed() < Duration::from_secs(10), "the long poll was never listed");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(running.namespace.as_deref(), Some(NS));
+        assert!(running.cancellable);
+        let cancelled = block_on(db.cancel_request(running.id, None)).unwrap();
+        assert_eq!(cancelled.id, running.id);
+        let e = poll.join().unwrap().unwrap_err();
+        assert_eq!(e.code(), Code::Cancelled, "{}", e);
+        // It ended: no longer listed, and a second cancel finds nothing
+        assert_eq!(code(block_on(db.cancel_request(running.id, None))), Code::NotFound);
+        let Listed { items, .. } = block_on(db.active_requests(None, None)).unwrap();
+        assert!(items.iter().all(|r| r.id != running.id), "{:?}", items);
+    });
+    let status = db.server_status().await.unwrap();
+    assert!(status.requests.cancelled >= 1, "{:?}", status.requests);
+}
+
+pub async fn admin_reads_are_bounded<D: Database + Admin>(db: &D) {
+    // This call itself runs: a limit of 0 cuts it
+    let none = db.active_requests(None, Some(0)).await.unwrap();
+    assert!(none.items.is_empty() && none.truncated, "{:?}", none);
+    let all = db.active_requests(None, Some(usize::MAX)).await.unwrap();
+    assert!(!all.items.is_empty() && all.items.len() <= MAX_LIST);
+    let mine = db.active_requests(Some("no-such-user".into()), None).await.unwrap();
+    assert!(mine.items.is_empty() && !mine.truncated);
+    let log = db.log(0, Some(usize::MAX)).await.unwrap();
+    assert!(log.events.len() <= crate::log::MAX_READ);
+    assert!(log.events.windows(2).all(|w| w[0].seq < w[1].seq));
+    assert!(db.consumers().await.unwrap().len() <= crate::requests::MAX_CONSUMERS);
+}
+
+pub async fn consumers_report_their_lag<D: Database + Admin>(db: &D) {
+    for id in ["a", "b", "c"] {
+        commit(db, vec![node(id, &["P"], &[])]).await;
+    }
+    let batch = db.changes(NS, changes_from(1), options()).await.unwrap();
+    let next = batch.value.next_seq;
+    let reader = |list: Vec<crate::requests::ConsumerInfo>| {
+        list.into_iter().find(|c| c.namespace == NS && c.next_seq == next).expect("the reader")
+    };
+    let first = reader(db.consumers().await.unwrap());
+    assert_eq!((first.lag, first.polls), (0, 1), "{:?}", first);
+    commit(db, vec![node("d", &["P"], &[])]).await;
+    commit(db, vec![node("e", &["P"], &[])]).await;
+    assert_eq!(reader(db.consumers().await.unwrap()).lag, 2);
 }

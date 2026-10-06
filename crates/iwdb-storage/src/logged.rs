@@ -9,6 +9,7 @@ use std::task::Waker;
 use std::time::{Duration, Instant};
 
 use iwdb_engine::catalog::AttrPath;
+use iwdb_engine::metrics::{Histogram, HistogramSnapshot};
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, IndexBuild, MarkUpdate, Mutation, Namespace, Prepare};
 
 use crate::io::{LogFs, StdFs};
@@ -76,6 +77,22 @@ pub struct LoggedNamespace<F: LogFs = StdFs> {
     /// `RwLock` doesn't promise that a waiting writer gets in between two
     /// read locks of one thread (on macOS a scan starved commits).
     applies_waiting: AtomicUsize,
+    /// The WAL's fsync histogram, readable without the writer's lock.
+    fsyncs: Arc<Histogram>,
+    /// The graph's nodes, edges and memory use, published with each apply,
+    /// so the metrics need no lock ([`sizes`](Self::sizes)).
+    nodes: AtomicUsize,
+    edges: AtomicUsize,
+    memory: AtomicUsize,
+}
+
+/// A namespace's size as of its last apply ([`LoggedNamespace::sizes`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sizes {
+    pub nodes: usize,
+    pub edges: usize,
+    /// The core's `Graph::memory_usage`: indexes included, payloads not.
+    pub memory_bytes: usize,
 }
 
 /// Rows scanned per read-lock hold of an online index build.
@@ -111,6 +128,25 @@ struct Stats {
     writes: AtomicU64,
     total_ns: AtomicU64,
     max_ns: AtomicU64,
+    /// Every commit's time, from the call to its acknowledgement (or
+    /// failure), waiting for the writer included.
+    commits: Histogram,
+    write_holds: Histogram,
+    read_holds: Histogram,
+}
+
+/// The namespace's duration histograms (the metrics, ADR 0050), since it
+/// was opened.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NamespaceHistograms {
+    /// Commits (data and catalog), from the call to the answer.
+    pub commits: HistogramSnapshot,
+    /// Fsyncs of the WAL's current segment.
+    pub fsyncs: HistogramSnapshot,
+    /// How long commits held the write lock (apply and index flush).
+    pub write_holds: HistogramSnapshot,
+    /// How long [`read`](LoggedNamespace::read) held the read lock.
+    pub read_holds: HistogramSnapshot,
 }
 
 /// How a [`wait_for_seq`](LoggedNamespace::wait_for_seq) ended.
@@ -148,7 +184,14 @@ impl<F: LogFs> LoggedNamespace<F> {
         }
         let poisoned = namespace.is_poisoned().then(|| iwdb_engine::Error::Poisoned.to_string());
         let failure = wal.failure().map(str::to_owned).or(poisoned);
+        let fsyncs = wal.fsyncs();
+        let g = namespace.graph();
+        let (nodes, edges, memory) = (g.node_count(), g.edge_count(), g.memory_usage());
         Ok(LoggedNamespace {
+            fsyncs,
+            nodes: AtomicUsize::new(nodes),
+            edges: AtomicUsize::new(edges),
+            memory: AtomicUsize::new(memory),
             seq: AtomicU64::new(namespace.seq()),
             streamable: AtomicU64::new(streamable(&wal, namespace.seq())),
             namespace: RwLock::new(namespace),
@@ -300,7 +343,12 @@ impl<F: LogFs> LoggedNamespace<F> {
     /// after some commit, never part of one. Commits wait to apply while it
     /// runs, so keep it short (ADR 0014).
     pub fn read<R>(&self, f: impl FnOnce(&Namespace) -> R) -> R {
-        f(&self.namespace())
+        let namespace = self.namespace();
+        let start = Instant::now();
+        let result = f(&namespace);
+        drop(namespace);
+        self.stats.read_holds.observe(start.elapsed());
+        result
     }
 
     /// The namespace, under the read lock until the guard is dropped. Don't
@@ -431,6 +479,27 @@ impl<F: LogFs> LoggedNamespace<F> {
         }
     }
 
+    /// The graph's size as of the last apply (O(1), no lock): the core's
+    /// counts and memory estimate, read under the write lock then.
+    pub fn sizes(&self) -> Sizes {
+        Sizes {
+            nodes: self.nodes.load(Ordering::Relaxed),
+            edges: self.edges.load(Ordering::Relaxed),
+            memory_bytes: self.memory.load(Ordering::Relaxed),
+        }
+    }
+
+    /// The namespace's duration histograms so far. Doesn't wait for any
+    /// lock.
+    pub fn histograms(&self) -> NamespaceHistograms {
+        NamespaceHistograms {
+            commits: self.stats.commits.snapshot(),
+            fsyncs: self.fsyncs.snapshot(),
+            write_holds: self.stats.write_holds.snapshot(),
+            read_holds: self.stats.read_holds.snapshot(),
+        }
+    }
+
     /// Sync (per the policy) and close the log, returning the namespace.
     pub fn close(self) -> Result<Namespace, Error> {
         let (namespace, wal) = self.into_parts();
@@ -459,6 +528,17 @@ impl<F: LogFs> LoggedNamespace<F> {
         build: Option<IndexBuild>,
         prepare: impl FnOnce(&Namespace) -> Result<Prepare, iwdb_engine::Error>,
     ) -> Result<CommitResult, Error> {
+        let start = Instant::now();
+        let result = self.commit_now(build, prepare);
+        self.stats.commits.observe(start.elapsed());
+        result
+    }
+
+    fn commit_now(
+        &self,
+        build: Option<IndexBuild>,
+        prepare: impl FnOnce(&Namespace) -> Result<Prepare, iwdb_engine::Error>,
+    ) -> Result<CommitResult, Error> {
         let mut wal = lock(&self.wal);
         if self.is_dropped() {
             return Err(Error::NamespaceDropped { name: self.namespace().name().to_string() });
@@ -483,6 +563,10 @@ impl<F: LogFs> LoggedNamespace<F> {
         // read-only) or a bug; either way the commit is not acknowledged.
         let applied = namespace.apply_built(prepared, Some(time), build);
         let seq = namespace.seq();
+        let g = namespace.graph();
+        self.nodes.store(g.node_count(), Ordering::Relaxed);
+        self.edges.store(g.edge_count(), Ordering::Relaxed);
+        self.memory.store(g.memory_usage(), Ordering::Relaxed);
         drop(namespace);
         self.stats.record(start.elapsed());
         match applied {
@@ -535,5 +619,6 @@ impl Stats {
         self.writes.fetch_add(1, Ordering::Relaxed);
         self.total_ns.fetch_add(ns, Ordering::Relaxed);
         self.max_ns.fetch_max(ns, Ordering::Relaxed);
+        self.write_holds.observe(held);
     }
 }

@@ -9,7 +9,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use ironweaver_core::GraphError;
-use iwdb_engine::CommitResult;
+use iwdb_engine::{CommitResult, CommitTime};
 use iwdb_storage::io::LogFs;
 use iwdb_storage::{CheckpointOutcome, Error, FsyncPolicy, LoggedNamespace};
 
@@ -123,7 +123,19 @@ pub(super) fn run_checkpoint<F: LogFs>(
     target: u64,
     appended: u64,
 ) -> Result<CheckpointOutcome, Error> {
-    let result = lock(&state.checkpointer).run(target);
+    let start = Instant::now();
+    let result = {
+        let mut checkpointer = lock(&state.checkpointer);
+        let result = checkpointer.run(target);
+        state.set_checkpoint_seq(checkpointer.newest());
+        result
+    };
+    if let Ok(outcome) = &result
+        && outcome.written
+    {
+        state.checkpoints.observe(start.elapsed());
+        *lock(&state.last_checkpoint) = Some(CommitTime::now());
+    }
     if let Some(size) = shared.options.checkpoint.wal_size {
         state.size_trigger.store(appended.saturating_add(size), Ordering::Relaxed);
     }

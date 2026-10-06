@@ -28,7 +28,7 @@ pub const TARGET: &str = "iwdb::audit";
 /// default sink. Fields: `operation`, `outcome` (`success` or `failure`),
 /// `code`, `user`, `auth` (`session`, `api_token`, `certificate`, `off`),
 /// `client`, `namespace`, `subject`, `token_name`, `role`, `admin`, `seq`,
-/// `namespace_event`; the absent ones are left out.
+/// `namespace_event`, `request`; the absent ones are left out.
 pub struct LogAudit;
 
 impl AuditSink for LogAudit {
@@ -48,6 +48,7 @@ impl AuditSink for LogAudit {
             admin = e.admin,
             seq = e.seq,
             namespace_event = e.namespace_event,
+            request = e.request,
             "audit"
         );
     }

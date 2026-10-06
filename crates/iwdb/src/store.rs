@@ -8,7 +8,8 @@ use std::thread::JoinHandle;
 
 use ironweaver_core::{EdgeId, GraphError, Projection};
 use iwdb_engine::catalog::{NamespaceCatalog, NamespaceName};
-use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation, Namespace};
+use iwdb_engine::metrics::Histogram;
+use iwdb_engine::{CatalogChange, CommitResult, CommitTime, IdempotencyKey, Mutation, Namespace};
 use iwdb_query::{CommitOptions, Edge, NamespaceStatus, Node, ProjectionSpec};
 use iwdb_storage::archive::{Archive, ArchiveHandle};
 use iwdb_storage::backup::{self, NamespaceSource};
@@ -30,7 +31,7 @@ mod projections;
 mod wait;
 
 use background::{checkpoint_loop, or_abort, run_checkpoint, spawn, sync_loop};
-pub use ns::Ns;
+pub use ns::{DiskUsage, NamespaceHistograms, Ns};
 pub(crate) use wait::StreamableWait;
 
 /// The name of the namespace every store has. It is created with the store
@@ -100,6 +101,27 @@ struct NsState<F: LogFs> {
     /// The last checkpoint error, cleared by a successful checkpoint.
     checkpoint_error: Mutex<Option<String>>,
     recovery: RecoveryReport,
+    /// How long checkpoint runs that wrote one took (the metrics).
+    checkpoints: Histogram,
+    /// When the newest checkpoint was written: its file's modification
+    /// time when the store opened, then the end of each written one.
+    last_checkpoint: Mutex<Option<CommitTime>>,
+    /// The checkpointer's newest checkpoint ([`NO_CHECKPOINT`]: none),
+    /// readable while a checkpoint runs.
+    checkpoint_seq: AtomicU64,
+}
+
+/// [`NsState::checkpoint_seq`] without a checkpoint.
+const NO_CHECKPOINT: u64 = u64::MAX;
+
+impl<F: LogFs> NsState<F> {
+    fn set_checkpoint_seq(&self, seq: Option<u64>) {
+        self.checkpoint_seq.store(seq.unwrap_or(NO_CHECKPOINT), std::sync::atomic::Ordering::Release);
+    }
+
+    fn checkpoint_seq(&self) -> Option<u64> {
+        Some(self.checkpoint_seq.load(std::sync::atomic::Ordering::Acquire)).filter(|&s| s != NO_CHECKPOINT)
+    }
 }
 
 /// The namespace log and the archive: what creating and dropping a
@@ -319,6 +341,41 @@ where
     /// The namespace `name`, as a handle. Errors: [`Error::NoSuchNamespace`]
     /// (also for the reserved system namespace, which only
     /// [`users`](Self::users) reads and writes, ADR 0043).
+    /// The WALs' fsync policy.
+    pub fn fsync_policy(&self) -> FsyncPolicy {
+        self.shared.options.wal.fsync
+    }
+
+    /// Bytes free for an unprivileged process on the data directory's file
+    /// system (`statvfs`: available blocks times the fragment size); `None`
+    /// where that can't be read (or on a platform without it).
+    pub fn disk_free(&self) -> Option<u64> {
+        #[cfg(unix)]
+        {
+            let stat = rustix::fs::statvfs(&self.shared.root).ok()?;
+            Some(stat.f_bavail.saturating_mul(stat.f_frsize))
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
+    /// Every namespace (but the reserved system namespace), by name, without
+    /// waiting for the namespace log (which creating, dropping and backups
+    /// hold): for the status views and the metrics.
+    pub fn open_namespaces(&self) -> Vec<Ns<'_, F>> {
+        let mut list: Vec<Ns<'_, F>> = self
+            .shared
+            .states()
+            .into_iter()
+            .filter(|s| !s.info.name.is_reserved())
+            .map(|state| Ns { store: self, state })
+            .collect();
+        list.sort_by(|a, b| a.name().cmp(b.name()));
+        list
+    }
+
     pub fn namespace(&self, name: &str) -> Result<Ns<'_, F>, Error> {
         match self.shared.find(name) {
             Some(state) if !state.info.name.is_reserved() => Ok(Ns { store: self, state }),
@@ -840,7 +897,12 @@ fn new_state<F: LogFs + Clone>(
         checkpointer.set_archive(ArchiveHandle::new(archive.clone(), info.id));
     }
     checkpointer.set_retention(options.retention);
+    let last_checkpoint = recovery.checkpoint.and_then(|seq| checkpoint_time(&paths, seq));
+    let checkpoint_seq = AtomicU64::new(checkpointer.newest().unwrap_or(NO_CHECKPOINT));
     NsState {
+        checkpoint_seq,
+        checkpoints: Histogram::new(),
+        last_checkpoint: Mutex::new(last_checkpoint),
         info,
         paths,
         live,
@@ -850,6 +912,14 @@ fn new_state<F: LogFs + Clone>(
         checkpoint_error: Mutex::new(None),
         recovery,
     }
+}
+
+/// The modification time of checkpoint `seq` in `paths`, if it can be read.
+fn checkpoint_time(paths: &NsPaths, seq: u64) -> Option<CommitTime> {
+    let path = paths.checkpoints.join(iwdb_storage::checkpoint::checkpoint_name(seq));
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    let micros = modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_micros();
+    Some(CommitTime(i64::try_from(micros).ok()?))
 }
 
 /// Log what recovery found that is worth attention.

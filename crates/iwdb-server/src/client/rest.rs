@@ -23,8 +23,11 @@ use hyper_util::rt::TokioExecutor;
 use ironweaver_core::EdgeId;
 use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation};
+use iwdb_query::log::LogTail;
+use iwdb_query::metrics::Metrics;
 use iwdb_query::read::Explain;
-use iwdb_query::{Accounts, NewToken, Role, Secret, Session, TokenInfo, UserInfo};
+use iwdb_query::requests::{ConsumerInfo, RequestInfo};
+use iwdb_query::{Accounts, Admin, Listed, NewToken, Role, Secret, ServerStatus, Session, TokenInfo, UserInfo};
 use iwdb_query::{
     AnalyticsRequest, Answer, Changes, ChangesRequest, CommitOptions, Database, Edge, Error, ExplainRequest,
     FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
@@ -683,6 +686,67 @@ impl Database for RestRemote {
             let bytes = c.send(Method::DELETE, c.url(&name, ""), body, JSON).await?;
             let response: pb::DropNamespaceResponse = parse(&bytes)?;
             namespace_result_from_pb(response.event, response.deduplicated).map_err(bad_answer)
+        })
+    }
+}
+
+/// `?name=value&...` of the parameters that are set (empty without any).
+fn parameters(parameters: &[(&str, Option<String>)]) -> String {
+    let set: Vec<String> =
+        parameters.iter().filter_map(|(n, v)| v.as_ref().map(|v| format!("{}={}", n, segment(v)))).collect();
+    if set.is_empty() { String::new() } else { format!("?{}", set.join("&")) }
+}
+
+impl Admin for RestRemote {
+    fn server_status(&self) -> impl Future<Output = Result<ServerStatus, Error>> + Send {
+        self.call(move |c| async move {
+            let response: pb::GetServerStatusResponse = c.get(format!("{}/v1/status", c.base)).await?;
+            server_status_from_pb(response.status).map_err(bad_answer)
+        })
+    }
+
+    fn active_requests(
+        &self,
+        user: Option<String>,
+        limit: Option<usize>,
+    ) -> impl Future<Output = Result<Listed<RequestInfo>, Error>> + Send {
+        self.call(move |c| async move {
+            let q = parameters(&[("user", user), ("limit", limit.map(|n| n.min(u32::MAX as usize).to_string()))]);
+            let response: pb::ListRequestsResponse = c.get(format!("{}/v1/requests{}", c.base, q)).await?;
+            requests_from_pb(response).map_err(bad_answer)
+        })
+    }
+
+    fn cancel_request(&self, id: u64, user: Option<String>) -> impl Future<Output = Result<RequestInfo, Error>> + Send {
+        self.call(move |c| async move {
+            let url = format!("{}/v1/requests/{}/cancel", c.base, id);
+            let response: pb::CancelRequestResponse = c.post(url, &pb::CancelRequestRequest { id, user }).await?;
+            request_from_pb(response.request).map_err(bad_answer)
+        })
+    }
+
+    fn consumers(&self) -> impl Future<Output = Result<Vec<ConsumerInfo>, Error>> + Send {
+        self.call(move |c| async move {
+            let response: pb::ListConsumersResponse = c.get(format!("{}/v1/consumers", c.base)).await?;
+            response.consumers.into_iter().map(consumer_from_pb).collect::<Result<_, _>>().map_err(bad_answer)
+        })
+    }
+
+    fn metrics(&self) -> impl Future<Output = Result<Metrics, Error>> + Send {
+        self.call(move |c| async move {
+            let response: pb::GetMetricsResponse = c.get(format!("{}/v1/metrics", c.base)).await?;
+            metrics_from_pb(response).map_err(bad_answer)
+        })
+    }
+
+    fn log(&self, after: u64, limit: Option<usize>) -> impl Future<Output = Result<LogTail, Error>> + Send {
+        self.call(move |c| async move {
+            let q = parameters(&[
+                ("after", Some(after.to_string())),
+                ("limit", limit.map(|n| n.min(u32::MAX as usize).to_string())),
+            ]);
+            let response: pb::GetLogResponse = c.get(format!("{}/v1/log{}", c.base, q)).await?;
+            log_from_pb(response).map_err(bad_answer)
         })
     }
 }

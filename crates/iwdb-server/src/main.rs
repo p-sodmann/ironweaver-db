@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use iwdb::projection::ProjectionHandle;
 use iwdb::{Embedded, Store};
+use iwdb_query::log::LogRing;
 use iwdb_server::auth::AuthMode;
 use iwdb_server::config::Config;
 use iwdb_server::health::{Health, Phase};
@@ -160,7 +161,9 @@ fn main() -> ExitCode {
         },
         None => None,
     };
-    if let Err(e) = logging::init(config.log.format, &config.log.level, audit) {
+    // The log tail (step 16c): the events the logger writes, for GetLog
+    let ring = Arc::new(LogRing::new(config.log.tail_events));
+    if let Err(e) = logging::init(config.log.format, &config.log.level, audit, ring.clone()) {
         eprintln!("iwdb-server: {}", e);
         return ExitCode::from(2);
     }
@@ -176,7 +179,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(&config, tls) {
+    match run(&config, tls, ring) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             tracing::error!(error = %message, "iwdb-server failed");
@@ -185,7 +188,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(config: &Config, tls: Option<Arc<ServerTls>>) -> Result<(), String> {
+fn run(config: &Config, tls: Option<Arc<ServerTls>>, ring: Arc<LogRing>) -> Result<(), String> {
     let dir = config.data_dir.display().to_string();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -197,7 +200,7 @@ fn run(config: &Config, tls: Option<Arc<ServerTls>>) -> Result<(), String> {
     let projections: Arc<Mutex<Vec<ProjectionHandle>>> = Arc::default();
     let open = {
         let (config, projections) = (config.clone(), projections.clone());
-        move || open(&config, &projections)
+        move || open(&config, &projections, ring)
     };
     let options = LaunchOptions {
         max_message_bytes: config.server.max_message_bytes,
@@ -253,7 +256,7 @@ fn run(config: &Config, tls: Option<Arc<ServerTls>>) -> Result<(), String> {
 }
 
 /// Open the store (recovery), start the projections, and serve it.
-fn open(config: &Config, projections: &Mutex<Vec<ProjectionHandle>>) -> Result<Embedded, String> {
+fn open(config: &Config, projections: &Mutex<Vec<ProjectionHandle>>, ring: Arc<LogRing>) -> Result<Embedded, String> {
     let dir = config.data_dir.display();
     let started = Instant::now();
     let store = Store::open(&config.data_dir, config.store_options()).map_err(|e| format!("opening {}: {}", dir, e))?;
@@ -281,7 +284,7 @@ fn open(config: &Config, projections: &Mutex<Vec<ProjectionHandle>>) -> Result<E
         list.extend(started);
     }
     Embedded::new(store, config.query_config())
-        .map(|db| db.with_auth(config.auth_settings()))
+        .map(|db| db.with_auth(config.auth_settings()).with_log(ring))
         .map_err(|e| e.to_string())
 }
 

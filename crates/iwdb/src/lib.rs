@@ -24,7 +24,9 @@
 //! **The `Database` trait**: [`Embedded`] serves a store
 //! through [`iwdb_query::Database`], the service interface every access
 //! method uses: bounded reads, pattern matching, analytics, the catalog
-//! and namespaces, with stable error codes.
+//! and namespaces, with stable error codes. It also serves
+//! [`iwdb_query::Admin`] ([`admin`], step 16c): the server's status, the
+//! running requests and cancelling them, the metrics and the log tail.
 //!
 //! Operations: [`Store::import_namespace`] and [`Ns::export`] (bulk
 //! import and export, [`import`]), [`Store::backup`] (an online backup), continuous WAL
@@ -40,6 +42,7 @@
 //! `documentation/guarantees.md`, the directory layout in
 //! `documentation/formats/data-dir.md`.
 
+pub mod admin;
 pub mod auth;
 mod embedded;
 pub mod import;
@@ -76,4 +79,4 @@ pub use iwdb_storage::{
 pub use ops::{Status, restore, restore_namespaces, restore_with, restore_with_only, status, verify};
 pub use options::{CheckpointOptions, StoreOptions};
 pub use request::{DEFAULT_TIMEOUT, ReadOptions};
-pub use store::{Analysis, NAMESPACE, Ns, Store, StoreStatus};
+pub use store::{Analysis, DiskUsage, NAMESPACE, NamespaceHistograms, Ns, Store, StoreStatus};

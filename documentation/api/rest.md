@@ -49,10 +49,33 @@
 | GET | `/v1/users/{user}/tokens` | – | `ListTokensResponse` | `Accounts::tokens` |
 | POST | `/v1/users/{user}/tokens` | `CreateTokenRequest` | `CreateTokenResponse` (the secret, once) | `Accounts::create_token` |
 | DELETE | `/v1/users/{user}/tokens/{token}` | – | `RevokeTokenResponse` | `Accounts::revoke_token` |
+| GET | `/v1/status` | – | `GetServerStatusResponse` | `Admin::server_status` |
+| GET | `/v1/requests` | `user`, `limit` as query parameters | `ListRequestsResponse` | `Admin::active_requests` |
+| POST | `/v1/requests/{request}/cancel` | `CancelRequestRequest` (optional) | `CancelRequestResponse` | `Admin::cancel_request` |
+| GET | `/v1/consumers` | – | `ListConsumersResponse` | `Admin::consumers` |
+| GET | `/v1/metrics` | – | `GetMetricsResponse` | `Admin::metrics` |
+| GET | `/v1/log` | `after`, `limit` as query parameters | `GetLogResponse` | `Admin::log` |
+| GET | `/metrics` | – | the metrics in Prometheus' text format ([metrics.md](metrics.md)) | `Admin::metrics` |
 
 Path parameters are percent-encoded: node `a/b` is `/nodes/a%2Fb`. A test keeps this table equal to the server's route table.
 
-The health routes are served in every build (also without the `rest` feature) and while the store recovers; until recovery has finished every other route answers 503 `unavailable` ([ADR 0040](../adr/0040-health-and-readiness.md)). With the `console` feature and `[console] enabled = true`, the operator console's pages are served at `/console/` on the same port ([ADR 0041](../adr/0041-console-served-by-the-server.md)); they aren't part of this API.
+The operator's routes (`/v1/status` to `/metrics`, step 16c) are described in [Operator reads](#operator-reads). The health routes are served in every build (also without the `rest` feature) and while the store recovers; until recovery has finished every other route answers 503 `unavailable` ([ADR 0040](../adr/0040-health-and-readiness.md)). With the `console` feature and `[console] enabled = true`, the operator console's pages are served at `/console/` on the same port ([ADR 0041](../adr/0041-console-served-by-the-server.md)); they aren't part of this API.
+
+## Operator reads
+
+`admin.proto`'s `AdminService` (step 16c, [ADRs 0050 to 0052](../adr/0051-the-status-views.md)): the server's status, the running requests and cancelling one, the change-stream readers, the metrics and the log tail. Every list is bounded (at most 1000 entries; the readers at most 1024).
+
+- **Who may.** Any authenticated caller reads `/v1/status`, `/v1/consumers`, `/v1/metrics` and `/metrics`, narrowed to the namespaces it has a role on (and the series of no namespace), and lists and cancels its own requests. A server-wide admin sees and cancels everyone's requests and reads `/v1/log`. Cancelling is audited.
+- **Cancel.** `POST /v1/requests/{id}/cancel` ends a running read: its caller gets 499 `cancelled` (gRPC `CANCELLED`), unless its answer was ready first. A request that isn't running (or is someone else's) is 404 `not_found`; a commit or another change is 400 `invalid_argument`, since cancelling it would only make its outcome unknown.
+- **`GET /metrics`** answers in Prometheus' text format (version 0.0.4), in every build, also without `rest`. It needs credentials like any route: give Prometheus an API token (`authorization: { credentials_file: ... }` in its scrape config) over TLS. The server opens no connection to send them anywhere ([SECURITY.md](../../SECURITY.md)).
+
+```sh
+# $U and $T as in the example of the next section
+curl -s $U/status -H "authorization: Bearer $T" | jq .status.requests
+curl -s "$U/requests?limit=10" -H "authorization: Bearer $T"
+curl -s -X POST $U/requests/42/cancel -H "authorization: Bearer $T"
+curl -s https://127.0.0.1:7600/metrics -H "authorization: Bearer $T"
+```
 
 ## Authentication
 

@@ -208,6 +208,26 @@ What it doesn't guarantee:
 - **Successful reads and data commits aren't audited** (the change stream records commits), nor failed TLS handshakes, nor in-process access to a data directory.
 - **Entries in stderr are kept as long as the log collector keeps them.**
 
+## Metrics, status views and cancel (step 16c)
+
+[ADRs 0050 to 0052](adr/0051-the-status-views.md); [api/metrics.md](api/metrics.md), [api/rest.md](api/rest.md#operator-reads).
+
+What it guarantees:
+
+- **Every metric is documented, and every documented one exported**: `metrics.md`'s table equals the code's list, and a scrape of the binary's `/metrics` holds exactly those metrics. Labels are bounded (operation, outcome code, lock kind, live namespace, version), never an id, a user, a client or a data value.
+- **Every status read is bounded** (requests and log events at most 1000 per read, readers at most 1024, the rest O(namespaces)) and implemented once (`Embedded`); gRPC and REST give the same answers (the `Admin` conformance suite).
+- **The operator's reads don't wait** for a namespace lock or a worker: requests, cancel, readers, metrics and the log answer while every worker is busy and while a commit waits for an fsync.
+- **Cancel**: a running read cancelled with `CancelRequest` ends with `cancelled` for its caller, unless its answer was ready first; a cancel of a request that has ended is `not_found`. Commits and other changes can't be cancelled (`invalid_argument`). Users see and cancel only their own requests; server admins anyone's. Every cancel is audited.
+- **The log tail holds what the log holds, no more**: the same events after the same level filter, so no secret (`no_secret_reaches_the_logs` reads the whole tail too). Only server admins read it.
+- **Pulled, never pushed.** `/metrics` needs credentials like any route; the server opens no connection to send metrics or logs anywhere.
+
+What it doesn't guarantee:
+
+- **The status isn't one consistent cut across namespaces**: each namespace's part is consistent on its own.
+- **Counts start when the database starts serving**, and calls made on an embedded store in-process aren't counted or listed.
+- **A running request's visited count isn't reported** (the core counts it only inside a search; upstream draft 23).
+- **The log tail is in memory**: a restart empties it, and older events fall out once `[log] tail_events` are kept.
+
 ## The change stream (step 13)
 
 The change stream ([api/changes.md](api/changes.md), [ADR 0031](adr/0031-change-stream.md)) returns a namespace's commits from a seq on, as logged:

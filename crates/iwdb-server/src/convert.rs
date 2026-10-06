@@ -28,6 +28,7 @@ use serde::de::DeserializeOwned;
 
 use crate::proto as pb;
 
+mod admin;
 mod answers;
 mod auth;
 mod catalog;
@@ -36,6 +37,7 @@ mod entities;
 mod mutations;
 mod requests;
 
+pub(crate) use admin::*;
 pub(crate) use answers::*;
 pub(crate) use auth::*;
 pub(crate) use catalog::*;

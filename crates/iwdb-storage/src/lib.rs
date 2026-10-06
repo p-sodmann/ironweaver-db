@@ -78,7 +78,7 @@ pub use error::Error;
 pub use history::HistoryId;
 pub use inspect::{DirStatus, NamespaceFiles, inspect};
 pub use iwdb_engine::CommitTime;
-pub use logged::{BUILD_CHUNK, BuildProgress, LockStats, LoggedNamespace, Wait};
+pub use logged::{BUILD_CHUNK, BuildProgress, LockStats, LoggedNamespace, NamespaceHistograms, Sizes, Wait};
 pub use reader::{
     LogEnd, MAX_SEGMENT_FILE_LEN, SegmentEnd, TornTail, WalReader, list_segments, read_log, read_segment,
     segment_prefix,
