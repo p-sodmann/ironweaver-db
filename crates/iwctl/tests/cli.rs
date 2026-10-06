@@ -333,3 +333,48 @@ fn users_and_tokens_on_a_data_directory() {
     assert_eq!(store.users().list().unwrap().len(), 1);
     store.close().unwrap();
 }
+
+/// `archive prune` on local directories (step 16e): a dry run removes
+/// nothing, then the segments before the backup's oldest checkpoint go,
+/// and the archive still verifies; a throttled backup.
+#[test]
+fn archive_prune_before_a_backup() {
+    let work = tempfile::tempdir().unwrap();
+    let (data, archive) = (work.path().join("data"), work.path().join("archive"));
+    let mut options = StoreOptions { archive: Some(archive.clone()), ..StoreOptions::default() };
+    options.wal.segment_size = iwdb_storage::MIN_SEGMENT_SIZE;
+    options.checkpoint.keep = 1;
+    options.checkpoint.background = false;
+    let store = Store::open(&data, options).unwrap();
+    for i in 0..60 {
+        let mutation = Mutation::UpsertNode {
+            id: format!("n{}", i),
+            labels: vec![],
+            attr: [("pad".to_owned(), iwdb::Value::String("x".repeat(300)))].into(),
+            meta: Default::default(),
+            expected_version: None,
+        };
+        store.commit(&[mutation]).unwrap();
+        if i % 10 == 9 {
+            store.checkpoint().unwrap();
+        }
+    }
+    store.close().unwrap();
+    let backup = work.path().join("backup");
+    let out = iwctl(&["backup", p(&data), p(&backup), "--max-bytes-per-second", "100000000"]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+
+    let before = fs::read_dir(archive.join("ns/00000000000000000001")).unwrap().count();
+    let value = json(&iwctl(&["--json", "archive", "prune", p(&archive), "--before", p(&backup), "--dry-run"]));
+    let removed = value["prune"]["namespaces"][0]["removed_segments"].as_array().unwrap().len();
+    assert!(removed > 0 && value["prune"]["dry_run"] == true, "{}", value);
+    assert_eq!(fs::read_dir(archive.join("ns/00000000000000000001")).unwrap().count(), before);
+    let out = iwctl(&["archive", "prune", p(&archive), "--before", p(&backup)]);
+    assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout(&out).contains(&format!("removed {} archived segments", removed)), "{}", stdout(&out));
+    assert_eq!(fs::read_dir(archive.join("ns/00000000000000000001")).unwrap().count(), before - removed);
+    assert_eq!(code(&iwctl(&["verify", p(&archive)])), 0);
+    // Not a backup, or no --before
+    assert_eq!(code(&iwctl(&["archive", "prune", p(&archive), "--before", p(&data)])), 4);
+    assert_eq!(code(&iwctl(&["archive", "prune", p(&archive)])), 2);
+}

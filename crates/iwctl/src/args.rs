@@ -18,7 +18,8 @@ for status, which then shows what the files say):
                                 write a checkpoint and cut the WAL; if the store archives
                                 its WAL, name the archive, or the segments it removes are
                                 not archived
-  backup <dir> <dest>           back up a data directory into a new directory <dest>,
+  backup <dir> <dest> [--max-bytes-per-second <n>]
+                                back up a data directory into a new directory <dest>,
                                 then verify it
   restore <dest> [--backup <dir>] [--archive <archive>] [--seq <n> | --time <rfc3339>] [-n <ns>]...
                                 restore into a new directory <dest> (the latest seq by
@@ -47,6 +48,30 @@ for status, which then shows what the files say):
   export <dir> <file> [-n <ns>] [--format json|binary]
                                 write a namespace's graph to <file> as a core file (JSON for
                                 a .json file, binary otherwise, unless --format)
+  archive prune <archive> --before <backup> [--dry-run]
+                                remove from a WAL archive what no restore from <backup> (the
+                                oldest backup you keep) or a later one needs; a store may
+                                keep archiving into it
+
+a running server (step 16e): --server <endpoint> instead of <dir>, with the
+credentials below; every command needs a server-wide admin:
+  status                        the server's version, memory, disk, requests and namespaces
+  checkpoint [-n <ns>]          checkpoint one namespace or all (archived first, if the
+                                server archives its WAL)
+  backup <name> [--max-bytes-per-second <n>] [--no-verify]
+                                back up into the server's backup directory ([backup] dir)
+                                under <name>, then verify it
+  verify [store | archive | backup <name>]
+                                verify the running store (default), the server's WAL archive,
+                                or a backup in its backup directory
+  archive prune --before <name> [--dry-run]
+                                prune the server's WAL archive before its backup <name>
+  namespaces, create-namespace <name>, drop-namespace <name>, indexes, create-index,
+  drop-index, add-constraint, drop-constraint
+                                as above, without <dir>
+  requests [<user>]             the running requests (a user's only, if given)
+  cancel <id>                   cancel a running request
+  restore, import and export are offline: run them on the server's host.
 
 users, grants and API tokens (step 15a), on a data directory <dir> (the server
 stopped) or, with --server <endpoint> instead of <dir>, on a running server:
@@ -82,9 +107,14 @@ options:
                                 given; restore: only those given)
   --key <k>                     an idempotency key (1 to 255 bytes) for the change
   --no-verify                   don't verify after backup or restore
+  --max-bytes-per-second <n>    backup: copy at most this fast (checkpoints wait longer);
+                                with --server, the default is the server's setting, 0: unthrottled
+  --before <backup>             archive prune: the oldest backup to keep (with --server, its name)
+  --dry-run                     archive prune: remove nothing, report what would go
   --format <f>                  the file format of import or export
   --merge                       import into an existing namespace
-  --server <endpoint>           user and token commands: act on a server, not a directory
+  --server <endpoint>           act on a running server, not a directory (https://host:port,
+                                or http:// without TLS)
   --token <token>               the API or session token to send (shell, --server); also
                                 IWDB_TOKEN
   --user <name>                 log in as <name> (shell, --server); prompts for the password
@@ -97,27 +127,94 @@ options:
   --expires <seconds>           token create: the token expires after this long
 
 exit codes: 0 ok, 1 damage found, 2 usage error, 3 locked (a store has the
-directory open), 4 any other failure";
+directory open; with --server: the server is busy or draining), 4 any other failure";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
-    Status { dir: PathBuf },
-    Checkpoint { dir: PathBuf },
-    Backup { dir: PathBuf, dest: PathBuf },
-    Restore { dest: PathBuf, backup: Option<PathBuf>, archive: Option<PathBuf>, target: RestoreTarget },
-    Verify { dir: PathBuf },
-    Namespaces { dir: PathBuf },
-    CreateNamespace { dir: PathBuf, name: String },
-    DropNamespace { dir: PathBuf, name: String },
-    Indexes { dir: PathBuf },
-    CreateIndex { dir: PathBuf, path: Vec<String> },
-    DropIndex { dir: PathBuf, path: Vec<String> },
-    AddConstraint { dir: PathBuf, kind: ConstraintKind, label: String, path: Vec<String> },
-    DropConstraint { dir: PathBuf, kind: ConstraintKind, label: String, path: Vec<String> },
-    Import { dir: PathBuf, name: String, file: PathBuf, format: Option<ImportFormat>, merge: bool },
-    Export { dir: PathBuf, file: PathBuf, format: Option<ExportFormat> },
-    Shell { endpoint: String },
-    Accounts { action: crate::users::Action, target: crate::users::Target },
+    Status {
+        dir: PathBuf,
+    },
+    Checkpoint {
+        dir: PathBuf,
+    },
+    Backup {
+        dir: PathBuf,
+        dest: PathBuf,
+        max_bytes_per_second: Option<u64>,
+    },
+    Restore {
+        dest: PathBuf,
+        backup: Option<PathBuf>,
+        archive: Option<PathBuf>,
+        target: RestoreTarget,
+    },
+    Verify {
+        dir: PathBuf,
+    },
+    Namespaces {
+        dir: PathBuf,
+    },
+    CreateNamespace {
+        dir: PathBuf,
+        name: String,
+    },
+    DropNamespace {
+        dir: PathBuf,
+        name: String,
+    },
+    Indexes {
+        dir: PathBuf,
+    },
+    CreateIndex {
+        dir: PathBuf,
+        path: Vec<String>,
+    },
+    DropIndex {
+        dir: PathBuf,
+        path: Vec<String>,
+    },
+    AddConstraint {
+        dir: PathBuf,
+        kind: ConstraintKind,
+        label: String,
+        path: Vec<String>,
+    },
+    DropConstraint {
+        dir: PathBuf,
+        kind: ConstraintKind,
+        label: String,
+        path: Vec<String>,
+    },
+    Import {
+        dir: PathBuf,
+        name: String,
+        file: PathBuf,
+        format: Option<ImportFormat>,
+        merge: bool,
+    },
+    Export {
+        dir: PathBuf,
+        file: PathBuf,
+        format: Option<ExportFormat>,
+    },
+    Shell {
+        endpoint: String,
+    },
+    Accounts {
+        action: crate::users::Action,
+        target: crate::users::Target,
+    },
+    /// `archive prune <archive> --before <backup>` on local directories.
+    PruneArchive {
+        archive: PathBuf,
+        before: PathBuf,
+        dry_run: bool,
+    },
+    /// A command against a running server (`--server`, step 16e).
+    Remote {
+        endpoint: String,
+        action: crate::remote::Action,
+    },
     Help,
     Version,
 }
@@ -144,11 +241,11 @@ pub struct Parsed {
     pub tls: ClientTls,
 }
 
-fn dotted(path: &str) -> Vec<String> {
+pub fn dotted(path: &str) -> Vec<String> {
     path.split('.').map(str::to_owned).collect()
 }
 
-fn constraint_kind(word: &str) -> Result<ConstraintKind, String> {
+pub fn constraint_kind(word: &str) -> Result<ConstraintKind, String> {
     match word {
         "unique" => Ok(ConstraintKind::Unique),
         "required" => Ok(ConstraintKind::Required),
@@ -168,6 +265,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
         (None, None, None, None);
     let mut admin = false;
     let mut tls = ClientTls::default();
+    let (mut before, mut dry_run, mut rate): (Option<String>, bool, Option<u64>) = (None, false, None);
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| args.next().cloned().ok_or_else(|| format!("{} needs a value", flag));
@@ -177,6 +275,15 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
             "--no-archive" => no_archive = true,
             "--merge" => merge = true,
             "--admin" => admin = true,
+            "--dry-run" => dry_run = true,
+            "--before" => before = Some(value("--before")?),
+            "--max-bytes-per-second" => {
+                rate = Some(
+                    value("--max-bytes-per-second")?
+                        .parse()
+                        .map_err(|_| "--max-bytes-per-second needs a number".to_owned())?,
+                )
+            }
             "--server" => server = Some(value("--server")?),
             "--token" => token = Some(value("--token")?),
             "--user" => user = Some(value("--user")?),
@@ -228,6 +335,9 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
         if format.is_some() || merge || backup.is_some() || seq.is_some() || time.is_some() || key.is_some() {
             return Err(format!("{} takes none of --format, --merge, --backup, --seq, --time, --key", name));
         }
+        if before.is_some() || dry_run || rate.is_some() {
+            return Err(format!("{} takes none of --before, --dry-run, --max-bytes-per-second", name));
+        }
         if !namespaces.is_empty() {
             return Err(format!("{} takes no --namespace", name));
         }
@@ -246,8 +356,50 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
             tls: ClientTls::default(),
         });
     }
-    if admin || expires.is_some() || server.is_some() {
-        return Err(format!("{} takes none of --admin, --expires, --server", name));
+    if let Some(endpoint) = server {
+        if matches!(name.as_str(), "restore" | "import" | "export") {
+            return Err(crate::remote::OFFLINE.into());
+        }
+        if admin || expires.is_some() {
+            return Err(format!("{} takes none of --admin, --expires", name));
+        }
+        if format.is_some() || merge || backup.is_some() || seq.is_some() || time.is_some() || archive.is_some() {
+            return Err(format!(
+                "{} --server takes none of --format, --merge, --backup, --seq, --time, --archive",
+                name
+            ));
+        }
+        if no_archive {
+            return Err("--no-archive is for a local data directory: a server's store knows its archive".into());
+        }
+        let flags = RemoteFlags { namespaces: &namespaces, key: key.clone(), before, dry_run, rate, no_verify };
+        let action = crate::remote::parse(name, rest, flags)?;
+        return Ok(Parsed {
+            command: Command::Remote { endpoint, action },
+            json,
+            fsync,
+            keep,
+            archive: None,
+            no_verify,
+            namespaces,
+            key,
+            no_archive,
+            token,
+            user,
+            tls,
+        });
+    }
+    if admin || expires.is_some() {
+        return Err(format!("{} takes none of --admin, --expires", name));
+    }
+    if name != "archive" && before.is_some() {
+        return Err(format!("{} takes no --before", name));
+    }
+    if name != "archive" && dry_run {
+        return Err(format!("{} takes no --dry-run", name));
+    }
+    if name != "backup" && rate.is_some() {
+        return Err(format!("{} takes no --max-bytes-per-second", name));
     }
     if (token.is_some() || user.is_some() || tls.is_set()) && name != "shell" {
         return Err(format!("{} takes no --token, --user or --tls-*", name));
@@ -268,7 +420,22 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
         }
         "backup" => {
             expect(2)?;
-            Command::Backup { dir: path(0, "a data directory")?, dest: path(1, "a destination")? }
+            Command::Backup {
+                dir: path(0, "a data directory")?,
+                dest: path(1, "a destination")?,
+                max_bytes_per_second: rate,
+            }
+        }
+        "archive" => {
+            match rest.first().map(String::as_str) {
+                Some("prune") => {}
+                Some(other) => return Err(format!("unknown action 'archive {}' (archive prune)", other)),
+                None => return Err("archive needs an action: archive prune".into()),
+            }
+            expect(2)?;
+            let archive = path(1, "an archive directory")?;
+            let before = before.take().ok_or("archive prune needs --before <backup>: the oldest backup to keep")?;
+            Command::PruneArchive { archive, before: PathBuf::from(before), dry_run }
         }
         "restore" => {
             expect(1)?;
@@ -407,6 +574,16 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
     Ok(Parsed { command, json, fsync, keep, archive, no_verify, namespaces, key, no_archive, token, user, tls })
 }
 
+/// The flags a command against a server may use.
+pub struct RemoteFlags<'a> {
+    pub namespaces: &'a [String],
+    pub key: Option<String>,
+    pub before: Option<String>,
+    pub dry_run: bool,
+    pub rate: Option<u64>,
+    pub no_verify: bool,
+}
+
 /// `--token`, `--user` and `--tls-*`: how to reach a server and log in.
 struct Credentials {
     token: Option<String>,
@@ -539,6 +716,74 @@ mod tests {
             assert!(parse_words(bad).is_err(), "{}", bad);
         }
         assert_eq!(parse_words("--help").expect("parse").command, Command::Help);
+    }
+
+    #[test]
+    fn commands_against_a_server() {
+        use crate::remote::Action;
+        use iwdb_query::VerifyTarget;
+        let remote = |s: &str| match parse_words(s).map(|p| p.command) {
+            Ok(Command::Remote { endpoint, action }) => {
+                assert_eq!(endpoint, "http://h:1");
+                Ok(action)
+            }
+            Ok(other) => panic!("{}: {:?}", s, other),
+            Err(e) => Err(e),
+        };
+        assert_eq!(remote("--server http://h:1 status"), Ok(Action::Status));
+        assert_eq!(remote("checkpoint --server http://h:1"), Ok(Action::Checkpoint { namespace: None }));
+        assert_eq!(
+            remote("checkpoint --server http://h:1 -n social"),
+            Ok(Action::Checkpoint { namespace: Some("social".into()) })
+        );
+        assert_eq!(
+            remote("backup --server http://h:1 nightly --max-bytes-per-second 1000 --no-verify"),
+            Ok(Action::Backup { name: "nightly".into(), max_bytes_per_second: Some(1000), verify: false })
+        );
+        assert_eq!(remote("verify --server http://h:1"), Ok(Action::Verify(VerifyTarget::Store)));
+        assert_eq!(remote("verify --server http://h:1 archive"), Ok(Action::Verify(VerifyTarget::Archive)));
+        assert_eq!(
+            remote("verify --server http://h:1 backup b1"),
+            Ok(Action::Verify(VerifyTarget::Backup("b1".into())))
+        );
+        assert_eq!(
+            remote("archive prune --server http://h:1 --before b1 --dry-run"),
+            Ok(Action::PruneArchive { before: "b1".into(), dry_run: true })
+        );
+        assert_eq!(remote("--server http://h:1 cancel 42"), Ok(Action::Cancel { id: 42 }));
+        assert_eq!(remote("--server http://h:1 requests ann"), Ok(Action::Requests { user: Some("ann".into()) }));
+        assert_eq!(
+            remote("--server http://h:1 create-index address.city -n social --key k"),
+            Ok(Action::CreateIndex {
+                namespace: "social".into(),
+                path: vec!["address".into(), "city".into()],
+                key: Some("k".into())
+            })
+        );
+        let offline = remote("restore --server http://h:1 r --backup b").unwrap_err();
+        assert!(offline.contains("offline"), "{}", offline);
+        for bad in [
+            "--server http://h:1 status extra",
+            "--server http://h:1 checkpoint --no-archive",
+            "--server http://h:1 checkpoint --archive a",
+            "--server http://h:1 backup",
+            "--server http://h:1 verify backup",
+            "--server http://h:1 archive prune",
+            "--server http://h:1 cancel x",
+            "--server http://h:1 status --key k",
+            "--server http://h:1 namespaces -n x",
+            "--server http://h:1 import n f",
+            "--server http://h:1 shell",
+        ] {
+            assert!(parse_words(bad).is_err(), "{}", bad);
+        }
+        let p = parse_words("archive prune a --before b --dry-run").expect("parse");
+        assert_eq!(p.command, Command::PruneArchive { archive: "a".into(), before: "b".into(), dry_run: true });
+        for bad in ["archive prune a", "archive prune --before b", "archive frob a --before b", "status d --dry-run"] {
+            assert!(parse_words(bad).is_err(), "{}", bad);
+        }
+        let p = parse_words("backup d b --max-bytes-per-second 5").expect("parse");
+        assert_matches!(p.command, Command::Backup { max_bytes_per_second: Some(5), .. });
     }
 
     #[test]

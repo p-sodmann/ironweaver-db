@@ -1,12 +1,15 @@
 //! `iwctl`: the admin CLI for local data directories (step 7), a query
-//! shell for servers (`iwctl shell`, step 14a), and users, grants and API
-//! tokens on a directory or a server (`iwctl user`, `iwctl token`, step 15a). It parses arguments, calls
-//! the library (`iwdb`, or the `Database` trait over gRPC) and prints the
-//! result; every operation lives in the library (design rule 8).
+//! shell for servers (`iwctl shell`, step 14a), users, grants and API
+//! tokens on a directory or a server (`iwctl user`, `iwctl token`, step
+//! 15a), and the admin commands against a running server (`--server`, step
+//! 16e). It parses arguments, calls the library (`iwdb`, or the `Database`
+//! and `Admin` traits over gRPC) and prints the result; every operation
+//! lives in the library (design rule 8).
 //! `documentation/iwctl.md` describes the commands and the exit codes.
 
 mod args;
 mod output;
+mod remote;
 mod shell;
 mod users;
 
@@ -21,7 +24,7 @@ use args::{Command, Parsed, USAGE};
 use output::Out;
 
 /// Exit codes (documented in `documentation/iwctl.md`).
-mod exit {
+pub(crate) mod exit {
     pub const OK: u8 = 0;
     /// Verify found damage, or the operation failed on damaged data.
     pub const DAMAGE: u8 = 1;
@@ -106,6 +109,13 @@ fn run(parsed: &Parsed, out: &Out) -> Result<u8, Error> {
             parsed.user.as_deref(),
         )),
         Command::Accounts { action, target } => Ok(users::run(action, target, store_options(parsed), out)),
+        Command::Remote { endpoint, action } => {
+            Ok(remote::run(endpoint, action, &parsed.tls, parsed.token.as_deref(), parsed.user.as_deref(), out))
+        }
+        Command::PruneArchive { archive, before, dry_run } => {
+            out.prune(&iwdb::prune_archive(archive, before, *dry_run)?);
+            Ok(exit::OK)
+        }
         Command::Status { dir } => {
             let status = iwdb::status(dir, store_options(parsed))?;
             out.status(&status);
@@ -124,13 +134,13 @@ fn run(parsed: &Parsed, out: &Out) -> Result<u8, Error> {
             };
             store.close()?;
             for (name, outcome) in &outcomes {
-                out.checkpoint(dir, name, outcome);
+                out.checkpoint(&dir.display().to_string(), name, outcome);
             }
             Ok(exit::OK)
         }
         Command::Namespaces { dir } => {
             let store = Store::open(dir, store_options(parsed))?;
-            out.namespaces(&store.status());
+            out.namespaces(&store.status().namespaces);
             Ok(exit::OK)
         }
         Command::CreateNamespace { dir, name } => {
@@ -196,9 +206,9 @@ fn run(parsed: &Parsed, out: &Out) -> Result<u8, Error> {
                 Ok(CatalogChange::DropConstraint(constraint(*kind, label, path)?))
             })
         }
-        Command::Backup { dir, dest } => {
+        Command::Backup { dir, dest, max_bytes_per_second } => {
             let store = Store::open(dir, store_options(parsed))?;
-            let report = store.backup(dest)?;
+            let report = store.backup_with(dest, *max_bytes_per_second)?;
             store.close()?;
             out.backup(&report);
             verify_after(parsed, out, dest)
