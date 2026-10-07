@@ -29,9 +29,9 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 21 | [`index_candidates` doesn't say which index it used](#21-index_candidates-doesnt-say-which-index-it-used) | fixed upstream (`ace9a0d`): [#50](https://github.com/p-sodmann/Ironweaver/issues/50) |
 | 22 | [`Value` / `Expr` serde can't be read from JSON beyond 64 levels, and skips unknown fields](#22-value--expr-serde-cant-be-read-from-json-beyond-64-levels-and-skips-unknown-fields) | fixed upstream (`7e7b7fa`): [#57](https://github.com/p-sodmann/Ironweaver/issues/57) |
 | 23 | [A search's progress, readable while it runs](#23-a-searchs-progress-readable-while-it-runs) | not filed: a feature proposal (step 16c), held for the owner's decision |
-| 24 | [List a graph's labels, and count its edges by type](#24-list-a-graphs-labels-and-count-its-edges-by-type) | filed: [#60](https://github.com/p-sodmann/Ironweaver/issues/60) |
-| 25 | [`memory_usage` can't count payloads, and an index build reports no memory](#25-memory_usage-cant-count-payloads-and-an-index-build-reports-no-memory) | filed: [#61](https://github.com/p-sodmann/Ironweaver/issues/61) |
-| 26 | [Algorithms report no progress while they run](#26-algorithms-report-no-progress-while-they-run) | filed: [#62](https://github.com/p-sodmann/Ironweaver/issues/62) |
+| 24 | [List a graph's labels, and count its edges by type](#24-list-a-graphs-labels-and-count-its-edges-by-type) | fixed upstream (`c69ef51`): [#60](https://github.com/p-sodmann/Ironweaver/issues/60) |
+| 25 | [`memory_usage` can't count payloads, and an index build reports no memory](#25-memory_usage-cant-count-payloads-and-an-index-build-reports-no-memory) | fixed upstream (`c69ef51`): [#61](https://github.com/p-sodmann/Ironweaver/issues/61) |
+| 26 | [Algorithms report no progress while they run](#26-algorithms-report-no-progress-while-they-run) | fixed upstream (`c69ef51`): [#62](https://github.com/p-sodmann/Ironweaver/issues/62) |
 
 ---
 
@@ -556,7 +556,7 @@ Step 16c's `ListRequests` (ADR 0052) lists every running request with its operat
 
 ## 24. List a graph's labels, and count its edges by type
 
-Status: filed as [#60](https://github.com/p-sodmann/Ironweaver/issues/60) on 2026-10-06. A feature proposal from step 16c-2, not a bug: the database works without it (it samples). Checked against `7e7b7fa`.
+Status: filed as [#60](https://github.com/p-sodmann/Ironweaver/issues/60) on 2026-10-06. A feature proposal from step 16c-2, not a bug: the database works without it (it samples). Checked against `7e7b7fa`. **Fixed upstream in `c69ef51`** (`Graph::labels`, `edge_types`, `edge_type_count`), adopted 2026-10-07.
 
 **Problem**
 
@@ -584,7 +584,7 @@ Step 16c-2's `schema` read (ADR 0053) lists a namespace's labels and edge types 
 
 ## 25. `memory_usage` can't count payloads, and an index build reports no memory
 
-Status: filed as [#61](https://github.com/p-sodmann/Ironweaver/issues/61) on 2026-10-06. A finding from step 16d: a missing guarantee, not a bug (the gap is documented). Checked against `7e7b7fa`.
+Status: filed as [#61](https://github.com/p-sodmann/Ironweaver/issues/61) on 2026-10-06. A finding from step 16d: a missing guarantee, not a bug (the gap is documented). Checked against `7e7b7fa`. **Fixed upstream in `c69ef51`** (`HeapSize`, `Graph::count_payloads`, `IndexBuild::memory_usage`, `RawProjection::memory_usage`), adopted 2026-10-07.
 
 **Problem**
 
@@ -630,7 +630,7 @@ That duplicates bookkeeping the graph already does for its own heap, and costs a
 
 ## 26. Algorithms report no progress while they run
 
-Status: filed as [#62](https://github.com/p-sodmann/Ironweaver/issues/62) on 2026-10-06. A finding from step 16f: a missing hook, not a bug. Checked against `7e7b7fa`; pinned by `algorithms_report_no_progress` (`core_smoke.rs`).
+Status: filed as [#62](https://github.com/p-sodmann/Ironweaver/issues/62) on 2026-10-06. A finding from step 16f: a missing hook, not a bug. Checked against `7e7b7fa`; pinned by `algorithms_report_no_progress` (`core_smoke.rs`). **Fixed upstream in `c69ef51`** (`cancel::Progress`, `run_with_progress`), adopted 2026-10-07; the pin is now `algorithms_report_progress`.
 
 **Problem**
 

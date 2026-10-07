@@ -6,7 +6,7 @@ Depends on: steps 16c (registry, cancel, status) and 16e (`iwctl` against a serv
 
 Split out of step 16 on 2026-10-04 (see its "Plan change"); moved to step 16 from step 10 by [ADR 0022](../adr/0022-analytics-jobs.md).
 
-Starts with the [upstream check](upstream-check.md): the core's algorithms report no progress ([#62](https://github.com/p-sodmann/Ironweaver/issues/62), filed in this step), so jobs report phases only until it is fixed.
+Starts with the [upstream check](upstream-check.md): the core's algorithms report no progress ([#62](https://github.com/p-sodmann/Ironweaver/issues/62), filed in this step), so jobs report phases only until it is fixed. *Fixed upstream in `c69ef51` and adopted in the upstream check of 2026-10-07: jobs now report the core's progress (`JobInfo.progress`).*
 
 ## Goal
 
@@ -27,7 +27,7 @@ Analytics that outlive a request's timeout: started, watched, cancelled and coll
 ## Outcome
 
 - The registry is `iwdb_query::jobs` (pure Rust, threads of its own); jobs are five `Admin` methods implemented once in `iwdb::Embedded`, over gRPC (`AdminService`), REST, both Rust clients, `iwctl --server ... jobs` and the console's status page. Python doesn't get them: its bindings have no `Admin` methods yet, and an embedded application runs `analyze` with its own timeout.
-- Progress is the phase (and the projection's size): the core reports nothing from inside an algorithm. Filed as [#62](https://github.com/p-sodmann/Ironweaver/issues/62) ([draft 26](../upstream-issues.md#26-algorithms-report-no-progress-while-they-run)), pinned by `algorithms_report_no_progress`; the [upstream check](upstream-check.md) lists what to change when it lands.
+- Progress is the phase (and the projection's size): the core reports nothing from inside an algorithm. Filed as [#62](https://github.com/p-sodmann/Ironweaver/issues/62) ([draft 26](../upstream-issues.md#26-algorithms-report-no-progress-while-they-run)), pinned by `algorithms_report_no_progress`; the [upstream check](upstream-check.md) lists what to change when it lands. *Done 2026-10-07 (core `c69ef51`): the pin is now `algorithms_report_progress`.*
 - The acceptance criterion is `a_job_outlives_the_request_timeout_over_grpc` and `..._over_rest` (`crates/iwdb-server/tests/jobs.rs`), with a 50 ms maximum request timeout.
 
 ## Non-goals
