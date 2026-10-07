@@ -585,9 +585,10 @@ fn algorithms_report_no_progress() {
         g.add_edge(a, ids[(i + 1) % ids.len()], Record::default()).expect("edge");
         g.add_edge(a, ids[(i * 7 + 3) % ids.len()], Record::default()).expect("edge");
     }
-    let p = Projection::collect::<_, _, GraphError>(&g, Direction::Out, &EdgeCost::Unit, |_, _| Ok(true), |_, _| Ok(true))
-        .expect("collect")
-        .finish();
+    let p =
+        Projection::collect::<_, _, GraphError>(&g, Direction::Out, &EdgeCost::Unit, |_, _| Ok(true), |_, _| Ok(true))
+            .expect("collect")
+            .finish();
     let heard = std::rc::Rc::new(Cell::new(0usize));
     let hook = {
         let heard = heard.clone();

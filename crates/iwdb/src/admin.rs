@@ -2,6 +2,10 @@
 //! reads, and the admin writes of step 16e (ADR 0055), implemented once
 //! here (design rule 8).
 //!
+//! Managed analytics jobs (step 16f, ADR 0056) run on the job registry's
+//! own threads (`iwdb_query::jobs`); their methods here only queue, list,
+//! cancel and page, on the caller's thread.
+//!
 //! The admin writes (checkpoint, backup, verify, pruning the archive) run
 //! on threads of their own, not on the workers: a throttled backup, or a
 //! checkpoint waiting for one, can take hours. Dropping their future
@@ -21,10 +25,12 @@ use std::sync::atomic::Ordering;
 use iwdb_engine::metrics::HistogramSnapshot;
 use iwdb_query::admin::{PruneReport, VerifyReport, check_backup_name, list_limit};
 use iwdb_query::exec::{Pending, spawn};
+use iwdb_query::jobs::Jobs;
 use iwdb_query::log::{LogTail, MAX_READ};
 use iwdb_query::metrics::{self as m, Metrics, Value};
 use iwdb_query::requests::{ConsumerInfo, RequestInfo, Requests};
 use iwdb_query::{Admin, Code, DiskStatus, Error, Listed, MemoryStatus, NamespaceStatus, RequestCounts, ServerStatus};
+use iwdb_query::{AnalyticsRequest, JobInfo, JobOwner, JobPage, QueryOptions};
 use iwdb_query::{BackupDone, BackupRequest, Checkpointed, MemoryState, VerifyTarget};
 use iwdb_storage::FsyncPolicy;
 use iwdb_storage::io::LogFs;
@@ -66,7 +72,7 @@ fn counts(requests: &Requests) -> RequestCounts {
 }
 
 /// Every metric, now (see [`iwdb_query::metrics::METRICS`]).
-fn metrics<F: LogFs + Clone + Send + Sync + 'static>(store: &Store<F>, monitor: &Monitor) -> Metrics
+fn metrics<F: LogFs + Clone + Send + Sync + 'static>(store: &Store<F>, monitor: &Monitor, jobs: &Jobs) -> Metrics
 where
     F::File: Send,
 {
@@ -145,6 +151,13 @@ where
     if let Some(t) = backups.last {
         out.add(m::LAST_BACKUP, &[], Value::Gauge(seconds(t.micros())));
     }
+    let jobs = jobs.counts();
+    out.add(m::JOBS_QUEUED, &[], Value::Gauge(jobs.queued as f64));
+    out.add(m::JOBS_RUNNING, &[], Value::Gauge(jobs.running as f64));
+    out.add(m::JOBS, &["done"], Value::Counter(jobs.done_total));
+    out.add(m::JOBS, &["failed"], Value::Counter(jobs.failed_total));
+    out.add(m::JOBS, &["cancelled"], Value::Counter(jobs.cancelled_total));
+    out.add(m::JOB_RESULT_BYTES, &[], Value::Gauge(jobs.result_bytes as f64));
     out
 }
 
@@ -153,7 +166,7 @@ where
     F::File: Send,
 {
     fn server_status(&self) -> impl Future<Output = Result<ServerStatus, Error>> + Send {
-        let monitor = self.monitor.clone();
+        let (monitor, jobs) = (self.monitor.clone(), self.jobs.clone());
         self.run(move |store, _| {
             let namespaces: Vec<NamespaceStatus> = store.open_namespaces().iter().map(|ns| ns.status()).collect();
             let mut disk = DiskStatus { free_bytes: store.disk_free(), ..DiskStatus::default() };
@@ -170,6 +183,7 @@ where
                 memory: MemoryStatus::of(&store.memory()),
                 disk,
                 requests: counts(&monitor.requests),
+                jobs: jobs.counts(),
                 namespaces,
             })
         })
@@ -205,7 +219,7 @@ where
     }
 
     fn metrics(&self) -> impl Future<Output = Result<Metrics, Error>> + Send {
-        std::future::ready(Ok(metrics(self.store(), &self.monitor)))
+        std::future::ready(Ok(metrics(self.store(), &self.monitor, &self.jobs)))
     }
 
     fn log(&self, after: u64, limit: Option<usize>) -> impl Future<Output = Result<LogTail, Error>> + Send {
@@ -292,8 +306,52 @@ where
         spawn("iwdb-admin-prune", move || Ok(crate::prune_archive(&archive, &backup, dry_run)?))
     }
 
+    fn start_job(
+        &self,
+        namespace: String,
+        request: AnalyticsRequest,
+        options: QueryOptions,
+        owner: Option<JobOwner>,
+    ) -> impl Future<Output = Result<JobInfo, Error>> + Send {
+        std::future::ready(self.queue_job(namespace, request, options, owner))
+    }
+
+    fn jobs(
+        &self,
+        user: Option<String>,
+        limit: Option<usize>,
+    ) -> impl Future<Output = Result<Listed<JobInfo>, Error>> + Send {
+        let (items, truncated) = self.jobs.list(user.as_deref(), list_limit(limit));
+        std::future::ready(Ok(Listed { items, truncated }))
+    }
+
+    fn job(&self, id: u64, user: Option<String>) -> impl Future<Output = Result<JobInfo, Error>> + Send {
+        std::future::ready(self.jobs.get(id, user.as_deref()))
+    }
+
+    fn cancel_job(&self, id: u64, user: Option<String>) -> impl Future<Output = Result<JobInfo, Error>> + Send {
+        std::future::ready(self.jobs.cancel(id, user.as_deref()))
+    }
+
+    fn job_result(
+        &self,
+        id: u64,
+        user: Option<String>,
+        offset: u64,
+        limit: Option<usize>,
+    ) -> impl Future<Output = Result<JobPage, Error>> + Send {
+        std::future::ready(self.jobs.page(id, user.as_deref(), offset, limit))
+    }
+
+    /// Not ready (the server drains): the jobs are cancelled and new ones
+    /// refused (ADR 0056).
     fn set_ready(&self, ready: bool) {
         self.monitor.ready.store(ready, Ordering::Release);
+        if ready {
+            self.jobs.resume();
+        } else {
+            self.jobs.drain();
+        }
     }
 
     fn registry(&self) -> Option<Arc<Requests>> {

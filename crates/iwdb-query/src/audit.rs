@@ -49,7 +49,8 @@ pub struct AuditEntry {
     /// The event number of a namespace's creation or drop in the
     /// namespaces log.
     pub namespace_event: Option<u64>,
-    /// The request a `CancelRequest` cancels (its id).
+    /// The request a `CancelRequest` cancels, or the job a `StartJob`
+    /// started or a `CancelJob` cancels (its id).
     pub request: Option<u64>,
     /// The backup a `Backup`, `Verify` or `PruneArchive` names: its name in
     /// the server's backup directory, never a full path.

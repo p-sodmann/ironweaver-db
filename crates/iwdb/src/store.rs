@@ -394,6 +394,12 @@ where
         self.shared.memory.snapshot()
     }
 
+    /// The store's memory accounting, for holders of memory outside the
+    /// namespaces (the managed jobs' stored results, ADR 0056).
+    pub(crate) fn memory_handle(&self) -> Arc<Memory> {
+        self.shared.memory.clone()
+    }
+
     /// The WALs' fsync policy.
     pub fn fsync_policy(&self) -> FsyncPolicy {
         self.shared.options.wal.fsync

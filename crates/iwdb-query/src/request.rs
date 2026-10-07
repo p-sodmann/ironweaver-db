@@ -320,6 +320,23 @@ pub enum Job {
     Triangles,
 }
 
+impl Job {
+    /// The job's name, as the protos' `Job` names it: `page_rank`,
+    /// `degree`, `weakly_connected_components`, ...
+    pub fn name(&self) -> &'static str {
+        match self {
+            Job::PageRank(_) => "page_rank",
+            Job::Degree { .. } => "degree",
+            Job::WeaklyConnectedComponents => "weakly_connected_components",
+            Job::StronglyConnectedComponents => "strongly_connected_components",
+            Job::Leiden(_) => "leiden",
+            Job::LabelPropagation { .. } => "label_propagation",
+            Job::CoreNumber => "core_number",
+            Job::Triangles => "triangles",
+        }
+    }
+}
+
 /// The result of a [`Job`], ranked, at most `max_results` rows.
 #[derive(Clone, Debug, PartialEq)]
 pub enum JobResult {

@@ -1,5 +1,6 @@
 //! `admin.proto` (step 16c): the server's status, requests, readers,
-//! metrics and log, both ways.
+//! metrics and log, the admin writes (step 16e) and the managed jobs (step
+//! 16f), both ways.
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -14,12 +15,15 @@ use iwdb_query::log::{Level, LogEvent, LogTail};
 use iwdb_query::metrics::{Family, Kind, Metrics, Sample, Value};
 use iwdb_query::requests::{ConsumerInfo, RequestInfo};
 use iwdb_query::{
-    BackupDone, Checkpointed, DiskStatus, Error, LimitSource, Listed, MemoryState, MemoryStatus, RequestCounts,
-    ServerStatus, VerifyTarget,
+    AnalyticsRequest, BackupDone, Checkpointed, Code, DiskStatus, Error, JobCounts, JobInfo, JobPage, JobState,
+    LimitSource, Listed, MemoryState, MemoryStatus, QueryOptions, RequestCounts, ServerStatus, VerifyTarget,
 };
 use iwdb_storage::HistoryId;
 
-use super::{missing, status_from_pb, status_to_pb, time_from_pb};
+use super::{
+    JobRows, analyze_from_pb, analyze_to_pb, job_result_from_pb, job_result_to_pb, missing, options_from_pb,
+    status_from_pb, status_to_pb, time_from_pb,
+};
 use crate::proto as pb;
 
 fn micros(d: Duration) -> u64 {
@@ -52,6 +56,31 @@ pub(crate) fn server_status_to_pb(s: &ServerStatus) -> pb::ServerStatus {
             denied: r.denied,
         }),
         namespaces: s.namespaces.iter().map(status_to_pb).collect(),
+        jobs: Some(job_counts_to_pb(&s.jobs)),
+    }
+}
+
+fn job_counts_to_pb(c: &JobCounts) -> pb::JobCounts {
+    pb::JobCounts {
+        queued: c.queued,
+        running: c.running,
+        finished: c.finished,
+        result_bytes: c.result_bytes,
+        done_total: c.done_total,
+        failed_total: c.failed_total,
+        cancelled_total: c.cancelled_total,
+    }
+}
+
+fn job_counts_from_pb(c: pb::JobCounts) -> JobCounts {
+    JobCounts {
+        queued: c.queued,
+        running: c.running,
+        finished: c.finished,
+        result_bytes: c.result_bytes,
+        done_total: c.done_total,
+        failed_total: c.failed_total,
+        cancelled_total: c.cancelled_total,
     }
 }
 
@@ -133,6 +162,7 @@ pub(crate) fn server_status_from_pb(s: Option<pb::ServerStatus>) -> Result<Serve
             denied: r.denied,
         },
         namespaces: s.namespaces.into_iter().map(|n| status_from_pb(Some(n))).collect::<Result<_, _>>()?,
+        jobs: job_counts_from_pb(s.jobs.unwrap_or_default()),
     })
 }
 
@@ -593,6 +623,134 @@ pub(crate) fn prune_from_pb(r: pb::PruneArchiveResponse) -> Result<PruneReport, 
         untouched: r.untouched,
         bytes: r.bytes,
     })
+}
+
+// ---- managed jobs (step 16f, ADR 0056) ----
+
+/// A `StartJob` request as the trait's arguments: the namespace, the job
+/// and its options (a job's timeout is the request's own: no
+/// `grpc-timeout` applies to a job that outlives its call).
+pub(crate) fn start_job_from_pb(r: pb::StartJobRequest) -> Result<(String, AnalyticsRequest, QueryOptions), Error> {
+    let options = options_from_pb(r.options, None)?;
+    let request = analyze_from_pb(pb::AnalyzeRequest {
+        namespace: String::new(),
+        projection: r.projection,
+        job: r.job,
+        options: None,
+    })?;
+    Ok((r.namespace, request, options))
+}
+
+pub(crate) fn start_job_to_pb(
+    namespace: &str,
+    request: &AnalyticsRequest,
+    options: &QueryOptions,
+) -> Result<pb::StartJobRequest, Error> {
+    let r = analyze_to_pb(namespace, request, options)?;
+    Ok(pb::StartJobRequest { namespace: r.namespace, projection: r.projection, job: r.job, options: r.options })
+}
+
+fn job_state_to_pb(state: JobState) -> pb::JobState {
+    match state {
+        JobState::Queued => pb::JobState::Queued,
+        JobState::Collecting => pb::JobState::Collecting,
+        JobState::Running => pb::JobState::Running,
+        JobState::Done => pb::JobState::Done,
+        JobState::Failed => pb::JobState::Failed,
+        JobState::Cancelled => pb::JobState::Cancelled,
+        JobState::Expired => pb::JobState::Expired,
+    }
+}
+
+fn job_state_from_pb(state: i32) -> Result<JobState, Error> {
+    Ok(match pb::JobState::try_from(state) {
+        Ok(pb::JobState::Queued) => JobState::Queued,
+        Ok(pb::JobState::Collecting) => JobState::Collecting,
+        Ok(pb::JobState::Running) => JobState::Running,
+        Ok(pb::JobState::Done) => JobState::Done,
+        Ok(pb::JobState::Failed) => JobState::Failed,
+        Ok(pb::JobState::Cancelled) => JobState::Cancelled,
+        Ok(pb::JobState::Expired) => JobState::Expired,
+        _ => return Err(Error::invalid(format!("unknown job state {}", state))),
+    })
+}
+
+pub(crate) fn job_to_pb(j: &JobInfo) -> pb::JobInfo {
+    pb::JobInfo {
+        id: j.id,
+        namespace: j.namespace.clone(),
+        user: j.user.clone(),
+        client: j.client.map(|c| c.to_string()),
+        kind: j.kind.clone(),
+        state: job_state_to_pb(j.state).into(),
+        created_micros: j.created.0,
+        started_micros: j.started.map(|t| t.0),
+        ended_micros: j.ended.map(|t| t.0),
+        elapsed_micros: micros(j.elapsed),
+        nodes: j.nodes,
+        edges: j.edges,
+        seq: j.seq,
+        rows: j.rows,
+        truncated: j.truncated,
+        result_bytes: j.result_bytes,
+        error: j
+            .error
+            .as_ref()
+            .map(|e| pb::Error { code: e.code().as_str().to_owned(), message: e.message().to_owned() }),
+        expires_micros: j.expires.map(|t| t.0),
+    }
+}
+
+pub(crate) fn job_from_pb(j: Option<pb::JobInfo>) -> Result<JobInfo, Error> {
+    let j = j.ok_or_else(|| missing("the job"))?;
+    Ok(JobInfo {
+        id: j.id,
+        namespace: j.namespace,
+        user: j.user,
+        client: client_from_pb(j.client)?,
+        kind: j.kind,
+        state: job_state_from_pb(j.state)?,
+        created: time_from_pb(j.created_micros),
+        started: j.started_micros.map(time_from_pb),
+        ended: j.ended_micros.map(time_from_pb),
+        elapsed: Duration::from_micros(j.elapsed_micros),
+        nodes: j.nodes,
+        edges: j.edges,
+        seq: j.seq,
+        rows: j.rows,
+        truncated: j.truncated,
+        result_bytes: j.result_bytes,
+        // A code a newer server sends reads as `internal`
+        error: j.error.map(|e| Error::new(Code::parse(&e.code).unwrap_or(Code::Internal), e.message)),
+        expires: j.expires_micros.map(time_from_pb),
+    })
+}
+
+pub(crate) fn jobs_to_pb(list: &Listed<JobInfo>) -> pb::ListJobsResponse {
+    pb::ListJobsResponse { jobs: list.items.iter().map(job_to_pb).collect(), truncated: list.truncated }
+}
+
+pub(crate) fn jobs_from_pb(r: pb::ListJobsResponse) -> Result<Listed<JobInfo>, Error> {
+    let items = r.jobs.into_iter().map(|j| job_from_pb(Some(j))).collect::<Result<_, _>>()?;
+    Ok(Listed { items, truncated: r.truncated })
+}
+
+pub(crate) fn job_page_to_pb(p: &JobPage) -> pb::GetJobResultResponse {
+    let rows = job_result_to_pb(&p.rows);
+    pb::GetJobResultResponse {
+        job: Some(job_to_pb(&p.job)),
+        kind: rows.kind.into(),
+        scores: rows.scores,
+        groups: rows.groups,
+        counts: rows.counts,
+        next_offset: p.next_offset,
+    }
+}
+
+pub(crate) fn job_page_from_pb(r: pb::GetJobResultResponse) -> Result<JobPage, Error> {
+    let kind = pb::JobResultKind::try_from(r.kind).unwrap_or(pb::JobResultKind::Unspecified);
+    let rows = job_result_from_pb(JobRows { kind, scores: r.scores, groups: r.groups, counts: r.counts })?;
+    Ok(JobPage { job: job_from_pb(r.job)?, rows, next_offset: r.next_offset })
 }
 
 #[cfg(test)]

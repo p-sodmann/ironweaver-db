@@ -15,6 +15,11 @@
 //! when its future is next polled answers that instead: the cancel came
 //! too late. Commits and other changes can't be cancelled (their outcome
 //! would only become unknown); they are listed with `cancellable: false`.
+//!
+//! **Managed jobs** (step 16f, ADR 0056) take their ids from the same
+//! counter ([`Requests::next_id`]) and are listed here while they are
+//! queued or running ([`Requests::register`]); cancelling one calls the job
+//! registry's cancel.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -81,18 +86,34 @@ pub struct ConsumerInfo {
     pub polls: u64,
 }
 
-/// A request's cancel flag and the waker of its future.
-#[derive(Debug, Default)]
+/// What cancelling registered work does ([`Requests::register`]).
+pub type CancelHook = Box<dyn Fn() + Send + Sync>;
+
+/// A request's cancel flag and the waker of its future; or, for work
+/// registered without a future (a job), its hook.
+#[derive(Default)]
 struct Cancel {
     set: AtomicBool,
     waker: Mutex<Option<Waker>>,
+    hook: Option<CancelHook>,
+}
+
+impl std::fmt::Debug for Cancel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cancel").field("set", &self.set).finish_non_exhaustive()
+    }
 }
 
 impl Cancel {
+    /// Fire it. Called without the registry's lock: a hook may take other
+    /// locks, and unregister work.
     fn fire(&self) {
         self.set.store(true, Ordering::Release);
         if let Some(waker) = lock(&self.waker).take() {
             waker.wake();
+        }
+        if let Some(hook) = &self.hook {
+            hook();
         }
     }
 
@@ -184,6 +205,43 @@ impl Requests {
         Arc::new(Requests::default())
     }
 
+    /// A new id from the counter that numbers requests: also for managed
+    /// jobs, so that requests and jobs share one id space (ADR 0056).
+    pub fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Register work that runs outside a call (a managed job, ADR 0056) as
+    /// request `id` of `operation`: listed, cancellable, until the returned
+    /// [`Registration`] is dropped. Cancelling it calls `on_cancel` (without
+    /// the registry's lock). It isn't counted in the request metrics when
+    /// it ends. O(log running).
+    #[allow(clippy::too_many_arguments)]
+    pub fn register(
+        self: &Arc<Self>,
+        id: u64,
+        operation: Operation,
+        namespace: Option<&str>,
+        user: &str,
+        client: Option<IpAddr>,
+        started: CommitTime,
+        on_cancel: CancelHook,
+    ) -> Registration {
+        let cancel = Arc::new(Cancel { hook: Some(on_cancel), ..Cancel::default() });
+        let info = RequestInfo {
+            id,
+            operation,
+            namespace: namespace.map(str::to_owned),
+            user: user.to_owned(),
+            client,
+            started,
+            elapsed: Duration::ZERO,
+            cancellable: true,
+        };
+        lock(&self.running).insert(id, Entry { info, started: Instant::now(), cancel });
+        Registration { requests: self.clone(), id }
+    }
+
     /// Register a call of `operation` by `user` from `client`: running until
     /// the returned [`Call`] is dropped. O(log running).
     pub fn begin(
@@ -193,7 +251,7 @@ impl Requests {
         user: &str,
         client: Option<IpAddr>,
     ) -> Call {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = self.next_id();
         let cancel = Arc::new(Cancel::default());
         let info = RequestInfo {
             id,
@@ -258,8 +316,11 @@ impl Requests {
                 entry.info.operation.name()
             )));
         }
-        entry.cancel.fire();
-        Ok(RequestInfo { elapsed: entry.started.elapsed(), ..entry.info.clone() })
+        let info = RequestInfo { elapsed: entry.started.elapsed(), ..entry.info.clone() };
+        let cancel = entry.cancel.clone();
+        drop(running);
+        cancel.fire();
+        Ok(info)
     }
 
     /// Every operation's calls that ended (and refusals), in the order of
@@ -366,6 +427,24 @@ impl Call {
     }
 }
 
+/// Registered work ([`Requests::register`]): listed until dropped.
+pub struct Registration {
+    requests: Arc<Requests>,
+    id: u64,
+}
+
+impl std::fmt::Debug for Registration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Registration").field("id", &self.id).finish()
+    }
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        lock(&self.requests.running).remove(&self.id);
+    }
+}
+
 impl Drop for Call {
     fn drop(&mut self) {
         lock(&self.requests.running).remove(&self.id);
@@ -461,6 +540,38 @@ mod tests {
         let e = requests.cancel(call.id(), None).unwrap_err();
         assert_eq!(e.code(), Code::InvalidArgument);
         assert!(e.message().contains("Commit"), "{}", e);
+    }
+
+    #[test]
+    fn registered_work_shares_the_ids_and_is_cancelled_through_its_hook() {
+        let requests = Requests::new();
+        let call = ann(&requests, Operation::Find);
+        let id = requests.next_id();
+        assert!(id > call.id());
+        let fired = Arc::new(AtomicU64::new(0));
+        let hook = {
+            let (fired, requests) = (fired.clone(), Arc::downgrade(&requests));
+            // A hook may use the registry: it runs without its lock
+            Box::new(move || {
+                fired.fetch_add(1, Ordering::Relaxed);
+                assert!(requests.upgrade().is_some_and(|r| r.active() > 0));
+            })
+        };
+        let job = requests.register(id, Operation::StartJob, Some("social"), "ann", None, CommitTime::now(), hook);
+        let listed = requests.list(None, 10).0;
+        assert_eq!(
+            listed.iter().map(|r| (r.id, r.cancellable)).collect::<Vec<_>>(),
+            vec![(call.id(), true), (id, true)]
+        );
+        assert_eq!(requests.cancel(id, Some("bob")).unwrap_err().code(), Code::NotFound);
+        assert_eq!(requests.cancel(id, Some("ann")).unwrap().operation, Operation::StartJob);
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
+        drop(job);
+        drop(call);
+        assert_eq!(requests.active(), 0);
+        // Registered work isn't counted when it ends
+        let start = requests.stats().into_iter().find(|s| s.operation == Operation::StartJob).unwrap();
+        assert!(start.outcomes.is_empty(), "{:?}", start.outcomes);
     }
 
     #[test]

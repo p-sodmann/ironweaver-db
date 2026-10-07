@@ -16,6 +16,8 @@
 //! - [`Admin`]: the operator's reads and cancel (step 16c): the server's
 //!   status, the [`requests`] registry, the [`metrics`] and the [`log`]
 //!   tail.
+//! - [`jobs`]: managed analytics jobs, the registry behind `Admin`'s job
+//!   methods (step 16f, ADR 0056).
 //! - `conformance` (feature): the conformance suite for implementations.
 //!
 //! Pure Rust (design rule 1): no Python, no protocol types.
@@ -26,6 +28,7 @@ pub mod auth;
 mod cursor;
 mod error;
 pub mod exec;
+pub mod jobs;
 pub mod log;
 pub mod metrics;
 mod model;
@@ -39,8 +42,8 @@ mod service;
 pub mod conformance;
 
 pub use admin::{
-    Admin, BackupDone, BackupRequest, Checkpointed, DiskStatus, LimitSource, Listed, MemorySnapshot, MemoryState,
-    MemoryStatus, RequestCounts, ServerStatus, VerifyTarget,
+    Admin, BackupDone, BackupRequest, Checkpointed, DiskStatus, JobCounts, JobInfo, JobOwner, JobPage, JobState,
+    LimitSource, Listed, MemorySnapshot, MemoryState, MemoryStatus, RequestCounts, ServerStatus, VerifyTarget,
 };
 pub use auth::{
     Accounts, Audited, Authenticate, Authorized, NewToken, Operation, Principal, Requirement, Role, Secret, Session,

@@ -98,6 +98,10 @@ metrics! {
     BACKUP_BYTES: "iwdb_backup_bytes_total", Counter, [], "bytes", "Bytes written by backups, counted as they are written (a throttled backup's progress).";
     BACKUPS: "iwdb_backups_total", Counter, ["outcome"], "", "Backups that ended, by outcome: `ok` or `failed`.";
     LAST_BACKUP: "iwdb_last_backup_timestamp_seconds", Gauge, [], "seconds", "When the last successful backup finished, in seconds since 1970 (UTC); no sample without one.";
+    JOBS_QUEUED: "iwdb_jobs_queued", Gauge, [], "", "Managed analytics jobs waiting for a job thread.";
+    JOBS_RUNNING: "iwdb_jobs_running", Gauge, [], "", "Managed analytics jobs collecting their projection or running.";
+    JOBS: "iwdb_jobs_total", Counter, ["outcome"], "", "Managed analytics jobs that ended, by outcome: `done`, `failed` or `cancelled`.";
+    JOB_RESULT_BYTES: "iwdb_job_result_bytes", Gauge, [], "bytes", "The stored job results' estimated size (counted in the `working` memory part).";
 }
 
 /// A metric's value in one sample.

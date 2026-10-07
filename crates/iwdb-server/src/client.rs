@@ -44,7 +44,7 @@ use iwdb_query::{
     FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
     QueryOptions, Schema, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
-use iwdb_query::{BackupDone, BackupRequest, Checkpointed, VerifyTarget};
+use iwdb_query::{BackupDone, BackupRequest, Checkpointed, JobInfo, JobOwner, JobPage, VerifyTarget};
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 use tokio::runtime::{Handle, Runtime};
 use tokio::task::JoinHandle;
@@ -832,6 +832,62 @@ impl Admin for Remote {
         self.call_admin(move |mut client| async move {
             let response = client.prune_archive(pb::PruneArchiveRequest { before, dry_run }).await.map_err(status)?;
             prune_from_pb(response.into_inner()).map_err(bad_answer)
+        })
+    }
+
+    /// `owner` is ignored: the server's authorisation point sets the caller.
+    fn start_job(
+        &self,
+        namespace: String,
+        request: AnalyticsRequest,
+        options: QueryOptions,
+        _owner: Option<JobOwner>,
+    ) -> impl Future<Output = Result<JobInfo, Error>> + Send {
+        let start = start_job_to_pb(&namespace, &request, &options);
+        self.call_admin(move |mut client| async move {
+            let response = client.start_job(start?).await.map_err(status)?;
+            job_from_pb(response.into_inner().job).map_err(bad_answer)
+        })
+    }
+
+    fn jobs(
+        &self,
+        user: Option<String>,
+        limit: Option<usize>,
+    ) -> impl Future<Output = Result<Listed<JobInfo>, Error>> + Send {
+        self.call_admin(move |mut client| async move {
+            let limit = limit.map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+            let response = client.list_jobs(pb::ListJobsRequest { user, limit }).await.map_err(status)?;
+            jobs_from_pb(response.into_inner()).map_err(bad_answer)
+        })
+    }
+
+    fn job(&self, id: u64, user: Option<String>) -> impl Future<Output = Result<JobInfo, Error>> + Send {
+        self.call_admin(move |mut client| async move {
+            let response = client.get_job(pb::GetJobRequest { id, user }).await.map_err(status)?;
+            job_from_pb(response.into_inner().job).map_err(bad_answer)
+        })
+    }
+
+    fn cancel_job(&self, id: u64, user: Option<String>) -> impl Future<Output = Result<JobInfo, Error>> + Send {
+        self.call_admin(move |mut client| async move {
+            let response = client.cancel_job(pb::CancelJobRequest { id, user }).await.map_err(status)?;
+            job_from_pb(response.into_inner().job).map_err(bad_answer)
+        })
+    }
+
+    fn job_result(
+        &self,
+        id: u64,
+        user: Option<String>,
+        offset: u64,
+        limit: Option<usize>,
+    ) -> impl Future<Output = Result<JobPage, Error>> + Send {
+        self.call_admin(move |mut client| async move {
+            let limit = limit.map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+            let request = pb::GetJobResultRequest { id, user, offset, limit };
+            let response = client.get_job_result(request).await.map_err(status)?;
+            job_page_from_pb(response.into_inner()).map_err(bad_answer)
         })
     }
 }

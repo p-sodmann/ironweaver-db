@@ -449,6 +449,33 @@ pub(crate) async fn prune_archive<D: Admin>(
     Ok(prune_to_pb(&db.prune_archive(r.before, r.dry_run).await?))
 }
 
+// ---- managed jobs (step 16f, `AdminService`) ----
+
+pub(crate) async fn start_job<D: Admin>(db: &D, r: pb::StartJobRequest) -> Result<pb::StartJobResponse, Error> {
+    let (namespace, request, options) = start_job_from_pb(r)?;
+    let job = db.start_job(namespace, request, options, None).await?;
+    Ok(pb::StartJobResponse { job: Some(job_to_pb(&job)) })
+}
+
+pub(crate) async fn list_jobs<D: Admin>(db: &D, r: pb::ListJobsRequest) -> Result<pb::ListJobsResponse, Error> {
+    Ok(jobs_to_pb(&db.jobs(r.user, limit_from_pb(r.limit)).await?))
+}
+
+pub(crate) async fn get_job<D: Admin>(db: &D, r: pb::GetJobRequest) -> Result<pb::GetJobResponse, Error> {
+    Ok(pb::GetJobResponse { job: Some(job_to_pb(&db.job(r.id, r.user).await?)) })
+}
+
+pub(crate) async fn cancel_job<D: Admin>(db: &D, r: pb::CancelJobRequest) -> Result<pb::CancelJobResponse, Error> {
+    Ok(pb::CancelJobResponse { job: Some(job_to_pb(&db.cancel_job(r.id, r.user).await?)) })
+}
+
+pub(crate) async fn get_job_result<D: Admin>(
+    db: &D,
+    r: pb::GetJobResultRequest,
+) -> Result<pb::GetJobResultResponse, Error> {
+    Ok(job_page_to_pb(&db.job_result(r.id, r.user, r.offset, limit_from_pb(r.limit)).await?))
+}
+
 /// `Login`: on the database itself (no principal yet), audited.
 pub(crate) async fn login<D: Authenticate>(
     db: &D,

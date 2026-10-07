@@ -30,7 +30,7 @@ use iwdb_storage::HistoryId;
 use crate::admin::MAX_LIST;
 use crate::auth::Operation;
 use crate::metrics::{self as m, METRICS};
-use crate::{Admin, Listed};
+use crate::{Admin, JobInfo, JobState, Listed};
 use crate::{
     AnalyticsRequest, Answer, ChangeEvent, ChangesRequest, Code, CommitOptions, Database, Error, ExplainRequest,
     FindRequest, Job, JobResult, MatchRequest, NeighbourhoodRequest, Order, PathMethod, PathRequest, Plan,
@@ -110,6 +110,9 @@ macro_rules! admin_conformance_tests {
             backups_are_named_verified_and_never_overwrite,
             the_running_store_verifies,
             the_archive_is_pruned_before_a_backup,
+            a_job_runs_to_the_end_and_its_result_is_paged,
+            a_job_is_cancelled_by_its_id_or_as_a_request,
+            jobs_are_checked_and_bounded,
         );
     };
 }
@@ -1061,4 +1064,120 @@ pub async fn the_archive_is_pruned_before_a_backup<D: Database + Admin>(db: &D) 
     assert!(archive.is_ok(), "{:#?}", archive.problems);
     assert_eq!(code(db.prune_archive("missing".into(), false).await), Code::NotFound);
     assert_eq!(code(db.prune_archive("..".into(), false).await), Code::InvalidArgument);
+}
+
+// ---- managed jobs (step 16f, `Admin`) ----
+
+fn job_request(job: Job) -> AnalyticsRequest {
+    AnalyticsRequest { projection: ProjectionSpec::default(), job }
+}
+
+/// PageRank that runs until cancelled: exactly `max_iter` (2^40)
+/// iterations.
+fn endless() -> Job {
+    Job::PageRank(PageRank { tol: 0.0, max_iter: 1 << 40, ..PageRank::default() })
+}
+
+/// Poll job `id` until `done` holds for it (at most 30 s).
+async fn wait_job<D: Admin>(db: &D, id: u64, done: impl Fn(&JobInfo) -> bool) -> JobInfo {
+    let start = std::time::Instant::now();
+    loop {
+        let job = db.job(id, None).await.unwrap();
+        if done(&job) {
+            return job;
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "job {} stays {:?}", id, job.state);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+pub async fn a_job_runs_to_the_end_and_its_result_is_paged<D: Database + Admin>(db: &D) {
+    let seq = people(db).await;
+    let request = || job_request(Job::PageRank(PageRank::default()));
+    let job = db.start_job(NS.into(), request(), options(), None).await.unwrap();
+    assert_eq!((job.namespace.as_str(), job.kind.as_str()), (NS, "page_rank"));
+    assert!(!job.state.ended(), "{:?}", job.state);
+    let done = wait_job(db, job.id, |j| j.state.ended()).await;
+    assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+    assert_eq!((done.nodes, done.seq, done.rows, done.truncated), (Some(5), Some(seq), Some(5), false));
+    assert!(done.started.is_some() && done.ended.is_some() && done.expires.is_some() && done.result_bytes > 0);
+    // The same rows as `analyze`, in pages
+    let direct = db.analyze(NS, request(), options()).await.unwrap().value;
+    let first = db.job_result(job.id, None, 0, Some(2)).await.unwrap();
+    assert_eq!((first.job.id, first.next_offset), (job.id, Some(2)));
+    let rest = db.job_result(job.id, None, 2, None).await.unwrap();
+    assert_eq!(rest.next_offset, None);
+    let (JobResult::Scores(a), JobResult::Scores(b), JobResult::Scores(all)) = (first.rows, rest.rows, direct) else {
+        panic!("scores")
+    };
+    assert_eq!([a, b].concat(), all);
+    // Listed, newest first; and in the status and the metrics
+    let second = db.start_job(NS.into(), job_request(Job::Triangles), options(), None).await.unwrap();
+    let Listed { items, truncated } = db.jobs(None, None).await.unwrap();
+    assert!(!truncated && items.iter().map(|j| j.id).collect::<Vec<_>>().starts_with(&[second.id, job.id]));
+    wait_job(db, second.id, |j| j.state.ended()).await;
+    let status = db.server_status().await.unwrap();
+    assert!(status.jobs.finished >= 2 && status.jobs.done_total >= 2, "{:?}", status.jobs);
+    let metrics = db.metrics().await.unwrap();
+    let done_jobs = metrics
+        .family(m::JOBS)
+        .unwrap()
+        .samples
+        .iter()
+        .any(|s| s.label("outcome") == Some("done") && matches!(s.value, m::Value::Counter(n) if n >= 2));
+    assert!(done_jobs, "{:?}", metrics.family(m::JOBS));
+    assert_eq!(code(db.job(u64::MAX, None).await), Code::NotFound);
+    assert_eq!(code(db.job_result(u64::MAX, None, 0, None).await), Code::NotFound);
+}
+
+pub async fn a_job_is_cancelled_by_its_id_or_as_a_request<D: Database + Admin>(db: &D) {
+    hub(db, 200).await;
+    let job = db.start_job(NS.into(), job_request(endless()), options(), None).await.unwrap();
+    let running = wait_job(db, job.id, |j| j.state == JobState::Running).await;
+    assert_eq!((running.nodes, running.edges), (Some(201), Some(200)));
+    assert_eq!(code(db.job_result(job.id, None, 0, None).await), Code::InvalidArgument, "not done yet");
+    // Listed as a request with the job's id, and cancelled as one
+    let Listed { items, .. } = db.active_requests(None, None).await.unwrap();
+    let listed = items.iter().find(|r| r.id == job.id).expect("the job is listed as a request");
+    assert_eq!(
+        (listed.operation, listed.namespace.as_deref(), listed.cancellable),
+        (Operation::StartJob, Some(NS), true)
+    );
+    db.cancel_request(job.id, None).await.unwrap();
+    let cancelled = db.job(job.id, None).await.unwrap();
+    assert_eq!(cancelled.state, JobState::Cancelled);
+    assert_eq!(cancelled.error.as_ref().map(Error::code), Some(Code::Cancelled));
+    assert_eq!(code(db.job_result(job.id, None, 0, None).await), Code::Cancelled);
+    let Listed { items, .. } = db.active_requests(None, None).await.unwrap();
+    assert!(items.iter().all(|r| r.id != job.id), "no longer a running request");
+    // And by its id
+    let other = db.start_job(NS.into(), job_request(endless()), options(), None).await.unwrap();
+    wait_job(db, other.id, |j| j.state == JobState::Running).await;
+    assert_eq!(db.cancel_job(other.id, None).await.unwrap().state, JobState::Cancelled);
+    // An ended job is answered as it is
+    assert_eq!(db.cancel_job(other.id, None).await.unwrap().state, JobState::Cancelled);
+    assert_eq!(code(db.cancel_job(u64::MAX, None).await), Code::NotFound);
+    // The threads are free again
+    let quick = db.start_job(NS.into(), job_request(Job::Degree { incoming: false }), options(), None).await.unwrap();
+    assert_eq!(wait_job(db, quick.id, |j| j.state.ended()).await.state, JobState::Done);
+    assert!(db.server_status().await.unwrap().jobs.cancelled_total >= 2);
+}
+
+pub async fn jobs_are_checked_and_bounded<D: Database + Admin>(db: &D) {
+    hub(db, 200).await;
+    let triangles = || job_request(Job::Triangles);
+    assert_eq!(code(db.start_job("nope".into(), triangles(), options(), None).await), Code::NotFound);
+    let small = limits(None, Some(100), None);
+    assert_eq!(code(db.start_job(NS.into(), triangles(), small, None).await), Code::BudgetExceeded);
+    let personalized = Job::PageRank(PageRank { personalization: Some(vec![1.0]), ..PageRank::default() });
+    assert_eq!(code(db.start_job(NS.into(), job_request(personalized), options(), None).await), Code::InvalidArgument);
+    // `max_results` keeps the top rows
+    let top = db.start_job(NS.into(), triangles(), limits(Some(3), None, None), None).await.unwrap();
+    let done = wait_job(db, top.id, |j| j.state.ended()).await;
+    assert_eq!((done.state, done.rows, done.truncated), (JobState::Done, Some(3), true));
+    assert_eq!(code(db.job_result(top.id, None, 0, Some(0)).await), Code::InvalidArgument);
+    let none = db.jobs(None, Some(0)).await.unwrap();
+    assert!(none.items.is_empty() && none.truncated);
+    assert!(db.jobs(Some("no-such-user".into()), None).await.unwrap().items.is_empty());
+    assert!(db.jobs(None, Some(usize::MAX)).await.unwrap().items.len() <= MAX_LIST);
 }

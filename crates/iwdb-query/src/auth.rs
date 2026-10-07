@@ -30,7 +30,8 @@ use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation};
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 
 use crate::admin::{
-    Admin, BackupDone, BackupRequest, Checkpointed, Listed, PruneReport, ServerStatus, VerifyReport, VerifyTarget,
+    Admin, BackupDone, BackupRequest, Checkpointed, JobInfo, JobOwner, JobPage, Listed, PruneReport, ServerStatus,
+    VerifyReport, VerifyTarget,
 };
 use crate::audit::{Audit, AuditEntry};
 use crate::log::LogTail;
@@ -417,6 +418,11 @@ operations! {
     Backup => "Backup", ServerAdmin, Always;
     Verify => "Verify", ServerAdmin, Always;
     PruneArchive => "PruneArchive", ServerAdmin, Always;
+    StartJob => "StartJob", Namespace(Role::Read), Always;
+    ListJobs => "ListJobs", Authenticated, Refusals;
+    GetJob => "GetJob", Authenticated, Refusals;
+    CancelJob => "CancelJob", Authenticated, Always;
+    GetJobResult => "GetJobResult", Authenticated, Refusals;
 }
 
 impl Operation {
@@ -424,7 +430,9 @@ impl Operation {
     /// reads can; commits and other changes can't (dropping one wouldn't
     /// undo it, only make its outcome unknown), nor can logging in or out
     /// and cancelling, nor the admin writes, which run on threads of their
-    /// own that a dropped future doesn't stop (ADR 0055).
+    /// own that a dropped future doesn't stop (ADR 0055). Starting a job
+    /// answers at once; the job itself is cancelled by its own id (ADR
+    /// 0056).
     pub fn cancellable(self) -> bool {
         use Operation::*;
         !matches!(
@@ -448,6 +456,8 @@ impl Operation {
                 | Backup
                 | Verify
                 | PruneArchive
+                | StartJob
+                | CancelJob
         )
     }
 
@@ -964,6 +974,96 @@ impl<D: Database + Accounts + Admin> Admin for Authorized<D> {
         let entry = AuditEntry { backup: Some(before.clone()), ..AuditEntry::default() };
         let checked = self.check(Operation::PruneArchive, "", entry);
         run!(self, checked, self.inner.prune_archive(before, dry_run), no_seq)
+    }
+
+    /// Needs `read` on the namespace. The job is the caller's, whatever
+    /// `owner` says. Audited with the namespace and, as `request`, the
+    /// job's id.
+    fn start_job(
+        &self,
+        namespace: String,
+        request: AnalyticsRequest,
+        options: QueryOptions,
+        _owner: Option<JobOwner>,
+    ) -> impl Future<Output = Result<JobInfo, Error>> + Send {
+        let checked = self.check(Operation::StartJob, &namespace, on(&namespace));
+        let owner = JobOwner { user: self.principal.user.clone(), client: self.audit.client };
+        run!(self, checked, self.inner.start_job(namespace, request, options, Some(owner)), |r: &JobInfo, e| {
+            e.request = Some(r.id)
+        })
+    }
+
+    /// A user who isn't a server admin sees only its own jobs.
+    fn jobs(
+        &self,
+        user: Option<String>,
+        limit: Option<usize>,
+    ) -> impl Future<Output = Result<Listed<JobInfo>, Error>> + Send {
+        let checked = self.check(Operation::ListJobs, "", AuditEntry::default());
+        let user = self.own(user);
+        run!(self, checked, self.inner.jobs(user, limit), no_seq)
+    }
+
+    /// Others' jobs are `not_found` for a user who isn't a server admin.
+    fn job(&self, id: u64, user: Option<String>) -> impl Future<Output = Result<JobInfo, Error>> + Send {
+        let checked = self.check(Operation::GetJob, "", AuditEntry::default());
+        let user = self.own(user);
+        run!(self, checked, self.inner.job(id, user), no_seq)
+    }
+
+    /// Others' jobs are `not_found` for a user who isn't a server admin.
+    /// Audited, with the job's id, and once found its owner as the subject
+    /// and its namespace.
+    fn cancel_job(&self, id: u64, user: Option<String>) -> impl Future<Output = Result<JobInfo, Error>> + Send {
+        let entry = AuditEntry { request: Some(id), ..AuditEntry::default() };
+        let checked = self.check(Operation::CancelJob, "", entry);
+        let user = self.own(user);
+        run!(self, checked, self.inner.cancel_job(id, user), |r: &JobInfo, e| {
+            e.subject = Some(r.user.clone());
+            e.namespace = Some(r.namespace.clone());
+        })
+    }
+
+    /// Others' jobs are `not_found` for a user who isn't a server admin;
+    /// and the caller must still have `read` on the job's namespace (a
+    /// result holds its node ids): `permission_denied` otherwise, audited
+    /// as a refusal.
+    fn job_result(
+        &self,
+        id: u64,
+        user: Option<String>,
+        offset: u64,
+        limit: Option<usize>,
+    ) -> impl Future<Output = Result<JobPage, Error>> + Send {
+        let checked = self.check(Operation::GetJobResult, "", AuditEntry::default());
+        let user = self.own(user);
+        let fetch = async move {
+            let page = self.inner.job_result(id, user, offset, limit).await?;
+            let namespace = page.job.namespace.as_str();
+            if self.principal.role(namespace).is_none() {
+                let e = Error::new(
+                    Code::PermissionDenied,
+                    format!(
+                        "user '{}' may not GetJobResult: it needs the 'read' role on namespace '{}'",
+                        self.principal.user, namespace
+                    ),
+                );
+                if let Some(requests) = &self.requests {
+                    requests.refused(Operation::GetJobResult, e.code());
+                }
+                self.audit.record(AuditEntry {
+                    operation: Some(Operation::GetJobResult),
+                    user: Some(self.principal.user.clone()),
+                    via: Some(self.principal.via),
+                    code: Some(e.code()),
+                    request: Some(id),
+                    ..on(namespace)
+                });
+                return Err(e);
+            }
+            Ok(page)
+        };
+        run!(self, checked, fetch, no_seq::<JobPage>)
     }
 }
 

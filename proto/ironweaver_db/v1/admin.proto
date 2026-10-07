@@ -1,7 +1,7 @@
 // Ironweaver DB gRPC contract, version 1: the operator's reads and
 // cancelling a request (step 16c, ADRs 0050 to 0052), and the admin writes
 // (step 16e, ADR 0055): checkpoints, backups, verifying, pruning the WAL
-// archive.
+// archive; and managed analytics jobs (step 16f, ADR 0056).
 //
 // One RPC per operation of the `Admin` trait (crates/iwdb-query), with the
 // same semantics: the server only translates. Every list is bounded. Who
@@ -13,6 +13,13 @@
 // They can't be cancelled, and have no deadline: a throttled backup runs
 // as long as its copy takes.
 //
+// A job is started by a caller with `read` on its namespace, and seen,
+// cancelled and fetched by its owner and server-wide admins (others get
+// `not_found`); fetching its result also needs `read` on the namespace
+// still. Starting and cancelling are audited. Job ids come from the same
+// counter as request ids: a queued or running job is listed by
+// ListRequests as a `StartJob` request, and CancelRequest cancels it.
+//
 // Nothing here holds a secret, a token, a certificate or a value of the
 // data: names, numbers and the server's own log lines (which hold none).
 
@@ -20,7 +27,10 @@ syntax = "proto3";
 
 package ironweaver_db.v1;
 
+import "ironweaver_db/v1/analytics.proto";
 import "ironweaver_db/v1/catalog.proto";
+import "ironweaver_db/v1/errors.proto";
+import "ironweaver_db/v1/query.proto";
 
 service AdminService {
   // Version, uptime, readiness, fsync policy, memory, disk, request counts
@@ -53,6 +63,18 @@ service AdminService {
   // Remove from the store's WAL archive what no restore from a backup (in
   // the backup directory) or a later one can need.
   rpc PruneArchive(PruneArchiveRequest) returns (PruneArchiveResponse);
+  // Queue an analytics job; answers at once with its id. It runs on the
+  // server's job threads, past any request timeout, until it ends, its
+  // timeout (`[jobs] timeout_secs`), a cancel or the server's drain.
+  rpc StartJob(StartJobRequest) returns (StartJobResponse);
+  // The jobs kept, newest first.
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+  // One job's state and progress.
+  rpc GetJob(GetJobRequest) returns (GetJobResponse);
+  // Cancel a queued or running job; one that ended is answered as it is.
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  // A page of a done job's result.
+  rpc GetJobResult(GetJobResultRequest) returns (GetJobResultResponse);
 }
 
 message GetServerStatusRequest {}
@@ -75,6 +97,23 @@ message ServerStatus {
   RequestCounts requests = 7;
   // The namespaces' status (those the caller has a role on), by name.
   repeated NamespaceStatus namespaces = 8;
+  // The managed jobs, server-wide.
+  JobCounts jobs = 9;
+}
+
+// The managed jobs at a glance.
+message JobCounts {
+  uint64 queued = 1;
+  // Collecting their projection or running.
+  uint64 running = 2;
+  // Ended and still kept.
+  uint64 finished = 3;
+  // The stored results' estimated size.
+  uint64 result_bytes = 4;
+  // Jobs that ended since the server started, by outcome.
+  uint64 done_total = 5;
+  uint64 failed_total = 6;
+  uint64 cancelled_total = 7;
 }
 
 // Memory as the server counts it, and its limit (ADR 0054). The limit
@@ -89,7 +128,8 @@ message MemoryStatus {
   uint64 payload_bytes = 3;
   // The checkpointers' copies of the namespaces, graphs and payloads.
   uint64 checkpoint_bytes = 4;
-  // Analytics projections and index builds while they run, estimated.
+  // Analytics projections and index builds while they run, and the stored
+  // job results, estimated.
   uint64 working_bytes = 5;
   // The sum of the parts: what the limit counts.
   uint64 used_bytes = 6;
@@ -479,4 +519,137 @@ message NamespacePrune {
   // The seqs of the archived (imports') checkpoints removed.
   repeated uint64 removed_checkpoints = 5;
   uint64 kept_segments = 6;
+}
+
+message StartJobRequest {
+  string namespace = 1;
+  Projection projection = 2;
+  Job job = 3;
+  // As for Analyze: `max_visited` and `max_edges` must hold the projection,
+  // `max_results` keeps the top rows, `min_seq` is waited for. `timeout_ms`
+  // is how long the job may run once it leaves the queue (default and
+  // maximum: the server's `[jobs] timeout_secs`).
+  QueryOptions options = 4;
+}
+
+message StartJobResponse {
+  // The queued job.
+  JobInfo job = 1;
+}
+
+message ListJobsRequest {
+  // Only this user's jobs (a caller who isn't a server-wide admin sees only
+  // its own anyway).
+  optional string user = 1;
+  // At most this many (default and maximum 1000).
+  optional uint32 limit = 2;
+}
+
+message ListJobsResponse {
+  // Newest first.
+  repeated JobInfo jobs = 1;
+  // There were more than the limit.
+  bool truncated = 2;
+}
+
+message GetJobRequest {
+  uint64 id = 1;
+  // Only if it is this user's; otherwise `not_found`.
+  optional string user = 2;
+}
+
+message GetJobResponse {
+  JobInfo job = 1;
+}
+
+message CancelJobRequest {
+  uint64 id = 1;
+  // Only if it is this user's; otherwise `not_found`.
+  optional string user = 2;
+}
+
+message CancelJobResponse {
+  // The job after the cancel: `cancelled`, or how it had ended.
+  JobInfo job = 1;
+}
+
+message GetJobResultRequest {
+  uint64 id = 1;
+  // Only if it is this user's; otherwise `not_found`.
+  optional string user = 2;
+  // The first row to answer.
+  uint64 offset = 3;
+  // At most this many rows (default and maximum 10000); a page also stops
+  // before about 4 MiB, after at least one row.
+  optional uint32 limit = 4;
+}
+
+// Fails with `invalid_argument` while the job is queued or running, with
+// the job's error if it failed, `cancelled` if it was, and `not_found` once
+// its result has expired.
+message GetJobResultResponse {
+  JobInfo job = 1;
+  // Rows of the kind `kind` names, from `offset`.
+  JobResultKind kind = 2;
+  repeated Score scores = 3;
+  repeated Group groups = 4;
+  repeated Count counts = 5;
+  // The offset of the next page; missing: this was the last.
+  optional uint64 next_offset = 6;
+}
+
+// A managed job's state and progress (ADR 0056).
+message JobInfo {
+  // Unique while the server runs, shared with request ids.
+  uint64 id = 1;
+  string namespace = 2;
+  // Its owner.
+  string user = 3;
+  // The owner's client address.
+  optional string client = 4;
+  // The job: the name of its `Job` field (`page_rank`, `leiden`, ...).
+  string kind = 5;
+  JobState state = 6;
+  // When it was queued, left the queue, and ended, in microseconds since
+  // 1970 (UTC).
+  int64 created_micros = 7;
+  optional int64 started_micros = 8;
+  optional int64 ended_micros = 9;
+  // How long it has run (or ran), from leaving the queue.
+  uint64 elapsed_micros = 10;
+  // The projection's size, once collecting started.
+  optional uint64 nodes = 11;
+  optional uint64 edges = 12;
+  // The seq of the state the projection saw, once done.
+  optional uint64 seq = 13;
+  // The result's rows, once done.
+  optional uint64 rows = 14;
+  // `max_results` cut rows.
+  bool truncated = 15;
+  // The stored result's estimated size.
+  uint64 result_bytes = 16;
+  // Why it failed or was cancelled.
+  optional Error error = 17;
+  // When it will be removed, once ended.
+  optional int64 expires_micros = 18;
+}
+
+// Where a job is. The core reports no progress from inside an algorithm
+// (upstream #62), so the state is the progress.
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  // Waiting for a job thread.
+  JOB_STATE_QUEUED = 1;
+  // Waiting for `min_seq`, then collecting the projection.
+  JOB_STATE_COLLECTING = 2;
+  // The algorithm runs.
+  JOB_STATE_RUNNING = 3;
+  // Ended; the result can be fetched.
+  JOB_STATE_DONE = 4;
+  // Ended with `error`.
+  JOB_STATE_FAILED = 5;
+  // Cancelled (CancelJob, CancelRequest, or the server drains).
+  JOB_STATE_CANCELLED = 6;
+  // Was done; its result was dropped for newer ones.
+  JOB_STATE_EXPIRED = 7;
 }
