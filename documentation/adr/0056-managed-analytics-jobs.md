@@ -12,6 +12,8 @@ Points to decide: where jobs live and run, their ids, who may do what, their sta
 
 **What the pinned core (`7e7b7fa`) reports while an algorithm runs: nothing.** Its algorithms fetch the thread's cancel flag (`cancel::stop()`) and check it in their loops; that is all they read from outside. PageRank, label propagation and Leiden iterate, but nobody can see which iteration they are on. Even the poll hook of `cancel::run_polling` isn't called by them: they check `Stop::requested`, not `Stop::poll` (pinned by `algorithms_report_no_progress`, `core_smoke.rs`). So a job can report its phase, not how far its algorithm has got. Filed as [upstream #62](https://github.com/p-sodmann/Ironweaver/issues/62) ([draft 26](../upstream-issues.md#26-algorithms-report-no-progress-while-they-run)).
 
+*Update, upstream check of 2026-10-07: #62 was fixed in core `c69ef51`. Algorithms now report to a `cancel::Progress` given with `cancel::run_with_progress`: a phase, the units done and their total. Jobs read it; see "States and progress".*
+
 ## Decision
 
 ### Jobs are `Admin` methods, implemented once
@@ -71,6 +73,8 @@ Ids are unique while the server runs, not across restarts (ADR 0052). A client t
 
 **Progress is the phase**, with what is known by then: the projection's node and edge counts once collecting starts, the seq it saw and the number of rows once done, and the creation, start and end times. The core reports nothing from inside an algorithm, so there is no fraction. When upstream #62 lands, a progress field per iteration is added (a new proto field, a minor change).
 
+*Update, 2026-10-07 (core `c69ef51`, #62 fixed):* `JobInfo` has `progress`: the core's `phase` (`pagerank`, `leiden`, `label propagation`, ...), the units `done` in it (iterations for PageRank and label propagation, runs for Leiden, nodes or sources for the others) and their `total` if known. The job closure runs the algorithm through `Ns::analyze_reporting`, which runs it under `cancel::run_with_progress` with the job's `Progress`, and the registry reads `Progress::snapshot` whenever it reports the job. When the job ends, the last report is kept (a cancelled job's thread may go on briefly; what it reports after that isn't shown). It is absent before the algorithm's first report: while queued and collecting, and for work that reports none. It is the core's count, not a time estimate: PageRank and label propagation can end below their total, and Leiden's runs differ in length. Proto field 19 (`JobProgress`), a minor change; `iwctl jobs` and the console's jobs table show it.
+
 A cancel takes effect at once in the registry: the job is `cancelled` when `CancelJob` answers, and its thread stops at the core's next check of the token (for a queued job: it never starts). A job that ended just before the cancel keeps its outcome; the cancel then answers with it, as a request's cancel does with a finished answer (ADR 0052).
 
 ### Where jobs run, and their bounds (design rule 5)
@@ -120,7 +124,7 @@ Fetching a job that isn't `done` fails: `invalid_argument` while it is queued or
 ## Consequences
 
 - An analytics job can run for up to an hour by default (longer if configured), past any request timeout, and be watched, cancelled and collected over gRPC, REST, `iwctl --server` and the console.
-- Progress is by phase only until upstream #62. An operator sees that a job is still running, not how far it has got.
+- ~~Progress is by phase only until upstream #62.~~ Since core `c69ef51` an operator sees how far a job's algorithm has got, in the core's units.
 - Jobs and their results are lost on restart and on drain. A client that needs them restarts them.
 - Five new rows in the operation table and the role test. `CancelRequest` reaches jobs too, through the registry's cancel hook.
 - The memory jobs hold is bounded and counted in `working`: `running` projections plus `result_bytes`.

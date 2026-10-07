@@ -104,6 +104,13 @@ fn a_job_outlives_the_request_timeout<D: Database + Admin>(db: &D) {
     assert_eq!((running.nodes, running.edges), (Some(2000), Some(4000)));
     assert!(running.elapsed > Duration::ZERO && running.ended.is_none());
     assert_eq!((done.rows, done.truncated), (Some(10), true));
+    // How far PageRank has got, by iteration (the core's report), and the
+    // last report once done
+    let reported: Vec<_> = seen.iter().filter_map(|j| j.progress.as_ref()).map(|p| p.done).collect();
+    assert!(reported.windows(2).all(|w| w[0] <= w[1]), "{:?}", reported);
+    assert!(reported.iter().any(|&d| 0 < d && d < 20_000), "never seen part way: {:?}", reported);
+    let last = done.progress.as_ref().expect("a last report");
+    assert_eq!((last.phase.as_str(), last.done, last.total), ("pagerank", 20_000, Some(20_000)));
 
     // Its result can be fetched, in pages, until it expires
     let page = block_on(db.job_result(job.id, None, 0, Some(4))).unwrap();

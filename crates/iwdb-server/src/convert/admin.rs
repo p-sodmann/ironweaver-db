@@ -15,8 +15,8 @@ use iwdb_query::log::{Level, LogEvent, LogTail};
 use iwdb_query::metrics::{Family, Kind, Metrics, Sample, Value};
 use iwdb_query::requests::{ConsumerInfo, RequestInfo};
 use iwdb_query::{
-    AnalyticsRequest, BackupDone, Checkpointed, Code, DiskStatus, Error, JobCounts, JobInfo, JobPage, JobState,
-    LimitSource, Listed, MemoryState, MemoryStatus, QueryOptions, RequestCounts, ServerStatus, VerifyTarget,
+    AnalyticsRequest, BackupDone, Checkpointed, Code, DiskStatus, Error, JobCounts, JobInfo, JobPage, JobProgress,
+    JobState, LimitSource, Listed, MemoryState, MemoryStatus, QueryOptions, RequestCounts, ServerStatus, VerifyTarget,
 };
 use iwdb_storage::HistoryId;
 
@@ -687,6 +687,7 @@ pub(crate) fn job_to_pb(j: &JobInfo) -> pb::JobInfo {
         started_micros: j.started.map(|t| t.0),
         ended_micros: j.ended.map(|t| t.0),
         elapsed_micros: micros(j.elapsed),
+        progress: j.progress.as_ref().map(|p| pb::JobProgress { phase: p.phase.clone(), done: p.done, total: p.total }),
         nodes: j.nodes,
         edges: j.edges,
         seq: j.seq,
@@ -714,6 +715,7 @@ pub(crate) fn job_from_pb(j: Option<pb::JobInfo>) -> Result<JobInfo, Error> {
         started: j.started_micros.map(time_from_pb),
         ended: j.ended_micros.map(time_from_pb),
         elapsed: Duration::from_micros(j.elapsed_micros),
+        progress: j.progress.map(|p| JobProgress { phase: p.phase, done: p.done, total: p.total }),
         nodes: j.nodes,
         edges: j.edges,
         seq: j.seq,

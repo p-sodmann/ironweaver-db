@@ -31,7 +31,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use ironweaver_core::cancel::Token;
+use ironweaver_core::cancel::{Progress, Token};
 use iwdb_engine::CommitTime;
 use iwdb_storage::memory::{Charge, Memory, Part};
 
@@ -194,6 +194,9 @@ pub struct JobInfo {
     /// How long it has run (or ran): from leaving the queue to now or its
     /// end; zero while queued.
     pub elapsed: Duration,
+    /// How far the algorithm has got, once it reports (the core's
+    /// [`Progress`], upstream #62); the last report once ended.
+    pub progress: Option<JobProgress>,
     /// The projection's size, once collecting started.
     pub nodes: Option<u64>,
     pub edges: Option<u64>,
@@ -209,6 +212,28 @@ pub struct JobInfo {
     pub error: Option<Error>,
     /// When it will be removed, once ended.
     pub expires: Option<CommitTime>,
+}
+
+/// How far a job's algorithm has got: the core's report (upstream #62).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobProgress {
+    /// The algorithm's phase, as the core names it (`pagerank`, `leiden`,
+    /// `label propagation`, ...).
+    pub phase: String,
+    /// Units done in the phase: iterations (PageRank, label propagation),
+    /// runs (Leiden), nodes or sources (the others).
+    pub done: u64,
+    /// The phase's units, if known. An algorithm that converges early ends
+    /// below it.
+    pub total: Option<u64>,
+}
+
+impl JobProgress {
+    /// What `progress` reports, if it has reported anything.
+    pub fn of(progress: &Progress) -> Option<JobProgress> {
+        let s = progress.snapshot();
+        (!s.phase.is_empty()).then(|| JobProgress { phase: s.phase.to_owned(), done: s.done, total: s.total })
+    }
 }
 
 /// A page of a done job's result ([`Jobs::page`]).
@@ -253,6 +278,7 @@ pub struct JobHandle {
     shared: Arc<Shared>,
     id: u64,
     token: Token,
+    progress: Progress,
     timeout: Duration,
 }
 
@@ -264,6 +290,12 @@ impl JobHandle {
     /// The job's cancel token: cancelled by a cancel or a drain.
     pub fn token(&self) -> &Token {
         &self.token
+    }
+
+    /// Where the algorithm reports how far it has got: run it with
+    /// `cancel::run_with_progress`.
+    pub fn progress(&self) -> &Progress {
+        &self.progress
     }
 
     /// How long the job may run, from now.
@@ -295,6 +327,7 @@ impl JobHandle {
 struct Entry {
     info: JobInfo,
     token: Token,
+    progress: Progress,
     timeout: Duration,
     started_at: Option<Instant>,
     ended_at: Option<Instant>,
@@ -313,7 +346,10 @@ impl Entry {
         };
         let retention = i64::try_from(retention.as_micros()).unwrap_or(i64::MAX);
         let expires = self.info.ended.map(|t| CommitTime(t.0.saturating_add(retention)));
-        JobInfo { elapsed, expires, ..self.info.clone() }
+        // Read live while it runs; `end` keeps the last report
+        let progress =
+            if self.info.state.ended() { self.info.progress.clone() } else { JobProgress::of(&self.progress) };
+        JobInfo { elapsed, expires, progress, ..self.info.clone() }
     }
 
     fn drop_result(&mut self, bytes: &mut u64) {
@@ -450,6 +486,7 @@ impl Jobs {
             started: None,
             ended: None,
             elapsed: Duration::ZERO,
+            progress: None,
             nodes: None,
             edges: None,
             seq: None,
@@ -462,6 +499,7 @@ impl Jobs {
         let entry = Entry {
             info,
             token,
+            progress: Progress::new(),
             timeout: timeout.map_or(config.timeout, |t| t.min(config.timeout)),
             started_at: None,
             ended_at: None,
@@ -631,6 +669,7 @@ fn cancel(shared: &Shared, id: u64, user: Option<&str>, message: &str) -> Result
 
 /// Mark `entry` ended in `outcome`, and take it out of the request list.
 fn end(entry: &mut Entry, outcome: JobState, error: Option<Error>) {
+    entry.info.progress = JobProgress::of(&entry.progress);
     entry.info.state = outcome;
     entry.info.error = error;
     entry.info.ended = Some(CommitTime::now());
@@ -745,6 +784,7 @@ fn work(shared: &Arc<Shared>) {
                             shared: shared.clone(),
                             id,
                             token: entry.token.clone(),
+                            progress: entry.progress.clone(),
                             timeout: entry.timeout,
                         };
                         break (handle, job);
@@ -838,11 +878,18 @@ mod tests {
     }
 
     /// Work that runs until its token is cancelled or `release` gets a
-    /// message, and reports that it started.
+    /// message, and reports that it started, and 4 of 10 units done as
+    /// the core's algorithms do.
     fn blocking(started: mpsc::Sender<u64>, release: mpsc::Receiver<()>) -> JobWork {
         Box::new(move |h| {
             h.collecting(10, 20);
             h.running();
+            ironweaver_core::cancel::run_with_progress(h.token(), h.progress(), || {
+                let report = ironweaver_core::cancel::progress();
+                report.start("count", Some(10));
+                report.add(4);
+            })
+            .ok();
             let _ = started.send(h.id());
             loop {
                 if h.token().is_cancelled() {
@@ -883,6 +930,8 @@ mod tests {
         let running = jobs.get(job.id, None).unwrap();
         assert_eq!((running.state, running.nodes, running.edges), (JobState::Running, Some(10), Some(20)));
         assert!(running.started.is_some() && running.ended.is_none());
+        let reported = JobProgress { phase: "count".into(), done: 4, total: Some(10) };
+        assert_eq!(running.progress.as_ref(), Some(&reported));
         // Listed as a request while it runs, with the job's id
         let listed = requests.list(None, 10).0;
         assert_eq!(listed.iter().map(|r| (r.id, r.operation)).collect::<Vec<_>>(), vec![(job.id, Operation::StartJob)]);
@@ -890,6 +939,7 @@ mod tests {
         let done = wait_for(&jobs, job.id, JobState::Done);
         assert_eq!((done.seq, done.rows, done.truncated), (Some(9), Some(3), true));
         assert!(done.result_bytes > 0 && done.expires.is_some());
+        assert_eq!(done.progress, Some(reported), "the last report is kept");
         assert_eq!(requests.active(), 0, "no longer a running request");
         let page = jobs.page(job.id, None, 0, Some(2)).unwrap();
         assert_eq!((page.rows, page.next_offset), (scores(2), Some(2)));

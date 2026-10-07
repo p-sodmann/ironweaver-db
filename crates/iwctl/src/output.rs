@@ -764,6 +764,7 @@ fn job_json(j: &JobInfo) -> Value {
         "kind": j.kind, "state": j.state.as_str(), "created": j.created.to_string(),
         "started": time(j.started), "ended": time(j.ended),
         "elapsed_micros": u64::try_from(j.elapsed.as_micros()).unwrap_or(u64::MAX),
+        "progress": j.progress.as_ref().map(|p| json!({"phase": p.phase, "done": p.done, "total": p.total})),
         "nodes": j.nodes, "edges": j.edges, "seq": j.seq, "rows": j.rows, "truncated": j.truncated,
         "result_bytes": j.result_bytes,
         "error": j.error.as_ref().map(|e| json!({"code": e.code().as_str(), "message": e.message()})),
@@ -777,14 +778,20 @@ fn job_text(j: &JobInfo) -> String {
         _ => String::new(),
     };
     let rows = j.rows.map_or(String::new(), |r| format!(", {} rows{}", r, if j.truncated { " (cut)" } else { "" }));
+    // `pagerank 1200/20000`: the core's units (iterations, runs, nodes)
+    let progress = j.progress.as_ref().map_or(String::new(), |p| match p.total {
+        Some(total) => format!(", {} {}/{}", p.phase, p.done, total),
+        None => format!(", {} {}", p.phase, p.done),
+    });
     format!(
-        "job {}: {} on {} by {}, {} for {:.1} s{}{}",
+        "job {}: {} on {} by {}, {} for {:.1} s{}{}{}",
         j.id,
         j.kind,
         j.namespace,
         j.user,
         j.state,
         j.elapsed.as_secs_f64(),
+        progress,
         size,
         rows
     )

@@ -278,8 +278,8 @@
     // Managed analytics jobs (step 16f, ADR 0056): their own PRNG, so the rest of the traffic stays as it was
     const rj = prng(7);
     server.jobs = [
-      { id: 4031, namespace: 'social', user: 'reporting', kind: 'page_rank', state: 'done', createdTicks: -900, startedTicks: -890, endedTicks: -420, nodes: 0, edges: 0, rows: 1000, truncated: true },
-      { id: 4077, namespace: 'orders', user: 'reporting', kind: 'leiden', state: 'running', createdTicks: -300, startedTicks: -295, endedTicks: null, leftTicks: 200 },
+      { id: 4031, namespace: 'social', user: 'reporting', kind: 'page_rank', state: 'done', createdTicks: -900, startedTicks: -890, endedTicks: -420, span: 470, nodes: 0, edges: 0, rows: 1000, truncated: true },
+      { id: 4077, namespace: 'orders', user: 'reporting', kind: 'leiden', state: 'running', createdTicks: -300, startedTicks: -295, endedTicks: null, leftTicks: 200, span: 495 },
       { id: 4098, namespace: 'social', user: 'admin', kind: 'triangles', state: 'queued', createdTicks: -5, startedTicks: null, endedTicks: null, leftTicks: 40 },
     ];
     server.jobsDone = 41; server.jobsFailed = 2; server.jobsCancelled = 3;
@@ -384,7 +384,7 @@
       });
       server.jobs.filter((j) => j.state === 'queued').forEach((j) => {
         if (server.jobs.filter((x) => x.state === 'running').length >= 2) return;
-        const ns = byName.get(j.namespace); j.state = 'running'; j.startedTicks = server.ticks; j.nodes = ns.nodes.size; j.edges = ns.edges.size;
+        const ns = byName.get(j.namespace); j.state = 'running'; j.startedTicks = server.ticks; j.span = j.leftTicks; j.nodes = ns.nodes.size; j.edges = ns.edges.size;
       });
       if (rj() < 0.03 && server.jobs.filter((j) => !jobEnded(j)).length < 6) {
         server.jobs.push({ id: server.nextReq++, namespace: pick(rj, ['social', 'orders', 'inventory']), user: pick(rj, ['reporting', 'admin']), kind: pick(rj, ['page_rank', 'weakly_connected_components', 'leiden', 'core_number']), state: 'queued', createdTicks: server.ticks, startedTicks: null, endedTicks: null, leftTicks: between(rj, 20, 400) });
@@ -429,10 +429,17 @@
 
     function jobEnded(j) { return !['queued', 'collecting', 'running'].includes(j.state); }
     const tickMicros = (t) => (t == null ? null : nowMicros() - (server.ticks - t) * 1e6);
+    // The core's report (upstream #62): each kind's phase and its units (iterations, runs, nodes), done as the job's time passes
+    const JOB_PHASES = { page_rank: ['pagerank', () => 100], leiden: ['leiden', () => 3], triangles: ['triangles', (j) => j.nodes], weakly_connected_components: ['weakly connected components', (j) => j.nodes], core_number: ['core number', (j) => j.nodes] };
+    const jobProgress = (j) => {
+      if (j.startedTicks == null || !j.span || !JOB_PHASES[j.kind]) return null;
+      const [phase, units] = JOB_PHASES[j.kind]; const total = units(j);
+      return { phase, done: Math.min(total, Math.floor((total * ((j.endedTicks ?? server.ticks) - j.startedTicks)) / j.span)), total };
+    };
     const jobOut = (j) => ({
       id: j.id, namespace: j.namespace, user: j.user, kind: j.kind, state: j.state,
       createdMicros: tickMicros(j.createdTicks), startedMicros: tickMicros(j.startedTicks), endedMicros: tickMicros(j.endedTicks),
-      elapsedMicros: j.startedTicks == null ? 0 : ((j.endedTicks ?? server.ticks) - j.startedTicks) * 1e6,
+      elapsedMicros: j.startedTicks == null ? 0 : ((j.endedTicks ?? server.ticks) - j.startedTicks) * 1e6, progress: jobProgress(j),
       nodes: j.startedTicks == null ? null : j.nodes, edges: j.startedTicks == null ? null : j.edges,
       rows: j.state === 'done' ? j.rows : null, truncated: j.state === 'done' && !!j.truncated, resultBytes: jobResultBytes(j),
       error: j.error ? { ...j.error } : null, expiresMicros: j.endedTicks == null ? null : tickMicros(j.endedTicks) + JOB_RETENTION_TICKS * 1e6,

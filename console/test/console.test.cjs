@@ -204,6 +204,11 @@ test('jobs run, end and are cancelled in the mock; an ended job is answered as i
   assert.equal(jobCounts.running, jobs.filter((j) => j.state === 'running').length);
   assert.ok(memory.workingBytes >= jobCounts.resultBytes, 'stored results count as working memory');
   const running = jobs.find((j) => j.state === 'running');
+  // How far it has got, in the core's units; the queued have no report yet
+  assert.ok(running.progress && running.progress.phase && running.progress.done <= running.progress.total, JSON.stringify(running.progress));
+  assert.ok(jobs.filter((j) => j.state === 'queued').every((j) => j.progress === null));
+  const doneJob = jobs.find((j) => j.state === 'done');
+  assert.equal(doneJob.progress.done, doneJob.progress.total, 'a done job reported every unit');
   assert.ok(running.nodes > 0 && running.rows === null && running.endedMicros === null);
   const c = await s.cancelJob(running.id);
   assert.equal(c.job.state, 'cancelled'); assert.equal(c.job.error.code, 'cancelled');
@@ -342,7 +347,7 @@ function statusServer(o = {}) {
     'GET /v1/consumers': [200, { consumers: [{ namespace: 'default', user: 'ann', nextSeq: '4', lag: '2', lastPollMicros: '1791260399290946', polls: '3' }] }],
     'GET /v1/metrics': () => [200, metrics(commits, finds)],
     'GET /v1/jobs?limit=50': [200, { jobs: [
-      { id: '31', namespace: 'default', user: 'admin', kind: 'page_rank', state: 'JOB_STATE_RUNNING', createdMicros: '1791260399000000', startedMicros: '1791260399000100', elapsedMicros: '5000000', nodes: '2000', edges: '4000' },
+      { id: '31', namespace: 'default', user: 'admin', kind: 'page_rank', state: 'JOB_STATE_RUNNING', createdMicros: '1791260399000000', startedMicros: '1791260399000100', elapsedMicros: '5000000', progress: { phase: 'pagerank', done: '37', total: '100' }, nodes: '2000', edges: '4000' },
       { id: '30', namespace: 'default', user: 'admin', kind: 'triangles', state: 'JOB_STATE_DONE', createdMicros: '1791260390000000', startedMicros: '1791260390000100', endedMicros: '1791260391000000', elapsedMicros: '999900', nodes: '2000', edges: '4000', seq: '7', rows: '10', truncated: true, resultBytes: '420', expiresMicros: '1791263991000000' },
     ] }],
     'POST /v1/jobs/31/cancel': [200, { job: { id: '31', namespace: 'default', user: 'admin', kind: 'page_rank', state: 'JOB_STATE_CANCELLED', createdMicros: '1', elapsedMicros: '6000000', error: { code: 'cancelled', message: 'the job was cancelled (CancelJob)' } } }],
@@ -397,7 +402,8 @@ test('the REST Source reads the status views: numbers, series from the metrics, 
   assert.equal(second.series.active[0], 2); assert.equal(second.series.walBytes[0], 84369);
   const r = await s.cancel(20); assert.equal(r.request.id, 20);
   // Managed jobs (step 16f): the contract's words and numbers
-  assert.deepEqual(first.jobs[0], { id: 31, namespace: 'default', user: 'admin', kind: 'page_rank', state: 'running', createdMicros: 1791260399000000, startedMicros: 1791260399000100, endedMicros: null, elapsedMicros: 5000000, nodes: 2000, edges: 4000, rows: null, truncated: false, resultBytes: 0, error: null, expiresMicros: null });
+  assert.deepEqual(first.jobs[0], { id: 31, namespace: 'default', user: 'admin', kind: 'page_rank', state: 'running', createdMicros: 1791260399000000, startedMicros: 1791260399000100, endedMicros: null, elapsedMicros: 5000000, progress: { phase: 'pagerank', done: 37, total: 100 }, nodes: 2000, edges: 4000, rows: null, truncated: false, resultBytes: 0, error: null, expiresMicros: null });
+  assert.equal(first.jobs[1].progress, null, 'no report: null');
   assert.deepEqual([first.jobs[1].state, first.jobs[1].rows, first.jobs[1].truncated, first.jobs[1].resultBytes], ['done', 10, true, 420]);
   assert.deepEqual(first.jobCounts, { queued: 0, running: 0, finished: 0, resultBytes: 0 }, 'absent counts are zeros');
   const c = await s.cancelJob(31);

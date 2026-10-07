@@ -44,8 +44,10 @@
  *                                                                     the last minute and a half, one value per call of server()
  *   Request: {id, operation, namespace, user, client, startedMicros, elapsedMicros, cancellable}
  *   Job (step 16f, ADR 0056): {id, namespace, user, kind, state: 'queued'|'collecting'|'running'|'done'|'failed'|'cancelled'|'expired',
- *    createdMicros, startedMicros|null, endedMicros|null, elapsedMicros, nodes|null, edges|null, rows|null, truncated,
- *    resultBytes, error: {code, message}|null, expiresMicros|null}: the state is the progress (the core reports none)
+ *    createdMicros, startedMicros|null, endedMicros|null, elapsedMicros, progress: {phase, done, total|null}|null,
+ *    nodes|null, edges|null, rows|null, truncated, resultBytes, error: {code, message}|null, expiresMicros|null}
+ *    progress: how far the algorithm has got, as the core reports it (upstream #62): the phase ('pagerank', 'leiden', ...),
+ *    units done (iterations, runs, nodes) and their total if known; the last report once ended, null before the first
  *   Memory (step 16d, ADR 0054): {graphBytes, payloadBytes, checkpointBytes, workingBytes, usedBytes (what the limit counts),
  *    limitBytes|null, warnBytes|null, refuseWritesBytes|null, state: 'normal'|'warn'|'refusing_writes',
  *    limitSource: 'config'|'cgroup v2'|'cgroup v1'|null}: the server's own lines and state, not the console's

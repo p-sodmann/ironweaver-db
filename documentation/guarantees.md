@@ -230,7 +230,7 @@ What it doesn't guarantee:
 
 - **The status isn't one consistent cut across namespaces**: each namespace's part is consistent on its own.
 - **Counts start when the database starts serving**, and calls made on an embedded store in-process aren't counted or listed.
-- **A running request's visited count isn't reported** (the core counts it only inside a search; upstream draft 23), nor a job's progress inside its algorithm (upstream #62).
+- **A running request's visited count isn't reported** (the core counts it only inside a search; upstream draft 23).
 - **The schema is sampled** ([ADR 0053](adr/0053-the-schema-read.md)): label counts are exact, but a label only nodes outside the sample carry isn't listed, and keys and edge-type counts are the sample's. It is complete when `sampled_nodes` equals `nodes` and `sampled_edges` equals `edges` (upstream [#60](https://github.com/p-sodmann/Ironweaver/issues/60)).
 - **The log tail is in memory**: a restart empties it, and older events fall out once `[log] tail_events` are kept.
 
@@ -251,7 +251,7 @@ What it guarantees:
 
 What it doesn't guarantee:
 
-- **Progress is the phase only** (queued, collecting, running, done): the core reports nothing from inside an algorithm (upstream [#62](https://github.com/p-sodmann/Ironweaver/issues/62)).
+- **Progress is the core's report**, in its units (iterations, runs, nodes or sources) per phase, not a time estimate: a converging algorithm (PageRank, label propagation) ends below its total, and Leiden's runs vary in length. It is read while the job runs and kept as it was when the job ended (`jobs.rs`, `algorithms_report_progress` in `core_smoke.rs`).
 - **Nothing persists**: a restart or a drain loses every job and result. Ids restart at 1, so an id kept across a restart can name a newer job.
 - **Expiry is checked when the registry is used**, not by a timer: an expired result is never served, but may hold its memory until the next call that looks.
 - **Jobs start while writes are refused**, as reads do: what they add is bounded (`[jobs] running` projections and `[jobs] result_bytes`) and counted, not refused.

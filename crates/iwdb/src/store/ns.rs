@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use ironweaver_core::cancel::{self, Token};
+use ironweaver_core::cancel::{self, Progress, Token};
 use ironweaver_core::{EdgeId, GraphError, Projection};
 use iwdb_engine::catalog::{AttrPath, NamespaceCatalog};
 use iwdb_engine::metrics::HistogramSnapshot;
@@ -273,6 +273,19 @@ where
         options: &ReadOptions,
         job: impl FnOnce(&Projection) -> Result<R, GraphError>,
     ) -> Result<Analysis<R>, Error> {
+        self.analyze_reporting(spec, options, None, job)
+    }
+
+    /// [`analyze`](Self::analyze), with the core's algorithms reporting
+    /// how far they have got to `progress` while `job` runs
+    /// ([`cancel::run_with_progress`]; a managed job's progress, ADR 0056).
+    pub fn analyze_reporting<R>(
+        &self,
+        spec: &ProjectionSpec,
+        options: &ReadOptions,
+        progress: Option<&Progress>,
+        job: impl FnOnce(&Projection) -> Result<R, GraphError>,
+    ) -> Result<Analysis<R>, Error> {
         let deadline = options.deadline();
         let (token, _scheduled) = self.start(options, &deadline, "the analytics job")?;
         // Working memory (ADR 0054): an estimate while the projection is
@@ -291,11 +304,15 @@ where
             (raw, ns.seq())
         });
         let raw = raw.map_err(iwdb_engine::Error::from)?;
-        let outcome = cancel::run(&token, || {
+        let run = || {
             let projection = raw.finish();
             charge.set(projection.memory_usage() as u64);
             job(&projection)
-        });
+        };
+        let outcome = match progress {
+            Some(progress) => cancel::run_with_progress(&token, progress, run),
+            None => cancel::run(&token, run),
+        };
         drop(charge);
         match outcome {
             Ok(Ok(value)) => Ok(Analysis { seq, value }),

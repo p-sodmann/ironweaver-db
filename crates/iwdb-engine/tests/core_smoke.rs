@@ -569,16 +569,15 @@ fn traversals_take_a_direction_and_an_edge_filter() {
     assert_eq!(ids(&g, expanded.value), ["a", "b"]);
 }
 
-/// Upstream #62 (draft 26): the core's algorithms report nothing while they
-/// run. They read only the stop flag, with `Stop::requested`, so not even
-/// the poll hook of `run_polling` hears from them, however many iterations
-/// they run. A managed job (ADR 0056) therefore reports its phase, not how
-/// far its algorithm has got. Fails once the core reports progress through
-/// the poll hook; if it adds another channel, replace this test with one
-/// that reads it, and fill the job's progress.
+/// Fixed upstream (#62, draft 26): the core's algorithms report how far
+/// they have got to the `Progress` of `run_with_progress`, which another
+/// thread reads. A managed job (ADR 0056) reads it for its progress; this
+/// pins the units it shows (iterations for PageRank and label propagation,
+/// runs for Leiden) and that a run without a `Progress` reports nowhere.
 #[test]
-fn algorithms_report_no_progress() {
+fn algorithms_report_progress() {
     use ironweaver_core::algo;
+    use ironweaver_core::cancel::{Progress, ProgressSnapshot};
     let mut g = G::new();
     let ids: Vec<_> = (0..2_000).map(|i| g.add_node(format!("n{}", i), Record::default()).expect("add")).collect();
     for (i, &a) in ids.iter().enumerate() {
@@ -589,21 +588,25 @@ fn algorithms_report_no_progress() {
         Projection::collect::<_, _, GraphError>(&g, Direction::Out, &EdgeCost::Unit, |_, _| Ok(true), |_, _| Ok(true))
             .expect("collect")
             .finish();
-    let heard = std::rc::Rc::new(Cell::new(0usize));
-    let hook = {
-        let heard = heard.clone();
-        std::rc::Rc::new(move || {
-            heard.set(heard.get() + 1);
-            false
-        })
-    };
     let token = Token::new();
-    // 300 iterations each: a poll per iteration would reach the hook
-    // (it runs at every 256th poll)
+    let watched = Progress::new();
+    assert_eq!(watched.snapshot(), ProgressSnapshot { phase: "", done: 0, total: None });
+
     let ranks = algo::PageRank { tol: 0.0, max_iter: 300, ..algo::PageRank::default() };
-    cancel::run_polling(&token, hook.clone(), || algo::pagerank(&p, &ranks)).expect("run").expect("pagerank");
-    cancel::run_polling(&token, hook.clone(), || algo::label_propagation(&p, 300)).expect("run");
+    cancel::run_with_progress(&token, &watched, || algo::pagerank(&p, &ranks)).expect("run").expect("pagerank");
+    assert_eq!(watched.snapshot(), ProgressSnapshot { phase: "pagerank", done: 300, total: Some(300) });
+    let (_, rounds) = algo::label_propagation(&p, 300);
+    cancel::run_with_progress(&token, &watched, || algo::label_propagation(&p, 300)).expect("run");
+    let expected = ProgressSnapshot { phase: "label propagation", done: rounds as u64, total: Some(300) };
+    assert_eq!(watched.snapshot(), expected);
     let leiden = algo::Leiden { max_iter: 300, ..algo::Leiden::default() };
-    cancel::run_polling(&token, hook, || algo::leiden(&p, &leiden)).expect("run").expect("leiden");
-    assert_eq!(heard.get(), 0, "an algorithm called the poll hook: the core may report progress now");
+    cancel::run_with_progress(&token, &watched, || algo::leiden(&p, &leiden)).expect("run").expect("leiden");
+    let s = watched.snapshot();
+    assert!(s.phase == "leiden" && s.done >= 1 && s.total.is_some_and(|t| s.done <= t), "{:?}", s);
+
+    // Without `run_with_progress` nothing is reported, not even to an
+    // outer run's `Progress` once it has returned
+    let before = watched.snapshot();
+    cancel::run(&token, || algo::pagerank(&p, &ranks)).expect("run").expect("pagerank");
+    assert_eq!(watched.snapshot(), before);
 }

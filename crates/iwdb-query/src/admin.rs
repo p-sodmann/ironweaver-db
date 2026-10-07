@@ -26,7 +26,7 @@ pub use iwdb_storage::{
     BackupReport, CheckpointOutcome, Finding, Kind, NamespaceBackup, NamespaceVerify, VerifyReport,
 };
 
-pub use crate::jobs::{JobCounts, JobInfo, JobPage, JobState};
+pub use crate::jobs::{JobCounts, JobInfo, JobPage, JobProgress, JobState};
 use crate::log::LogTail;
 use crate::metrics::Metrics;
 use crate::requests::{ConsumerInfo, RequestInfo, Requests};

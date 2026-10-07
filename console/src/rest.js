@@ -63,6 +63,7 @@
     id: n(j.id), namespace: j.namespace || '', user: j.user || '', kind: j.kind || '',
     state: String(j.state || 'JOB_STATE_UNSPECIFIED').replace(/^JOB_STATE_/, '').toLowerCase(),
     createdMicros: n(j.createdMicros), startedMicros: opt(j.startedMicros), endedMicros: opt(j.endedMicros), elapsedMicros: n(j.elapsedMicros),
+    progress: j.progress ? { phase: j.progress.phase || '', done: n(j.progress.done), total: opt(j.progress.total) } : null,
     nodes: opt(j.nodes), edges: opt(j.edges), rows: opt(j.rows), truncated: !!j.truncated, resultBytes: n(j.resultBytes),
     error: j.error ? { code: j.error.code || 'internal', message: j.error.message || '' } : null, expiresMicros: opt(j.expiresMicros),
   });

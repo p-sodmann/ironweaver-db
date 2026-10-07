@@ -50,6 +50,9 @@
     h('tbody', null, rows.length ? rows : h('tr', null, h('td', { colSpan: cols.length, className: 'iw-small iw-muted' }, empty))))));
   const Num = (v) => h('td', { className: 'is-num iw-mono-s' }, v);
   const ago = (micros, now) => (micros ? U.span((now * 1000 - micros) / 1e6) + ' ago' : '—');
+  /** A job's progress as the core reports it: 'pagerank 37 / 100 · 37%', or the units alone without a total. */
+  const progressText = (p) => (!p ? '—' : p.total == null ? p.phase + ' ' + U.num(p.done)
+    : p.phase + ' ' + U.num(p.done) + ' / ' + U.num(p.total) + ' · ' + (p.total ? Math.floor((100 * p.done) / p.total) : 100) + '%');
 
   function nsState(s) {
     if (s.readOnly) return ['failed', '✕ READ-ONLY', s.readOnly];
@@ -209,10 +212,10 @@
               Num(ago(c.lastPollMicros, now)), Num(U.num(c.polls)))),
             empty: 'No one is following a change stream.',
           })),
-        /* Managed analytics jobs (step 16f): the state is the progress, the core reports none (upstream #62) */
+        /* Managed analytics jobs (step 16f): the state, and how far the algorithm has got as the core reports it (upstream #62) */
         h(Section, { title: 'JOBS', meta: s.jobCounts.queued + ' queued · ' + s.jobCounts.running + ' running · ' + s.jobCounts.finished + ' kept · results ' + U.bytes(s.jobCounts.resultBytes), className: 'cs-jobs' },
           h(Table, {
-            cols: [['JOB'], ['KIND'], ['NAMESPACE'], ['USER'], ['STATE'], ['RUNNING', 1], ['PROJECTION', 1], ['ROWS', 1], ['']],
+            cols: [['JOB'], ['KIND'], ['NAMESPACE'], ['USER'], ['STATE'], ['PROGRESS', 1], ['RUNNING', 1], ['PROJECTION', 1], ['ROWS', 1], ['']],
             rows: s.jobs.flatMap((j) => {
               const live = ['queued', 'collecting', 'running'].includes(j.state);
               const cls = j.state === 'failed' ? 'failed' : live ? 'populating' : j.state === 'done' ? 'online' : 'offline';
@@ -220,13 +223,14 @@
                 h('td', { className: 'iw-mono-s' }, j.id), h('td', { className: 'iw-mono' }, j.kind), h('td', { className: 'iw-mono-s' }, j.namespace),
                 h('td', { className: 'iw-mono-s' }, j.user),
                 h('td', null, h('span', { className: 'iw-state is-' + cls }, (live ? '▲ ' : '') + j.state.toUpperCase())),
+                Num(progressText(j.progress)),
                 Num(j.state === 'queued' ? '—' : U.span(j.elapsedMicros / 1e6)),
                 Num(j.nodes == null ? '—' : U.num(j.nodes) + ' / ' + U.num(j.edges)),
                 Num(j.rows == null ? '—' : U.num(j.rows) + (j.truncated ? ' (top)' : '')),
                 h('td', { className: 'is-num' }, live
                   ? h(I.Button, { variant: 'ghost', onClick: () => cancelJob(j.id), title: 'Cancel job ' + j.id + ': it stops at the next check' }, 'CANCEL')
                   : h('span', { className: 'iw-small iw-muted' }, j.expiresMicros ? 'kept ' + U.span(Math.max(0, j.expiresMicros - now * 1000) / 1e6) : '')));
-              return j.error && j.state === 'failed' ? [row, h('tr', { key: j.id + ':why', className: 'cs-why' }, h('td', null), h('td', { colSpan: 8, className: 'iw-small' }, j.error.code + ': ' + j.error.message))] : [row];
+              return j.error && j.state === 'failed' ? [row, h('tr', { key: j.id + ':why', className: 'cs-why' }, h('td', null), h('td', { colSpan: 9, className: 'iw-small' }, j.error.code + ': ' + j.error.message))] : [row];
             }),
             empty: 'No analytics jobs. Start one with StartJob or POST /v1/namespaces/{ns}/jobs.',
           })),

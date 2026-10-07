@@ -632,10 +632,25 @@ message JobInfo {
   optional Error error = 17;
   // When it will be removed, once ended.
   optional int64 expires_micros = 18;
+  // How far the algorithm has got, once it reports; its last report once
+  // ended.
+  optional JobProgress progress = 19;
 }
 
-// Where a job is. The core reports no progress from inside an algorithm
-// (upstream #62), so the state is the progress.
+// How far a job's algorithm has got, as the core reports it.
+message JobProgress {
+  // The algorithm's phase, as the core names it (`pagerank`, `leiden`,
+  // `label propagation`, ...).
+  string phase = 1;
+  // Units done in the phase: iterations (PageRank, label propagation), runs
+  // (Leiden), nodes or sources (the others).
+  uint64 done = 2;
+  // The phase's units, if known. An algorithm that converges early ends
+  // below it.
+  optional uint64 total = 3;
+}
+
+// Where a job is. While it runs, `JobInfo.progress` says how far.
 enum JobState {
   JOB_STATE_UNSPECIFIED = 0;
   // Waiting for a job thread.
