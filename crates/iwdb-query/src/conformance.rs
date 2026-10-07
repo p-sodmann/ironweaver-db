@@ -715,16 +715,17 @@ pub async fn schema_counts_labels_and_samples_keys_and_types<D: Database>(db: &D
 
 pub async fn schema_is_bounded<D: Database>(db: &D) {
     hub(db, 50).await;
-    // A limit ends the sample, not the read; label counts stay exact
+    // A limit ends the keys' sample, not the read; labels and types are
+    // complete and exact at any sample size (the core's counts, #60)
     let answer = db.schema(NS, limits(None, Some(3), Some(2))).await.expect("sampled");
     let s = &answer.value;
-    assert_eq!((s.nodes, s.edges, s.sampled_nodes, s.sampled_edges), (51, 50, 3, 2));
-    assert_eq!((answer.work.visited, answer.work.edges, answer.truncated), (3, 2, false));
-    assert!(!s.labels.is_empty());
+    assert_eq!((s.nodes, s.edges, s.sampled_nodes, s.sampled_edges), (51, 50, 3, 50));
+    assert_eq!((answer.work.visited, answer.work.edges, answer.truncated), (3, 0, false));
+    assert_eq!(s.labels.len(), 2);
     for label in &s.labels {
         assert_eq!(label.count, if label.name == "Hub" { 1 } else { 50 }, "{}", label.name);
     }
-    assert_eq!(s.types.iter().map(|t| t.count).sum::<usize>(), 2);
+    assert_eq!(s.types.iter().map(|t| t.count).sum::<usize>(), 50);
     let all = db.schema(NS, options()).await.expect("all").value;
     assert_eq!((all.sampled_nodes, all.sampled_edges, all.labels.len()), (51, 50, 2));
     assert_eq!(code(db.schema(NS, limits(None, Some(0), None)).await), Code::InvalidArgument);

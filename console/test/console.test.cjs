@@ -431,9 +431,9 @@ test('histogram quantiles: linear within the bucket, as Prometheus estimates the
   assert.equal(rest.quantile({ bounds: [0.001], counts: [0, 0] }, 0.5), 0, 'no observations');
 });
 
-test('the REST Source reads the schema: exact label counts, sampled keys and types', async () => {
+test('the REST Source reads the schema: exact labels and types, sampled keys', async () => {
   const { fetch, calls } = fakeServer({
-    'GET /v1/namespaces/s/schema?max_visited=10000&max_edges=100000': [200, { schema: { labels: [{ name: 'Person', count: '64', sampled: '40', keys: [{ name: 'age', kinds: [{ kind: 'Int', count: '40' }] }] }, { name: 'Robot' }], types: [{ count: '2' }, { name: 'KNOWS', count: '60' }], nodes: '82', edges: '272', sampledNodes: '82', sampledEdges: '272' } }],
+    'GET /v1/namespaces/s/schema?max_visited=10000': [200, { schema: { labels: [{ name: 'Person', count: '64', sampled: '40', keys: [{ name: 'age', kinds: [{ kind: 'Int', count: '40' }] }] }, { name: 'Robot' }], types: [{ count: '2' }, { name: 'KNOWS', count: '60' }], nodes: '82', edges: '272', sampledNodes: '82', sampledEdges: '272' } }],
     'GET /v1/namespaces/s/catalog': [200, { catalog: { constraints: [{ kind: 'CONSTRAINT_KIND_REQUIRED', label: 'Robot', path: { keys: ['serial'] } }] } }],
   });
   const sc = await rest.create({ fetch }).schema('s');

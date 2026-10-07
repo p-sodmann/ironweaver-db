@@ -27,8 +27,9 @@ message GetCatalogResponse {
 
 message GetSchemaRequest {
   string namespace = 1;
-  // `max_visited` is the nodes the sample reads, `max_edges` its edges;
-  // reaching them ends the sample, not the read.
+  // `max_visited` is the nodes the keys' sample reads; reaching it ends the
+  // sample, not the read. `max_edges` doesn't apply (types are counted by
+  // the core).
   QueryOptions options = 2;
 }
 
@@ -37,21 +38,22 @@ message GetSchemaResponse {
   AnswerMeta meta = 2;
 }
 
-// A namespace's labels, edge types and attribute keys, from a sample of
-// its nodes and edges in the core's order: complete when sampled_nodes is
-// nodes and sampled_edges is edges.
+// A namespace's labels and edge types, complete and with exact counts, and
+// its attribute keys from a sample of its nodes in the core's order: the
+// keys are complete when sampled_nodes is nodes. At most 10 000 labels and
+// 10 000 types; more set the answer's `truncated`.
 message Schema {
-  // The labels of the sampled nodes and of the constraints, by name.
+  // Every label a node carries, and the constraints' labels, by name.
   repeated LabelInfo labels = 1;
-  // The types of the sampled edges, by name (untyped first).
+  // Every edge type, by name (untyped first).
   repeated TypeInfo types = 2;
   // Nodes in the namespace.
   uint64 nodes = 3;
   // Edges in the namespace.
   uint64 edges = 4;
-  // Nodes the sample read.
+  // Nodes the keys' sample read.
   uint64 sampled_nodes = 5;
-  // Edges the sample read.
+  // Edges the type counts cover: always `edges` (the core counts types).
   uint64 sampled_edges = 6;
 }
 
@@ -82,7 +84,7 @@ message KindCount {
 message TypeInfo {
   // Missing for untyped edges.
   optional string name = 1;
-  // Sampled edges of the type.
+  // Edges of the type: exact.
   uint64 count = 2;
 }
 

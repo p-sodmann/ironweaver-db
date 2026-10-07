@@ -19,8 +19,7 @@
 (function (root) {
   'use strict';
 
-  const SAMPLE_NODES = 10000;    // nodes `schema` samples for keys (label counts are exact)
-  const SAMPLE_EDGES = 100000;   // edges it samples for types
+  const SAMPLE_NODES = 10000;    // nodes `schema` samples for keys (labels and edge types are exact and complete)
   const SERIES = 30;             // values a series keeps: 90 s at the status page's 3 s
   const LOG_KEEP = 200;          // log events kept
   // Reads whose latency is the "query" series: not commits, not the change stream's long polls, not the operator's
@@ -227,9 +226,9 @@
       kind: 'rest',
       namespaces: async () => ((await call('GET', '/v1/namespaces')).namespaces || []).map((x) => ({ id: n(x.id), name: x.name, createdMicros: n(x.createdMicros), createdSeq: n(x.createdSeq) })),
       namespaceStatus: async (name) => status((await call('GET', ns(name))).status),
-      /** Labels with their exact counts; keys and edge types from a sample (step 16c, ADR 0053). */
+      /** Labels and edge types with their exact counts; keys from a sample (step 16c, ADR 0053; types exact since core #60). */
       schema: async (name) => {
-        const [r, cat] = await Promise.all([call('GET', ns(name) + `/schema?max_visited=${SAMPLE_NODES}&max_edges=${SAMPLE_EDGES}`), call('GET', ns(name) + '/catalog')]);
+        const [r, cat] = await Promise.all([call('GET', ns(name) + `/schema?max_visited=${SAMPLE_NODES}`), call('GET', ns(name) + '/catalog')]);
         const s = r.schema || {};
         const c = (cat.catalog && cat.catalog.constraints) || [];
         return {

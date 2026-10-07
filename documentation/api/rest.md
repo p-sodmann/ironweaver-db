@@ -15,7 +15,7 @@
 | DELETE | `/v1/namespaces/{ns}` | `DropNamespaceRequest` (optional) | `DropNamespaceResponse` | `drop_namespace` |
 | GET | `/v1/namespaces/{ns}` | – | `GetNamespaceStatusResponse` | `namespace_status` |
 | GET | `/v1/namespaces/{ns}/catalog` | options | `GetCatalogResponse` | `catalog` |
-| GET | `/v1/namespaces/{ns}/schema` | options (`maxVisited`, `maxEdges`: the sample) | `GetSchemaResponse` | `schema` |
+| GET | `/v1/namespaces/{ns}/schema` | options (`maxVisited`: the keys' sample) | `GetSchemaResponse` | `schema` |
 | POST | `/v1/namespaces/{ns}/catalog` | `CommitCatalogRequest` | `CommitCatalogResponse` | `commit_catalog` |
 | POST | `/v1/namespaces/{ns}/commit` | `CommitRequest` | `CommitResponse` | `commit` |
 | POST | `/v1/namespaces/{ns}/wait` | `WaitForSeqRequest` | `WaitForSeqResponse` | `wait_for_seq` |

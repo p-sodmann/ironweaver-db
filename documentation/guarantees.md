@@ -231,7 +231,7 @@ What it doesn't guarantee:
 - **The status isn't one consistent cut across namespaces**: each namespace's part is consistent on its own.
 - **Counts start when the database starts serving**, and calls made on an embedded store in-process aren't counted or listed.
 - **A running request's visited count isn't reported** (the core counts it only inside a search; upstream draft 23).
-- **The schema is sampled** ([ADR 0053](adr/0053-the-schema-read.md)): label counts are exact, but a label only nodes outside the sample carry isn't listed, and keys and edge-type counts are the sample's. It is complete when `sampled_nodes` equals `nodes` and `sampled_edges` equals `edges` (upstream [#60](https://github.com/p-sodmann/Ironweaver/issues/60)).
+- **The schema's keys are sampled** ([ADR 0053](adr/0053-the-schema-read.md)): labels and edge types are complete with exact counts (the core's, upstream [#60](https://github.com/p-sodmann/Ironweaver/issues/60)), up to 10 000 of each (`truncated` beyond), but attribute keys come from the first `max_visited` nodes. They are complete when `sampled_nodes` equals `nodes`.
 - **The log tail is in memory**: a restart empties it, and older events fall out once `[log] tail_events` are kept.
 
 ## Managed analytics jobs (step 16f)

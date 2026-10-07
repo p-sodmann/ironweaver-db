@@ -3807,7 +3807,7 @@
         "type": "string"
       },
       "Schema": {
-        "description": "A namespace's labels, edge types and attribute keys, from a sample of\nits nodes and edges in the core's order: complete when sampled_nodes is\nnodes and sampled_edges is edges.",
+        "description": "A namespace's labels and edge types, complete and with exact counts, and\nits attribute keys from a sample of its nodes in the core's order: the\nkeys are complete when sampled_nodes is nodes. At most 10 000 labels and\n10 000 types; more set the answer's `truncated`.",
         "properties": {
           "edges": {
             "allOf": [
@@ -3818,7 +3818,7 @@
             "description": "Edges in the namespace."
           },
           "labels": {
-            "description": "The labels of the sampled nodes and of the constraints, by name.",
+            "description": "Every label a node carries, and the constraints' labels, by name.",
             "items": {
               "$ref": "#/components/schemas/LabelInfo"
             },
@@ -3838,7 +3838,7 @@
                 "$ref": "#/components/schemas/Uint64"
               }
             ],
-            "description": "Edges the sample read."
+            "description": "Edges the type counts cover: always `edges` (the core counts types)."
           },
           "sampledNodes": {
             "allOf": [
@@ -3846,10 +3846,10 @@
                 "$ref": "#/components/schemas/Uint64"
               }
             ],
-            "description": "Nodes the sample read."
+            "description": "Nodes the keys' sample read."
           },
           "types": {
-            "description": "The types of the sampled edges, by name (untyped first).",
+            "description": "Every edge type, by name (untyped first).",
             "items": {
               "$ref": "#/components/schemas/TypeInfo"
             },
@@ -4362,7 +4362,7 @@
                 "$ref": "#/components/schemas/Uint64"
               }
             ],
-            "description": "Sampled edges of the type."
+            "description": "Edges of the type: exact."
           },
           "name": {
             "description": "Missing for untyped edges.",
@@ -7040,7 +7040,7 @@
     },
     "/v1/namespaces/{ns}/schema": {
       "get": {
-        "description": "Labels (with exact counts), edge types and attribute keys, sampled.",
+        "description": "Labels and edge types (with exact counts), and attribute keys, sampled.",
         "operationId": "getSchema",
         "parameters": [
           {
