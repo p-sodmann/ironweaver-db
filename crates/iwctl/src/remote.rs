@@ -3,6 +3,9 @@
 //! one call of the `Database` or `Admin` trait through the gRPC client
 //! (`client::Remote`), printed like its local form; `iwctl` decides nothing
 //! (design rule 8). Credentials work as for `user` and `token`.
+//!
+//! `jobs list|show|cancel|result` (step 16f, ADR 0056) exist only here:
+//! managed jobs live in a running server's memory.
 
 use iwdb::{CatalogChange, CommitOptions, IdempotencyKey, IndexDef};
 use iwdb_query::exec::block_on;
@@ -71,6 +74,28 @@ pub enum Action {
     Cancel {
         id: u64,
     },
+    Jobs {
+        user: Option<String>,
+    },
+    Job {
+        id: u64,
+    },
+    CancelJob {
+        id: u64,
+    },
+    JobResult {
+        id: u64,
+        offset: u64,
+        limit: Option<usize>,
+    },
+}
+
+/// Why `jobs` needs `--server`.
+pub const JOBS_ONLY_REMOTE: &str =
+    "jobs live in a running server's memory: use iwctl --server <endpoint> jobs list|show|cancel|result";
+
+fn number<T: std::str::FromStr>(word: &str, what: &str) -> Result<T, String> {
+    word.parse().map_err(|_| format!("{} is a number, not '{}'", what, word))
 }
 
 /// Why restore, import and export refuse `--server` (ADR 0055).
@@ -176,6 +201,21 @@ pub fn parse(name: &str, rest: &[String], flags: RemoteFlags<'_>) -> Result<Acti
         "cancel" => {
             expect(1, "<request id>")?;
             Action::Cancel { id: rest[0].parse().map_err(|_| format!("a request id is a number, not '{}'", rest[0]))? }
+        }
+        "jobs" => {
+            let usage = "usage: iwctl --server <endpoint> jobs list [<user>] | show <id> | cancel <id> | result <id> [<offset> [<limit>]]";
+            match rest {
+                [w] if w == "list" => Action::Jobs { user: None },
+                [w, user] if w == "list" => Action::Jobs { user: Some(user.clone()) },
+                [w, id] if w == "show" => Action::Job { id: number(id, "a job id")? },
+                [w, id] if w == "cancel" => Action::CancelJob { id: number(id, "a job id")? },
+                [w, id, more @ ..] if w == "result" && more.len() <= 2 => Action::JobResult {
+                    id: number(id, "a job id")?,
+                    offset: more.first().map(|o| number(o, "an offset")).transpose()?.unwrap_or(0),
+                    limit: more.get(1).map(|l| number(l, "a limit")).transpose()?,
+                },
+                _ => return Err(usage.into()),
+            }
         }
         "restore" | "import" | "export" => return Err(OFFLINE.into()),
         "shell" | "help" | "version" => return Err(format!("{} takes no --server", name)),
@@ -316,6 +356,22 @@ fn execute(remote: &Remote, endpoint: &str, action: &Action, out: &Out) -> Resul
         }
         Action::Cancel { id } => {
             out.cancelled(&block_on(remote.cancel_request(*id, None))?);
+            Ok(OK)
+        }
+        Action::Jobs { user } => {
+            out.jobs(&block_on(remote.jobs(user.clone(), None))?);
+            Ok(OK)
+        }
+        Action::Job { id } => {
+            out.job("job", &block_on(remote.job(*id, None))?);
+            Ok(OK)
+        }
+        Action::CancelJob { id } => {
+            out.job("cancelled", &block_on(remote.cancel_job(*id, None))?);
+            Ok(OK)
+        }
+        Action::JobResult { id, offset, limit } => {
+            out.job_page(&block_on(remote.job_result(*id, None, *offset, *limit))?);
             Ok(OK)
         }
     }

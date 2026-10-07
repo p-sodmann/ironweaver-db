@@ -112,7 +112,7 @@ Fetching a job that isn't `done` fails: `invalid_argument` while it is queued or
 - **`GetServerStatus`** gains `jobs`: queued, running, kept (ended and still listed), and the stored results' bytes.
 - **Metrics** (bounded labels, ADR 0050): `iwdb_jobs_queued` and `iwdb_jobs_running` (gauges), `iwdb_jobs_total{outcome}` (`done`, `failed`, `cancelled`), and `iwdb_job_result_bytes` (gauge).
 - **The console's status page** gets a jobs table (id, namespace, kind, user, state, elapsed, rows) with a cancel button for queued and running jobs. The mock `Source` answers the same shapes.
-- **`iwctl jobs list|show|cancel|result`** with `--server` only: jobs live in a running server's memory, and a data directory has none. Without `--server` the command is refused at parsing (exit code 2). It has no `start`: a job's request is built by the clients, the query shell's `analyze`, or the API.
+- **`iwctl jobs list|show|cancel|result`** with `--server` only: jobs live in a running server's memory, and a data directory has none. Without `--server` the command is refused at parsing (exit code 2). It has no `start`: a job's request (projection, job, options) is built through the API or the Rust clients.
 - **Python: not now.** The bindings have no `Admin` methods at all (status, requests). An embedded Python application runs `analyze` with its own timeout; the remote client gains jobs with the rest of `Admin`.
 
 ## Consequences
