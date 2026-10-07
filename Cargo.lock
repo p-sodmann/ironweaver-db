@@ -856,7 +856,7 @@ dependencies = [
 [[package]]
 name = "ironweaver-core"
 version = "0.2.0"
-source = "git+https://github.com/p-sodmann/Ironweaver?rev=7e7b7fa40e3224b512d59d046f28b5bc0ffe7144#7e7b7fa40e3224b512d59d046f28b5bc0ffe7144"
+source = "git+https://github.com/p-sodmann/Ironweaver?rev=c69ef5146c5865f2fd160a2df0a13b968d0255a3#c69ef5146c5865f2fd160a2df0a13b968d0255a3"
 dependencies = [
  "chrono",
  "crc32fast",
