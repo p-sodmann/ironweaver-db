@@ -1,7 +1,7 @@
 /* Ironweaver DB operator console: the status page (step 16a; on the server's status views since step 16c). The
  * server at one glance: health, the write and read figures of the last minute and a half, every namespace's
- * state, memory and disk, latency per operation, running requests (with cancel), change-stream readers, index
- * builds, and the log. Problems sit at the top of the rail's drawer and on their rows; nothing is hidden behind a
+ * state, memory and disk, latency per operation, running requests (with cancel), change-stream readers, managed
+ * jobs (with cancel, step 16f), index builds, and the log. Problems sit at the top of the rail's drawer and on their rows; nothing is hidden behind a
  * click. Reads IW.ui.source() only. */
 (function () {
   'use strict';
@@ -95,6 +95,7 @@
 
     const problems = useMemo(() => U.problems(s), [s]);
     const cancel = (id) => src.cancel(id).then(() => src.server().then(setS), () => src.server().then(setS, () => {}));
+    const cancelJob = (id) => src.cancelJob(id).then(() => src.server().then(setS), () => src.server().then(setS, () => {}));
 
     if (!s) return h('div', { className: 'cs-status' }, h(I.EmptyState, { kind: 'log', title: 'Asking the server.', body: 'The status appears in a moment.' }));
     const sr = s.series; const tick = s.tickMs;
@@ -176,7 +177,7 @@
                 ? h(I.Meter, { caption: 'MEMORY', value: s.memory.usedBytes, max: limit, warnAt: mem.meterWarnAt, width: 220, readout: U.bytes(s.memory.usedBytes) + ' / ' + U.bytes(limit) })
                 : h('div', null, h('div', { className: 'iw-cap' }, 'MEMORY'), h('div', { className: 'iw-metric' }, U.bytes(s.memory.usedBytes))),
               h('dl', { className: 'cs-dl' },
-                [['GRAPHS', s.memory.graphBytes], ['PAYLOADS', s.memory.payloadBytes], ['CHECKPOINT COPIES', s.memory.checkpointBytes], ['PROJECTIONS, BUILDS', s.memory.workingBytes]]
+                [['GRAPHS', s.memory.graphBytes], ['PAYLOADS', s.memory.payloadBytes], ['CHECKPOINT COPIES', s.memory.checkpointBytes], ['PROJECTIONS, BUILDS, JOB RESULTS', s.memory.workingBytes]]
                   .map(([k, v]) => h('div', { key: k }, h('dt', { className: 'iw-cap' }, k), h('dd', { className: 'iw-mono' }, U.bytes(v))))),
               h('div', { className: 'iw-small iw-muted' }, mem
                 ? `What the server counts against its limit (${s.memory.limitSource || 'set'}): it warns at ${U.pct(mem.warnAt)} and refuses writes at ${U.pct(mem.refuseAt)}, each until memory is 5 % below the line. Payloads, projections and builds are estimates.`
@@ -208,10 +209,31 @@
               Num(ago(c.lastPollMicros, now)), Num(U.num(c.polls)))),
             empty: 'No one is following a change stream.',
           })),
+        /* Managed analytics jobs (step 16f): the state is the progress, the core reports none (upstream #62) */
+        h(Section, { title: 'JOBS', meta: s.jobCounts.queued + ' queued · ' + s.jobCounts.running + ' running · ' + s.jobCounts.finished + ' kept · results ' + U.bytes(s.jobCounts.resultBytes), className: 'cs-jobs' },
+          h(Table, {
+            cols: [['JOB'], ['KIND'], ['NAMESPACE'], ['USER'], ['STATE'], ['RUNNING', 1], ['PROJECTION', 1], ['ROWS', 1], ['']],
+            rows: s.jobs.flatMap((j) => {
+              const live = ['queued', 'collecting', 'running'].includes(j.state);
+              const cls = j.state === 'failed' ? 'failed' : live ? 'populating' : j.state === 'done' ? 'online' : 'offline';
+              const row = h('tr', { key: j.id, className: j.state === 'failed' ? 'is-problem' : undefined },
+                h('td', { className: 'iw-mono-s' }, j.id), h('td', { className: 'iw-mono' }, j.kind), h('td', { className: 'iw-mono-s' }, j.namespace),
+                h('td', { className: 'iw-mono-s' }, j.user),
+                h('td', null, h('span', { className: 'iw-state is-' + cls }, (live ? '▲ ' : '') + j.state.toUpperCase())),
+                Num(j.state === 'queued' ? '—' : U.span(j.elapsedMicros / 1e6)),
+                Num(j.nodes == null ? '—' : U.num(j.nodes) + ' / ' + U.num(j.edges)),
+                Num(j.rows == null ? '—' : U.num(j.rows) + (j.truncated ? ' (top)' : '')),
+                h('td', { className: 'is-num' }, live
+                  ? h(I.Button, { variant: 'ghost', onClick: () => cancelJob(j.id), title: 'Cancel job ' + j.id + ': it stops at the next check' }, 'CANCEL')
+                  : h('span', { className: 'iw-small iw-muted' }, j.expiresMicros ? 'kept ' + U.span(Math.max(0, j.expiresMicros - now * 1000) / 1e6) : '')));
+              return j.error && j.state === 'failed' ? [row, h('tr', { key: j.id + ':why', className: 'cs-why' }, h('td', null), h('td', { colSpan: 8, className: 'iw-small' }, j.error.code + ': ' + j.error.message))] : [row];
+            }),
+            empty: 'No analytics jobs. Start one with StartJob or POST /v1/namespaces/{ns}/jobs.',
+          })),
         /* The log */
         h(Section, { title: serverLog ? 'LOG' : 'THIS PAGE\'S REQUESTS', meta: serverLog ? null : 'the server\'s log needs a server-wide admin', className: 'cs-logsec' }, h(I.LogStream, { entries: log, follow: live })),
-        /* Index builds (managed jobs come with step 16f) */
-        h(Section, { title: 'INDEX BUILDS', className: 'cs-jobs' }, h(Table, {
+        /* Index builds */
+        h(Section, { title: 'INDEX BUILDS', className: 'cs-builds' }, h(Table, {
           cols: [['INDEX'], ['NAMESPACE'], ['PROGRESS']],
           rows: s.namespaces.flatMap((n) => n.indexes.filter((x) => x.building).map((x) => h('tr', { key: n.name + x.path.join('.') }, h('td', { className: 'iw-mono' }, '[' + x.path.join('.') + ']'), h('td', { className: 'iw-mono-s' }, n.name), h('td', null, h(I.Meter, { value: x.building.scanned, max: Math.max(1, x.building.total), warnAt: 2, width: 96, readout: U.num(x.building.scanned) + ' / ' + U.num(x.building.total) }))))),
           empty: 'No index is being built.',

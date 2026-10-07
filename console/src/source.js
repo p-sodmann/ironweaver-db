@@ -22,8 +22,9 @@
  *   matchPattern(ns, text, {limit}) POST .../match                              {columns: [{name, kind}], rows: [{nodes, edges}], meta}
  *   commit(ns, mutations)          POST .../commit                              {seq, edgeIds, timeMicros}
  *   createIndex(ns, path)          POST .../catalog (createIndex)               {seq}
- *   server()                       GET /v1/status, /v1/requests, /v1/consumers, /v1/metrics   Server (below)
+ *   server()                       GET /v1/status, /v1/requests, /v1/consumers, /v1/metrics, /v1/jobs   Server (below)
  *   cancel(requestId)              POST /v1/requests/{id}/cancel                {request: Request}
+ *   cancelJob(jobId)               POST /v1/jobs/{id}/cancel                    {job: Job} (step 16f)
  *   log(), onLog(f) -> unsubscribe GET /v1/log (polled by server())             [{t, level, msg}]
  *   logKind()                      none                                         'server' (the server's log) or 'page' (this page's requests:
  *                                                                                the server's log needs a server-wide admin)
@@ -37,10 +38,14 @@
  *   {version, startedMicros, ready, fsync, memory: Memory, disk: {walBytes, checkpointBytes, freeBytes|null},
  *    requests: {active, total, timedOut, cancelled, rejected, denied}, namespaces: [NamespaceStatus],
  *    active: [Request], consumers: [{namespace, user, client, nextSeq, lag, lastPollMicros, polls}],
+ *    jobs: [Job] (newest first, at most 50), jobCounts: {queued, running, finished, resultBytes},
  *    operations: [{operation, calls, errors, p50Ms, p99Ms}]          from the metrics' histograms, since the start
  *    series: {commitsPerSec, commitP50, commitP99, fsyncP99, queryP50, queryP99, active, usedBytes, walBytes}, tickMs}
  *                                                                     the last minute and a half, one value per call of server()
  *   Request: {id, operation, namespace, user, client, startedMicros, elapsedMicros, cancellable}
+ *   Job (step 16f, ADR 0056): {id, namespace, user, kind, state: 'queued'|'collecting'|'running'|'done'|'failed'|'cancelled'|'expired',
+ *    createdMicros, startedMicros|null, endedMicros|null, elapsedMicros, nodes|null, edges|null, rows|null, truncated,
+ *    resultBytes, error: {code, message}|null, expiresMicros|null}: the state is the progress (the core reports none)
  *   Memory (step 16d, ADR 0054): {graphBytes, payloadBytes, checkpointBytes, workingBytes, usedBytes (what the limit counts),
  *    limitBytes|null, warnBytes|null, refuseWritesBytes|null, state: 'normal'|'warn'|'refusing_writes',
  *    limitSource: 'config'|'cgroup v2'|'cgroup v1'|null}: the server's own lines and state, not the console's
@@ -58,7 +63,7 @@
  */
 (function (root) {
   'use strict';
-  const METHODS = ['namespaces', 'namespaceStatus', 'schema', 'getNodes', 'getEdges', 'find', 'explain', 'neighbours', 'subgraph', 'matchPattern', 'commit', 'createIndex', 'server', 'cancel', 'log', 'onLog', 'logKind', 'tick', 'session', 'login', 'logout', 'onAuth'];
+  const METHODS = ['namespaces', 'namespaceStatus', 'schema', 'getNodes', 'getEdges', 'find', 'explain', 'neighbours', 'subgraph', 'matchPattern', 'commit', 'createIndex', 'server', 'cancel', 'cancelJob', 'log', 'onLog', 'logKind', 'tick', 'session', 'login', 'logout', 'onAuth'];
   const api = { METHODS };
   root.IW = root.IW || {}; root.IW.sourceContract = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

@@ -196,6 +196,24 @@ test('cancel ends a running read and is logged; a commit can\'t be cancelled', a
   await rejects(s.cancel(0), 'not_found');
 });
 
+test('jobs run, end and are cancelled in the mock; an ended job is answered as it is', async () => {
+  const s = fresh();
+  const { jobs, jobCounts, memory } = await s.server();
+  assert.ok(jobs.some((j) => j.state === 'running') && jobs.some((j) => j.state === 'done'), jobs.map((j) => j.state).join());
+  assert.ok(jobs.every((j, i) => i === 0 || jobs[i - 1].id > j.id), 'newest first');
+  assert.equal(jobCounts.running, jobs.filter((j) => j.state === 'running').length);
+  assert.ok(memory.workingBytes >= jobCounts.resultBytes, 'stored results count as working memory');
+  const running = jobs.find((j) => j.state === 'running');
+  assert.ok(running.nodes > 0 && running.rows === null && running.endedMicros === null);
+  const c = await s.cancelJob(running.id);
+  assert.equal(c.job.state, 'cancelled'); assert.equal(c.job.error.code, 'cancelled');
+  assert.equal((await s.cancelJob(running.id)).job.state, 'cancelled');
+  const done = jobs.find((j) => j.state === 'done');
+  assert.equal((await s.cancelJob(done.id)).job.state, 'done');
+  await rejects(s.cancelJob(1), 'not_found');
+  assert.ok(s.log().some((e) => e.msg.includes(`job cancelled · id=${running.id}`)));
+});
+
 test('the query line parses the shell\'s commands', () => {
   assert.deepEqual(Q.parse('-- hi\nmatch (a)-[e]->(b)\n\\limit 40'), { cmd: 'match', pattern: '(a)-[e]->(b)', opts: { limit: 40 } });
   assert.deepEqual(Q.parse('find {"Label":\n "Person"}'), { cmd: 'find', filter: { Label: 'Person' }, opts: {} });
@@ -323,6 +341,11 @@ function statusServer(o = {}) {
     'GET /v1/requests?limit=100': [200, { requests: [{ id: '20', operation: 'Find', namespace: 'default', user: 'admin', client: '127.0.0.1', startedMicros: '1791260399290946', elapsedMicros: '23', cancellable: true }] }],
     'GET /v1/consumers': [200, { consumers: [{ namespace: 'default', user: 'ann', nextSeq: '4', lag: '2', lastPollMicros: '1791260399290946', polls: '3' }] }],
     'GET /v1/metrics': () => [200, metrics(commits, finds)],
+    'GET /v1/jobs?limit=50': [200, { jobs: [
+      { id: '31', namespace: 'default', user: 'admin', kind: 'page_rank', state: 'JOB_STATE_RUNNING', createdMicros: '1791260399000000', startedMicros: '1791260399000100', elapsedMicros: '5000000', nodes: '2000', edges: '4000' },
+      { id: '30', namespace: 'default', user: 'admin', kind: 'triangles', state: 'JOB_STATE_DONE', createdMicros: '1791260390000000', startedMicros: '1791260390000100', endedMicros: '1791260391000000', elapsedMicros: '999900', nodes: '2000', edges: '4000', seq: '7', rows: '10', truncated: true, resultBytes: '420', expiresMicros: '1791263991000000' },
+    ] }],
+    'POST /v1/jobs/31/cancel': [200, { job: { id: '31', namespace: 'default', user: 'admin', kind: 'page_rank', state: 'JOB_STATE_CANCELLED', createdMicros: '1', elapsedMicros: '6000000', error: { code: 'cancelled', message: 'the job was cancelled (CancelJob)' } } }],
     'POST /v1/requests/20/cancel': [200, { request: { id: '20', operation: 'Find', user: 'admin', startedMicros: '1', elapsedMicros: '9', cancellable: true } }],
     ...(o.admin === false
       ? { 'GET /v1/log?after=0&limit=1000': [403, { code: 'permission_denied', message: 'reading the log needs a server-wide admin' }] }
@@ -373,6 +396,12 @@ test('the REST Source reads the status views: numbers, series from the metrics, 
   assert.equal(second.series.queryP99[0], 0, 'no queries since the last answer');
   assert.equal(second.series.active[0], 2); assert.equal(second.series.walBytes[0], 84369);
   const r = await s.cancel(20); assert.equal(r.request.id, 20);
+  // Managed jobs (step 16f): the contract's words and numbers
+  assert.deepEqual(first.jobs[0], { id: 31, namespace: 'default', user: 'admin', kind: 'page_rank', state: 'running', createdMicros: 1791260399000000, startedMicros: 1791260399000100, endedMicros: null, elapsedMicros: 5000000, nodes: 2000, edges: 4000, rows: null, truncated: false, resultBytes: 0, error: null, expiresMicros: null });
+  assert.deepEqual([first.jobs[1].state, first.jobs[1].rows, first.jobs[1].truncated, first.jobs[1].resultBytes], ['done', 10, true, 420]);
+  assert.deepEqual(first.jobCounts, { queued: 0, running: 0, finished: 0, resultBytes: 0 }, 'absent counts are zeros');
+  const c = await s.cancelJob(31);
+  assert.deepEqual([c.job.state, c.job.error], ['cancelled', { code: 'cancelled', message: 'the job was cancelled (CancelJob)' }]);
 });
 
 test('the REST Source shows the server\'s log to an admin, and this page\'s requests to anyone else', async () => {
