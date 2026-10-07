@@ -76,7 +76,7 @@ Ironweaver DB is a **separate project** that turns `ironweaver-core` into a dura
 - Operations: get/multi-get, neighbourhood, BFS/DFS, shortest paths, random walks, subgraph extraction, `match` patterns with `Expr` filters, analytics jobs on a `Projection`.
 - Every read: max results, max visited, timeout (cancel token), cursor pagination. `EXPLAIN` shows index use.
 - Error model shared by all access methods.
-- Built in step 10 as `iwdb-query`: the `Database` trait and its embedded implementation ([ADR 0020](adr/0020-database-trait.md)), limits and cursors ([ADR 0021](adr/0021-bounded-reads-and-cursors.md)), synchronous analytics jobs ([ADR 0022](adr/0022-analytics-jobs.md)), error codes ([api/errors.md](api/errors.md)).
+- Built in step 10 as `iwdb-query`: the `Database` trait and its embedded implementation ([ADR 0020](adr/0020-database-trait.md)), limits and cursors ([ADR 0021](adr/0021-bounded-reads-and-cursors.md)), synchronous analytics jobs ([ADR 0022](adr/0022-analytics-jobs.md)), error codes ([api/errors.md](api/errors.md)). Managed analytics jobs, which outlive a request's timeout, came with step 16f ([ADR 0056](adr/0056-managed-analytics-jobs.md)): a registry in `iwdb-query`, behind the `Admin` trait.
 
 ### 6. Access methods
 - `Database` service trait; embedded facade; Python bindings; gRPC server; REST gateway; `iwctl` shell.

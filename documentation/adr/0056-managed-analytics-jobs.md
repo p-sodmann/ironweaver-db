@@ -20,11 +20,13 @@ Five methods on the `Admin` trait (ADR 0051), implemented once in `iwdb::Embedde
 
 | Method | RPC / REST | What |
 |---|---|---|
-| `start_job(namespace, AnalyticsRequest, QueryOptions)` | `StartJob`, `POST /v1/namespaces/{ns}/jobs` | queue the job; answer at once with its id and state |
+| `start_job(namespace, AnalyticsRequest, QueryOptions, owner)` | `StartJob`, `POST /v1/namespaces/{ns}/jobs` | queue the job; answer at once with its id and state |
 | `jobs(user, limit)` | `ListJobs`, `GET /v1/jobs` | the jobs kept, newest first |
 | `job(id, user)` | `GetJob`, `GET /v1/jobs/{id}` | one job's state and progress |
 | `cancel_job(id, user)` | `CancelJob`, `POST /v1/jobs/{id}/cancel` | cancel a queued or running job |
 | `job_result(id, user, offset, limit)` | `GetJobResult`, `GET /v1/jobs/{id}/result` | a page of a finished job's rows |
+
+**The owner** is an argument because only the authorisation point knows the caller: `Authorized` always sets it to its principal's user and client, whatever it is given, and the clients don't send it (their server's `Authorized` sets it). Called in-process without `Authorized`, a job belongs to the unauthenticated principal.
 
 `Admin`, not `Database`: `Database` is the data API every access method and the Python bindings share. Jobs are something an operator lists and cancels beside the running requests, with which they share ids (below). An embedded application has no server timeout to outlive: it calls `analyze` with the timeout it chooses.
 

@@ -1,6 +1,6 @@
 # ADR 0022: Analytics jobs on a projection: synchronous now, job management later
 
-Status: accepted
+Status: accepted; managed jobs added by [ADR 0056](0056-managed-analytics-jobs.md) (step 16f)
 Date: 2026-10-03
 
 ## Context

@@ -230,9 +230,31 @@ What it doesn't guarantee:
 
 - **The status isn't one consistent cut across namespaces**: each namespace's part is consistent on its own.
 - **Counts start when the database starts serving**, and calls made on an embedded store in-process aren't counted or listed.
-- **A running request's visited count isn't reported** (the core counts it only inside a search; upstream draft 23).
+- **A running request's visited count isn't reported** (the core counts it only inside a search; upstream draft 23), nor a job's progress inside its algorithm (upstream #62).
 - **The schema is sampled** ([ADR 0053](adr/0053-the-schema-read.md)): label counts are exact, but a label only nodes outside the sample carry isn't listed, and keys and edge-type counts are the sample's. It is complete when `sampled_nodes` equals `nodes` and `sampled_edges` equals `edges` (upstream [#60](https://github.com/p-sodmann/Ironweaver/issues/60)).
 - **The log tail is in memory**: a restart empties it, and older events fall out once `[log] tail_events` are kept.
+
+## Managed analytics jobs (step 16f)
+
+[ADR 0056](adr/0056-managed-analytics-jobs.md); [api/rest.md](api/rest.md#managed-jobs), [api/config.md](api/config.md#managed-jobs) (`[jobs]`).
+
+What it guarantees:
+
+- **A job outlives any request's timeout.** It runs on the server's job threads until it ends, its own timeout (`[jobs] timeout_secs`, default an hour), a cancel or the drain, and its result can be fetched, in bounded pages, until it expires; then `not_found`. Tested with a 50 ms maximum request timeout, over gRPC and REST (`crates/iwdb-server/tests/jobs.rs`).
+- **The same answer as `analyze`**: the same projection, limits and ranking, and the rows of a page sequence equal `analyze`'s (the admin conformance suite, over embedded, gRPC and REST).
+- **Jobs never take a query worker**, so a long job doesn't hold back reads.
+- **Every bound has a cap and a defined answer**: a full queue or a user with `[jobs] per_user` jobs is refused with `unavailable`; a projection too large for the limits with `budget_exceeded`, at once; ended jobs are kept for `[jobs] retention_secs` and at most `[jobs] max_finished` (the first to end goes first); stored results hold at most `[jobs] result_bytes` together (the oldest are dropped first, their jobs `expired`), and a result alone larger fails its job with `budget_exceeded`.
+- **A cancel takes effect at once**: the job is `cancelled` when `CancelJob` (or `CancelRequest` on its id) answers, its thread stops at the core's next check, and a queued one never starts. A job that had ended keeps its outcome.
+- **Who may**: starting needs `read` on the namespace; a job is seen, cancelled and fetched only by its owner and server admins (others get `not_found`); fetching a result needs `read` on the namespace still. Starting and cancelling are audited, with the job's id (`roles.rs`).
+- **Counted memory**: a running job's projection and every stored result count in the memory limit's `working` part, and leave it when the job ends and the result expires (`crates/iwdb/tests/memory.rs`).
+- **The drain cancels every job** and refuses new ones (`unavailable`); the jobs stay readable during it, and the drain still ends in time (`jobs.rs`).
+
+What it doesn't guarantee:
+
+- **Progress is the phase only** (queued, collecting, running, done): the core reports nothing from inside an algorithm (upstream [#62](https://github.com/p-sodmann/Ironweaver/issues/62)).
+- **Nothing persists**: a restart or a drain loses every job and result. Ids restart at 1, so an id kept across a restart can name a newer job.
+- **Expiry is checked when the registry is used**, not by a timer: an expired result is never served, but may hold its memory until the next call that looks.
+- **Jobs start while writes are refused**, as reads do: what they add is bounded (`[jobs] running` projections and `[jobs] result_bytes`) and counted, not refused.
 
 ## The memory limit (step 16d)
 
