@@ -163,14 +163,14 @@ fn writes_resume_only_once_memory_is_below_the_band() {
 }
 
 #[test]
-fn a_namespace_charges_its_graph_and_payloads_until_it_is_dropped() {
+fn a_namespace_charges_its_graph_with_its_payloads_until_it_is_dropped() {
     let dir = tempfile::tempdir().unwrap();
     let memory = Memory::unlimited();
     let ns = logged(&TestFs::default(), dir.path(), namespace(), &memory);
     ns.commit(&[upsert("a", Value::String("x".repeat(10_000)))]).unwrap();
-    let (graph, payload) = ns.read(|n| (n.graph().memory_usage() as u64, n.payload_bytes() as u64));
-    assert!(payload > 10_000);
-    assert_eq!((memory.part(Part::Graph), memory.part(Part::Payload)), (graph, payload));
+    let graph = ns.read(|n| n.memory_bytes() as u64);
+    assert!(graph > 10_000, "the payload counts (upstream #61): {}", graph);
+    assert_eq!(memory.part(Part::Graph), graph);
     // Without a limit nothing is refused
     assert_eq!(memory.state(), MemoryState::Normal);
     drop(ns);

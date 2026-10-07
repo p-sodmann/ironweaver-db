@@ -180,11 +180,11 @@
                 ? h(I.Meter, { caption: 'MEMORY', value: s.memory.usedBytes, max: limit, warnAt: mem.meterWarnAt, width: 220, readout: U.bytes(s.memory.usedBytes) + ' / ' + U.bytes(limit) })
                 : h('div', null, h('div', { className: 'iw-cap' }, 'MEMORY'), h('div', { className: 'iw-metric' }, U.bytes(s.memory.usedBytes))),
               h('dl', { className: 'cs-dl' },
-                [['GRAPHS', s.memory.graphBytes], ['PAYLOADS', s.memory.payloadBytes], ['CHECKPOINT COPIES', s.memory.checkpointBytes], ['PROJECTIONS, BUILDS, JOB RESULTS', s.memory.workingBytes]]
+                [['GRAPHS AND PAYLOADS', s.memory.graphBytes], ['CHECKPOINT COPIES', s.memory.checkpointBytes], ['PROJECTIONS, BUILDS, JOB RESULTS', s.memory.workingBytes]]
                   .map(([k, v]) => h('div', { key: k }, h('dt', { className: 'iw-cap' }, k), h('dd', { className: 'iw-mono' }, U.bytes(v))))),
               h('div', { className: 'iw-small iw-muted' }, mem
-                ? `What the server counts against its limit (${s.memory.limitSource || 'set'}): it warns at ${U.pct(mem.warnAt)} and refuses writes at ${U.pct(mem.refuseAt)}, each until memory is 5 % below the line. Payloads, projections and builds are estimates.`
-                : 'What the server counts: graphs, payloads (estimated), checkpoint copies, projections and builds. The server has no memory limit.')),
+                ? `What the server counts against its limit (${s.memory.limitSource || 'set'}): it warns at ${U.pct(mem.warnAt)} and refuses writes at ${U.pct(mem.refuseAt)}, each until memory is 5 % below the line. Projections are estimated while they are collected; job results are estimates.`
+                : 'What the server counts: graphs with their payloads, checkpoint copies, projections, builds and job results. The server has no memory limit.')),
             h('dl', { className: 'cs-dl' },
               [['WAL', U.bytes(s.disk.walBytes)], ['CHECKPOINTS', U.bytes(s.disk.checkpointBytes)], ['DISK FREE', U.bytes(s.disk.freeBytes)], ['REQUESTS', U.num(s.requests.total)], ['REJECTED', U.num(s.requests.rejected)], ['TIMED OUT', U.num(s.requests.timedOut)], ['CANCELLED', U.num(s.requests.cancelled)], ['DENIED', U.num(s.requests.denied)]]
                 .map(([k, v]) => h('div', { key: k }, h('dt', { className: 'iw-cap' }, k), h('dd', { className: 'iw-mono' }, v)))),

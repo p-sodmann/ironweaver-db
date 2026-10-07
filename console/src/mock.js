@@ -301,8 +301,9 @@
       return b + ns.edges.size * 64 + ns.indexes.length * ns.nodes.size * 40;
     };
     const graphBytes = () => spaces.reduce((a, s) => a + memoryOf(s), 0);
-    // The server's memory (step 16d, ADR 0054): the payloads (their JSON's length and a map each), the checkpointers'
-    // copies of both, index builds while they run; a limit from the cgroup, its lines and the state with its band
+    // The server's memory (step 16d, ADR 0054): the graphs with their payloads (their JSON's length and a map each; the
+    // core counts them, upstream #61), the checkpointers' copies, index builds while they run; a limit from the cgroup,
+    // its lines and the state with its band
     const payloadOf = (ns) => {
       let b = 0; const add = (x) => { b += 120 + JSON.stringify(x.attr).length; };
       ns.nodes.forEach(add); ns.edges.forEach(add); return b;
@@ -311,9 +312,9 @@
       const graph = graphBytes(); const payload = spaces.reduce((a, s) => a + payloadOf(s), 0);
       let working = 0; spaces.forEach((s) => s.indexes.forEach((ix) => { if (ix.building) working += 8 * ix.building.total + 96 * ix.building.scanned; }));
       server.jobs.forEach((j) => { working += jobResultBytes(j) + jobWorking(j); });
-      return { graph, payload, checkpoint: graph + payload, working };
+      return { graph: graph + payload, checkpoint: graph + payload, working };
     };
-    const usedBytes = () => { const p = memoryParts(); return p.graph + p.payload + p.checkpoint + p.working; };
+    const usedBytes = () => { const p = memoryParts(); return p.graph + p.checkpoint + p.working; };
     const limit = { bytes: 4 * 2 ** 20, source: 'cgroup v2', warnAt: 0.8, refuseAt: 0.9, band: 0.05 };
     let memState = 'normal';
     const memoryNow = () => {
@@ -326,7 +327,7 @@
       else memState = 'normal';
       const p = memoryParts();
       return {
-        graphBytes: p.graph, payloadBytes: p.payload, checkpointBytes: p.checkpoint, workingBytes: p.working, usedBytes: used,
+        graphBytes: p.graph, checkpointBytes: p.checkpoint, workingBytes: p.working, usedBytes: used,
         limitBytes: limit.bytes, warnBytes: Math.floor(at(limit.warnAt)), refuseWritesBytes: Math.floor(at(limit.refuseAt)),
         state: memState, limitSource: limit.source,
       };

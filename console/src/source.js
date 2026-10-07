@@ -48,7 +48,7 @@
  *    nodes|null, edges|null, rows|null, truncated, resultBytes, error: {code, message}|null, expiresMicros|null}
  *    progress: how far the algorithm has got, as the core reports it (upstream #62): the phase ('pagerank', 'leiden', ...),
  *    units done (iterations, runs, nodes) and their total if known; the last report once ended, null before the first
- *   Memory (step 16d, ADR 0054): {graphBytes, payloadBytes, checkpointBytes, workingBytes, usedBytes (what the limit counts),
+ *   Memory (step 16d, ADR 0054): {graphBytes (payloads included), checkpointBytes, workingBytes, usedBytes (what the limit counts),
  *    limitBytes|null, warnBytes|null, refuseWritesBytes|null, state: 'normal'|'warn'|'refusing_writes',
  *    limitSource: 'config'|'cgroup v2'|'cgroup v1'|null}: the server's own lines and state, not the console's
  * Writes that add fail with `resource_exhausted` while the state is 'refusing_writes'; deletes and drops go on.

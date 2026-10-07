@@ -99,7 +99,6 @@ fn memory_to_pb(m: &MemoryStatus) -> pb::MemoryStatus {
     pb::MemoryStatus {
         graph_bytes: m.graph_bytes,
         limit_bytes: m.limit_bytes,
-        payload_bytes: m.payload_bytes,
         checkpoint_bytes: m.checkpoint_bytes,
         working_bytes: m.working_bytes,
         used_bytes: m.used_bytes,
@@ -125,7 +124,6 @@ fn memory_from_pb(m: pb::MemoryStatus) -> MemoryStatus {
     };
     MemoryStatus {
         graph_bytes: m.graph_bytes,
-        payload_bytes: m.payload_bytes,
         checkpoint_bytes: m.checkpoint_bytes,
         working_bytes: m.working_bytes,
         used_bytes: m.used_bytes,

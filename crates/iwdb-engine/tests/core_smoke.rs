@@ -296,20 +296,25 @@ fn files_without_the_binary_header_are_refused() {
     }
 }
 
-/// Upstream #61 (draft 25): the core can't count a payload's heap, so the
-/// database estimates it (`Namespace::payload_bytes`, ADR 0054). Fails
-/// once the core counts payloads: then remove the estimate.
+/// Fixed upstream (#61, draft 25): `memory_usage` counts the payloads'
+/// heap (`HeapSize`), but only once `count_payloads` turns it on. Every
+/// namespace's graph does (`Namespace::new`, `from_loaded`; ADR 0054); this
+/// pins that the core leaves it off by default, so a graph we make
+/// elsewhere must turn it on too.
 #[test]
-fn memory_usage_leaves_out_payloads() {
-    let build = |text: &str| {
+fn memory_usage_counts_payloads_once_turned_on() {
+    let build = |text: &str, counted: bool| {
         let mut g = G::new();
+        if counted {
+            g.count_payloads();
+        }
         for i in 0..100 {
             g.add_node(format!("n{}", i), rec([("text", Value::String(text.repeat(1000)))])).expect("add");
         }
         g
     };
-    // Attribute maps are owned by the payload: the database must add them
-    assert_eq!(build("").memory_usage(), build("x").memory_usage());
+    assert_eq!(build("", false).memory_usage(), build("x", false).memory_usage(), "off by default");
+    assert!(build("x", true).memory_usage() >= build("", true).memory_usage() + 100 * 1000);
 }
 
 /// Fixed upstream (#27): `max_edges` bounds the edges a traversal

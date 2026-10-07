@@ -2434,7 +2434,7 @@
         "type": "string"
       },
       "MemoryStatus": {
-        "description": "Memory as the server counts it, and its limit (ADR 0054). The limit\ncounts `used_bytes`: the graphs, their payloads, the checkpointers' copies\nand the working memory.",
+        "description": "Memory as the server counts it, and its limit (ADR 0054). The limit\ncounts `used_bytes`: the graphs with their payloads, the checkpointers'\ncopies and the working memory.",
         "properties": {
           "checkpointBytes": {
             "allOf": [
@@ -2450,7 +2450,7 @@
                 "$ref": "#/components/schemas/Uint64"
               }
             ],
-            "description": "The live graphs (the core's estimate), indexes included."
+            "description": "The live graphs (the core's estimate), indexes and attribute payloads\nincluded."
           },
           "limitBytes": {
             "allOf": [
@@ -2467,14 +2467,6 @@
               }
             ],
             "description": "Where the limit came from; unspecified without a limit."
-          },
-          "payloadBytes": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/Uint64"
-              }
-            ],
-            "description": "The live graphs' attribute payloads, estimated."
           },
           "refuseWritesBytes": {
             "allOf": [

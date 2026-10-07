@@ -61,7 +61,7 @@ fn a_crash_after_a_refused_commit_recovers_exactly_the_accepted_ones() {
     }
     let memory = store.memory();
     assert_eq!(memory.state, MemoryState::RefusingWrites, "{:?}", memory);
-    assert!(memory.payload > HEADROOM, "{:?}", memory);
+    assert!(memory.graph > HEADROOM, "the payloads count in the graph: {:?}", memory);
 
     // Any WAL or namespace-log write from here on fails, so a refused
     // write that reached the log would show as `Io` and a read-only store
@@ -234,7 +234,7 @@ fn a_job_is_counted_while_it_runs_and_starts_while_writes_are_refused() {
     assert_eq!(working(), done.result_bytes);
     assert_eq!(
         db.store().memory().used(),
-        db.store().memory().graph + db.store().memory().payload + db.store().memory().checkpoint + done.result_bytes
+        db.store().memory().graph + db.store().memory().checkpoint + done.result_bytes
     );
     std::thread::sleep(Duration::from_millis(350));
     // Expiry is checked when the registry is used

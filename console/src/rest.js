@@ -147,7 +147,7 @@
   const MEMORY_STATES = { MEMORY_STATE_NORMAL: 'normal', MEMORY_STATE_WARN: 'warn', MEMORY_STATE_REFUSING_WRITES: 'refusing_writes' };
   const LIMIT_SOURCES = { MEMORY_LIMIT_SOURCE_CONFIG: 'config', MEMORY_LIMIT_SOURCE_CGROUP_V2: 'cgroup v2', MEMORY_LIMIT_SOURCE_CGROUP_V1: 'cgroup v1' };
   const memoryOf = (m) => ({
-    graphBytes: n(m.graphBytes), payloadBytes: n(m.payloadBytes), checkpointBytes: n(m.checkpointBytes), workingBytes: n(m.workingBytes),
+    graphBytes: n(m.graphBytes), checkpointBytes: n(m.checkpointBytes), workingBytes: n(m.workingBytes),
     usedBytes: n(m.usedBytes), limitBytes: opt(m.limitBytes), warnBytes: opt(m.warnBytes), refuseWritesBytes: opt(m.refuseWritesBytes),
     state: MEMORY_STATES[m.state] || 'normal', limitSource: LIMIT_SOURCES[m.limitSource] || null,
   });

@@ -52,7 +52,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// [`Error::ReadOnly`] until the namespace is reopened from its checkpoint
 /// and log. Reads still work, and see every applied commit.
 ///
-/// **Memory** (ADR 0054). The namespace charges its graph and payloads to a
+/// **Memory** (ADR 0054). The namespace charges its graph, payloads included, to a
 /// [`Memory`] ([`with_memory`](Self::with_memory); its own unlimited one
 /// otherwise). While that refuses writes, a commit that adds anything
 /// fails with [`Error::MemoryLimit`] after it is prepared and before it is
@@ -94,10 +94,9 @@ pub struct LoggedNamespace<F: LogFs = StdFs> {
     nodes: AtomicUsize,
     edges: AtomicUsize,
     memory: AtomicUsize,
-    /// The graph's and the payloads' charges ([`Part::Graph`],
-    /// [`Part::Payload`]), set with each apply.
+    /// The graph's charge ([`Part::Graph`]: structure, indexes and
+    /// payloads), set with each apply.
     graph_charge: Charge,
-    payload_charge: Charge,
     /// Whether the memory limit applies: every namespace but the system
     /// namespace (users, grants, session tokens), so that an operator can
     /// still log in and act.
@@ -109,18 +108,17 @@ pub struct LoggedNamespace<F: LogFs = StdFs> {
 pub struct Sizes {
     pub nodes: usize,
     pub edges: usize,
-    /// The core's `Graph::memory_usage`: indexes included, payloads not.
+    /// The core's `Graph::memory_usage`: indexes and payloads included.
     pub memory_bytes: usize,
 }
 
 /// Rows scanned per read-lock hold of an online index build.
 pub const BUILD_CHUNK: usize = 2048;
 
-/// The memory an index build is charged (ADR 0054): its node handles, and
-/// an estimate per node scanned, between the measured 75 (an integer key)
-/// and 216 bytes (an email). The core reports no figure (upstream #61).
+/// The memory an index build is charged for each node handle it holds
+/// (ADR 0054), on top of the core's figure for the build itself
+/// (`IndexBuild::memory_usage`).
 const BUILD_HANDLE_BYTES: usize = 8;
-const BUILD_ENTRY_BYTES: usize = 96;
 
 /// An online index build in progress ([`LoggedNamespace::builds`]).
 #[derive(Debug)]
@@ -212,13 +210,11 @@ impl<F: LogFs> LoggedNamespace<F> {
         let g = namespace.graph();
         let (nodes, edges, memory) = (g.node_count(), g.edge_count(), g.memory_usage());
         let accounting = Memory::unlimited();
-        let (graph_charge, payload_charge) = (accounting.charge(Part::Graph), accounting.charge(Part::Payload));
+        let graph_charge = accounting.charge(Part::Graph);
         graph_charge.set(memory as u64);
-        payload_charge.set(namespace.payload_bytes() as u64);
         Ok(LoggedNamespace {
             limited: !namespace.name().is_reserved(),
             graph_charge,
-            payload_charge,
             fsyncs,
             nodes: AtomicUsize::new(nodes),
             edges: AtomicUsize::new(edges),
@@ -241,11 +237,9 @@ impl<F: LogFs> LoggedNamespace<F> {
     /// Charge this namespace's memory to `memory` (the store's), whose
     /// limit then refuses its writes (see the type docs).
     pub fn with_memory(mut self, memory: &Arc<Memory>) -> Self {
-        let (graph, payload) = (memory.charge(Part::Graph), memory.charge(Part::Payload));
+        let graph = memory.charge(Part::Graph);
         graph.set(self.graph_charge.bytes());
-        payload.set(self.payload_charge.bytes());
         self.graph_charge = graph;
-        self.payload_charge = payload;
         self
     }
 
@@ -346,8 +340,8 @@ impl<F: LogFs> LoggedNamespace<F> {
         let progress =
             Arc::new(BuildProgress { path: build.path().clone(), total: handles.len(), scanned: AtomicU64::new(0) });
         let charge = self.memory().charge(Part::Working);
-        let estimate = |scanned: usize| (BUILD_HANDLE_BYTES * handles.len() + BUILD_ENTRY_BYTES * scanned) as u64;
-        charge.set(estimate(0));
+        let charged = |build: &IndexBuild| (BUILD_HANDLE_BYTES * handles.len() + build.memory_usage()) as u64;
+        charge.set(charged(&build));
         lock(&self.builds).push(progress.clone());
         let mut result = Ok(());
         for chunk in handles.chunks(BUILD_CHUNK) {
@@ -362,8 +356,8 @@ impl<F: LogFs> LoggedNamespace<F> {
             if result.is_err() {
                 break;
             }
-            let scanned = progress.scanned.fetch_add(chunk.len() as u64, Ordering::Relaxed) as usize + chunk.len();
-            charge.set(estimate(scanned));
+            progress.scanned.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            charge.set(charged(&build));
         }
         lock(&self.builds).retain(|b| !Arc::ptr_eq(b, &progress));
         result.map(|()| Some((build, charge)))
@@ -638,7 +632,6 @@ impl<F: LogFs> LoggedNamespace<F> {
         self.edges.store(g.edge_count(), Ordering::Relaxed);
         self.memory.store(g.memory_usage(), Ordering::Relaxed);
         self.graph_charge.set(g.memory_usage() as u64);
-        self.payload_charge.set(namespace.payload_bytes() as u64);
         drop(namespace);
         self.stats.record(start.elapsed());
         match applied {

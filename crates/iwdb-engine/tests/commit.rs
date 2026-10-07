@@ -680,15 +680,18 @@ fn replay_rejects_gaps_and_repeats() {
 
 // Memory
 
+/// The core counts the payloads (upstream #61): the namespace's memory
+/// follows what commits add and remove, whatever entity holds it.
 #[test]
-fn the_payload_estimate_follows_commits_and_counts_the_namespaces_memory() {
+fn the_namespaces_memory_counts_payloads_as_commits_change_them() {
     let mut ns = ns();
-    assert_eq!(ns.payload_bytes(), 0);
+    assert!(ns.graph().counts_payloads());
+    let empty = ns.memory_bytes();
+    assert_eq!(empty, ns.graph().memory_usage());
     let text = Value::String("x".repeat(10_000));
     ns.commit(&[upsert("a", &[], &[("text", text.clone())]), upsert("b", &[], &[])]).unwrap();
-    let one = ns.payload_bytes();
-    assert!(one > 10_000, "{}", one);
-    assert_eq!(ns.memory_bytes(), ns.graph().memory_usage() + one);
+    let one = ns.memory_bytes();
+    assert!(one > empty + 10_000, "{} {}", empty, one);
 
     // An edge's payload, then the edge removed with its node
     let r = ns
@@ -700,15 +703,17 @@ fn the_payload_estimate_follows_commits_and_counts_the_namespaces_memory() {
             meta: Attrs::new(),
         }])
         .unwrap();
-    assert!(ns.payload_bytes() > one + 10_000);
+    let two = ns.memory_bytes();
+    assert!(two > one + 10_000, "{} {}", one, two);
     ns.commit(&[Mutation::DeleteNode { id: "b".into(), expected_version: None }]).unwrap();
     assert!(ns.graph().edge_ix(r.edge_ids[0]).is_none());
-    assert_eq!(ns.payload_bytes(), one);
+    assert!(ns.memory_bytes() + 10_000 < two, "the edge's payload left with it");
 
     // An attribute removed
+    let before = ns.memory_bytes();
     ns.commit(&[Mutation::RemoveAttr { target: Target::Node("a".into()), key: "text".into(), expected_version: None }])
         .unwrap();
-    assert!(ns.payload_bytes() < 1000, "{}", ns.payload_bytes());
+    assert!(ns.memory_bytes() + 10_000 <= before, "{} {}", before, ns.memory_bytes());
 }
 
 // Saved files
@@ -724,8 +729,7 @@ fn a_namespace_from_a_loaded_file_continues_where_the_original_was() {
     assert_eq!(loaded.name(), original.name());
     assert_eq!(loaded.catalog(), original.catalog());
     assert_eq!(canonical(loaded.graph()), canonical(original.graph()));
-    assert!(original.payload_bytes() > 0);
-    assert_eq!(loaded.payload_bytes(), original.payload_bytes(), "the payload estimate survives a save and load");
+    assert!(loaded.graph().counts_payloads(), "a loaded namespace counts its payloads too");
 
     // Same results, including edge ids, versions and the constraint
     let next = [upsert("b", &["P"], &[("k", Value::Int(2))]), edge("a", "b", Some("T"))];

@@ -338,7 +338,7 @@ impl Out {
             "ready": s.ready,
             "fsync": s.fsync,
             "memory": {
-                "graph_bytes": m.graph_bytes, "payload_bytes": m.payload_bytes, "checkpoint_bytes": m.checkpoint_bytes,
+                "graph_bytes": m.graph_bytes, "checkpoint_bytes": m.checkpoint_bytes,
                 "working_bytes": m.working_bytes, "used_bytes": m.used_bytes, "limit_bytes": m.limit_bytes,
                 "warn_bytes": m.warn_bytes, "refuse_writes_bytes": m.refuse_writes_bytes,
                 "state": memory_state(m.state),

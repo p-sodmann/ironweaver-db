@@ -271,7 +271,7 @@ What it guarantees:
 
 What it doesn't guarantee:
 
-- **The accounting is an estimate.** It counts the live graphs (the core's figure), their payloads (ours, from lengths: 3–8 % above the measured heap), the checkpointers' copies, and projections and index builds while they run (by a formula per node and edge). It doesn't count request buffers, the WAL's buffer, the allocator's slack or the runtime. The process's resident memory can be higher than `used`; the 10 % between the refusal line and the limit is for that.
+- **The accounting is an estimate.** It counts the live graphs with their payloads and the index builds (the core's figures, from lengths, not capacities; upstream [#61](https://github.com/p-sodmann/Ironweaver/issues/61)), the checkpointers' copies, projections while they run (a formula per node and edge while collected, then the core's figure) and the managed jobs' stored results (estimated). It doesn't count request buffers, the WAL's buffer, the allocator's slack or the runtime. The process's resident memory can be higher than `used`; the 10 % between the refusal line and the limit is for that.
 - **One commit can cross the line.** A commit is admitted on the state before it, so `used` can pass the line by one commit (a WAL record is at most 64 MiB). The next one is refused.
 - **Reads aren't limited by memory.** An `analyze` is counted, and can push the store into refusing writes, but it isn't refused.
 - **An embedded store has no limit** unless `StoreOptions::memory` sets one: it can't see the memory of the application it runs in. Without a limit nothing is refused.

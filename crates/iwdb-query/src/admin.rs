@@ -60,11 +60,9 @@ pub struct ServerStatus {
 /// wide: every namespace's, the system namespace's included.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemoryStatus {
-    /// The live graphs, indexes included: the core's estimate (the sum of
-    /// the namespaces' `memory_bytes`).
+    /// The live graphs, indexes and payloads (attribute maps) included:
+    /// the core's estimate (the sum of the namespaces' `memory_bytes`).
     pub graph_bytes: u64,
-    /// The live graphs' payloads (attribute maps), estimated.
-    pub payload_bytes: u64,
     /// The checkpointers' copies of the namespaces.
     pub checkpoint_bytes: u64,
     /// Analytics projections and index builds while they run, and the
@@ -88,7 +86,6 @@ impl MemoryStatus {
     pub fn of(m: &MemorySnapshot) -> Self {
         MemoryStatus {
             graph_bytes: m.graph,
-            payload_bytes: m.payload,
             checkpoint_bytes: m.checkpoint,
             working_bytes: m.working,
             used_bytes: m.used(),

@@ -289,7 +289,8 @@ where
         let deadline = options.deadline();
         let (token, _scheduled) = self.start(options, &deadline, "the analytics job")?;
         // Working memory (ADR 0054): an estimate while the projection is
-        // collected, then its own size until the job ends
+        // collected (charged before it allocates), then the core's figures:
+        // the raw projection's, then the sorted one's until the job ends
         let charge = self.store.shared.memory.charge(Part::Working);
         let (raw, seq) = self.read(|ns| {
             let g = ns.graph();
@@ -304,6 +305,7 @@ where
             (raw, ns.seq())
         });
         let raw = raw.map_err(iwdb_engine::Error::from)?;
+        charge.set(raw.memory_usage() as u64);
         let run = || {
             let projection = raw.finish();
             charge.set(projection.memory_usage() as u64);
@@ -602,8 +604,10 @@ fn dir_bytes(dir: &std::path::Path) -> u64 {
 
 /// Bytes a projection of a graph holds while it is collected (ADR 0054):
 /// per edge its row entry (16), per node its handle, id and offsets (48),
-/// per node slot its dense index (4). Within 6 % of the measured peaks; the
-/// core reports no figure for a raw projection (upstream #61).
+/// per node slot its dense index (4). Within 6 % of the measured peaks.
+/// Charged before collecting, so that the limit sees it while the memory is
+/// allocated; replaced by the core's `RawProjection::memory_usage` once
+/// collected.
 fn projection_estimate(nodes: usize, edges: usize, slots: usize) -> u64 {
     (16 * edges as u64).saturating_add(48 * nodes as u64).saturating_add(4 * slots as u64)
 }

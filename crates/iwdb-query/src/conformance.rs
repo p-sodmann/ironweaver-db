@@ -885,7 +885,7 @@ pub async fn server_status_reports_the_database<D: Database + Admin>(db: &D) {
     let m = &after.memory;
     let graphs: u64 = after.namespaces.iter().map(|n| n.memory_bytes as u64).sum();
     assert!(m.graph_bytes >= graphs, "{:?}", m);
-    assert_eq!(m.used_bytes, m.graph_bytes + m.payload_bytes + m.checkpoint_bytes + m.working_bytes);
+    assert_eq!(m.used_bytes, m.graph_bytes + m.checkpoint_bytes + m.working_bytes);
     assert_eq!(m.limit_bytes.is_some(), m.refuse_writes_bytes.is_some());
     // The commit and the first status at least
     assert!(after.requests.total >= before.requests.total + 2, "{:?} then {:?}", before.requests, after.requests);

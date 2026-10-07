@@ -144,7 +144,7 @@ test('the server status: series, problems in the degraded scenario', async () =>
   assert.deepEqual(U.problems(calm), []); assert.equal(calm.ready, true);
   assert.equal(calm.series.commitsPerSec.length, 90);
   assert.deepEqual([calm.memory.state, calm.memory.limitSource], ['normal', 'cgroup v2']);
-  assert.equal(calm.memory.usedBytes, calm.memory.graphBytes + calm.memory.payloadBytes + calm.memory.checkpointBytes + calm.memory.workingBytes);
+  assert.equal(calm.memory.usedBytes, calm.memory.graphBytes + calm.memory.checkpointBytes + calm.memory.workingBytes);
   const s = fresh({ scenario: 'degraded' }); const d = await s.server();
   assert.equal(U.problems(d).length, 3);
   assert.equal(d.memory.state, 'warn');
@@ -341,7 +341,7 @@ const metrics = (commits, finds) => ({ families: [
 function statusServer(o = {}) {
   let commits = 10; let finds = 4;
   const routes = {
-    'GET /v1/status': () => [200, { status: { version: '0.1.0', startedMicros: '1791260391767612', ready: true, fsync: 'always', memory: { graphBytes: '648086', payloadBytes: '900000', usedBytes: '1548086', limitBytes: '2000000', warnBytes: '1600000', refuseWritesBytes: '1800000', state: 'MEMORY_STATE_NORMAL', limitSource: 'MEMORY_LIMIT_SOURCE_CGROUP_V2' }, disk: { walBytes: '84369', freeBytes: '74012971008' }, requests: { active: '1', total: '18' },
+    'GET /v1/status': () => [200, { status: { version: '0.1.0', startedMicros: '1791260391767612', ready: true, fsync: 'always', memory: { graphBytes: '1548086', usedBytes: '1548086', limitBytes: '2000000', warnBytes: '1600000', refuseWritesBytes: '1800000', state: 'MEMORY_STATE_NORMAL', limitSource: 'MEMORY_LIMIT_SOURCE_CGROUP_V2' }, disk: { walBytes: '84369', freeBytes: '74012971008' }, requests: { active: '1', total: '18' },
       namespaces: [{ id: '1', name: 'default', createdMicros: '1791260391478630', syncedSeq: '0', memoryBytes: '432', recovery: {}, unsynced: '0' }] } }],
     'GET /v1/requests?limit=100': [200, { requests: [{ id: '20', operation: 'Find', namespace: 'default', user: 'admin', client: '127.0.0.1', startedMicros: '1791260399290946', elapsedMicros: '23', cancellable: true }] }],
     'GET /v1/consumers': [200, { consumers: [{ namespace: 'default', user: 'ann', nextSeq: '4', lag: '2', lastPollMicros: '1791260399290946', polls: '3' }] }],
@@ -385,8 +385,8 @@ test('the REST Source reads the status views: numbers, series from the metrics, 
   const srv = statusServer();
   const s = rest.create({ fetch: srv.fetch });
   const first = await s.server();
-  assert.equal(first.version, '0.1.0'); assert.equal(first.memory.graphBytes, 648086);
-  assert.deepEqual(first.memory, { graphBytes: 648086, payloadBytes: 900000, checkpointBytes: 0, workingBytes: 0, usedBytes: 1548086, limitBytes: 2000000, warnBytes: 1600000, refuseWritesBytes: 1800000, state: 'normal', limitSource: 'cgroup v2' });
+  assert.equal(first.version, '0.1.0'); assert.equal(first.memory.graphBytes, 1548086);
+  assert.deepEqual(first.memory, { graphBytes: 1548086, checkpointBytes: 0, workingBytes: 0, usedBytes: 1548086, limitBytes: 2000000, warnBytes: 1600000, refuseWritesBytes: 1800000, state: 'normal', limitSource: 'cgroup v2' });
   assert.equal(first.disk.checkpointBytes, 0); assert.equal(first.requests.total, 18); assert.equal(first.requests.denied, 0);
   assert.deepEqual(first.active[0], { id: 20, operation: 'Find', namespace: 'default', user: 'admin', client: '127.0.0.1', startedMicros: 1791260399290946, elapsedMicros: 23, cancellable: true });
   assert.deepEqual(first.consumers[0], { namespace: 'default', user: 'ann', client: null, nextSeq: 4, lag: 2, lastPollMicros: 1791260399290946, polls: 3 });
