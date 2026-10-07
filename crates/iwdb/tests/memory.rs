@@ -163,3 +163,82 @@ fn a_growing_write_load_is_refused_below_the_limit_and_resumes_when_memory_falls
     assert_eq!(store.memory().state, MemoryState::Normal);
     store.commit(&node("again", 20_000)).unwrap();
 }
+
+/// Managed jobs (ADR 0056): a running job's projection is in `working`
+/// and leaves it when the job ends; its stored result stays there until
+/// it expires. Jobs start while writes are refused, as reads do.
+#[test]
+fn a_job_is_counted_while_it_runs_and_starts_while_writes_are_refused() {
+    use ironweaver_core::algo::PageRank;
+    use iwdb::{Embedded, QueryConfig};
+    use iwdb_query::exec::block_on;
+    use iwdb_query::jobs::JobsConfig;
+    use iwdb_query::{Admin, AnalyticsRequest, Database, Job, JobState, QueryOptions};
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open(dir.path(), options(2)).unwrap();
+        let mut m: Vec<Mutation> = (0..500).flat_map(|i| node(&format!("n{}", i), 10)).collect();
+        m.extend((0..500).map(|i| Mutation::AddEdge {
+            from: format!("n{}", i),
+            to: format!("n{}", (i + 1) % 500),
+            ty: None,
+            attr: Default::default(),
+            meta: Default::default(),
+        }));
+        store.commit(&m).unwrap();
+        store.close().unwrap();
+    }
+    // A limit of 1 byte: refusing writes from the start
+    let memory = MemoryOptions { limit_bytes: Some(1), ..MemoryOptions::default() };
+    let store = Store::open(dir.path(), StoreOptions { memory, ..options(2) }).unwrap();
+    let jobs = JobsConfig { retention: Duration::from_millis(300), ..JobsConfig::default() };
+    let db = Embedded::new(store, QueryConfig { jobs, ..QueryConfig::default() }).unwrap();
+    assert_eq!(db.store().memory().state, MemoryState::RefusingWrites);
+    assert_eq!(
+        block_on(db.commit("default", node("new", 1), Default::default())).unwrap_err().code(),
+        Code::ResourceExhausted
+    );
+    let working = || db.store().memory().working;
+    assert_eq!(working(), 0);
+
+    let endless = Job::PageRank(PageRank { tol: 0.0, max_iter: 1 << 40, ..PageRank::default() });
+    let request = |job| AnalyticsRequest { projection: ProjectionSpec::default(), job };
+    let job = block_on(db.start_job("default".into(), request(endless), QueryOptions::default(), None)).unwrap();
+    let start = Instant::now();
+    while block_on(db.job(job.id, None)).unwrap().state != JobState::Running {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let projection = working();
+    assert!(projection > 0, "the running job's projection is counted");
+    block_on(db.cancel_job(job.id, None)).unwrap();
+    let start = Instant::now();
+    while working() != 0 {
+        assert!(start.elapsed() < Duration::from_secs(10), "the projection was never released");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    // A done job's result stays counted until it expires
+    let quick = request(Job::Degree { incoming: false });
+    let job = block_on(db.start_job("default".into(), quick, QueryOptions::default(), None)).unwrap();
+    let done = loop {
+        let j = block_on(db.job(job.id, None)).unwrap();
+        if j.state.ended() {
+            break j;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert_eq!(done.state, JobState::Done);
+    assert_eq!(working(), done.result_bytes);
+    assert_eq!(
+        db.store().memory().used(),
+        db.store().memory().graph + db.store().memory().payload + db.store().memory().checkpoint + done.result_bytes
+    );
+    std::thread::sleep(Duration::from_millis(350));
+    // Expiry is checked when the registry is used
+    assert_eq!(block_on(db.job(job.id, None)).unwrap_err().code(), Code::NotFound);
+    assert_eq!(working(), 0);
+    db.close().unwrap();
+}

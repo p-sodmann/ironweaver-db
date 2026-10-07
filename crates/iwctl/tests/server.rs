@@ -1,7 +1,7 @@
 //! `iwctl --server <endpoint>` (step 16e, ADR 0055): every admin command
 //! against a server the test starts, with authentication on, a WAL archive
 //! and a backup directory; text and `--json` output and exit codes. Step
-//! 16e's acceptance criterion: a test per command.
+//! 16e's acceptance criterion: a test per command. And `jobs` (step 16f).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use iwdb::auth::{AuthSettings, HashParams};
 use iwdb::{Embedded, Mutation, QueryConfig, Secret, Store, StoreOptions};
 use iwdb_query::exec::block_on;
-use iwdb_query::{ChangesRequest, Code, Database, QueryOptions};
+use iwdb_query::{Admin, AnalyticsRequest, ChangesRequest, Code, Database, Job, ProjectionSpec, QueryOptions};
 use iwdb_server::Server;
 use iwdb_server::auth::AuthMode;
 use iwdb_server::client::Remote;
@@ -258,6 +258,62 @@ fn requests_and_cancel() {
     assert!(text.contains(&format!("cancelled request {}", id)), "{}", text);
     assert_eq!(poll.join().unwrap().unwrap_err().code(), Code::Cancelled);
     fails(&s.iwctl(&["cancel", &id.to_string()]), 4, "not_found");
+}
+
+/// `jobs list|show|result|cancel` on ann's jobs, as ann and as root.
+#[test]
+fn jobs() {
+    use ironweaver_core::algo::PageRank;
+    let s = serve();
+    let remote = Remote::connect(&s.endpoint).unwrap();
+    remote.set_token(Some(Secret::new(s.ann.clone())));
+    let request = |job| AnalyticsRequest { projection: ProjectionSpec::default(), job };
+    let degree = block_on(remote.start_job(
+        "default".into(),
+        request(Job::Degree { incoming: false }),
+        QueryOptions::default(),
+        None,
+    ))
+    .unwrap();
+    let start = Instant::now();
+    while !block_on(remote.job(degree.id, None)).unwrap().state.ended() {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let endless = Job::PageRank(PageRank { tol: 0.0, max_iter: 1 << 40, ..PageRank::default() });
+    let long = block_on(remote.start_job("default".into(), request(endless), QueryOptions::default(), None)).unwrap();
+    let (d, l) = (degree.id.to_string(), long.id.to_string());
+
+    let text = ok(&s.iwctl(&["jobs", "list"]));
+    assert!(text.contains(&format!("job {}: degree on default by ann, done", d)), "{}", text);
+    assert!(text.contains(&format!("job {}: page_rank on default by ann", l)), "{}", text);
+    let [v] = s.json(&["jobs", "list", "ann"]).try_into().unwrap();
+    assert_eq!(v["jobs"].as_array().unwrap().len(), 2, "{}", v);
+    let [v] = s.json(&["jobs", "show", &d]).try_into().unwrap();
+    assert_eq!((v["job"]["state"].as_str(), v["job"]["rows"].as_u64()), (Some("done"), Some(41)), "{}", v);
+    // A page of rows, and where the next starts
+    let text = ok(&s.iwctl(&["jobs", "result", &d, "0", "3"]));
+    assert_eq!(text.lines().count(), 4, "{}", text);
+    assert!(text.ends_with(&format!("(more: jobs result {} 3)\n", d)), "{}", text);
+    let [v] = s.json(&["jobs", "result", &d, "40"]).try_into().unwrap();
+    assert_eq!((v["kind"].as_str(), v["rows"].as_array().unwrap().len()), (Some("scores"), 1), "{}", v);
+    assert!(v["next_offset"].is_null());
+    // Not done yet: a usage error of the API, exit 4
+    fails(&s.iwctl(&["jobs", "result", &l]), 4, "invalid_argument");
+    // Ann cancels her own; a cancelled one's result is its error
+    let text = ok(&s.iwctl_as(&s.ann, &["jobs", "cancel", &l]));
+    assert!(
+        text.starts_with(&format!("cancelled job {}: page_rank", l))
+            && text.contains("cancelled: the job was cancelled"),
+        "{}",
+        text
+    );
+    fails(&s.iwctl(&["jobs", "result", &l]), 4, "cancelled");
+    fails(&s.iwctl(&["jobs", "show", "999999"]), 4, "not_found");
+    // Without --server: a usage error
+    let o = Command::new(env!("CARGO_BIN_EXE_iwctl")).args(["jobs", "list"]).output().unwrap();
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert!(stderr(&o).contains("running server"), "{}", stderr(&o));
 }
 
 #[test]

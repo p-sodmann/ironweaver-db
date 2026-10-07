@@ -179,6 +179,8 @@ pub struct Config {
     pub audit: AuditSection,
     #[serde(default)]
     pub backup: BackupSection,
+    #[serde(default)]
+    pub jobs: JobsSection,
     /// `[[projection]]` sections (ADR 0032).
     #[serde(default, rename = "projection")]
     pub projections: Vec<ProjectionSection>,
@@ -269,6 +271,58 @@ pub struct BackupSection {
     pub max_bytes_per_second: u64,
 }
 
+/// `[jobs]`: managed analytics jobs (step 16f, ADR 0056).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct JobsSection {
+    /// Jobs running at once, each on a thread of its own (not a query
+    /// worker).
+    pub running: usize,
+    /// Jobs that may wait; more are refused with `unavailable`.
+    pub queued: usize,
+    /// A user's queued and running jobs at once; more are refused.
+    pub per_user: usize,
+    /// The longest a job runs, from when it leaves the queue.
+    pub timeout_secs: u64,
+    /// How long an ended job and its result are kept.
+    pub retention_secs: u64,
+    /// Ended jobs kept at most (the oldest go first).
+    pub max_finished: usize,
+    /// Stored results' estimated bytes, together, at most (the oldest are
+    /// dropped first).
+    pub result_bytes: u64,
+}
+
+impl Default for JobsSection {
+    fn default() -> Self {
+        let d = iwdb_query::jobs::JobsConfig::default();
+        JobsSection {
+            running: d.running,
+            queued: d.queued,
+            per_user: d.per_user,
+            timeout_secs: d.timeout.as_secs(),
+            retention_secs: d.retention.as_secs(),
+            max_finished: d.max_finished,
+            result_bytes: d.result_bytes,
+        }
+    }
+}
+
+impl JobsSection {
+    /// The job registry's bounds.
+    pub fn config(&self) -> iwdb_query::jobs::JobsConfig {
+        iwdb_query::jobs::JobsConfig {
+            running: self.running,
+            queued: self.queued,
+            per_user: self.per_user,
+            timeout: Duration::from_secs(self.timeout_secs),
+            retention: Duration::from_secs(self.retention_secs),
+            max_finished: self.max_finished,
+            result_bytes: self.result_bytes,
+        }
+    }
+}
+
 /// The default of `[audit] retention_days`.
 pub const DEFAULT_AUDIT_RETENTION_DAYS: u32 = 30;
 
@@ -346,6 +400,7 @@ impl Default for Config {
             tls: TlsSection::default(),
             audit: AuditSection::default(),
             backup: BackupSection::default(),
+            jobs: JobsSection::default(),
             projections: Vec::new(),
             sources: BTreeMap::new(),
             bootstrap: None,
@@ -481,6 +536,13 @@ keys! {
     "audit.retention_days" "IWDB_AUDIT_RETENTION_DAYS" => audit.retention_days;
     "backup.dir" "IWDB_BACKUP_DIR" => backup.dir;
     "backup.max_bytes_per_second" "IWDB_BACKUP_MAX_BYTES_PER_SECOND" => backup.max_bytes_per_second;
+    "jobs.running" "IWDB_JOBS_RUNNING" => jobs.running;
+    "jobs.queued" "IWDB_JOBS_QUEUED" => jobs.queued;
+    "jobs.per_user" "IWDB_JOBS_PER_USER" => jobs.per_user;
+    "jobs.timeout_secs" "IWDB_JOBS_TIMEOUT_SECS" => jobs.timeout_secs;
+    "jobs.retention_secs" "IWDB_JOBS_RETENTION_SECS" => jobs.retention_secs;
+    "jobs.max_finished" "IWDB_JOBS_MAX_FINISHED" => jobs.max_finished;
+    "jobs.result_bytes" "IWDB_JOBS_RESULT_BYTES" => jobs.result_bytes;
 }
 
 /// Variables with these prefixes must name a setting.
@@ -495,6 +557,7 @@ const SECTION_PREFIXES: &[&str] = &[
     "IWDB_TLS_",
     "IWDB_AUDIT_",
     "IWDB_BACKUP_",
+    "IWDB_JOBS_",
 ];
 
 /// The settings that are paths, resolved against the file's directory when
@@ -952,6 +1015,19 @@ impl Config {
         if self.auth.session_lifetime_secs == 0 {
             problems.push(format!("{} must be at least 1", self.at("auth.session_lifetime_secs")));
         }
+        let j = &self.jobs;
+        let counts = [
+            ("jobs.running", j.running as u64),
+            ("jobs.queued", j.queued as u64),
+            ("jobs.per_user", j.per_user as u64),
+            ("jobs.timeout_secs", j.timeout_secs),
+            ("jobs.max_finished", j.max_finished as u64),
+        ];
+        for (key, n) in counts {
+            if n == 0 {
+                problems.push(format!("{} must be at least 1", self.at(key)));
+            }
+        }
         if self.auth.login_max_failures == 0 {
             problems.push(format!("{} must be at least 1", self.at("auth.login_max_failures")));
         }
@@ -1171,6 +1247,7 @@ impl Config {
             limits: self.limit_config(),
             workers: if self.server.workers == 0 { defaults.workers } else { self.server.workers },
             queue: self.server.queue,
+            jobs: self.jobs.config(),
         }
     }
 

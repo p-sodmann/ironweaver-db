@@ -34,7 +34,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [16c](step_16c.md) | Metrics, status views, cancel and the console | M4 | done |
 | [16d](step_16d.md) | Memory limit | M4 | done |
 | [16e](step_16e.md) | `iwctl` against a server, archive pruning, backup throttling | M4 | done |
-| [16f](step_16f.md) | Managed analytics jobs | M4 | todo |
+| [16f](step_16f.md) | Managed analytics jobs | M4 | done |
 | [16g](step_16g.md) | OpenTelemetry traces | M4 | todo |
 | [16h](step_16h.md) | Windows | M4 | todo |
 | [16i](step_16i.md) | Operations guide | M4 | todo |

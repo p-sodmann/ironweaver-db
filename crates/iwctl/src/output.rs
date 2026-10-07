@@ -9,7 +9,7 @@ use iwdb::{
     NamespaceResult, NamespaceStatus, PruneReport, RecoveryReport, RestoreReport, Status, StoreRecovery, VerifyReport,
 };
 use iwdb_query::requests::RequestInfo;
-use iwdb_query::{Listed, MemoryState, ServerStatus};
+use iwdb_query::{JobInfo, JobPage, JobResult, Listed, MemoryState, ServerStatus};
 use serde_json::{Value, json};
 
 pub struct Out {
@@ -348,6 +348,11 @@ impl Out {
                 "active": r.active, "total": r.total, "timed_out": r.timed_out, "cancelled": r.cancelled,
                 "rejected": r.rejected, "denied": r.denied,
             },
+            "jobs": {
+                "queued": s.jobs.queued, "running": s.jobs.running, "finished": s.jobs.finished,
+                "result_bytes": s.jobs.result_bytes, "done_total": s.jobs.done_total,
+                "failed_total": s.jobs.failed_total, "cancelled_total": s.jobs.cancelled_total,
+            },
             "namespaces": s.namespaces.iter().map(ns_status_json).collect::<Vec<_>>(),
         });
         let mib = |b: u64| format!("{:.1} MiB", b as f64 / (1 << 20) as f64);
@@ -375,6 +380,14 @@ impl Out {
             "\n  requests: {} running, {} ended ({} timed out, {} cancelled, {} rejected, {} denied)",
             r.active, r.total, r.timed_out, r.cancelled, r.rejected, r.denied
         );
+        let j = &s.jobs;
+        text += &format!(
+            "\n  jobs: {} queued, {} running, {} kept ({} of results)",
+            j.queued,
+            j.running,
+            j.finished,
+            mib(j.result_bytes)
+        );
         for n in &s.namespaces {
             text += &format!("\n  {}", ns_status_text(n));
         }
@@ -398,6 +411,50 @@ impl Out {
     pub fn cancelled(&self, r: &RequestInfo) {
         let value = json!({"cancelled": request_json(r)});
         self.print(value, &format!("cancelled {}", request_text(r)));
+    }
+
+    /// The managed jobs (`iwctl --server ... jobs list`).
+    pub fn jobs(&self, list: &Listed<JobInfo>) {
+        let value = json!({"jobs": list.items.iter().map(job_json).collect::<Vec<_>>(), "truncated": list.truncated});
+        let mut text = if list.items.is_empty() { "no jobs".to_owned() } else { String::new() };
+        let lines: Vec<String> = list.items.iter().map(job_text).collect();
+        text += &lines.join("\n");
+        if list.truncated {
+            text += "\n(more not shown)";
+        }
+        self.print(value, &text);
+    }
+
+    /// One job (`jobs show`), or one just cancelled (`jobs cancel`): `what`
+    /// names which.
+    pub fn job(&self, what: &str, j: &JobInfo) {
+        let mut text = format!("{} {}", what, job_text(j));
+        if let Some(e) = &j.error {
+            text += &format!("\n  {}: {}", e.code(), e.message());
+        }
+        if let Some(t) = j.expires {
+            text += &format!("\n  kept until {}", t);
+        }
+        self.print(json!({ what: job_json(j) }), &text);
+    }
+
+    /// A page of a job's result (`jobs result`).
+    pub fn job_page(&self, p: &JobPage) {
+        let (kind, rows): (&str, Vec<Value>) = match &p.rows {
+            JobResult::Scores(r) => ("scores", r.iter().map(|(id, s)| json!({"id": id, "score": s})).collect()),
+            JobResult::Counts(r) => ("counts", r.iter().map(|(id, c)| json!({"id": id, "count": c})).collect()),
+            JobResult::Groups(r) => ("groups", r.iter().map(|ids| json!(ids)).collect()),
+        };
+        let value = json!({"job": job_json(&p.job), "kind": kind, "rows": rows, "next_offset": p.next_offset});
+        let mut lines: Vec<String> = match &p.rows {
+            JobResult::Scores(r) => r.iter().map(|(id, s)| format!("{}\t{}", id, s)).collect(),
+            JobResult::Counts(r) => r.iter().map(|(id, c)| format!("{}\t{}", id, c)).collect(),
+            JobResult::Groups(r) => r.iter().map(|ids| ids.join(" ")).collect(),
+        };
+        if let Some(next) = p.next_offset {
+            lines.push(format!("(more: jobs result {} {})", p.job.id, next));
+        }
+        self.print(value, &lines.join("\n"));
     }
 
     /// What pruning an archive removed, or would remove.
@@ -698,5 +755,37 @@ fn request_text(r: &RequestInfo) -> String {
         r.client.map_or(String::new(), |c| format!(" from {}", c)),
         r.elapsed.as_secs_f64(),
         if r.cancellable { "" } else { " (can't be cancelled)" }
+    )
+}
+
+fn job_json(j: &JobInfo) -> Value {
+    json!({
+        "id": j.id, "namespace": j.namespace, "user": j.user, "client": j.client.map(|c| c.to_string()),
+        "kind": j.kind, "state": j.state.as_str(), "created": j.created.to_string(),
+        "started": time(j.started), "ended": time(j.ended),
+        "elapsed_micros": u64::try_from(j.elapsed.as_micros()).unwrap_or(u64::MAX),
+        "nodes": j.nodes, "edges": j.edges, "seq": j.seq, "rows": j.rows, "truncated": j.truncated,
+        "result_bytes": j.result_bytes,
+        "error": j.error.as_ref().map(|e| json!({"code": e.code().as_str(), "message": e.message()})),
+        "expires": time(j.expires),
+    })
+}
+
+fn job_text(j: &JobInfo) -> String {
+    let size = match (j.nodes, j.edges) {
+        (Some(n), Some(e)) => format!(", {} nodes and {} edges", n, e),
+        _ => String::new(),
+    };
+    let rows = j.rows.map_or(String::new(), |r| format!(", {} rows{}", r, if j.truncated { " (cut)" } else { "" }));
+    format!(
+        "job {}: {} on {} by {}, {} for {:.1} s{}{}",
+        j.id,
+        j.kind,
+        j.namespace,
+        j.user,
+        j.state,
+        j.elapsed.as_secs_f64(),
+        size,
+        rows
     )
 }

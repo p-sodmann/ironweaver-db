@@ -2,8 +2,9 @@
 //! running database (its status, the running requests, the change-stream
 //! readers, the metrics and the log tail) and cancelling a request; and
 //! its admin writes (step 16e, ADR 0055): checkpoints, backups into the
-//! server's backup directory, verifying, and pruning the WAL archive. A
-//! sibling of [`Database`](crate::Database), which stays the data API.
+//! server's backup directory, verifying, and pruning the WAL archive; and
+//! managed analytics jobs (step 16f, ADR 0056). A sibling of
+//! [`Database`](crate::Database), which stays the data API.
 //!
 //! Implemented once, by the embedded database (`iwdb::Embedded`), and
 //! again by the clients over the wire and by
@@ -25,10 +26,11 @@ pub use iwdb_storage::{
     BackupReport, CheckpointOutcome, Finding, Kind, NamespaceBackup, NamespaceVerify, VerifyReport,
 };
 
+pub use crate::jobs::{JobCounts, JobInfo, JobPage, JobState};
 use crate::log::LogTail;
 use crate::metrics::Metrics;
 use crate::requests::{ConsumerInfo, RequestInfo, Requests};
-use crate::{Error, NamespaceStatus};
+use crate::{AnalyticsRequest, Error, NamespaceStatus, QueryOptions};
 
 /// The most entries a list of [`Admin`] returns (and its default).
 pub const MAX_LIST: usize = 1000;
@@ -47,6 +49,9 @@ pub struct ServerStatus {
     pub memory: MemoryStatus,
     pub disk: DiskStatus,
     pub requests: RequestCounts,
+    /// The managed jobs (ADR 0056): queued, running and kept, and the
+    /// stored results' bytes. Server wide.
+    pub jobs: JobCounts,
     /// The namespaces' status, by name.
     pub namespaces: Vec<NamespaceStatus>,
 }
@@ -62,7 +67,8 @@ pub struct MemoryStatus {
     pub payload_bytes: u64,
     /// The checkpointers' copies of the namespaces.
     pub checkpoint_bytes: u64,
-    /// Analytics projections and index builds while they run.
+    /// Analytics projections and index builds while they run, and the
+    /// managed jobs' stored results.
     pub working_bytes: u64,
     /// The sum of the parts: what the limit counts.
     pub used_bytes: u64,
@@ -172,6 +178,13 @@ pub enum VerifyTarget {
     Archive,
 }
 
+/// Who a job belongs to ([`Admin::start_job`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobOwner {
+    pub user: String,
+    pub client: Option<std::net::IpAddr>,
+}
+
 /// The longest backup name.
 pub const MAX_BACKUP_NAME: usize = 128;
 
@@ -259,10 +272,64 @@ pub trait Admin: Send + Sync {
     /// history); `not_found` (no such backup).
     fn prune_archive(&self, before: String, dry_run: bool) -> impl Future<Output = Result<PruneReport, Error>> + Send;
 
+    /// Queue analytics job `request` on `namespace` (ADR 0056), with
+    /// `options`' limits as for [`analyze`](crate::Database::analyze):
+    /// `max_visited` and `max_edges` must hold the projection, `max_results`
+    /// keeps the top rows. `options.timeout` is how long the job may run
+    /// (default and maximum: the server's job timeout). Answers at once
+    /// with the queued job. Errors: `not_found` (no such namespace);
+    /// `budget_exceeded` (the projection doesn't fit the limits);
+    /// `invalid_argument`; `unavailable` (too many jobs queued, or the
+    /// caller's, or the server drains).
+    ///
+    /// `owner` is who the job belongs to: [`Authorized`](crate::Authorized)
+    /// sets the caller, whatever it was given; a client over the wire
+    /// ignores it (its server's authorisation point sets it); `None`
+    /// called in-process: the unauthenticated principal's.
+    fn start_job(
+        &self,
+        namespace: String,
+        request: AnalyticsRequest,
+        options: QueryOptions,
+        owner: Option<JobOwner>,
+    ) -> impl Future<Output = Result<JobInfo, Error>> + Send;
+
+    /// The jobs kept, newest first: only `user`'s if given; at most `limit`
+    /// (default and maximum [`MAX_LIST`]).
+    fn jobs(
+        &self,
+        user: Option<String>,
+        limit: Option<usize>,
+    ) -> impl Future<Output = Result<Listed<JobInfo>, Error>> + Send;
+
+    /// Job `id`'s state and progress (only if it is `user`'s, if given).
+    /// Errors: `not_found` (none, removed, or someone else's).
+    fn job(&self, id: u64, user: Option<String>) -> impl Future<Output = Result<JobInfo, Error>> + Send;
+
+    /// Cancel job `id` (only if it is `user`'s, if given): it is
+    /// `cancelled` when this answers, unless it had ended (then it is
+    /// answered as it is). Errors: `not_found`.
+    fn cancel_job(&self, id: u64, user: Option<String>) -> impl Future<Output = Result<JobInfo, Error>> + Send;
+
+    /// Rows `offset..` of done job `id`'s result (only if it is `user`'s,
+    /// if given): at most `limit` (default and maximum
+    /// [`MAX_PAGE_ROWS`](crate::jobs::MAX_PAGE_ROWS)), about 4 MiB at most.
+    /// Errors: `not_found` (none, someone else's, or its result expired);
+    /// `invalid_argument` (not done yet); the job's error if it failed;
+    /// `cancelled` if it was.
+    fn job_result(
+        &self,
+        id: u64,
+        user: Option<String>,
+        offset: u64,
+        limit: Option<usize>,
+    ) -> impl Future<Output = Result<JobPage, Error>> + Send;
+
     /// Whether the database's server serves requests: the server says
     /// `false` when it starts draining (shutdown). What
     /// [`ServerStatus::ready`] and the `iwdb_ready` metric report. A client
-    /// ignores it.
+    /// ignores it. The database cancels its jobs when it stops being
+    /// ready, and refuses new ones (ADR 0056).
     fn set_ready(&self, _ready: bool) {}
 
     /// The registry the authorisation point registers calls in (the

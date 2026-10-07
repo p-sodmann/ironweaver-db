@@ -26,8 +26,10 @@
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use ironweaver_core::Expr;
+use ironweaver_core::algo::PageRank;
 use iwdb::{Embedded, QueryConfig, Store};
 use iwdb_engine::catalog::{AttrPath, IndexDef};
 use iwdb_engine::{CatalogChange, Mutation};
@@ -35,7 +37,7 @@ use iwdb_query::audit::AuditEntry;
 use iwdb_query::exec::block_on;
 use iwdb_query::{
     Accounts, AnalyticsRequest, ChangesRequest, Code, CommitOptions, Database, Error, ExplainRequest, FindRequest, Job,
-    MatchRequest, NeighbourhoodRequest, Order, PathRequest, ProjectionSpec, QueryOptions, Role, Secret,
+    JobState, MatchRequest, NeighbourhoodRequest, Order, PathRequest, ProjectionSpec, QueryOptions, Role, Secret,
     SubgraphRequest, TraverseRequest, UserInfo, WalkRequest,
 };
 use iwdb_query::{Admin, Audited, Operation, Via};
@@ -155,6 +157,14 @@ enum Op {
     Backup,
     Verify,
     PruneArchive,
+    StartJob,
+    ListJobs,
+    GetOwnJob,
+    GetOthersJob,
+    CancelOwnJob,
+    CancelOthersJob,
+    OwnJobResult,
+    OthersJobResult,
 }
 
 impl Op {
@@ -205,6 +215,11 @@ impl Op {
             Op::Backup => Operation::Backup,
             Op::Verify => Operation::Verify,
             Op::PruneArchive => Operation::PruneArchive,
+            Op::StartJob => Operation::StartJob,
+            Op::ListJobs => Operation::ListJobs,
+            Op::GetOwnJob | Op::GetOthersJob => Operation::GetJob,
+            Op::CancelOwnJob | Op::CancelOthersJob => Operation::CancelJob,
+            Op::OwnJobResult | Op::OthersJobResult => Operation::GetJobResult,
         }
     }
 }
@@ -265,6 +280,17 @@ const TABLE: &[(Op, [Outcome; 6])] = &[
     (Op::Backup, [U, D, D, D, D, A]),
     (Op::Verify, [U, D, D, D, D, A]),
     (Op::PruneArchive, [U, D, D, D, D, A]),
+    // Managed jobs: started with `read`; others' are `not_found` but for a
+    // server admin. A user without grants has no job of its own: it asks
+    // for one that doesn't exist
+    (Op::StartJob, [U, D, A, A, A, A]),
+    (Op::ListJobs, [U, A, A, A, A, A]),
+    (Op::GetOwnJob, [U, N, A, A, A, A]),
+    (Op::GetOthersJob, [U, N, N, N, N, A]),
+    (Op::CancelOwnJob, [U, N, A, A, A, A]),
+    (Op::CancelOthersJob, [U, N, N, N, N, A]),
+    (Op::OwnJobResult, [U, N, A, A, A, A]),
+    (Op::OthersJobResult, [U, N, N, N, N, A]),
 ];
 
 /// The backup the server's backup directory starts with (`PruneArchive`).
@@ -583,7 +609,70 @@ impl World {
             }
             Op::Verify => block_on(c.verify(iwdb_query::VerifyTarget::Store)).map(drop),
             Op::PruneArchive => block_on(c.prune_archive(SEED_BACKUP.into(), true)).map(drop),
+            Op::StartJob => {
+                let job = block_on(c.start_job(NS.into(), degree(), o(), None))?;
+                assert_eq!((job.user.as_str(), job.namespace.as_str()), (me, NS), "the job is the caller's");
+                Ok(())
+            }
+            Op::ListJobs => {
+                // A job of the reader's: listed for the reader and the admin
+                self.job(Who::Read, false);
+                let list = block_on(c.jobs(None, None))?;
+                let readers = list.items.iter().any(|j| j.user == Who::Read.user());
+                assert_eq!(readers, matches!(who, Who::Read | Who::Admin), "{:?}: {:?}", who, list.items);
+                if who != Who::Admin {
+                    assert!(list.items.iter().all(|j| j.user == me), "{:?}: {:?}", who, list.items);
+                }
+                Ok(())
+            }
+            Op::GetOwnJob | Op::CancelOwnJob | Op::OwnJobResult if who == Who::NoGrant => match op {
+                Op::GetOwnJob => block_on(c.job(u64::MAX, None)).map(drop),
+                Op::CancelOwnJob => block_on(c.cancel_job(u64::MAX, None)).map(drop),
+                _ => block_on(c.job_result(u64::MAX, None, 0, None)).map(drop),
+            },
+            Op::GetOwnJob | Op::GetOthersJob => {
+                let owner = job_owner(op == Op::GetOwnJob, who);
+                let id = self.job(owner, false);
+                block_on(c.job(id, None)).map(|j| assert_eq!((j.id, j.user.as_str()), (id, owner.user())))
+            }
+            Op::CancelOwnJob | Op::CancelOthersJob => {
+                let owner = job_owner(op == Op::CancelOwnJob, who);
+                let id = self.job(owner, true);
+                let result = block_on(c.cancel_job(id, None));
+                if result.is_err() {
+                    self.audit.paused(|| block_on(self.admin.cancel_job(id, None))).unwrap();
+                }
+                result.map(|j| assert_eq!((j.state, j.user.as_str()), (JobState::Cancelled, owner.user())))
+            }
+            Op::OwnJobResult | Op::OthersJobResult => {
+                let owner = job_owner(op == Op::OwnJobResult, who);
+                let id = self.job(owner, false);
+                block_on(c.job_result(id, None, 0, None)).map(|p| assert_eq!(p.job.id, id))
+            }
         }
+    }
+
+    /// A job of `owner`'s on NS (started over gRPC, not audited): one that
+    /// runs until cancelled, or a quick one, waited for until it is done.
+    fn job(&self, owner: Who, endless: bool) -> u64 {
+        self.audit.paused(|| {
+            let job = if endless {
+                Job::PageRank(PageRank { tol: 0.0, max_iter: 1 << 40, ..PageRank::default() })
+            } else {
+                Job::Degree { incoming: false }
+            };
+            let request = AnalyticsRequest { projection: ProjectionSpec::default(), job };
+            let client = self.grpc(owner);
+            let id = block_on(client.start_job(NS.into(), request, QueryOptions::default(), None)).unwrap().id;
+            if !endless {
+                let start = std::time::Instant::now();
+                while block_on(client.job(id, None)).unwrap().state != JobState::Done {
+                    assert!(start.elapsed() < Duration::from_secs(10), "job {} never finished", id);
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            id
+        })
     }
 
     /// The namespaces `who` has a role on, by name.
@@ -702,7 +791,25 @@ const NOT_AUDITED: &[Operation] = &[
     Operation::Consumers,
     Operation::Metrics,
     Operation::Log,
+    Operation::ListJobs,
+    Operation::GetJob,
+    Operation::GetJobResult,
 ];
+
+/// A quick job.
+fn degree() -> AnalyticsRequest {
+    AnalyticsRequest { projection: ProjectionSpec::default(), job: Job::Degree { incoming: false } }
+}
+
+/// Whose job a job cell acts on: the caller's own (the reader's for a
+/// caller without credentials), or someone else's.
+fn job_owner(own: bool, who: Who) -> Who {
+    match (own, who) {
+        (true, Who::Anonymous) => Who::Read,
+        (true, _) => who,
+        (false, _) => someone_else(who),
+    }
+}
 
 /// A user other than `who` with a role on NS: whose request
 /// `CancelOthersRequest` cancels.
@@ -714,7 +821,8 @@ fn someone_else(who: Who) -> Who {
 /// `got` (empty: nothing).
 fn audit_problems(op: Op, who: Who, got: Outcome, entries: &[AuditEntry]) -> Vec<String> {
     let operation = op.operation();
-    let audited = got != A || !NOT_AUDITED.contains(&operation);
+    // A refusal always; a `not_found` only where every call is audited
+    let audited = matches!(got, U | D) || !NOT_AUDITED.contains(&operation);
     if !audited {
         return if entries.is_empty() { vec![] } else { vec![format!("expected no entry, got {:?}", entries)] };
     }
@@ -766,6 +874,16 @@ fn audit_problems(op: Op, who: Who, got: Outcome, entries: &[AuditEntry]) -> Vec
             Op::Checkpoint => expect("namespace", e.namespace.as_deref() == Some(NS)),
             Op::Backup => expect("backup", e.backup.as_deref().is_some_and(|b| b.starts_with(BACKUP_PREFIX))),
             Op::PruneArchive => expect("backup", e.backup.as_deref() == Some(SEED_BACKUP)),
+            Op::StartJob => expect("job", e.namespace.as_deref() == Some(NS) && e.request.is_some()),
+            Op::CancelOwnJob | Op::CancelOthersJob => {
+                let owner = job_owner(op == Op::CancelOwnJob, who);
+                expect(
+                    "job",
+                    e.request.is_some()
+                        && e.subject.as_deref() == Some(owner.user())
+                        && e.namespace.as_deref() == Some(NS),
+                )
+            }
             _ => {}
         }
     }
@@ -852,4 +970,25 @@ fn users_change_their_own_password_with_the_current_one() {
     assert_eq!(e.code(), Code::Unauthenticated);
     block_on(reader.set_password("reader", Secret::new("a new password"), Some(Secret::new("reader-password"))))
         .unwrap();
+}
+
+/// A job's result holds the namespace's node ids: its owner fetches it only
+/// while it can still read the namespace (ADR 0056). The refusal is
+/// audited; the job's state stays visible.
+#[test]
+fn a_job_result_needs_read_on_the_namespace_still() {
+    let world = World::new();
+    let id = world.job(Who::Read, false);
+    world.audit.paused(|| block_on(world.admin.revoke(Who::Read.user(), NS))).unwrap();
+    world.audit.take();
+    // A new token resolves the principal without the grant
+    let reader = world.grpc(Who::Read);
+    let e = block_on(reader.job_result(id, None, 0, None)).unwrap_err();
+    assert_eq!(e.code(), Code::PermissionDenied, "{}", e);
+    let entries = world.audit.take();
+    let [entry] = &entries[..] else { panic!("one entry: {:?}", entries) };
+    assert_eq!((entry.operation, entry.code), (Some(Operation::GetJobResult), Some(Code::PermissionDenied)));
+    assert_eq!((entry.namespace.as_deref(), entry.request), (Some(NS), Some(id)));
+    assert_eq!(block_on(reader.job(id, None)).unwrap().state, JobState::Done);
+    assert!(block_on(world.admin.job_result(id, None, 0, None)).is_ok());
 }

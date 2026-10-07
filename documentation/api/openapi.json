@@ -248,6 +248,31 @@
         },
         "type": "object"
       },
+      "CancelJobRequest": {
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "user": {
+            "description": "Only if it is this user's; otherwise `not_found`.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CancelJobResponse": {
+        "properties": {
+          "job": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/JobInfo"
+              }
+            ],
+            "description": "The job after the cancel: `cancelled`, or how it had ended."
+          }
+        },
+        "type": "object"
+      },
       "CancelRequestRequest": {
         "properties": {
           "id": {
@@ -1400,6 +1425,57 @@
         },
         "type": "object"
       },
+      "GetJobResponse": {
+        "properties": {
+          "job": {
+            "$ref": "#/components/schemas/JobInfo"
+          }
+        },
+        "type": "object"
+      },
+      "GetJobResultResponse": {
+        "description": "Fails with `invalid_argument` while the job is queued or running, with\nthe job's error if it failed, `cancelled` if it was, and `not_found` once\nits result has expired.",
+        "properties": {
+          "counts": {
+            "items": {
+              "$ref": "#/components/schemas/Count"
+            },
+            "type": "array"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            },
+            "type": "array"
+          },
+          "job": {
+            "$ref": "#/components/schemas/JobInfo"
+          },
+          "kind": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/JobResultKind"
+              }
+            ],
+            "description": "Rows of the kind `kind` names, from `offset`."
+          },
+          "nextOffset": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The offset of the next page; missing: this was the last."
+          },
+          "scores": {
+            "items": {
+              "$ref": "#/components/schemas/Score"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "GetLogResponse": {
         "properties": {
           "events": {
@@ -1715,6 +1791,162 @@
         },
         "type": "object"
       },
+      "JobCounts": {
+        "description": "The managed jobs at a glance.",
+        "properties": {
+          "cancelledTotal": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "doneTotal": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Jobs that ended since the server started, by outcome."
+          },
+          "failedTotal": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "finished": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Ended and still kept."
+          },
+          "queued": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "resultBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The stored results' estimated size."
+          },
+          "running": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Collecting their projection or running."
+          }
+        },
+        "type": "object"
+      },
+      "JobInfo": {
+        "description": "A managed job's state and progress (ADR 0056).",
+        "properties": {
+          "client": {
+            "description": "The owner's client address.",
+            "type": "string"
+          },
+          "createdMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Int64"
+              }
+            ],
+            "description": "When it was queued, left the queue, and ended, in microseconds since\n1970 (UTC)."
+          },
+          "edges": {
+            "$ref": "#/components/schemas/Uint64"
+          },
+          "elapsedMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "How long it has run (or ran), from leaving the queue."
+          },
+          "endedMicros": {
+            "$ref": "#/components/schemas/Int64"
+          },
+          "error": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Error"
+              }
+            ],
+            "description": "Why it failed or was cancelled."
+          },
+          "expiresMicros": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Int64"
+              }
+            ],
+            "description": "When it will be removed, once ended."
+          },
+          "id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Unique while the server runs, shared with request ids."
+          },
+          "kind": {
+            "description": "The job: the name of its `Job` field (`page_rank`, `leiden`, ...).",
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "nodes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The projection's size, once collecting started."
+          },
+          "resultBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The stored result's estimated size."
+          },
+          "rows": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The result's rows, once done."
+          },
+          "seq": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The seq of the state the projection saw, once done."
+          },
+          "startedMicros": {
+            "$ref": "#/components/schemas/Int64"
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState"
+          },
+          "truncated": {
+            "description": "`max_results` cut rows.",
+            "type": "boolean"
+          },
+          "user": {
+            "description": "Its owner.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "JobResultKind": {
         "description": "What kind of rows a job returns.\n\n- `JOB_RESULT_KIND_SCORES`: `scores`: per node, by score (highest first), then id.\n\n- `JOB_RESULT_KIND_GROUPS`: `groups`: node ids (each group sorted), biggest first, then by first id.\n\n- `JOB_RESULT_KIND_COUNTS`: `counts`: per node, by count (highest first), then id.",
         "enum": [
@@ -1722,6 +1954,20 @@
           "JOB_RESULT_KIND_SCORES",
           "JOB_RESULT_KIND_GROUPS",
           "JOB_RESULT_KIND_COUNTS"
+        ],
+        "type": "string"
+      },
+      "JobState": {
+        "description": "Where a job is. The core reports no progress from inside an algorithm\n(upstream #62), so the state is the progress.\n\n- `JOB_STATE_QUEUED`: Waiting for a job thread.\n\n- `JOB_STATE_COLLECTING`: Waiting for `min_seq`, then collecting the projection.\n\n- `JOB_STATE_RUNNING`: The algorithm runs.\n\n- `JOB_STATE_DONE`: Ended; the result can be fetched.\n\n- `JOB_STATE_FAILED`: Ended with `error`.\n\n- `JOB_STATE_CANCELLED`: Cancelled (CancelJob, CancelRequest, or the server drains).\n\n- `JOB_STATE_EXPIRED`: Was done; its result was dropped for newer ones.",
+        "enum": [
+          "JOB_STATE_UNSPECIFIED",
+          "JOB_STATE_QUEUED",
+          "JOB_STATE_COLLECTING",
+          "JOB_STATE_RUNNING",
+          "JOB_STATE_DONE",
+          "JOB_STATE_FAILED",
+          "JOB_STATE_CANCELLED",
+          "JOB_STATE_EXPIRED"
         ],
         "type": "string"
       },
@@ -1851,6 +2097,22 @@
               "$ref": "#/components/schemas/ConsumerInfo"
             },
             "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ListJobsResponse": {
+        "properties": {
+          "jobs": {
+            "description": "Newest first.",
+            "items": {
+              "$ref": "#/components/schemas/JobInfo"
+            },
+            "type": "array"
+          },
+          "truncated": {
+            "description": "There were more than the limit.",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -2213,7 +2475,7 @@
                 "$ref": "#/components/schemas/Uint64"
               }
             ],
-            "description": "Analytics projections and index builds while they run, estimated."
+            "description": "Analytics projections and index builds while they run, and the stored\njob results, estimated."
           }
         },
         "type": "object"
@@ -3582,6 +3844,14 @@
             "description": "The WAL's fsync policy: `always`, `group` or `off`.",
             "type": "string"
           },
+          "jobs": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/JobCounts"
+              }
+            ],
+            "description": "The managed jobs, server-wide."
+          },
           "memory": {
             "$ref": "#/components/schemas/MemoryStatus"
           },
@@ -3849,6 +4119,41 @@
           },
           "seq": {
             "$ref": "#/components/schemas/Uint64"
+          }
+        },
+        "type": "object"
+      },
+      "StartJobRequest": {
+        "properties": {
+          "job": {
+            "$ref": "#/components/schemas/Job"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "options": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/QueryOptions"
+              }
+            ],
+            "description": "As for Analyze: `max_visited` and `max_edges` must hold the projection,\n`max_results` keeps the top rows, `min_seq` is waited for. `timeout_ms`\nis how long the job may run once it leaves the queue (default and\nmaximum: the server's `[jobs] timeout_secs`)."
+          },
+          "projection": {
+            "$ref": "#/components/schemas/Projection"
+          }
+        },
+        "type": "object"
+      },
+      "StartJobResponse": {
+        "properties": {
+          "job": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/JobInfo"
+              }
+            ],
+            "description": "The queued job."
           }
         },
         "type": "object"
@@ -4896,6 +5201,258 @@
         },
         "security": [],
         "summary": "Readiness: 200 once recovery has finished, 503 before and while shutting down"
+      }
+    },
+    "/v1/jobs": {
+      "get": {
+        "description": "The jobs kept, newest first.",
+        "operationId": "listJobs",
+        "parameters": [
+          {
+            "description": "Only this user's jobs (others than a server admin see only their own).",
+            "in": "query",
+            "name": "user",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "At most this many (default and maximum 1000).",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListJobsResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "The jobs kept"
+      }
+    },
+    "/v1/jobs/{job}": {
+      "get": {
+        "description": "One job's state and progress.",
+        "operationId": "getJob",
+        "parameters": [
+          {
+            "description": "The job's id.",
+            "in": "path",
+            "name": "job",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only if it is this user's job; otherwise 404.",
+            "in": "query",
+            "name": "user",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetJobResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "A job's state and progress"
+      }
+    },
+    "/v1/jobs/{job}/cancel": {
+      "post": {
+        "description": "Cancel a queued or running job; one that ended is answered as it is.",
+        "operationId": "cancelJob",
+        "parameters": [
+          {
+            "description": "The job's id.",
+            "in": "path",
+            "name": "job",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelJobRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelJobResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Cancel a job"
+      }
+    },
+    "/v1/jobs/{job}/result": {
+      "get": {
+        "description": "A page of a done job's result.",
+        "operationId": "getJobResult",
+        "parameters": [
+          {
+            "description": "The job's id.",
+            "in": "path",
+            "name": "job",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only if it is this user's job; otherwise 404.",
+            "in": "query",
+            "name": "user",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The first row (default 0).",
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "At most this many rows (default and maximum 10000); a page also stops before about 4 MiB.",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetJobResultResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "A page of a done job's result"
       }
     },
     "/v1/log": {
@@ -6067,6 +6624,66 @@
           }
         },
         "summary": "Nodes by id"
+      }
+    },
+    "/v1/namespaces/{ns}/jobs": {
+      "post": {
+        "description": "Queue an analytics job; answers at once with its id. It runs on the\nserver's job threads, past any request timeout, until it ends, its\ntimeout (`[jobs] timeout_secs`), a cancel or the server's drain.",
+        "operationId": "startJob",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartJobRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartJobResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Queue an analytics job"
       }
     },
     "/v1/namespaces/{ns}/match": {

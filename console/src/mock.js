@@ -275,6 +275,17 @@
       { namespace: 'social', user: 'search-indexer', client: '10.4.2.17', nextSeq: 4119, lastPollTicks: 0, polls: 81233 },
       { namespace: 'orders', user: 'warehouse-sync', client: '10.4.2.31', nextSeq: 18191, lastPollTicks: 0, polls: 40210 },
     ];
+    // Managed analytics jobs (step 16f, ADR 0056): their own PRNG, so the rest of the traffic stays as it was
+    const rj = prng(7);
+    server.jobs = [
+      { id: 4031, namespace: 'social', user: 'reporting', kind: 'page_rank', state: 'done', createdTicks: -900, startedTicks: -890, endedTicks: -420, nodes: 0, edges: 0, rows: 1000, truncated: true },
+      { id: 4077, namespace: 'orders', user: 'reporting', kind: 'leiden', state: 'running', createdTicks: -300, startedTicks: -295, endedTicks: null, leftTicks: 200 },
+      { id: 4098, namespace: 'social', user: 'admin', kind: 'triangles', state: 'queued', createdTicks: -5, startedTicks: null, endedTicks: null, leftTicks: 40 },
+    ];
+    server.jobsDone = 41; server.jobsFailed = 2; server.jobsCancelled = 3;
+    const JOB_RETENTION_TICKS = 3600;
+    const jobResultBytes = (j) => (j.state === 'done' ? j.rows * 40 : 0);
+    const jobWorking = (j) => (j.state === 'running' || j.state === 'collecting' ? 48 * (j.nodes || 0) + 16 * (j.edges || 0) : 0);
     // A build in progress, so the status page shows one (social: an index on ["joined"])
     byName.get('social').indexes.push({ path: ['joined'], declared: true, unique: false, building: { scanned: 4, total: byName.get('social').nodes.size } });
 
@@ -299,6 +310,7 @@
     const memoryParts = () => {
       const graph = graphBytes(); const payload = spaces.reduce((a, s) => a + payloadOf(s), 0);
       let working = 0; spaces.forEach((s) => s.indexes.forEach((ix) => { if (ix.building) working += 8 * ix.building.total + 96 * ix.building.scanned; }));
+      server.jobs.forEach((j) => { working += jobResultBytes(j) + jobWorking(j); });
       return { graph, payload, checkpoint: graph + payload, working };
     };
     const usedBytes = () => { const p = memoryParts(); return p.graph + p.payload + p.checkpoint + p.working; };
@@ -363,8 +375,25 @@
         ix.building.scanned = Math.min(ix.building.total, ix.building.scanned + 1);
         if (ix.building.scanned >= ix.building.total) { delete ix.building; s.seq++; s.synced = s.seq; emit('INFO', `index ${s.name} [${ix.path.join('.')}] ready`); }
       }));
+      // Jobs: at most two run, the queue moves up, a new one now and then; ended ones are kept for an hour
+      server.jobs.forEach((j) => {
+        if (j.state === 'running' && (j.leftTicks -= 1) <= 0) {
+          j.state = 'done'; j.endedTicks = server.ticks; j.rows = Math.min(1000, j.nodes); j.truncated = j.nodes > 1000; server.jobsDone++;
+          emit('INFO', `job ${j.id} done · ${j.kind} · ${j.namespace} · ${j.rows} rows`);
+        }
+      });
+      server.jobs.filter((j) => j.state === 'queued').forEach((j) => {
+        if (server.jobs.filter((x) => x.state === 'running').length >= 2) return;
+        const ns = byName.get(j.namespace); j.state = 'running'; j.startedTicks = server.ticks; j.nodes = ns.nodes.size; j.edges = ns.edges.size;
+      });
+      if (rj() < 0.03 && server.jobs.filter((j) => !jobEnded(j)).length < 6) {
+        server.jobs.push({ id: server.nextReq++, namespace: pick(rj, ['social', 'orders', 'inventory']), user: pick(rj, ['reporting', 'admin']), kind: pick(rj, ['page_rank', 'weakly_connected_components', 'leiden', 'core_number']), state: 'queued', createdTicks: server.ticks, startedTicks: null, endedTicks: null, leftTicks: between(rj, 20, 400) });
+      }
+      server.jobs = server.jobs.filter((j) => !jobEnded(j) || server.ticks - j.endedTicks < JOB_RETENTION_TICKS).slice(-20);
       if (server.ticks % 6 === 0) emit('INFO', `commit ${o.name} · seq ${o.seq} · ${commits} commits/s · mark ${o.marks[0].name} at ${o.marks[0].position}`);
     }
+    // Sizes of the jobs that started before the first look
+    server.jobs.forEach((j) => { if (j.startedTicks != null) { const ns = byName.get(j.namespace); j.nodes = ns.nodes.size; j.edges = ns.edges.size; } });
     for (let k = 0; k < 90; k++) tick(); // a minute and a half of history before the first look
     // Degraded: just above the warning line, as the first look finds it
     if (scenario === 'degraded') { limit.bytes = Math.round(usedBytes() / 0.82); memState = 'warn'; }
@@ -396,6 +425,17 @@
     const requestOut = (q) => ({
       id: q.id, operation: q.operation, namespace: q.namespace, user: q.user, client: q.client, startedMicros: nowMicros() - (server.ticks - q.startedTicks) * 1e6 - 120e3,
       elapsedMicros: (server.ticks - q.startedTicks) * 1e6 + 120e3, cancellable: q.operation !== 'Commit',
+    });
+
+    function jobEnded(j) { return !['queued', 'collecting', 'running'].includes(j.state); }
+    const tickMicros = (t) => (t == null ? null : nowMicros() - (server.ticks - t) * 1e6);
+    const jobOut = (j) => ({
+      id: j.id, namespace: j.namespace, user: j.user, kind: j.kind, state: j.state,
+      createdMicros: tickMicros(j.createdTicks), startedMicros: tickMicros(j.startedTicks), endedMicros: tickMicros(j.endedTicks),
+      elapsedMicros: j.startedTicks == null ? 0 : ((j.endedTicks ?? server.ticks) - j.startedTicks) * 1e6,
+      nodes: j.startedTicks == null ? null : j.nodes, edges: j.startedTicks == null ? null : j.edges,
+      rows: j.state === 'done' ? j.rows : null, truncated: j.state === 'done' && !!j.truncated, resultBytes: jobResultBytes(j),
+      error: j.error ? { ...j.error } : null, expiresMicros: j.endedTicks == null ? null : tickMicros(j.endedTicks) + JOB_RETENTION_TICKS * 1e6,
     });
 
     function statusOf(ns) {
@@ -563,6 +603,11 @@
         requests: { active: server.active.length, total: server.total, timedOut: server.timedOut, cancelled: server.cancelled, rejected: server.rejected, denied: server.denied },
         namespaces: spaces.map(statusOf),
         active: server.active.map(requestOut),
+        jobs: server.jobs.slice().reverse().map(jobOut),
+        jobCounts: {
+          queued: server.jobs.filter((j) => j.state === 'queued').length, running: server.jobs.filter((j) => j.state === 'running').length,
+          finished: server.jobs.filter(jobEnded).length, resultBytes: server.jobs.reduce((a, j) => a + jobResultBytes(j), 0),
+        },
         consumers: server.consumers.map((c) => ({ namespace: c.namespace, user: c.user, client: c.client, nextSeq: c.nextSeq, lag: Math.max(0, byName.get(c.namespace).seq + 1 - c.nextSeq), lastPollMicros: nowMicros() - (server.ticks - c.lastPollTicks) * 1e6, polls: c.polls })),
         operations: OPS.map((op) => ({ operation: op, calls: server.opStats[op].calls, errors: server.opStats[op].errors, p50Ms: server.opStats[op].p50, p99Ms: server.opStats[op].p99 })),
         series: clone(server.series), tickMs: 1000,
@@ -574,6 +619,15 @@
         if (q.operation === 'Commit') fail('invalid_argument', `request ${id} is a commit: cancelling it would only make its outcome unknown`);
         server.active.splice(k, 1); server.cancelled++; emit('WARN', `request cancelled · id=${q.id} · operation=${q.operation} · namespace=${q.namespace}`);
         return { request: requestOut(q) };
+      }),
+      /** Cancel a queued or running job (step 16f); one that ended is answered as it is (as on the server). */
+      cancelJob: (id) => call('CancelJob', () => {
+        const j = server.jobs.find((x) => x.id === id); if (!j) fail('not_found', `no job ${id}`);
+        if (!jobEnded(j)) {
+          j.state = 'cancelled'; j.endedTicks = server.ticks; j.error = { code: 'cancelled', message: 'the job was cancelled (CancelJob)' }; server.jobsCancelled++;
+          emit('WARN', `job cancelled · id=${j.id} · ${j.kind} · namespace=${j.namespace}`);
+        }
+        return { job: jobOut(j) };
       }),
       log: () => server.log.slice(),
       onLog: (f) => { server.listeners.add(f); return () => server.listeners.delete(f); },

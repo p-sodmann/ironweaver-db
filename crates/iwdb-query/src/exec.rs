@@ -237,7 +237,7 @@ fn time(shared: &Shared) {
 }
 
 /// Run `job`, turning a panic into an `internal` error.
-fn catch<T>(job: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+pub(crate) fn catch<T>(job: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
     match panic::catch_unwind(AssertUnwindSafe(job)) {
         Ok(result) => result,
         Err(payload) => {

@@ -66,6 +66,13 @@ iwdb-server --check-config --config server.toml       # validate; print the effe
 | `audit.retention_days` | `IWDB_AUDIT_RETENTION_DAYS` | `30` | Days of audit files to keep, today included; older ones are deleted at start and at each new day. `0`: keep them all. |
 | `backup.dir` | `IWDB_BACKUP_DIR` | `unset` | The backup directory: the only place remote backups (`Backup`, `iwctl --server ... backup <name>`) are written, as `<dir>/<name>`, and where `Verify` and `PruneArchive` find backups by name. It must exist and not be inside the data directory. Unset: remote backups are refused ([ADR 0055](../adr/0055-admin-writes-and-iwctl-against-a-server.md)). |
 | `backup.max_bytes_per_second` | `IWDB_BACKUP_MAX_BYTES_PER_SECOND` | `0` | Copy backups at most this fast (`0`: as fast as the disks go); a `Backup` request can set another rate. Checkpoints wait for a backup's whole copy, so a slower backup holds them back longer, and the WAL grows meanwhile. |
+| `jobs.running` | `IWDB_JOBS_RUNNING` | `2` | Managed analytics jobs running at once, each on a thread of its own, never a query worker (so a long job doesn't hold back reads). Further jobs wait ([ADR 0056](../adr/0056-managed-analytics-jobs.md)). |
+| `jobs.queued` | `IWDB_JOBS_QUEUED` | `16` | Jobs that may wait for a job thread; `StartJob` beyond that fails with `unavailable`. |
+| `jobs.per_user` | `IWDB_JOBS_PER_USER` | `4` | A user's queued and running jobs at once (server admins included); more fail with `unavailable`. |
+| `jobs.timeout_secs` | `IWDB_JOBS_TIMEOUT_SECS` | `3600` | The longest a job runs, from when it leaves the queue; it fails with `timeout` then. A `StartJob`'s `timeout_ms` can only lower it. |
+| `jobs.retention_secs` | `IWDB_JOBS_RETENTION_SECS` | `3600` | How long an ended job and its result are kept; then `GetJob` answers `not_found`. |
+| `jobs.max_finished` | `IWDB_JOBS_MAX_FINISHED` | `100` | Ended jobs kept at most; the one that ended first goes first. |
+| `jobs.result_bytes` | `IWDB_JOBS_RESULT_BYTES` | `67108864` | Stored results' estimated size, all together (64 MiB). A new result drops the oldest (their jobs become `expired`); a result alone larger fails its job with `budget_exceeded`. Counted in the memory limit's `working` part. |
 
 A test keeps this table equal to the code's list (`iwdb_server::config::KEYS`).
 
@@ -124,12 +131,21 @@ An operator backs up, checkpoints, verifies and prunes a running server with `iw
 - **Restore is offline**: `iwctl restore` on the server's host into a new directory, then start a server on it.
 - **The archive.** With `store.archive`, `iwctl --server <endpoint> archive prune --before <backup>` removes what no restore from that backup (or a later one) needs; keep the oldest backup you want to restore from.
 
+## Managed jobs
+
+An analytics job that may take longer than a request's timeout (`limits.max.timeout_ms`) runs as a managed job: `StartJob` (gRPC), `POST /v1/namespaces/{ns}/jobs` (REST), then watched, cancelled and fetched by id, with `iwctl --server <endpoint> jobs ...` or the console's status page ([ADR 0056](../adr/0056-managed-analytics-jobs.md)).
+
+- **Who.** Starting needs `read` on the namespace; a job is seen, cancelled and fetched by its owner and server admins (others get `not_found`). Starting and cancelling are audited.
+- **Where they run.** On `jobs.running` threads of their own, not the query workers. A queued or running job is also listed by `ListRequests` (as `StartJob`, with the job's id), and `CancelRequest` cancels it.
+- **Memory.** A running job's projection and every stored result count in the memory limit's `working` part, so jobs add at most `jobs.running` projections plus `jobs.result_bytes`. Jobs still start while writes are refused, as reads do.
+- **Shutdown.** When the server drains, every queued and running job is cancelled ("the server is shutting down") and new ones are refused. Nothing is kept across a restart: a job's id then answers `not_found`.
+
 ## Audit log
 
-Every login (and failed login), logout, user, grant, token, namespace and catalog change, every cancelled request (`CancelRequest`, step 16c), every admin write (`Checkpoint`, `Backup`, `Verify`, `PruneArchive`, step 16e), and every refused request (`unauthenticated`, `permission_denied`), leaves one audit entry ([ADR 0049](../adr/0049-audit-log.md)). Reads and data commits don't (the change stream is for those).
+Every login (and failed login), logout, user, grant, token, namespace and catalog change, every cancelled request (`CancelRequest`, step 16c), every admin write (`Checkpoint`, `Backup`, `Verify`, `PruneArchive`, step 16e), every started or cancelled job (`StartJob`, `CancelJob`, step 16f), and every refused request (`unauthenticated`, `permission_denied`), leaves one audit entry ([ADR 0049](../adr/0049-audit-log.md)). Reads and data commits don't (the change stream is for those).
 
 - **In the log.** Entries are log events of target `iwdb::audit` at `info`, in the log's format. They pass whatever `log.level` says unless the level names `iwdb::audit` itself (`warn,iwdb::audit=off` turns them off in the log).
 - **In files** with `audit.dir`: the same entries as JSON lines, one file per UTC day, the files older than `audit.retention_days` deleted.
 - **How long they are kept.** The audit files: `audit.retention_days` (30 by default). Entries in the log (stderr) are kept as long as whatever collects it keeps them: set its limits there (Docker: the log driver's `max-size` and `max-file`; journald: `MaxRetentionSec`, `SystemMaxUse`).
-- **Fields** (absent ones left out): `operation` (the RPC: `Login`, `CreateUser`, `CommitCatalog`, ...), `outcome` (`success` or `failure`), `code` (the error code of a failure), `user`, `auth` (`session`, `api_token`, `certificate`, `off`), `client` (the client's IP address), `namespace`, `subject` (the user an account change is about), `token_name`, `role`, `admin`, `seq` (a catalog change's commit), `namespace_event` (a namespace's creation or drop), `request` (the id of the request a `CancelRequest` cancels; its owner is the `subject`), `backup` (the backup a `Backup`, `Verify` or `PruneArchive` names, by its name in the backup directory). Never a password, a token or its hash, a certificate, an error message or a value of the data.
+- **Fields** (absent ones left out): `operation` (the RPC: `Login`, `CreateUser`, `CommitCatalog`, ...), `outcome` (`success` or `failure`), `code` (the error code of a failure), `user`, `auth` (`session`, `api_token`, `certificate`, `off`), `client` (the client's IP address), `namespace`, `subject` (the user an account change is about), `token_name`, `role`, `admin`, `seq` (a catalog change's commit), `namespace_event` (a namespace's creation or drop), `request` (the id of the request a `CancelRequest` cancels, or of the job a `StartJob` started or a `CancelJob` cancels; a cancelled one's owner is the `subject`), `backup` (the backup a `Backup`, `Verify` or `PruneArchive` names, by its name in the backup directory). Never a password, a token or its hash, a certificate, an error message or a value of the data.
 - **Best effort.** An entry is written after the outcome is known, without fsync: a crash can lose the last entries, never the changes, which are in the WAL.

@@ -54,7 +54,8 @@ for status, which then shows what the files say):
                                 keep archiving into it
 
 a running server (step 16e): --server <endpoint> instead of <dir>, with the
-credentials below; every command needs a server-wide admin:
+credentials below; every command but requests, cancel and jobs (which act on
+the caller's own unless it is a server-wide admin) needs a server-wide admin:
   status                        the server's version, memory, disk, requests and namespaces
   checkpoint [-n <ns>]          checkpoint one namespace or all (archived first, if the
                                 server archives its WAL)
@@ -70,7 +71,13 @@ credentials below; every command needs a server-wide admin:
   drop-index, add-constraint, drop-constraint
                                 as above, without <dir>
   requests [<user>]             the running requests (a user's only, if given)
-  cancel <id>                   cancel a running request
+  cancel <id>                   cancel a running request (or a queued or running job)
+  jobs list [<user>]            the managed analytics jobs kept, newest first (step 16f)
+  jobs show <id>                a job's state and progress
+  jobs cancel <id>              cancel a queued or running job
+  jobs result <id> [<offset> [<limit>]]
+                                a page of a done job's rows (at most 10000; the next
+                                offset is printed while more are left)
   restore, import and export are offline: run them on the server's host.
 
 users, grants and API tokens (step 15a), on a data directory <dir> (the server
@@ -470,6 +477,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
                 tls: ClientTls::default(),
             });
         }
+        "jobs" => return Err(crate::remote::JOBS_ONLY_REMOTE.into()),
         "shell" => {
             expect(1)?;
             Command::Shell { endpoint: rest.first().cloned().ok_or("shell needs an endpoint (https://host:port)")? }
@@ -751,6 +759,19 @@ mod tests {
             Ok(Action::PruneArchive { before: "b1".into(), dry_run: true })
         );
         assert_eq!(remote("--server http://h:1 cancel 42"), Ok(Action::Cancel { id: 42 }));
+        assert_eq!(remote("--server http://h:1 jobs list"), Ok(Action::Jobs { user: None }));
+        assert_eq!(remote("--server http://h:1 jobs list ann"), Ok(Action::Jobs { user: Some("ann".into()) }));
+        assert_eq!(remote("--server http://h:1 jobs show 7"), Ok(Action::Job { id: 7 }));
+        assert_eq!(remote("--server http://h:1 jobs cancel 7"), Ok(Action::CancelJob { id: 7 }));
+        assert_eq!(
+            remote("--server http://h:1 jobs result 7"),
+            Ok(Action::JobResult { id: 7, offset: 0, limit: None })
+        );
+        assert_eq!(
+            remote("--server http://h:1 jobs result 7 100 5"),
+            Ok(Action::JobResult { id: 7, offset: 100, limit: Some(5) })
+        );
+        assert_eq!(parse_words("jobs list").unwrap_err(), crate::remote::JOBS_ONLY_REMOTE);
         assert_eq!(remote("--server http://h:1 requests ann"), Ok(Action::Requests { user: Some("ann".into()) }));
         assert_eq!(
             remote("--server http://h:1 create-index address.city -n social --key k"),
@@ -770,6 +791,11 @@ mod tests {
             "--server http://h:1 verify backup",
             "--server http://h:1 archive prune",
             "--server http://h:1 cancel x",
+            "--server http://h:1 jobs",
+            "--server http://h:1 jobs show",
+            "--server http://h:1 jobs show x",
+            "--server http://h:1 jobs result 1 2 3 4",
+            "--server http://h:1 jobs start",
             "--server http://h:1 status --key k",
             "--server http://h:1 namespaces -n x",
             "--server http://h:1 import n f",

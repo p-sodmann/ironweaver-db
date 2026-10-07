@@ -59,7 +59,13 @@ Put `--server <endpoint>` (`https://host:port`, or `http://` for a server whose 
 | `namespaces`, `create-namespace <name> [--key <k>]`, `drop-namespace <name> [--key <k>]` | As locally, without `<dir>` (and without `--archive`). |
 | `indexes`, `create-index`, `drop-index`, `add-constraint`, `drop-constraint` | As locally, without `<dir>`; `-n` names the namespace. |
 | `requests [<user>]` | The running requests, oldest first (a non-admin sees only its own). |
-| `cancel <id>` | Cancel a running read: its caller gets `cancelled`. Commits and admin writes can't be cancelled. |
+| `cancel <id>` | Cancel a running read: its caller gets `cancelled`. Commits and admin writes can't be cancelled. A queued or running job (listed as `StartJob`) is cancelled like `jobs cancel`. |
+| `jobs list [<user>]` | The managed analytics jobs the server keeps, newest first: id, kind, namespace, owner, state, how long it ran, the projection's size and rows once known (a non-admin sees only its own). |
+| `jobs show <id>` | One job's state and progress, its error if it failed or was cancelled, and how long it is kept. |
+| `jobs cancel <id>` | Cancel a queued or running job; one that has ended is shown as it is. |
+| `jobs result <id> [<offset> [<limit>]]` | A page of a done job's rows (tab-separated id and score or count, or a group's ids per line), at most 10 000 and about 4 MiB; while more are left the last line names the next command. |
+
+Jobs are started through the API (gRPC `StartJob`, REST `POST /v1/namespaces/{ns}/jobs`) or the Rust clients, not by `iwctl` ([ADR 0056](adr/0056-managed-analytics-jobs.md)). They live in the server's memory, so `jobs` needs `--server` (exit 2 without it); anyone may list, show, cancel and fetch their own, a server-wide admin anyone's. `jobs result` of a job that isn't done fails (exit 4) with `invalid_argument`, or the job's error.
 
 `restore`, `import` and `export` are offline: with `--server` they are refused (exit 2). A restore writes a new data directory and doesn't touch a running store: run `iwctl restore` on the server's host, then start a server on the restored directory.
 
@@ -77,6 +83,14 @@ would remove 41 archived segments (43008 bytes) of /var/lib/iwdb-archive before 
 $ iwctl $S requests
 request 812: Analyze on social by ann from 10.0.0.7, running 41.3 s
 $ iwctl $S cancel 812
+$ iwctl $S jobs list
+job 815: leiden on social by ann, running for 912.4 s, 2000000 nodes and 9000000 edges
+job 790: page_rank on social by ann, done for 431.0 s, 1000 rows (cut)
+$ iwctl $S jobs result 790 0 3
+p-1003	0.0021
+p-77	0.0019
+p-4	0.0017
+(more: jobs result 790 3)
 ```
 
 ## Users and tokens

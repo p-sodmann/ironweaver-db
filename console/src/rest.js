@@ -58,6 +58,14 @@
     id: n(q.id), operation: q.operation, namespace: q.namespace ?? null, user: q.user || '', client: q.client ?? null,
     startedMicros: n(q.startedMicros), elapsedMicros: n(q.elapsedMicros), cancellable: !!q.cancellable,
   });
+  /** A managed job (step 16f): `state` as the contract's word ('running', not JOB_STATE_RUNNING). */
+  const job = (j) => ({
+    id: n(j.id), namespace: j.namespace || '', user: j.user || '', kind: j.kind || '',
+    state: String(j.state || 'JOB_STATE_UNSPECIFIED').replace(/^JOB_STATE_/, '').toLowerCase(),
+    createdMicros: n(j.createdMicros), startedMicros: opt(j.startedMicros), endedMicros: opt(j.endedMicros), elapsedMicros: n(j.elapsedMicros),
+    nodes: opt(j.nodes), edges: opt(j.edges), rows: opt(j.rows), truncated: !!j.truncated, resultBytes: n(j.resultBytes),
+    error: j.error ? { code: j.error.code || 'internal', message: j.error.message || '' } : null, expiresMicros: opt(j.expiresMicros),
+  });
   const consumer = (c) => ({ namespace: c.namespace, user: c.user || '', client: c.client ?? null, nextSeq: n(c.nextSeq), lag: n(c.lag), lastPollMicros: n(c.lastPollMicros), polls: n(c.polls) });
 
   /* ---- the metrics (GET /v1/metrics, documentation/api/metrics.md) */
@@ -273,9 +281,10 @@
           config = await doFetch(base ? base + '/console-config.json' : 'console-config.json').then((r) => (r.ok ? r.json() : {}), () => ({}));
           if (config && config.upstream) src.endpoint = config.upstream;
         }
-        const [st, rq, co, m] = await Promise.all([
+        const [st, rq, co, m, jb] = await Promise.all([
           call('GET', '/v1/status', undefined, true), call('GET', '/v1/requests?limit=100', undefined, true),
           call('GET', '/v1/consumers', undefined, true), call('GET', '/v1/metrics', undefined, true),
+          call('GET', '/v1/jobs?limit=50', undefined, true),
         ]);
         await pollLog();
         const s = st.status || {}; const d = digest(m); step(d, s);
@@ -287,6 +296,8 @@
           requests: { active: n(r.active), total: n(r.total), timedOut: n(r.timedOut), cancelled: n(r.cancelled), rejected: n(r.rejected), denied: n(r.denied) },
           namespaces: (s.namespaces || []).map(status),
           active: (rq.requests || []).map(request), consumers: (co.consumers || []).map(consumer),
+          jobs: (jb.jobs || []).map(job),
+          jobCounts: { queued: n(s.jobs && s.jobs.queued), running: n(s.jobs && s.jobs.running), finished: n(s.jobs && s.jobs.finished), resultBytes: n(s.jobs && s.jobs.resultBytes) },
           operations: d.operations, series: JSON.parse(JSON.stringify(series)), tickMs,
         };
       },
@@ -294,6 +305,11 @@
       cancel: async (id) => {
         const r = await call('POST', `/v1/requests/${enc(String(id))}/cancel`, {});
         return { request: request(r.request || {}) };
+      },
+      /** Cancel a queued or running job (step 16f); one that ended is answered as it is. */
+      cancelJob: async (id) => {
+        const r = await call('POST', `/v1/jobs/${enc(String(id))}/cancel`, {});
+        return { job: job(r.job || {}) };
       },
       log: () => (logKind === 'server' ? serverLog : pageLog).slice(),
       onLog: (f) => { listeners.add(f); return () => listeners.delete(f); },

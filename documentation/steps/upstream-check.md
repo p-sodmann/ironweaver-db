@@ -1,7 +1,7 @@
 # Upstream check (recurring gate)
 
 Status: recurring
-Runs: before starting [step 10](step_10.md), [step 11](step_11.md), [step 12](step_12.md), [step 13](step_13.md) and [step 17](step_17.md), and as part of every `ironweaver-core` bump ([ADR 0002](../adr/0002-ironweaver-core-dependency.md)).
+Runs: before starting [step 10](step_10.md), [step 11](step_11.md), [step 12](step_12.md), [step 13](step_13.md), [step 16f](step_16f.md) and [step 17](step_17.md), and as part of every `ironweaver-core` bump ([ADR 0002](../adr/0002-ironweaver-core-dependency.md)).
 
 ## Goal
 
@@ -16,12 +16,13 @@ Find out which of our upstream issues have been fixed, adopt the fixes, and remo
 
 ## Open issues
 
-Last checked: 2026-10-03 at core `7e7b7fa` (start of step 12: #57 fixed and adopted; no issue of ours is open). Before that at `ca308f0` (step 11b bump: edition 2024, Rust 1.99, `rand` 0.9; no issue of ours fixed or affected) and `d15a7ec`, at the start of step 11. #26–#35 were fixed in `3b15149`, #46 in `cd09ea0`, #48–#50 in `ace9a0d`, #57 in `7e7b7fa` (see Closed issues). `d15a7ec` (upstream #54, not one of ours) removed the format-1 binary reader and the `format-v1` feature; see the #30 row.
+Last checked: 2026-10-06 at core `7e7b7fa` (start of step 16f: #60, #61 and the new #62 are open, upstream `main` is at `fc91a6f` with none of them fixed; no bump). Before that on 2026-10-03 at `7e7b7fa` (start of step 12: #57 fixed and adopted; no issue of ours was open), and at `ca308f0` (step 11b bump: edition 2024, Rust 1.99, `rand` 0.9; no issue of ours fixed or affected) and `d15a7ec`, at the start of step 11. #26–#35 were fixed in `3b15149`, #46 in `cd09ea0`, #48–#50 in `ace9a0d`, #57 in `7e7b7fa` (see Closed issues). `d15a7ec` (upstream #54, not one of ours) removed the format-1 binary reader and the `format-v1` feature; see the #30 row.
 
 | Issue | Finding | Needed before | Until fixed | When fixed |
 |---|---|---|---|---|
 | [#60](https://github.com/p-sodmann/Ironweaver/issues/60) | The core can't list a graph's labels, and has no count of edges by type (filed in step 16c-2) | nothing: no step depends on it | `read::schema` samples (ADR 0053): label names from the first `max_visited` nodes with exact counts (`label_count`), types counted in the first `max_edges` edges | List labels and types (with counts) from the core in `read::schema`, keep the sample for keys only; update `schema_is_bounded` (labels complete at any sample size), ADR 0053 and the guarantees' "schema is sampled" item |
 | [#61](https://github.com/p-sodmann/Ironweaver/issues/61) | `memory_usage` leaves out payloads' heap; an `IndexBuild` and a `RawProjection` report no memory (filed in step 16d) | nothing: step 16d works with its estimate; step 15d (per-namespace limits) gains from it | `Namespace::payload_bytes` (`DbRecord::heap_bytes`, kept per apply from the touched entities, ADR 0054); builds and raw projections charged per node and edge (`iwdb_storage::memory`) | Count payloads with the core's figure: remove `payload_bytes`, `Touched` and `heap_bytes` from `iwdb-engine`, fold the `payload` part into `graph` (metrics, status, console), use `IndexBuild::memory_usage` and `RawProjection::memory_usage` for `working`; turn `memory_usage_leaves_out_payloads` (`core_smoke.rs`) around; update ADR 0054 |
+| [#62](https://github.com/p-sodmann/Ironweaver/issues/62) | The core's algorithms report no progress while they run, not even through `run_polling`'s hook (filed in step 16f) | nothing: step 16f reports phases only | a job's progress is its state (`queued`, `collecting`, `running`, ...) with the projection's size; no fraction (ADR 0056) | Read the core's progress in the job runner (`iwdb::Embedded`'s job closure), add a progress field to `JobInfo` (proto `JobInfo`, REST, `iwctl jobs show`, the console's jobs table); turn `algorithms_report_no_progress` (`core_smoke.rs`) into a test of the new channel; update ADR 0056 |
 
 ## Closed issues
 

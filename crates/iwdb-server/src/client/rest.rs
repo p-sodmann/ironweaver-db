@@ -34,7 +34,7 @@ use iwdb_query::{
     FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
     QueryOptions, Schema, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
-use iwdb_query::{BackupDone, BackupRequest, Checkpointed, VerifyTarget};
+use iwdb_query::{BackupDone, BackupRequest, Checkpointed, JobInfo, JobOwner, JobPage, VerifyTarget};
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -795,6 +795,68 @@ impl Admin for RestRemote {
             let url = format!("{}/v1/archive/prune", c.base);
             let response: pb::PruneArchiveResponse = c.post(url, &pb::PruneArchiveRequest { before, dry_run }).await?;
             prune_from_pb(response).map_err(bad_answer)
+        })
+    }
+
+    /// `owner` is ignored: the server's authorisation point sets the caller.
+    fn start_job(
+        &self,
+        namespace: String,
+        request: AnalyticsRequest,
+        options: QueryOptions,
+        _owner: Option<JobOwner>,
+    ) -> impl Future<Output = Result<JobInfo, Error>> + Send {
+        let start = start_job_to_pb(&namespace, &request, &options);
+        self.call(move |c| async move {
+            let url = c.url(&namespace, "/jobs");
+            let response: pb::StartJobResponse = c.post(url, &start?).await?;
+            job_from_pb(response.job).map_err(bad_answer)
+        })
+    }
+
+    fn jobs(
+        &self,
+        user: Option<String>,
+        limit: Option<usize>,
+    ) -> impl Future<Output = Result<Listed<JobInfo>, Error>> + Send {
+        self.call(move |c| async move {
+            let q = parameters(&[("user", user), ("limit", limit.map(|n| n.min(u32::MAX as usize).to_string()))]);
+            let response: pb::ListJobsResponse = c.get(format!("{}/v1/jobs{}", c.base, q)).await?;
+            jobs_from_pb(response).map_err(bad_answer)
+        })
+    }
+
+    fn job(&self, id: u64, user: Option<String>) -> impl Future<Output = Result<JobInfo, Error>> + Send {
+        self.call(move |c| async move {
+            let q = parameters(&[("user", user)]);
+            let response: pb::GetJobResponse = c.get(format!("{}/v1/jobs/{}{}", c.base, id, q)).await?;
+            job_from_pb(response.job).map_err(bad_answer)
+        })
+    }
+
+    fn cancel_job(&self, id: u64, user: Option<String>) -> impl Future<Output = Result<JobInfo, Error>> + Send {
+        self.call(move |c| async move {
+            let url = format!("{}/v1/jobs/{}/cancel", c.base, id);
+            let response: pb::CancelJobResponse = c.post(url, &pb::CancelJobRequest { id, user }).await?;
+            job_from_pb(response.job).map_err(bad_answer)
+        })
+    }
+
+    fn job_result(
+        &self,
+        id: u64,
+        user: Option<String>,
+        offset: u64,
+        limit: Option<usize>,
+    ) -> impl Future<Output = Result<JobPage, Error>> + Send {
+        self.call(move |c| async move {
+            let q = parameters(&[
+                ("user", user),
+                ("offset", Some(offset.to_string())),
+                ("limit", limit.map(|n| n.min(u32::MAX as usize).to_string())),
+            ]);
+            let response: pb::GetJobResultResponse = c.get(format!("{}/v1/jobs/{}/result{}", c.base, id, q)).await?;
+            job_page_from_pb(response).map_err(bad_answer)
         })
     }
 }

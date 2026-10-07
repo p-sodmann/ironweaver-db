@@ -523,6 +523,26 @@ impl<D: Served> AdminService for Adapter<D> {
     async fn prune_archive(&self, request: Request<pb::PruneArchiveRequest>) -> Res<pb::PruneArchiveResponse> {
         Ok(Response::new(ops::prune_archive(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
     }
+
+    async fn start_job(&self, request: Request<pb::StartJobRequest>) -> Res<pb::StartJobResponse> {
+        Ok(Response::new(ops::start_job(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
+
+    async fn list_jobs(&self, request: Request<pb::ListJobsRequest>) -> Res<pb::ListJobsResponse> {
+        Ok(Response::new(ops::list_jobs(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
+
+    async fn get_job(&self, request: Request<pb::GetJobRequest>) -> Res<pb::GetJobResponse> {
+        Ok(Response::new(ops::get_job(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
+
+    async fn cancel_job(&self, request: Request<pb::CancelJobRequest>) -> Res<pb::CancelJobResponse> {
+        Ok(Response::new(ops::cancel_job(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
+
+    async fn get_job_result(&self, request: Request<pb::GetJobResultRequest>) -> Res<pb::GetJobResultResponse> {
+        Ok(Response::new(ops::get_job_result(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
 }
 
 #[cfg(test)]

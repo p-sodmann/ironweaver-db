@@ -260,12 +260,14 @@ impl Protos {
             // Health, login and this document need no credentials
             operation.insert("security".into(), json!([]));
         }
-        for name in
-            ["user", "ns", "token", "id", "request"].into_iter().filter(|p| route.path.contains(&format!("{{{}}}", p)))
+        for name in ["user", "ns", "token", "id", "request", "job"]
+            .into_iter()
+            .filter(|p| route.path.contains(&format!("{{{}}}", p)))
         {
             let (schema, description) = match (name, route.rpc) {
                 ("ns", _) => (json!({ "type": "string" }), "The namespace."),
                 ("request", _) => (json!({ "type": "string", "pattern": "^[0-9]+$" }), "The request's id."),
+                ("job", _) => (json!({ "type": "string", "pattern": "^[0-9]+$" }), "The job's id."),
                 ("user", _) => (json!({ "type": "string" }), "The user."),
                 ("token", _) => (json!({ "type": "string" }), "The API token's name."),
                 (_, Some("GetEdges")) => (json!({ "type": "string", "pattern": "^[0-9]+$" }), "The edge's id."),

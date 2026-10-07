@@ -21,15 +21,16 @@ use iwdb_engine::CommitTime;
 use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation, Namespace};
 use iwdb_query::exec::{Pending, Pool};
+use iwdb_query::jobs::{Finished, JobHandle, JobWork, Jobs, JobsConfig};
 use iwdb_query::log::LogRing;
 use iwdb_query::read::{self, ReadContext};
 use iwdb_query::requests::Requests;
 use iwdb_query::{Accounts, Authenticate, NewToken, Principal, Role, Secret, Session, TokenInfo, UserInfo, Via};
 use iwdb_query::{
-    AnalyticsRequest, Answer, CHANGES_BATCH_BYTES, ChangeEvent, Changes, ChangesRequest, Code, CommitOptions, Database,
-    Edge, Error, Explain, ExplainRequest, FindRequest, JobResult, LimitConfig, MatchRequest, MatchRow, NamespaceStatus,
-    NeighbourhoodRequest, Node, Path, PathRequest, QueryOptions, Schema, Subgraph, SubgraphRequest, TraverseRequest,
-    WalkRequest, Work,
+    AnalyticsRequest, Answer, Bounds, CHANGES_BATCH_BYTES, ChangeEvent, Changes, ChangesRequest, Code, CommitOptions,
+    Database, Edge, Error, Explain, ExplainRequest, FindRequest, JobResult, LimitConfig, MatchRequest, MatchRow,
+    NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest, QueryOptions, Schema, Subgraph, SubgraphRequest,
+    TraverseRequest, WalkRequest, Work,
 };
 use iwdb_storage::io::{LogFs, StdFs};
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
@@ -49,12 +50,14 @@ pub struct QueryConfig {
     /// Requests that may wait for a worker; more fail with `unavailable`.
     /// Default: 1024.
     pub queue: usize,
+    /// The managed jobs' threads and bounds (ADR 0056).
+    pub jobs: JobsConfig,
 }
 
 impl Default for QueryConfig {
     fn default() -> Self {
         let cpus = std::thread::available_parallelism().map_or(2, |n| n.get());
-        QueryConfig { limits: LimitConfig::default(), workers: cpus.max(2), queue: 1024 }
+        QueryConfig { limits: LimitConfig::default(), workers: cpus.max(2), queue: 1024, jobs: JobsConfig::default() }
     }
 }
 
@@ -74,11 +77,14 @@ where
 {
     store: Arc<Store<F>>,
     pool: Pool,
-    config: QueryConfig,
+    /// Shared: it is large, and an `Embedded` is moved around whole.
+    config: Arc<QueryConfig>,
     auth: Arc<AuthState>,
     pub(crate) monitor: Arc<Monitor>,
     /// The backup directory: where `Admin::backup` writes (ADR 0055).
     pub(crate) backup_dir: Option<Arc<std::path::PathBuf>>,
+    /// The managed analytics jobs (ADR 0056).
+    pub(crate) jobs: Arc<Jobs>,
 }
 
 /// What the operator's reads report beyond the store (step 16c): the
@@ -114,12 +120,15 @@ where
     F::File: Send,
 {
     /// Serve `store` with `config`. Errors: `invalid_argument` for invalid
-    /// limits; `internal` if the worker threads can't start.
+    /// limits or job bounds; `internal` if the worker or job threads can't
+    /// start.
     pub fn new(store: Store<F>, config: QueryConfig) -> Result<Self, Error> {
         config.limits.check()?;
         let pool = Pool::new("iwdb-query", config.workers, config.queue)?;
+        let requests = Requests::new();
+        let jobs = Jobs::new(config.jobs.clone(), requests.clone(), Some(store.memory_handle()))?;
         let monitor = Monitor {
-            requests: Requests::new(),
+            requests,
             log: Arc::new(LogRing::new(0)),
             started: CommitTime::now(),
             ready: AtomicBool::new(true),
@@ -127,10 +136,11 @@ where
         Ok(Embedded {
             store: Arc::new(store),
             pool,
-            config,
+            config: Arc::new(config),
             auth: Arc::default(),
             monitor: Arc::new(monitor),
             backup_dir: None,
+            jobs: Arc::new(jobs),
         })
     }
 
@@ -242,10 +252,12 @@ where
         &self.config
     }
 
-    /// Finish the queued requests, stop the workers, and close the store
-    /// ([`Store::close`]).
+    /// Cancel the managed jobs and join their threads, finish the queued
+    /// requests, stop the workers, and close the store ([`Store::close`]).
     pub fn close(self) -> Result<(), crate::Error> {
-        let Embedded { store, pool, auth, .. } = self;
+        let Embedded { store, pool, auth, jobs, .. } = self;
+        jobs.close();
+        drop(jobs);
         drop(auth);
         pool.shutdown();
         drop(pool);
@@ -347,6 +359,75 @@ impl Request {
             crate::Error::Timeout { what, .. } => self.timed_out(&what),
             other => other.into(),
         }
+    }
+}
+
+/// The size of `ns`'s projection (nodes, edges), if `bounds` let a job
+/// collect it: `max_visited` must hold the nodes and `max_edges` the edges
+/// (ADR 0022). Errors: `budget_exceeded`.
+fn projection_fits<F: LogFs + Clone + Send + Sync + 'static>(
+    ns: &Ns<'_, F>,
+    bounds: Bounds,
+) -> Result<(usize, usize), Error>
+where
+    F::File: Send,
+{
+    let (nodes, edges) = ns.read(|n| (n.graph().node_count(), n.graph().edge_count()));
+    if nodes > bounds.max_visited || edges > bounds.max_edges {
+        return Err(Error::budget(format!(
+            "{} nodes visited and {} edges examined (the projection holds {} nodes and {} edges)",
+            bounds.max_visited, bounds.max_edges, nodes, edges
+        )));
+    }
+    Ok((nodes, edges))
+}
+
+impl<F: LogFs + Clone + Send + Sync + 'static> Embedded<F>
+where
+    F::File: Send,
+{
+    /// Queue `request` on `namespace` as a managed job of `owner` (ADR
+    /// 0056): checked now as `analyze` checks it (the namespace exists, the
+    /// projection fits the limits), and again when it leaves the queue.
+    /// Its work is `analyze`'s: `Ns::analyze` and `read::run_job`, under
+    /// the job's token and timeout.
+    pub(crate) fn queue_job(
+        &self,
+        namespace: String,
+        request: AnalyticsRequest,
+        options: QueryOptions,
+        owner: Option<iwdb_query::JobOwner>,
+    ) -> Result<iwdb_query::JobInfo, Error> {
+        let (bounds, _) = self.config.limits.resolve(&options)?;
+        if let iwdb_query::Job::PageRank(o) = &request.job
+            && o.personalization.is_some()
+        {
+            return Err(Error::invalid(
+                "PageRank's personalization is by dense index and can't be given to a database job",
+            ));
+        }
+        projection_fits(&self.store.namespace(&namespace)?, bounds)?;
+        let owner =
+            owner.unwrap_or_else(|| iwdb_query::JobOwner { user: Principal::unauthenticated().user, client: None });
+        let (store, name, kind) = (self.store.clone(), namespace.clone(), request.job.name());
+        let work: JobWork = Box::new(move |handle: &JobHandle| {
+            let ns = store.namespace(&name)?;
+            let (nodes, edges) = projection_fits(&ns, bounds)?;
+            handle.collecting(nodes as u64, edges as u64);
+            let read = ReadOptions {
+                min_seq: options.min_seq,
+                history: options.history,
+                timeout: Some(handle.timeout()),
+                cancel: Some(handle.token().clone()),
+            };
+            let analysis = ns.analyze(&request.projection, &read, |p| {
+                handle.running();
+                read::run_job(&request.job, p, bounds.max_results)
+            })?;
+            let (result, truncated) = analysis.value;
+            Ok(Finished { result, truncated, seq: analysis.seq })
+        });
+        self.jobs.start(&namespace, &owner.user, owner.client, kind, options.timeout, work)
     }
 }
 
@@ -503,13 +584,7 @@ where
         self.run_until(resolved.expiry(), move |store, token| {
             let ns = store.namespace(&name)?;
             let bounds = resolved.bounds;
-            let (nodes, edges) = ns.read(|n| (n.graph().node_count(), n.graph().edge_count()));
-            if nodes > bounds.max_visited || edges > bounds.max_edges {
-                return Err(Error::budget(format!(
-                    "{} nodes visited and {} edges examined (the projection holds {} nodes and {} edges)",
-                    bounds.max_visited, bounds.max_edges, nodes, edges
-                )));
-            }
+            let (nodes, edges) = projection_fits(&ns, bounds)?;
             let job = &request.job;
             let analysis = ns
                 .analyze(&request.projection, &resolved.read_options(token)?, |p| {

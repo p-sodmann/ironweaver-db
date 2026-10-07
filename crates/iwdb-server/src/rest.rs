@@ -299,6 +299,26 @@ pub const ROUTES: &[Route] = &[
         "pruneArchive",
         "Prune the WAL archive before a backup",
     ),
+    // Managed analytics jobs (admin.proto, step 16f)
+    route(Method::POST, "/v1/namespaces/{ns}/jobs", "StartJob", BODY, "startJob", "Queue an analytics job"),
+    route(Method::GET, "/v1/jobs", "ListJobs", Input::Query(JOBS_PARAMETERS), "listJobs", "The jobs kept"),
+    route(
+        Method::GET,
+        "/v1/jobs/{job}",
+        "GetJob",
+        Input::Query(JOB_PARAMETERS),
+        "getJob",
+        "A job's state and progress",
+    ),
+    route(Method::POST, "/v1/jobs/{job}/cancel", "CancelJob", OPTIONAL_BODY, "cancelJob", "Cancel a job"),
+    route(
+        Method::GET,
+        "/v1/jobs/{job}/result",
+        "GetJobResult",
+        Input::Query(JOB_RESULT_PARAMETERS),
+        "getJobResult",
+        "A page of a done job's result",
+    ),
     // Served by the gate in every build, also without `rest`
     route(
         Method::GET,
@@ -340,6 +360,23 @@ pub const ROUTES: &[Route] = &[
 pub(crate) const REQUESTS_PARAMETERS: &[(&str, &str, &str)] = &[
     ("user", "string", "Only this user's requests (others than a server admin see only their own)."),
     ("limit", "integer", "At most this many (default and maximum 1000)."),
+];
+
+/// The query parameters of `GET /v1/jobs`.
+pub(crate) const JOBS_PARAMETERS: &[(&str, &str, &str)] = &[
+    ("user", "string", "Only this user's jobs (others than a server admin see only their own)."),
+    ("limit", "integer", "At most this many (default and maximum 1000)."),
+];
+
+/// The query parameters of `GET /v1/jobs/{job}`.
+pub(crate) const JOB_PARAMETERS: &[(&str, &str, &str)] =
+    &[("user", "string", "Only if it is this user's job; otherwise 404.")];
+
+/// The query parameters of `GET /v1/jobs/{job}/result`.
+pub(crate) const JOB_RESULT_PARAMETERS: &[(&str, &str, &str)] = &[
+    ("user", "string", "Only if it is this user's job; otherwise 404."),
+    ("offset", "integer", "The first row (default 0)."),
+    ("limit", "integer", "At most this many rows (default and maximum 10000); a page also stops before about 4 MiB."),
 ];
 
 /// The query parameters of `GET /v1/log`.
@@ -456,6 +493,11 @@ fn handler<D: Served>(r: &Route) -> MethodRouter<Arc<Shared<D>>> {
         "backup" => post(backup::<D>),
         "verify" => post(verify::<D>),
         "pruneArchive" => post(prune_archive::<D>),
+        "startJob" => post(start_job::<D>),
+        "listJobs" => get(list_jobs::<D>),
+        "getJob" => get(get_job::<D>),
+        "cancelJob" => post(cancel_job::<D>),
+        "getJobResult" => get(get_job_result::<D>),
         other => get(move || async move { Failure::from(Error::internal(format!("route {} has no handler", other))) }),
     }
 }
@@ -758,6 +800,7 @@ body_handler!(random_walks, pb::RandomWalksRequest, |db, r, h| streamed(&h, ops:
 body_handler!(subgraph, pb::SubgraphRequest, |db, r, h| streamed(&h, ops::subgraph(&db, r, None).await));
 body_handler!(match_pattern, pb::MatchPatternRequest, |db, r, h| streamed(&h, ops::match_pattern(&db, r, None).await));
 body_handler!(analyze, pb::AnalyzeRequest, |db, r, h| streamed(&h, ops::analyze(&db, r, None).await));
+body_handler!(start_job, pb::StartJobRequest, |db, r, _h| unary(ops::start_job(&db, r).await));
 
 /// One node by id: its `GetNodesResponse`, or 404 if it doesn't exist.
 async fn get_node<D: Served>(
@@ -978,6 +1021,70 @@ async fn cancel_request<D: Served>(
     }
     r.id = id;
     unary(ops::cancel_request(&db, r).await)
+}
+
+// ---- managed jobs (step 16f) ----
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobQuery {
+    user: Option<String>,
+    offset: Option<u64>,
+    limit: Option<u32>,
+}
+
+fn job_query(q: Result<Query<JobQuery>, QueryRejection>) -> Result<JobQuery, Failure> {
+    q.map(|Query(q)| q).map_err(|e| Failure::from(Error::invalid(format!("invalid query: {}", e))))
+}
+
+async fn list_jobs<D: Served>(
+    State(s): St<D>,
+    caller: Caller_,
+    q: Result<Query<RequestsQuery>, QueryRejection>,
+) -> Answer {
+    let Query(q) = q.map_err(|e| Failure::from(Error::invalid(format!("invalid query: {}", e))))?;
+    unary(ops::list_jobs(&s.db(&caller)?, pb::ListJobsRequest { user: q.user, limit: q.limit }).await)
+}
+
+async fn get_job<D: Served>(
+    State(s): St<D>,
+    caller: Caller_,
+    p: Result<Path<u64>, PathRejection>,
+    q: Result<Query<JobQuery>, QueryRejection>,
+) -> Answer {
+    let q = job_query(q)?;
+    if q.offset.is_some() || q.limit.is_some() {
+        return Err(Error::invalid("a job takes only the parameter 'user'").into());
+    }
+    unary(ops::get_job(&s.db(&caller)?, pb::GetJobRequest { id: path(p)?, user: q.user }).await)
+}
+
+async fn get_job_result<D: Served>(
+    State(s): St<D>,
+    caller: Caller_,
+    p: Result<Path<u64>, PathRejection>,
+    q: Result<Query<JobQuery>, QueryRejection>,
+) -> Answer {
+    let q = job_query(q)?;
+    let r = pb::GetJobResultRequest { id: path(p)?, user: q.user, offset: q.offset.unwrap_or(0), limit: q.limit };
+    unary(ops::get_job_result(&s.db(&caller)?, r).await)
+}
+
+async fn cancel_job<D: Served>(
+    State(s): St<D>,
+    caller: Caller_,
+    p: Result<Path<u64>, PathRejection>,
+    headers: HeaderMap,
+    body: Body,
+) -> Answer {
+    let db = s.db(&caller)?;
+    let mut r: pb::CancelJobRequest = read(&headers, body, s.max_body).await?;
+    let id = path(p)?;
+    if r.id != 0 && r.id != id {
+        return Err(Error::invalid(format!("the body names job {}, the path {}", r.id, id)).into());
+    }
+    r.id = id;
+    unary(ops::cancel_job(&db, r).await)
 }
 
 async fn list_consumers<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {

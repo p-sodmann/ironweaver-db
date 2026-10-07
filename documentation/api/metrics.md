@@ -53,6 +53,10 @@ A test keeps this table equal to the metrics the server exports (`METRICS` in `c
 | `iwdb_backup_bytes_total` | counter | – | bytes | Bytes written by backups, counted as they are written (a throttled backup's progress). |
 | `iwdb_backups_total` | counter | `outcome` | – | Backups that ended, by outcome: `ok` or `failed`. |
 | `iwdb_last_backup_timestamp_seconds` | gauge | – | seconds | When the last successful backup finished, in seconds since 1970 (UTC); no sample without one. |
+| `iwdb_jobs_queued` | gauge | – | – | Managed analytics jobs waiting for a job thread. |
+| `iwdb_jobs_running` | gauge | – | – | Managed analytics jobs collecting their projection or running. |
+| `iwdb_jobs_total` | counter | `outcome` | – | Managed analytics jobs that ended, by outcome: `done`, `failed` or `cancelled`. |
+| `iwdb_job_result_bytes` | gauge | – | bytes | The stored job results' estimated size (counted in the `working` memory part). |
 
 ## Examples
 
@@ -60,4 +64,5 @@ A test keeps this table equal to the metrics the server exports (`METRICS` in `c
 - Rejected requests (a full queue, or draining): `rate(iwdb_requests_total{code="unavailable"}[5m])`; timed out: `code="timeout"`.
 - Memory: `sum(iwdb_memory_used_bytes) / iwdb_memory_limit_bytes` is the fraction of the limit in use ([ADR 0054](../adr/0054-the-memory-limit.md)); alert on `iwdb_memory_state >= 1`, and page on `iwdb_memory_state == 2` (writes refused: `rate(iwdb_requests_total{code="resource_exhausted"}[5m])`).
 - Backups ([ADR 0055](../adr/0055-admin-writes-and-iwctl-against-a-server.md)): a backup's copy rate is `rate(iwdb_backup_bytes_total[1m])`; checkpoints are held back while `iwdb_backup_running > 0`; alert on `time() - iwdb_last_backup_timestamp_seconds` above your backup interval, and on `increase(iwdb_backups_total{outcome="failed"}[1d]) > 0`.
+- Managed jobs ([ADR 0056](../adr/0056-managed-analytics-jobs.md)): `iwdb_jobs_queued` near `[jobs] queued` means starts are about to be refused (`unavailable`); alert on `increase(iwdb_jobs_total{outcome="failed"}[1h]) > 0` if failed jobs matter; stored results are part of `iwdb_memory_used_bytes{part="working"}`.
 - A namespace that went read-only: `iwdb_namespace_read_only == 1`. Checkpoints falling behind: `iwdb_checkpoint_lag_commits`, `time() - iwdb_last_checkpoint_timestamp_seconds`.

@@ -60,11 +60,16 @@
 | POST | `/v1/backups` | `BackupRequest` (`name`, `max_bytes_per_second`, `no_verify`) | `BackupResponse` | `Admin::backup` |
 | POST | `/v1/verify` | `VerifyRequest` (optional: `backup` or `archive`) | `VerifyResponse` | `Admin::verify` |
 | POST | `/v1/archive/prune` | `PruneArchiveRequest` (`before`, `dry_run`) | `PruneArchiveResponse` | `Admin::prune_archive` |
+| POST | `/v1/namespaces/{ns}/jobs` | `StartJobRequest` | `StartJobResponse` | `Admin::start_job` |
+| GET | `/v1/jobs` | `user`, `limit` as query parameters | `ListJobsResponse` | `Admin::jobs` |
+| GET | `/v1/jobs/{job}` | `user` as a query parameter | `GetJobResponse` | `Admin::job` |
+| POST | `/v1/jobs/{job}/cancel` | `CancelJobRequest` (optional) | `CancelJobResponse` | `Admin::cancel_job` |
+| GET | `/v1/jobs/{job}/result` | `user`, `offset`, `limit` as query parameters | `GetJobResultResponse` | `Admin::job_result` |
 | GET | `/metrics` | – | the metrics in Prometheus' text format ([metrics.md](metrics.md)) | `Admin::metrics` |
 
 Path parameters are percent-encoded: node `a/b` is `/nodes/a%2Fb`. A test keeps this table equal to the server's route table.
 
-The operator's routes (`/v1/status` to `/metrics`, step 16c) are described in [Operator reads](#operator-reads), the admin writes (`/v1/checkpoint` to `/v1/archive/prune`, step 16e) in [Admin writes](#admin-writes). The health routes are served in every build (also without the `rest` feature) and while the store recovers; until recovery has finished every other route answers 503 `unavailable` ([ADR 0040](../adr/0040-health-and-readiness.md)). With the `console` feature and `[console] enabled = true`, the operator console's pages are served at `/console/` on the same port ([ADR 0041](../adr/0041-console-served-by-the-server.md)); they aren't part of this API.
+The operator's routes (`/v1/status` to `/metrics`, step 16c) are described in [Operator reads](#operator-reads), the admin writes (`/v1/checkpoint` to `/v1/archive/prune`, step 16e) in [Admin writes](#admin-writes), the managed jobs (`/v1/namespaces/{ns}/jobs` and `/v1/jobs...`, step 16f) in [Managed jobs](#managed-jobs). The health routes are served in every build (also without the `rest` feature) and while the store recovers; until recovery has finished every other route answers 503 `unavailable` ([ADR 0040](../adr/0040-health-and-readiness.md)). With the `console` feature and `[console] enabled = true`, the operator console's pages are served at `/console/` on the same port ([ADR 0041](../adr/0041-console-served-by-the-server.md)); they aren't part of this API.
 
 ## Operator reads
 
@@ -97,6 +102,24 @@ curl -s -X POST $U/backups -H "authorization: Bearer $T" -H 'content-type: appli
   -d '{"name": "nightly", "max_bytes_per_second": 52428800}' | jq .verify.problems
 curl -s -X POST $U/archive/prune -H "authorization: Bearer $T" -H 'content-type: application/json' \
   -d '{"before": "nightly", "dry_run": true}'
+```
+
+## Managed jobs
+
+Analytics that outlive a request's timeout (step 16f, [ADR 0056](../adr/0056-managed-analytics-jobs.md)): a job is queued with the body of `analyze` and answered at once with its id, runs on the server's job threads, and is watched, cancelled and fetched by id.
+
+- **Who may.** Starting needs `read` on the namespace (403 otherwise). A job is seen, cancelled and fetched by its owner and server-wide admins; anyone else gets 404. Fetching a result also needs `read` on the job's namespace still. Starting and cancelling are audited.
+- **`POST /v1/namespaces/{ns}/jobs`** takes `projection`, `job` and `options` as `analyze` does: `maxVisited` and `maxEdges` must hold the projection (400 `budget_exceeded` otherwise, at once), `maxResults` keeps the top rows, `timeoutMs` is how long the job may run once it leaves the queue (default and maximum: `[jobs] timeout_secs`). Too many jobs queued, or the caller's (`[jobs] per_user`), or a server that drains: 503 `unavailable`.
+- **`GET /v1/jobs/{id}`**: its `state` (`JOB_STATE_QUEUED`, `..._COLLECTING`, `..._RUNNING`, `..._DONE`, `..._FAILED`, `..._CANCELLED`, `..._EXPIRED`), the projection's `nodes` and `edges` once known, `rows` and `seq` once done, the `error` of a failed or cancelled job, and when it `expires`. The state is the progress: the core reports nothing from inside an algorithm (upstream #62).
+- **`GET /v1/jobs/{id}/result?offset=0&limit=1000`**: the rows from `offset` (at most 10 000, and about 4 MiB), with `nextOffset` while more are left. Before the job is done 400 `invalid_argument`; a failed job answers its error, a cancelled one 499 `cancelled`, an expired or removed one 404.
+- **`POST /v1/jobs/{id}/cancel`**: the job is `cancelled` at once and its thread stops at the next check. A job that had ended is answered as it is. A queued or running job is also listed by `GET /v1/requests` (as `StartJob`), and `POST /v1/requests/{id}/cancel` cancels it too.
+- **Kept** for `[jobs] retention_secs` after it ends, at most `[jobs] max_finished` jobs and `[jobs] result_bytes` of results; nothing survives a restart.
+
+```sh
+J=$(curl -s -X POST $U/namespaces/social/jobs -H "authorization: Bearer $T" -H 'content-type: application/json' \
+  -d '{"job": {"pageRank": {}}, "options": {"limits": {"maxResults": 100}}}' | jq -r .job.id)
+curl -s $U/jobs/$J -H "authorization: Bearer $T" | jq .job.state
+curl -s "$U/jobs/$J/result?limit=10" -H "authorization: Bearer $T" | jq .scores
 ```
 
 ## Authentication

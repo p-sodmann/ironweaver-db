@@ -91,7 +91,9 @@ html, body { background: var(--surface-000); color: var(--ink); }
 .cs-res { grid-column: span 5; }
 .cs-act { grid-column: span 7; }
 .cs-con { grid-column: span 5; }
-.cs-jobs { grid-column: span 5; }
+.cs-jobs { grid-column: 1 / -1; }
+.cs-jobs tr.is-problem td { border-bottom: 0; }
+.cs-builds { grid-column: span 5; }
 .cs-logsec { grid-column: span 7; }
 .cs-logsec .iw-log { height: 300px; border: 1px solid var(--line-100); background: var(--surface-200); }
 .cs-res__body { display: flex; flex-direction: column; gap: 16px; }
@@ -105,7 +107,7 @@ html, body { background: var(--surface-000); color: var(--ink); }
 /* ---------- narrower screens: the status page stacks; the explorer drops the navigator (⌘K reaches it all) */
 @media (max-width: 1180px) {
   .cs-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .cs-res, .cs-ops, .cs-act, .cs-con, .cs-jobs, .cs-logsec { grid-column: 1 / -1; }
+  .cs-res, .cs-ops, .cs-act, .cs-con, .cs-builds, .cs-logsec { grid-column: 1 / -1; }
 }
 @media (max-width: 820px) {
   .cs-wb, .cs-wb.has-insp { grid-template-columns: 0 minmax(0, 1fr) 0; column-gap: 0; }

@@ -194,11 +194,11 @@ On SIGINT or SIGTERM the server stops accepting connections and sends every HTTP
 
 | Role (per namespace) | Allows |
 |---|---|
-| `read` | `WaitForSeq`, `GetNodes`, `GetEdges`, `Find`, `Explain`, `Neighbourhood`, `Traverse`, `ShortestPath`, `RandomWalks`, `Subgraph`, `MatchPattern`, `Analyze`, `GetChanges`, `Watch`, `GetCatalog`, `GetSchema`, `GetNamespaceStatus` |
+| `read` | `WaitForSeq`, `GetNodes`, `GetEdges`, `Find`, `Explain`, `Neighbourhood`, `Traverse`, `ShortestPath`, `RandomWalks`, `Subgraph`, `MatchPattern`, `Analyze`, `GetChanges`, `Watch`, `GetCatalog`, `GetSchema`, `GetNamespaceStatus`, `StartJob` (and fetching that job's result) |
 | `write` | `read`, and `Commit` |
 | `admin` | `write`, and `CommitCatalog`, `DropNamespace` |
-| server-wide admin | every role on every namespace, `CreateNamespace`, the user, grant and token RPCs for anyone, `GetLog`, `ListRequests` and `CancelRequest` for anyone's requests, and the admin writes (`Checkpoint`, `Backup`, `Verify`, `PruneArchive`) |
-| any user | `ListNamespaces` (the ones it has a role on), `WhoAmI`, `Logout`, and `SetPassword` (with its current password), `CreateToken`, `RevokeToken`, `ListTokens` for itself; `GetServerStatus`, `ListConsumers` and `GetMetrics` (narrowed to the namespaces it has a role on), and `ListRequests` and `CancelRequest` for its own requests |
+| server-wide admin | every role on every namespace, `CreateNamespace`, the user, grant and token RPCs for anyone, `GetLog`, `ListRequests` and `CancelRequest` for anyone's requests, `ListJobs`, `GetJob`, `CancelJob` and `GetJobResult` for anyone's jobs, and the admin writes (`Checkpoint`, `Backup`, `Verify`, `PruneArchive`) |
+| any user | `ListNamespaces` (the ones it has a role on), `WhoAmI`, `Logout`, and `SetPassword` (with its current password), `CreateToken`, `RevokeToken`, `ListTokens` for itself; `GetServerStatus`, `ListConsumers` and `GetMetrics` (narrowed to the namespaces it has a role on), and `ListRequests` and `CancelRequest` for its own requests; `ListJobs`, `GetJob`, `CancelJob` and `GetJobResult` for its own jobs (others' are `NOT_FOUND`) |
 
 The Rust clients take a token (`Remote::with_token`) or log in (`Remote::login`, which keeps the session's token), and implement `iwdb_query::Accounts` for the user RPCs.
 
@@ -209,6 +209,12 @@ The Rust clients take a token (`Remote::with_token`) or log in (`Remote::login`,
 ## Admin writes
 
 `AdminService`'s `Checkpoint`, `Backup`, `Verify` and `PruneArchive` (step 16e, [ADR 0055](../adr/0055-admin-writes-and-iwctl-against-a-server.md)): checkpoint a namespace or all; back up into the server's backup directory (`[backup] dir`) under a name, throttled by `max_bytes_per_second`, then verify; verify the running store, a backup by name, or the WAL archive; and prune the WAL archive before a backup. Only a server-wide admin may call them, every call is audited, and none can be cancelled (`CancelRequest` answers `INVALID_ARGUMENT`). Send them without a deadline, or with one longer than the copy: a checkpoint waits for a running backup, and a throttled backup takes as long as its copy. `iwctl --server` makes these calls ([iwctl.md](../iwctl.md#against-a-running-server)); [rest.md](rest.md#admin-writes) has the details, which are the same over both APIs.
+
+## Managed jobs
+
+`AdminService`'s `StartJob`, `ListJobs`, `GetJob`, `CancelJob` and `GetJobResult` (step 16f, [ADR 0056](../adr/0056-managed-analytics-jobs.md)): analytics that outlive a request's timeout. `StartJob` takes `Analyze`'s projection, job and options, answers at once with the queued `JobInfo`, and the job runs on the server's job threads (`[jobs] running`) until it ends, its own timeout (`options.timeout_ms`, at most `[jobs] timeout_secs`; `grpc-timeout` doesn't apply to it), a cancel, or the server's drain. Poll `GetJob` for its state (`JOB_STATE_QUEUED` to `JOB_STATE_DONE`, `..._FAILED`, `..._CANCELLED`, `..._EXPIRED`), then page through `GetJobResult` (at most 10 000 rows and about 4 MiB a page, `next_offset` while more are left). The state is the progress: the core reports nothing from inside an algorithm (upstream [#62](https://github.com/p-sodmann/Ironweaver/issues/62)).
+
+Ids come from the request counter: a queued or running job is listed by `ListRequests` as `StartJob`, and `CancelRequest` cancels it too. Full queues answer `UNAVAILABLE`; a projection too large for the limits `RESOURCE_EXHAUSTED` with `iwdb-code: budget_exceeded`, at once. Nothing survives a restart. [rest.md](rest.md#managed-jobs) has the details, which are the same over both APIs; `iwctl --server <endpoint> jobs ...` lists, shows, cancels and fetches them.
 
 ## TLS
 
