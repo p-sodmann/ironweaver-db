@@ -13,7 +13,7 @@ Operators can configure, monitor and administer the server without reading the c
 - [x] Config file plus environment overrides, validated at startup with clear errors (16b).
 - [x] Health and readiness endpoints (ready only after recovery finished) (16b).
 - [x] Prometheus metrics: commit latency, fsync time, WAL size, checkpoint duration and lag, memory per namespace, query latency per operation, rejected and timed-out requests, lock hold times (16c).
-- [ ] OpenTelemetry traces (16g) and structured JSON logs (`tracing`; done in 16b).
+- [x] OpenTelemetry traces (16g) and structured JSON logs (`tracing`; done in 16b).
 - [x] `status` views (like `pg_stat_*`): namespaces, sizes, indexes, active requests, replication/stream consumers (16c).
 - [x] `iwctl` against a running server: status, checkpoint, backup, restore, verify, index and constraint management, namespaces, cancel a request (16e; restore stays offline, ADR 0055).
 - [x] Memory-limit behaviour: reject writes and alert before the OS kills the process (16d).
