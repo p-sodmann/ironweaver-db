@@ -1,9 +1,9 @@
 {
-  "_comment": "The CI gate on the 100k set (step 14b): loadgen --nodes 100000 --clients 4 --seconds 3. Set from two runs on an Apple M4 Pro (documentation/benchmarks.md) with room for shared runners: throughput at least 1/5 of it, p99 latency at most 10x, the graph's own memory estimate at most ~40% above it. Not gated: commit.always (fsync cost depends on the runner's disk) and resident memory (allocator and OS noise).",
+  "_comment": "The CI gate on the 100k set (step 14b): loadgen --nodes 100000 --clients 4 --seconds 3. Set from two runs on an Apple M4 Pro (documentation/benchmarks.md) with room for shared runners: throughput at least 1/5 of it, p99 latency at most 10x, the graph's own memory estimate (payloads included since core c69ef51, 542 bytes per entity) at most ~40% above it. Not gated: commit.always (fsync cost depends on the runner's disk) and resident memory (allocator and OS noise).",
   "load.nodes_per_s": {"min": 90000},
   "load.edges_per_s": {"min": 65000},
   "import.entities_per_s": {"min": 90000},
-  "memory.graph_bytes_per_entity": {"max": 400},
+  "memory.graph_bytes_per_entity": {"max": 760},
   "read.get_node.ops_per_s": {"min": 6000},
   "read.get_node.p99_ms": {"max": 2},
   "read.neighbourhood_depth_2.ops_per_s": {"min": 4000},

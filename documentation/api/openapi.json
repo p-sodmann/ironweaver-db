@@ -1906,6 +1906,14 @@
             ],
             "description": "The projection's size, once collecting started."
           },
+          "progress": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/JobProgress"
+              }
+            ],
+            "description": "How far the algorithm has got, once it reports; its last report once\nended."
+          },
           "resultBytes": {
             "allOf": [
               {
@@ -1947,6 +1955,32 @@
         },
         "type": "object"
       },
+      "JobProgress": {
+        "description": "How far a job's algorithm has got, as the core reports it.",
+        "properties": {
+          "done": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Units done in the phase: iterations (PageRank, label propagation), runs\n(Leiden), nodes or sources (the others)."
+          },
+          "phase": {
+            "description": "The algorithm's phase, as the core names it (`pagerank`, `leiden`,\n`label propagation`, ...).",
+            "type": "string"
+          },
+          "total": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The phase's units, if known. An algorithm that converges early ends\nbelow it."
+          }
+        },
+        "type": "object"
+      },
       "JobResultKind": {
         "description": "What kind of rows a job returns.\n\n- `JOB_RESULT_KIND_SCORES`: `scores`: per node, by score (highest first), then id.\n\n- `JOB_RESULT_KIND_GROUPS`: `groups`: node ids (each group sorted), biggest first, then by first id.\n\n- `JOB_RESULT_KIND_COUNTS`: `counts`: per node, by count (highest first), then id.",
         "enum": [
@@ -1958,7 +1992,7 @@
         "type": "string"
       },
       "JobState": {
-        "description": "Where a job is. The core reports no progress from inside an algorithm\n(upstream #62), so the state is the progress.\n\n- `JOB_STATE_QUEUED`: Waiting for a job thread.\n\n- `JOB_STATE_COLLECTING`: Waiting for `min_seq`, then collecting the projection.\n\n- `JOB_STATE_RUNNING`: The algorithm runs.\n\n- `JOB_STATE_DONE`: Ended; the result can be fetched.\n\n- `JOB_STATE_FAILED`: Ended with `error`.\n\n- `JOB_STATE_CANCELLED`: Cancelled (CancelJob, CancelRequest, or the server drains).\n\n- `JOB_STATE_EXPIRED`: Was done; its result was dropped for newer ones.",
+        "description": "Where a job is. While it runs, `JobInfo.progress` says how far.\n\n- `JOB_STATE_QUEUED`: Waiting for a job thread.\n\n- `JOB_STATE_COLLECTING`: Waiting for `min_seq`, then collecting the projection.\n\n- `JOB_STATE_RUNNING`: The algorithm runs.\n\n- `JOB_STATE_DONE`: Ended; the result can be fetched.\n\n- `JOB_STATE_FAILED`: Ended with `error`.\n\n- `JOB_STATE_CANCELLED`: Cancelled (CancelJob, CancelRequest, or the server drains).\n\n- `JOB_STATE_EXPIRED`: Was done; its result was dropped for newer ones.",
         "enum": [
           "JOB_STATE_UNSPECIFIED",
           "JOB_STATE_QUEUED",
@@ -2400,7 +2434,7 @@
         "type": "string"
       },
       "MemoryStatus": {
-        "description": "Memory as the server counts it, and its limit (ADR 0054). The limit\ncounts `used_bytes`: the graphs, their payloads, the checkpointers' copies\nand the working memory.",
+        "description": "Memory as the server counts it, and its limit (ADR 0054). The limit\ncounts `used_bytes`: the graphs with their payloads, the checkpointers'\ncopies and the working memory.",
         "properties": {
           "checkpointBytes": {
             "allOf": [
@@ -2416,7 +2450,7 @@
                 "$ref": "#/components/schemas/Uint64"
               }
             ],
-            "description": "The live graphs (the core's estimate), indexes included."
+            "description": "The live graphs (the core's estimate), indexes and attribute payloads\nincluded."
           },
           "limitBytes": {
             "allOf": [
@@ -2440,7 +2474,7 @@
                 "$ref": "#/components/schemas/Uint64"
               }
             ],
-            "description": "The live graphs' attribute payloads, estimated."
+            "description": "Deprecated, always 0: the payloads, once estimated apart. The core\ncounts them in `graph_bytes` now (upstream #61). Kept so that v1 stays\ncompatible."
           },
           "refuseWritesBytes": {
             "allOf": [
@@ -3773,7 +3807,7 @@
         "type": "string"
       },
       "Schema": {
-        "description": "A namespace's labels, edge types and attribute keys, from a sample of\nits nodes and edges in the core's order: complete when sampled_nodes is\nnodes and sampled_edges is edges.",
+        "description": "A namespace's labels and edge types, complete and with exact counts, and\nits attribute keys from a sample of its nodes in the core's order: the\nkeys are complete when sampled_nodes is nodes. At most 10 000 labels and\n10 000 types; more set the answer's `truncated`.",
         "properties": {
           "edges": {
             "allOf": [
@@ -3784,7 +3818,7 @@
             "description": "Edges in the namespace."
           },
           "labels": {
-            "description": "The labels of the sampled nodes and of the constraints, by name.",
+            "description": "Every label a node carries, and the constraints' labels, by name.",
             "items": {
               "$ref": "#/components/schemas/LabelInfo"
             },
@@ -3804,7 +3838,7 @@
                 "$ref": "#/components/schemas/Uint64"
               }
             ],
-            "description": "Edges the sample read."
+            "description": "Edges the type counts cover: always `edges` (the core counts types)."
           },
           "sampledNodes": {
             "allOf": [
@@ -3812,10 +3846,10 @@
                 "$ref": "#/components/schemas/Uint64"
               }
             ],
-            "description": "Nodes the sample read."
+            "description": "Nodes the keys' sample read."
           },
           "types": {
-            "description": "The types of the sampled edges, by name (untyped first).",
+            "description": "Every edge type, by name (untyped first).",
             "items": {
               "$ref": "#/components/schemas/TypeInfo"
             },
@@ -4328,7 +4362,7 @@
                 "$ref": "#/components/schemas/Uint64"
               }
             ],
-            "description": "Sampled edges of the type."
+            "description": "Edges of the type: exact."
           },
           "name": {
             "description": "Missing for untyped edges.",
@@ -7006,7 +7040,7 @@
     },
     "/v1/namespaces/{ns}/schema": {
       "get": {
-        "description": "Labels (with exact counts), edge types and attribute keys, sampled.",
+        "description": "Labels and edge types (with exact counts), and attribute keys, sampled.",
         "operationId": "getSchema",
         "parameters": [
           {

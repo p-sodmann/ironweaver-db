@@ -420,7 +420,7 @@ where
                 timeout: Some(handle.timeout()),
                 cancel: Some(handle.token().clone()),
             };
-            let analysis = ns.analyze(&request.projection, &read, |p| {
+            let analysis = ns.analyze_reporting(&request.projection, &read, Some(handle.progress()), |p| {
                 handle.running();
                 read::run_job(&request.job, p, bounds.max_results)
             })?;

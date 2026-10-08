@@ -1,6 +1,6 @@
 //! [`DbRecord`], the payload of the database's graphs.
 
-use ironweaver_core::{AttrPatch, Attributes, Attrs, GraphError, Lookup, Value};
+use ironweaver_core::{AttrPatch, Attributes, Attrs, GraphError, HeapSize, Lookup, Value};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::reserved::VERSION_KEY;
@@ -37,18 +37,6 @@ impl DbRecord {
         DbRecord { attr: attr.into_iter().map(|(k, v)| (k.into(), v)).collect(), ..DbRecord::default() }
     }
 
-    /// Estimated heap bytes the record owns: its attribute and meta maps,
-    /// their keys and the values' strings, lists, maps and bytes (ADR 0054).
-    /// The core's `Graph::memory_usage` counts the record's inline size,
-    /// not these (upstream draft 25).
-    ///
-    /// Computed from lengths, not capacities, so a record decoded from the
-    /// WAL or a checkpoint has the same estimate as the one it was written
-    /// from. O(size of the record).
-    pub fn heap_bytes(&self) -> usize {
-        attrs_heap(&self.attr) + attrs_heap(&self.meta)
-    }
-
     /// The core's path lookup (`record::lookup`), so that `DbRecord`
     /// answers every `Attributes` method exactly like `Record` for the same
     /// attribute map (checked by `tests/db_record.rs`).
@@ -57,33 +45,15 @@ impl DbRecord {
     }
 }
 
-/// The heap of a map: its hash table (std's layout: a power of two of
-/// buckets, at most 7/8 full, one control byte per bucket and a group of
-/// 16), and what its keys and values own.
-fn attrs_heap(attrs: &Attrs) -> usize {
-    if attrs.is_empty() {
-        return 0;
-    }
-    let entries: usize = attrs.iter().map(|(k, v)| k.len() + value_heap(v)).sum();
-    table_bytes(attrs.len(), std::mem::size_of::<(String, Value)>()) + entries
-}
-
-fn table_bytes(len: usize, entry: usize) -> usize {
-    let buckets = match len {
-        0..=3 => 4,
-        4..=7 => 8,
-        _ => (len * 8 / 7).next_power_of_two(),
-    };
-    buckets * (entry + 1) + 16
-}
-
-fn value_heap(value: &Value) -> usize {
-    match value {
-        Value::String(s) => s.len(),
-        Value::Bytes(b) => b.len(),
-        Value::List(items) => items.len() * std::mem::size_of::<Value>() + items.iter().map(value_heap).sum::<usize>(),
-        Value::Dict(map) => attrs_heap(map),
-        _ => 0,
+/// Heap bytes the record owns: its attribute and meta maps, their keys and
+/// the values' strings, lists, maps and bytes, as the core counts a
+/// `Record`'s (ADR 0054). The graphs count it in `Graph::memory_usage`
+/// (`Graph::count_payloads`, upstream #61). Computed from lengths, not
+/// capacities, so a record decoded from the WAL or a checkpoint counts the
+/// same as the one it was written from. O(size of the record).
+impl HeapSize for DbRecord {
+    fn heap_bytes(&self) -> usize {
+        self.attr.heap_bytes() + self.meta.heap_bytes()
     }
 }
 

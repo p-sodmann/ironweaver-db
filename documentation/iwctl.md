@@ -60,7 +60,7 @@ Put `--server <endpoint>` (`https://host:port`, or `http://` for a server whose 
 | `indexes`, `create-index`, `drop-index`, `add-constraint`, `drop-constraint` | As locally, without `<dir>`; `-n` names the namespace. |
 | `requests [<user>]` | The running requests, oldest first (a non-admin sees only its own). |
 | `cancel <id>` | Cancel a running read: its caller gets `cancelled`. Commits and admin writes can't be cancelled. A queued or running job (listed as `StartJob`) is cancelled like `jobs cancel`. |
-| `jobs list [<user>]` | The managed analytics jobs the server keeps, newest first: id, kind, namespace, owner, state, how long it ran, the projection's size and rows once known (a non-admin sees only its own). |
+| `jobs list [<user>]` | The managed analytics jobs the server keeps, newest first: id, kind, namespace, owner, state, how long it ran, how far its algorithm has got (`pagerank 37/100`: the core's phase, units done and their total), the projection's size and rows once known (a non-admin sees only its own). |
 | `jobs show <id>` | One job's state and progress, its error if it failed or was cancelled, and how long it is kept. |
 | `jobs cancel <id>` | Cancel a queued or running job; one that has ended is shown as it is. |
 | `jobs result <id> [<offset> [<limit>]]` | A page of a done job's rows (tab-separated id and score or count, or a group's ids per line), at most 10 000 and about 4 MiB; while more are left the last line names the next command. |
@@ -84,8 +84,8 @@ $ iwctl $S requests
 request 812: Analyze on social by ann from 10.0.0.7, running 41.3 s
 $ iwctl $S cancel 812
 $ iwctl $S jobs list
-job 815: leiden on social by ann, running for 912.4 s, 2000000 nodes and 9000000 edges
-job 790: page_rank on social by ann, done for 431.0 s, 1000 rows (cut)
+job 815: leiden on social by ann, running for 912.4 s, leiden 1/3, 2000000 nodes and 9000000 edges
+job 790: page_rank on social by ann, done for 431.0 s, pagerank 37/100, 1000 rows (cut)
 $ iwctl $S jobs result 790 0 3
 p-1003	0.0021
 p-77	0.0019

@@ -12,27 +12,32 @@ use crate::{Answer, Error, Work};
 /// [`LabelInfo::more_keys`].
 pub const MAX_KEYS_PER_LABEL: usize = 256;
 
+/// Labels, and edge types, reported at most; more set the answer's
+/// `truncated` (a bound on the read, design rule 5).
+pub const MAX_NAMES: usize = 10_000;
+
 /// A namespace's labels and edge types ([`Database::schema`](crate::Database::schema)).
 ///
-/// The core can count a label's nodes in O(1) but can't list the labels a
-/// graph has, and has no index of edge types (upstream #60), so this
-/// is read from a sample: the first `max_visited` nodes and the first
-/// `max_edges` edges in the core's slot order. When the sample covers the
-/// namespace (`sampled_nodes == nodes`, `sampled_edges == edges`) the lists
-/// are complete and every count exact.
+/// Labels and edge types, with their counts, come from the core (exact,
+/// complete; upstream #60, fixed in `c69ef51`). Attribute keys are read
+/// from a sample: the first `max_visited` nodes in the core's slot order;
+/// the keys are complete when `sampled_nodes == nodes`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Schema {
-    /// The labels of the sampled nodes and of the constraints, by name.
+    /// Every label a node carries, and the constraints' labels, by name
+    /// (at most [`MAX_NAMES`]).
     pub labels: Vec<LabelInfo>,
-    /// The types of the sampled edges, by name (untyped first).
+    /// Every edge type, by name, untyped first (at most [`MAX_NAMES`]).
     pub types: Vec<TypeInfo>,
     /// Nodes in the namespace.
     pub nodes: usize,
     /// Edges in the namespace.
     pub edges: usize,
-    /// Nodes the sample read.
+    /// Nodes the sample read (for the keys).
     pub sampled_nodes: usize,
-    /// Edges the sample read.
+    /// Edges the type counts cover: every edge since the core counts
+    /// types (upstream #60), so equal to `edges`. Kept so that clients
+    /// that compare it with `edges` see complete lists.
     pub sampled_edges: usize,
 }
 
@@ -64,7 +69,7 @@ pub struct KeyInfo {
 pub struct TypeInfo {
     /// `None` for untyped edges.
     pub name: Option<String>,
-    /// Sampled edges of the type (exact when the sample covers every edge).
+    /// Edges of the type: exact (the core's count).
     pub count: usize,
 }
 
@@ -92,13 +97,18 @@ struct Keys {
     more: bool,
 }
 
-/// The namespace's schema, from a sample of at most `max_visited` nodes and
-/// `max_edges` edges: O(sample + labels). Never fails on a limit (the
-/// sample is the point): compare the sampled counts with the totals.
+/// The namespace's schema: labels and types with their counts from the
+/// core, O(labels + types); keys from a sample of at most `max_visited`
+/// nodes, O(sample). Never fails on a limit (the sample is the point):
+/// compare `sampled_nodes` with `nodes`.
 pub fn schema(ns: &Namespace, cx: &ReadContext) -> Result<Answer<Schema>, Error> {
     let g = ns.graph();
     let stop = ironweaver_core::cancel::stop();
-    let mut labels: BTreeMap<String, Keys> = BTreeMap::new();
+    // Every label, and a constraint's label even without a node
+    let mut labels: BTreeMap<String, Keys> = g.labels().map(|(name, _)| (name.to_owned(), Keys::default())).collect();
+    for constraint in ns.catalog().constraints() {
+        labels.entry(constraint.label.as_str().to_owned()).or_default();
+    }
     let mut sampled_nodes = 0;
     for ix in g.node_indices().take(cx.bounds.max_visited) {
         if stop.poll() {
@@ -107,7 +117,7 @@ pub fn schema(ns: &Namespace, cx: &ReadContext) -> Result<Answer<Schema>, Error>
         let (Some(node), Some(names)) = (g.node(ix), g.label_names(ix)) else { continue };
         sampled_nodes += 1;
         for name in names {
-            let keys = labels.entry(name.to_owned()).or_default();
+            let Some(keys) = labels.get_mut(name) else { continue };
             keys.nodes += 1;
             for (key, value) in &node.data.attr {
                 if !keys.kinds.contains_key(key.as_str()) && keys.kinds.len() >= MAX_KEYS_PER_LABEL {
@@ -118,22 +128,12 @@ pub fn schema(ns: &Namespace, cx: &ReadContext) -> Result<Answer<Schema>, Error>
             }
         }
     }
-    // A constraint's label is part of the schema even without a sampled node
-    for constraint in ns.catalog().constraints() {
-        labels.entry(constraint.label.as_str().to_owned()).or_default();
-    }
-    let mut types: BTreeMap<Option<String>, usize> = BTreeMap::new();
-    let mut sampled_edges = 0;
-    for (ix, _) in g.edges().take(cx.bounds.max_edges) {
-        if stop.poll() {
-            break;
-        }
-        sampled_edges += 1;
-        *types.entry(g.edge_type_name(ix).map(str::to_owned)).or_default() += 1;
-    }
+    let types: BTreeMap<Option<String>, usize> = g.edge_types().map(|(name, n)| (name.map(str::to_owned), n)).collect();
+    let truncated = labels.len() > MAX_NAMES || types.len() > MAX_NAMES;
     let value = Schema {
         labels: labels
             .into_iter()
+            .take(MAX_NAMES)
             .map(|(name, keys)| LabelInfo {
                 count: g.label_count(&name),
                 sampled: keys.nodes,
@@ -149,14 +149,14 @@ pub fn schema(ns: &Namespace, cx: &ReadContext) -> Result<Answer<Schema>, Error>
                 name,
             })
             .collect(),
-        types: types.into_iter().map(|(name, count)| TypeInfo { name, count }).collect(),
+        types: types.into_iter().take(MAX_NAMES).map(|(name, count)| TypeInfo { name, count }).collect(),
         nodes: g.node_count(),
         edges: g.edge_count(),
         sampled_nodes,
-        sampled_edges,
+        sampled_edges: g.edge_count(),
     };
-    let work = Work { visited: sampled_nodes, edges: sampled_edges };
-    Ok(Answer { work, ..Answer::at(ns.seq(), value) })
+    let work = Work { visited: sampled_nodes, edges: 0 };
+    Ok(Answer { work, truncated, ..Answer::at(ns.seq(), value) })
 }
 
 #[cfg(test)]
@@ -207,9 +207,11 @@ mod tests {
         // Both kinds of `k000`, by kind name
         let k000 = thing.keys.iter().find(|k| k.name == "k000").unwrap();
         assert_eq!(k000.kinds, [("Int".to_owned(), 1), ("String".to_owned(), 1)]);
-        // A sample of one node: its labels' counts stay exact
+        // A sample of one node: every label is still listed, with its exact
+        // count; only the sampled one has keys
         let one = read(&ns, 1);
         assert_eq!(one.sampled_nodes, 1);
-        assert!(one.labels.len() == 1 && one.labels.iter().all(|l| l.count == if l.name == "Thing" { 2 } else { 1 }));
+        let listed: Vec<_> = one.labels.iter().map(|l| (l.name.as_str(), l.count, l.sampled)).collect();
+        assert_eq!(listed, [("Thing", 2, 0), ("Wide", 1, 1)]);
     }
 }

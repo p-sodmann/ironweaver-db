@@ -129,12 +129,7 @@ where
         out.add(m::DISK_FREE, &[], Value::Gauge(free as f64));
     }
     let memory = store.memory();
-    for (part, bytes) in [
-        ("graph", memory.graph),
-        ("payload", memory.payload),
-        ("checkpoint", memory.checkpoint),
-        ("working", memory.working),
-    ] {
+    for (part, bytes) in [("graph", memory.graph), ("checkpoint", memory.checkpoint), ("working", memory.working)] {
         out.add(m::MEMORY_USED, &[part], Value::Gauge(bytes as f64));
     }
     if let Some(limit) = memory.limit {

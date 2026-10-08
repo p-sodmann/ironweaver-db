@@ -19,8 +19,7 @@
 (function (root) {
   'use strict';
 
-  const SAMPLE_NODES = 10000;    // nodes `schema` samples for keys (label counts are exact)
-  const SAMPLE_EDGES = 100000;   // edges it samples for types
+  const SAMPLE_NODES = 10000;    // nodes `schema` samples for keys (labels and edge types are exact and complete)
   const SERIES = 30;             // values a series keeps: 90 s at the status page's 3 s
   const LOG_KEEP = 200;          // log events kept
   // Reads whose latency is the "query" series: not commits, not the change stream's long polls, not the operator's
@@ -63,6 +62,7 @@
     id: n(j.id), namespace: j.namespace || '', user: j.user || '', kind: j.kind || '',
     state: String(j.state || 'JOB_STATE_UNSPECIFIED').replace(/^JOB_STATE_/, '').toLowerCase(),
     createdMicros: n(j.createdMicros), startedMicros: opt(j.startedMicros), endedMicros: opt(j.endedMicros), elapsedMicros: n(j.elapsedMicros),
+    progress: j.progress ? { phase: j.progress.phase || '', done: n(j.progress.done), total: opt(j.progress.total) } : null,
     nodes: opt(j.nodes), edges: opt(j.edges), rows: opt(j.rows), truncated: !!j.truncated, resultBytes: n(j.resultBytes),
     error: j.error ? { code: j.error.code || 'internal', message: j.error.message || '' } : null, expiresMicros: opt(j.expiresMicros),
   });
@@ -147,7 +147,7 @@
   const MEMORY_STATES = { MEMORY_STATE_NORMAL: 'normal', MEMORY_STATE_WARN: 'warn', MEMORY_STATE_REFUSING_WRITES: 'refusing_writes' };
   const LIMIT_SOURCES = { MEMORY_LIMIT_SOURCE_CONFIG: 'config', MEMORY_LIMIT_SOURCE_CGROUP_V2: 'cgroup v2', MEMORY_LIMIT_SOURCE_CGROUP_V1: 'cgroup v1' };
   const memoryOf = (m) => ({
-    graphBytes: n(m.graphBytes), payloadBytes: n(m.payloadBytes), checkpointBytes: n(m.checkpointBytes), workingBytes: n(m.workingBytes),
+    graphBytes: n(m.graphBytes), checkpointBytes: n(m.checkpointBytes), workingBytes: n(m.workingBytes),
     usedBytes: n(m.usedBytes), limitBytes: opt(m.limitBytes), warnBytes: opt(m.warnBytes), refuseWritesBytes: opt(m.refuseWritesBytes),
     state: MEMORY_STATES[m.state] || 'normal', limitSource: LIMIT_SOURCES[m.limitSource] || null,
   });
@@ -226,9 +226,9 @@
       kind: 'rest',
       namespaces: async () => ((await call('GET', '/v1/namespaces')).namespaces || []).map((x) => ({ id: n(x.id), name: x.name, createdMicros: n(x.createdMicros), createdSeq: n(x.createdSeq) })),
       namespaceStatus: async (name) => status((await call('GET', ns(name))).status),
-      /** Labels with their exact counts; keys and edge types from a sample (step 16c, ADR 0053). */
+      /** Labels and edge types with their exact counts; keys from a sample (step 16c, ADR 0053; types exact since core #60). */
       schema: async (name) => {
-        const [r, cat] = await Promise.all([call('GET', ns(name) + `/schema?max_visited=${SAMPLE_NODES}&max_edges=${SAMPLE_EDGES}`), call('GET', ns(name) + '/catalog')]);
+        const [r, cat] = await Promise.all([call('GET', ns(name) + `/schema?max_visited=${SAMPLE_NODES}`), call('GET', ns(name) + '/catalog')]);
         const s = r.schema || {};
         const c = (cat.catalog && cat.catalog.constraints) || [];
         return {

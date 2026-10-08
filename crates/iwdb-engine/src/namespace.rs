@@ -67,8 +67,6 @@ pub struct Namespace {
     keys: KeyTable,
     marks: MarkTable,
     poisoned: bool,
-    /// The payloads' estimated heap ([`payload_bytes`](Self::payload_bytes)).
-    payload: usize,
 }
 
 /// An index being built off the write lock (ADR 0019), the core's
@@ -96,6 +94,12 @@ impl IndexBuild {
 
     pub fn is_empty(&self) -> bool {
         self.build.is_empty()
+    }
+
+    /// Approximate bytes the build holds: the index so far and the nodes
+    /// read without a key (the core's figure, O(1), upstream #61).
+    pub fn memory_usage(&self) -> usize {
+        std::mem::size_of::<AttrPath>() + self.build.memory_usage()
     }
 }
 
@@ -169,12 +173,11 @@ impl Namespace {
         Namespace {
             name,
             catalog: NamespaceCatalog::new(),
-            graph: DbGraph::new(),
+            graph: counted(DbGraph::new()),
             seq: 0,
             keys: KeyTable::new(),
             marks: MarkTable::new(),
             poisoned: false,
-            payload: 0,
         }
     }
 
@@ -188,33 +191,25 @@ impl Namespace {
     /// way; [`new`](Self::new) only makes an empty one.
     pub fn from_loaded(loaded: codec::Loaded) -> Self {
         let codec::Loaded { graph, meta, index_changes: _ } = loaded;
-        let payload = graph.nodes().map(|(_, n)| n.data.heap_bytes()).sum::<usize>()
-            + graph.edges().map(|(_, e)| e.data.heap_bytes()).sum::<usize>();
         Namespace {
             name: meta.namespace,
             catalog: meta.catalog,
-            graph,
+            graph: counted(graph),
             seq: meta.seq,
             keys: meta.keys,
             marks: meta.marks,
             poisoned: false,
-            payload,
         }
     }
 
-    /// The estimated heap bytes of the graph's payloads (attribute and
-    /// meta maps, [`DbRecord::heap_bytes`]), which `Graph::memory_usage`
-    /// leaves out (ADR 0054). Kept up to date by every apply and replay in
-    /// O(entities the commit touches), computed in O(graph) when loaded. A
-    /// namespace and its replayed copy have the same estimate.
-    pub fn payload_bytes(&self) -> usize {
-        self.payload
-    }
-
-    /// The namespace's memory estimate: the core's `memory_usage` (graph
-    /// and indexes, O(number of indexes)) plus [`payload_bytes`](Self::payload_bytes).
+    /// The namespace's memory estimate: the core's `memory_usage`, with
+    /// the structure, the indexes and the payloads (attribute and meta
+    /// maps, [`DbRecord`]'s `HeapSize`; the graph counts them, upstream
+    /// #61, ADR 0054). O(number of indexes): the core keeps the count as
+    /// the graph changes. A namespace and its replayed copy count the same
+    /// payloads.
     pub fn memory_bytes(&self) -> usize {
-        self.graph.memory_usage() + self.payload
+        self.graph.memory_usage()
     }
 
     /// The graph meta a checkpoint of this namespace is saved with: its
@@ -543,13 +538,8 @@ impl Namespace {
             }
             return Err(error);
         }
-        let touched = Touched::of(&self.graph, &ops);
-        let before = touched.payload(&self.graph);
         match self.graph.apply_all(ops) {
-            Ok(_) => {
-                self.payload = (self.payload + touched.payload(&self.graph)).saturating_sub(before);
-                self.graph.flush_indexes()
-            }
+            Ok(_) => self.graph.flush_indexes(),
             Err((_, error)) => Err(error),
         }
     }
@@ -569,59 +559,11 @@ impl Namespace {
     }
 }
 
-/// The nodes and edges a data record's ops may change the payload of: the
-/// ids they name, and the edges of removed nodes (removed with them). Their
-/// payloads summed before and after the apply give the change of
-/// [`Namespace::payload_bytes`] in O(touched).
-struct Touched {
-    nodes: Vec<String>,
-    edges: Vec<ironweaver_core::EdgeId>,
-}
-
-impl Touched {
-    fn of(graph: &DbGraph, ops: &[Op<DbRecord, DbRecord>]) -> Self {
-        let mut touched = Touched { nodes: Vec::new(), edges: Vec::new() };
-        for op in ops {
-            match op {
-                Op::AddNode { id, .. } | Op::SetNode { id, .. } | Op::SetNodeAttr { id, .. } => {
-                    touched.nodes.push(id.clone())
-                }
-                // A renamed node may be removed later in the record: its
-                // edges count as touched under either name
-                Op::RenameNode { id, new_id } => {
-                    for id in [id, new_id] {
-                        touched.node_and_edges(graph, id);
-                    }
-                }
-                Op::RemoveNode { id } => touched.node_and_edges(graph, id),
-                Op::AddEdge { id, .. }
-                | Op::RemoveEdge { id }
-                | Op::SetEdge { id, .. }
-                | Op::SetEdgeAttr { id, .. } => touched.edges.push(*id),
-                _ => {}
-            }
-        }
-        touched.nodes.sort_unstable();
-        touched.nodes.dedup();
-        touched.edges.sort_unstable();
-        touched.edges.dedup();
-        touched
-    }
-
-    fn node_and_edges(&mut self, graph: &DbGraph, id: &str) {
-        self.nodes.push(id.to_owned());
-        if let Some(node) = graph.node_by_id(id) {
-            let incident = node.out_edges().iter().chain(node.in_edges());
-            self.edges.extend(incident.filter_map(|&e| graph.edge(e)).map(|e| e.id()));
-        }
-    }
-
-    /// The payloads of the touched entities that exist in `graph`.
-    fn payload(&self, graph: &DbGraph) -> usize {
-        let nodes: usize = self.nodes.iter().filter_map(|id| graph.node_by_id(id)).map(|n| n.data.heap_bytes()).sum();
-        let edges = self.edges.iter().filter_map(|&id| graph.edge(graph.edge_ix(id)?)).map(|e| e.data.heap_bytes());
-        nodes + edges.sum::<usize>()
-    }
+/// `graph`, counting its payloads in `memory_usage` from now on (one pass;
+/// a no-op if it already does): every namespace's graph does (ADR 0054).
+fn counted(mut graph: DbGraph) -> DbGraph {
+    graph.count_payloads();
+    graph
 }
 
 /// The core can't index `labels` (the node's labels).

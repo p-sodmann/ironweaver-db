@@ -34,6 +34,8 @@ It is a `Database` method, not an `Admin` one, because it reads a namespace's da
 
 **Upstream**: [#60](https://github.com/p-sodmann/Ironweaver/issues/60) ([draft 24](../upstream-issues.md#24-list-a-graphs-labels-and-count-its-edges-by-type)) proposes listing a graph's labels and counting edges by type. With it, the label list becomes complete and the type counts exact without a sample. The sample stays for keys.
 
+*Update, upstream check of 2026-10-07: #60 was fixed in core `c69ef51` (`Graph::labels`, `edge_types`, `edge_type_count`).* `read::schema` now lists every label (with the constraints' labels) and every edge type from the core, with exact counts, in O(labels + types). The sample of the first `max_visited` nodes is only for the keys; `max_edges` no longer applies and no edge is read. `sampled_edges` stays in the answer, always equal to `edges`, so clients that compare it see complete lists. To keep the read bounded with any number of labels, at most 10 000 labels and 10 000 types are listed (`MAX_NAMES`); more set the answer's `truncated`, which it never was before. `schema_is_bounded` checks that labels and types are complete at a sample of 3 nodes. The console no longer sends `max_edges` and dropped the "counted in the first N edges" note.
+
 **The console's Source contract follows the server** (`console/src/source.js`):
 
 - **No unbounded counts.** `find` has no total and explain no `matched` (design rule 5). The pager counts pages as it goes, and a plan shows a match count only when the first page holds every match.
@@ -45,7 +47,7 @@ It is a `Database` method, not an `Admin` one, because it reads a namespace's da
 
 ## Consequences
 
-- A label that only nodes outside the sample carry is missing from the list until the sample grows or draft 24 lands. With the console's sample (10 000 nodes, 100 000 edges), a namespace up to that size is listed completely, and the structure view says when it isn't.
+- ~~A label that only nodes outside the sample carry is missing from the list until the sample grows or draft 24 lands.~~ Since core `c69ef51` (#60) every label and type is listed with its exact count. With the console's sample (10 000 nodes, 100 000 edges), a namespace up to that size is listed completely, and the structure view says when it isn't.
 - Label counts are exact at any size, so the explorer's primary label and the navigator's counts are right on large namespaces too. Key presence is a fraction of the sampled nodes with the label, not of all of them.
 - The console's latencies are bucket estimates, at most one bucket wide. The series need two polls before they show anything, and they restart with the page.
 - The running-requests table lists the page's own status calls while they run: they are real requests.

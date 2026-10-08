@@ -144,7 +144,7 @@ test('the server status: series, problems in the degraded scenario', async () =>
   assert.deepEqual(U.problems(calm), []); assert.equal(calm.ready, true);
   assert.equal(calm.series.commitsPerSec.length, 90);
   assert.deepEqual([calm.memory.state, calm.memory.limitSource], ['normal', 'cgroup v2']);
-  assert.equal(calm.memory.usedBytes, calm.memory.graphBytes + calm.memory.payloadBytes + calm.memory.checkpointBytes + calm.memory.workingBytes);
+  assert.equal(calm.memory.usedBytes, calm.memory.graphBytes + calm.memory.checkpointBytes + calm.memory.workingBytes);
   const s = fresh({ scenario: 'degraded' }); const d = await s.server();
   assert.equal(U.problems(d).length, 3);
   assert.equal(d.memory.state, 'warn');
@@ -204,6 +204,11 @@ test('jobs run, end and are cancelled in the mock; an ended job is answered as i
   assert.equal(jobCounts.running, jobs.filter((j) => j.state === 'running').length);
   assert.ok(memory.workingBytes >= jobCounts.resultBytes, 'stored results count as working memory');
   const running = jobs.find((j) => j.state === 'running');
+  // How far it has got, in the core's units; the queued have no report yet
+  assert.ok(running.progress && running.progress.phase && running.progress.done <= running.progress.total, JSON.stringify(running.progress));
+  assert.ok(jobs.filter((j) => j.state === 'queued').every((j) => j.progress === null));
+  const doneJob = jobs.find((j) => j.state === 'done');
+  assert.equal(doneJob.progress.done, doneJob.progress.total, 'a done job reported every unit');
   assert.ok(running.nodes > 0 && running.rows === null && running.endedMicros === null);
   const c = await s.cancelJob(running.id);
   assert.equal(c.job.state, 'cancelled'); assert.equal(c.job.error.code, 'cancelled');
@@ -336,13 +341,13 @@ const metrics = (commits, finds) => ({ families: [
 function statusServer(o = {}) {
   let commits = 10; let finds = 4;
   const routes = {
-    'GET /v1/status': () => [200, { status: { version: '0.1.0', startedMicros: '1791260391767612', ready: true, fsync: 'always', memory: { graphBytes: '648086', payloadBytes: '900000', usedBytes: '1548086', limitBytes: '2000000', warnBytes: '1600000', refuseWritesBytes: '1800000', state: 'MEMORY_STATE_NORMAL', limitSource: 'MEMORY_LIMIT_SOURCE_CGROUP_V2' }, disk: { walBytes: '84369', freeBytes: '74012971008' }, requests: { active: '1', total: '18' },
+    'GET /v1/status': () => [200, { status: { version: '0.1.0', startedMicros: '1791260391767612', ready: true, fsync: 'always', memory: { graphBytes: '1548086', usedBytes: '1548086', limitBytes: '2000000', warnBytes: '1600000', refuseWritesBytes: '1800000', state: 'MEMORY_STATE_NORMAL', limitSource: 'MEMORY_LIMIT_SOURCE_CGROUP_V2' }, disk: { walBytes: '84369', freeBytes: '74012971008' }, requests: { active: '1', total: '18' },
       namespaces: [{ id: '1', name: 'default', createdMicros: '1791260391478630', syncedSeq: '0', memoryBytes: '432', recovery: {}, unsynced: '0' }] } }],
     'GET /v1/requests?limit=100': [200, { requests: [{ id: '20', operation: 'Find', namespace: 'default', user: 'admin', client: '127.0.0.1', startedMicros: '1791260399290946', elapsedMicros: '23', cancellable: true }] }],
     'GET /v1/consumers': [200, { consumers: [{ namespace: 'default', user: 'ann', nextSeq: '4', lag: '2', lastPollMicros: '1791260399290946', polls: '3' }] }],
     'GET /v1/metrics': () => [200, metrics(commits, finds)],
     'GET /v1/jobs?limit=50': [200, { jobs: [
-      { id: '31', namespace: 'default', user: 'admin', kind: 'page_rank', state: 'JOB_STATE_RUNNING', createdMicros: '1791260399000000', startedMicros: '1791260399000100', elapsedMicros: '5000000', nodes: '2000', edges: '4000' },
+      { id: '31', namespace: 'default', user: 'admin', kind: 'page_rank', state: 'JOB_STATE_RUNNING', createdMicros: '1791260399000000', startedMicros: '1791260399000100', elapsedMicros: '5000000', progress: { phase: 'pagerank', done: '37', total: '100' }, nodes: '2000', edges: '4000' },
       { id: '30', namespace: 'default', user: 'admin', kind: 'triangles', state: 'JOB_STATE_DONE', createdMicros: '1791260390000000', startedMicros: '1791260390000100', endedMicros: '1791260391000000', elapsedMicros: '999900', nodes: '2000', edges: '4000', seq: '7', rows: '10', truncated: true, resultBytes: '420', expiresMicros: '1791263991000000' },
     ] }],
     'POST /v1/jobs/31/cancel': [200, { job: { id: '31', namespace: 'default', user: 'admin', kind: 'page_rank', state: 'JOB_STATE_CANCELLED', createdMicros: '1', elapsedMicros: '6000000', error: { code: 'cancelled', message: 'the job was cancelled (CancelJob)' } } }],
@@ -380,8 +385,8 @@ test('the REST Source reads the status views: numbers, series from the metrics, 
   const srv = statusServer();
   const s = rest.create({ fetch: srv.fetch });
   const first = await s.server();
-  assert.equal(first.version, '0.1.0'); assert.equal(first.memory.graphBytes, 648086);
-  assert.deepEqual(first.memory, { graphBytes: 648086, payloadBytes: 900000, checkpointBytes: 0, workingBytes: 0, usedBytes: 1548086, limitBytes: 2000000, warnBytes: 1600000, refuseWritesBytes: 1800000, state: 'normal', limitSource: 'cgroup v2' });
+  assert.equal(first.version, '0.1.0'); assert.equal(first.memory.graphBytes, 1548086);
+  assert.deepEqual(first.memory, { graphBytes: 1548086, checkpointBytes: 0, workingBytes: 0, usedBytes: 1548086, limitBytes: 2000000, warnBytes: 1600000, refuseWritesBytes: 1800000, state: 'normal', limitSource: 'cgroup v2' });
   assert.equal(first.disk.checkpointBytes, 0); assert.equal(first.requests.total, 18); assert.equal(first.requests.denied, 0);
   assert.deepEqual(first.active[0], { id: 20, operation: 'Find', namespace: 'default', user: 'admin', client: '127.0.0.1', startedMicros: 1791260399290946, elapsedMicros: 23, cancellable: true });
   assert.deepEqual(first.consumers[0], { namespace: 'default', user: 'ann', client: null, nextSeq: 4, lag: 2, lastPollMicros: 1791260399290946, polls: 3 });
@@ -397,7 +402,8 @@ test('the REST Source reads the status views: numbers, series from the metrics, 
   assert.equal(second.series.active[0], 2); assert.equal(second.series.walBytes[0], 84369);
   const r = await s.cancel(20); assert.equal(r.request.id, 20);
   // Managed jobs (step 16f): the contract's words and numbers
-  assert.deepEqual(first.jobs[0], { id: 31, namespace: 'default', user: 'admin', kind: 'page_rank', state: 'running', createdMicros: 1791260399000000, startedMicros: 1791260399000100, endedMicros: null, elapsedMicros: 5000000, nodes: 2000, edges: 4000, rows: null, truncated: false, resultBytes: 0, error: null, expiresMicros: null });
+  assert.deepEqual(first.jobs[0], { id: 31, namespace: 'default', user: 'admin', kind: 'page_rank', state: 'running', createdMicros: 1791260399000000, startedMicros: 1791260399000100, endedMicros: null, elapsedMicros: 5000000, progress: { phase: 'pagerank', done: 37, total: 100 }, nodes: 2000, edges: 4000, rows: null, truncated: false, resultBytes: 0, error: null, expiresMicros: null });
+  assert.equal(first.jobs[1].progress, null, 'no report: null');
   assert.deepEqual([first.jobs[1].state, first.jobs[1].rows, first.jobs[1].truncated, first.jobs[1].resultBytes], ['done', 10, true, 420]);
   assert.deepEqual(first.jobCounts, { queued: 0, running: 0, finished: 0, resultBytes: 0 }, 'absent counts are zeros');
   const c = await s.cancelJob(31);
@@ -425,9 +431,9 @@ test('histogram quantiles: linear within the bucket, as Prometheus estimates the
   assert.equal(rest.quantile({ bounds: [0.001], counts: [0, 0] }, 0.5), 0, 'no observations');
 });
 
-test('the REST Source reads the schema: exact label counts, sampled keys and types', async () => {
+test('the REST Source reads the schema: exact labels and types, sampled keys', async () => {
   const { fetch, calls } = fakeServer({
-    'GET /v1/namespaces/s/schema?max_visited=10000&max_edges=100000': [200, { schema: { labels: [{ name: 'Person', count: '64', sampled: '40', keys: [{ name: 'age', kinds: [{ kind: 'Int', count: '40' }] }] }, { name: 'Robot' }], types: [{ count: '2' }, { name: 'KNOWS', count: '60' }], nodes: '82', edges: '272', sampledNodes: '82', sampledEdges: '272' } }],
+    'GET /v1/namespaces/s/schema?max_visited=10000': [200, { schema: { labels: [{ name: 'Person', count: '64', sampled: '40', keys: [{ name: 'age', kinds: [{ kind: 'Int', count: '40' }] }] }, { name: 'Robot' }], types: [{ count: '2' }, { name: 'KNOWS', count: '60' }], nodes: '82', edges: '272', sampledNodes: '82', sampledEdges: '272' } }],
     'GET /v1/namespaces/s/catalog': [200, { catalog: { constraints: [{ kind: 'CONSTRAINT_KIND_REQUIRED', label: 'Robot', path: { keys: ['serial'] } }] } }],
   });
   const sc = await rest.create({ fetch }).schema('s');

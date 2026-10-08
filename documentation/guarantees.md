@@ -230,8 +230,8 @@ What it doesn't guarantee:
 
 - **The status isn't one consistent cut across namespaces**: each namespace's part is consistent on its own.
 - **Counts start when the database starts serving**, and calls made on an embedded store in-process aren't counted or listed.
-- **A running request's visited count isn't reported** (the core counts it only inside a search; upstream draft 23), nor a job's progress inside its algorithm (upstream #62).
-- **The schema is sampled** ([ADR 0053](adr/0053-the-schema-read.md)): label counts are exact, but a label only nodes outside the sample carry isn't listed, and keys and edge-type counts are the sample's. It is complete when `sampled_nodes` equals `nodes` and `sampled_edges` equals `edges` (upstream [#60](https://github.com/p-sodmann/Ironweaver/issues/60)).
+- **A running request's visited count isn't reported** (the core counts it only inside a search; upstream draft 23).
+- **The schema's keys are sampled** ([ADR 0053](adr/0053-the-schema-read.md)): labels and edge types are complete with exact counts (the core's, upstream [#60](https://github.com/p-sodmann/Ironweaver/issues/60)), up to 10 000 of each (`truncated` beyond), but attribute keys come from the first `max_visited` nodes. They are complete when `sampled_nodes` equals `nodes`.
 - **The log tail is in memory**: a restart empties it, and older events fall out once `[log] tail_events` are kept.
 
 ## Managed analytics jobs (step 16f)
@@ -251,7 +251,7 @@ What it guarantees:
 
 What it doesn't guarantee:
 
-- **Progress is the phase only** (queued, collecting, running, done): the core reports nothing from inside an algorithm (upstream [#62](https://github.com/p-sodmann/Ironweaver/issues/62)).
+- **Progress is the core's report**, in its units (iterations, runs, nodes or sources) per phase, not a time estimate: a converging algorithm (PageRank, label propagation) ends below its total, and Leiden's runs vary in length. It is read while the job runs and kept as it was when the job ended (`jobs.rs`, `algorithms_report_progress` in `core_smoke.rs`).
 - **Nothing persists**: a restart or a drain loses every job and result. Ids restart at 1, so an id kept across a restart can name a newer job.
 - **Expiry is checked when the registry is used**, not by a timer: an expired result is never served, but may hold its memory until the next call that looks.
 - **Jobs start while writes are refused**, as reads do: what they add is bounded (`[jobs] running` projections and `[jobs] result_bytes`) and counted, not refused.
@@ -271,7 +271,7 @@ What it guarantees:
 
 What it doesn't guarantee:
 
-- **The accounting is an estimate.** It counts the live graphs (the core's figure), their payloads (ours, from lengths: 3–8 % above the measured heap), the checkpointers' copies, and projections and index builds while they run (by a formula per node and edge). It doesn't count request buffers, the WAL's buffer, the allocator's slack or the runtime. The process's resident memory can be higher than `used`; the 10 % between the refusal line and the limit is for that.
+- **The accounting is an estimate.** It counts the live graphs with their payloads and the index builds (the core's figures, from lengths, not capacities; upstream [#61](https://github.com/p-sodmann/Ironweaver/issues/61)), the checkpointers' copies, projections while they run (a formula per node and edge while collected, then the core's figure) and the managed jobs' stored results (estimated). It doesn't count request buffers, the WAL's buffer, the allocator's slack or the runtime. The process's resident memory can be higher than `used`; the 10 % between the refusal line and the limit is for that.
 - **One commit can cross the line.** A commit is admitted on the state before it, so `used` can pass the line by one commit (a WAL record is at most 64 MiB). The next one is refused.
 - **Reads aren't limited by memory.** An `analyze` is counted, and can push the store into refusing writes, but it isn't refused.
 - **An embedded store has no limit** unless `StoreOptions::memory` sets one: it can't see the memory of the application it runs in. Without a limit nothing is refused.

@@ -2,7 +2,7 @@
 //! it runs out (ADR 0054).
 //!
 //! A store owns one [`Memory`]. The parts that hold memory report to it
-//! through [`Charge`]s: each live namespace its graph and payloads, each
+//! through [`Charge`]s: each live namespace its graph (payloads included), each
 //! checkpointer its copy, each analytics projection and index build its
 //! working memory. A charge is a number of bytes the holder sets as it
 //! changes and that is released when the charge is dropped. Reading the
@@ -35,11 +35,9 @@ const V1_UNLIMITED: u64 = 1 << 60;
 /// What holds memory: the parts of [`Memory::used`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Part {
-    /// The live graphs: the core's `Graph::memory_usage` (structure and
-    /// indexes).
+    /// The live graphs: the core's `Graph::memory_usage` (structure,
+    /// indexes and payloads).
     Graph,
-    /// The live graphs' payloads, estimated (`Namespace::payload_bytes`).
-    Payload,
     /// The checkpointers' copies of the namespaces, graph and payloads.
     Checkpoint,
     /// Analytics projections and index builds while they run.
@@ -47,12 +45,11 @@ pub enum Part {
 }
 
 impl Part {
-    pub const ALL: [Part; 4] = [Part::Graph, Part::Payload, Part::Checkpoint, Part::Working];
+    pub const ALL: [Part; 3] = [Part::Graph, Part::Checkpoint, Part::Working];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Part::Graph => "graph",
-            Part::Payload => "payload",
             Part::Checkpoint => "checkpoint",
             Part::Working => "working",
         }
@@ -172,7 +169,6 @@ pub struct Limit {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemorySnapshot {
     pub graph: u64,
-    pub payload: u64,
     pub checkpoint: u64,
     pub working: u64,
     pub limit: Option<Limit>,
@@ -182,7 +178,7 @@ pub struct MemorySnapshot {
 impl MemorySnapshot {
     /// Every part: what the limit counts.
     pub fn used(&self) -> u64 {
-        self.graph.saturating_add(self.payload).saturating_add(self.checkpoint).saturating_add(self.working)
+        self.graph.saturating_add(self.checkpoint).saturating_add(self.working)
     }
 }
 
@@ -191,7 +187,7 @@ impl MemorySnapshot {
 /// change of state.
 #[derive(Debug)]
 pub struct Memory {
-    parts: [AtomicU64; 4],
+    parts: [AtomicU64; 3],
     limit: Option<Limit>,
     state: AtomicU8,
     /// Serializes changes of state, so that each is logged once.
@@ -250,7 +246,6 @@ impl Memory {
     pub fn snapshot(&self) -> MemorySnapshot {
         MemorySnapshot {
             graph: self.part(Part::Graph),
-            payload: self.part(Part::Payload),
             checkpoint: self.part(Part::Checkpoint),
             working: self.part(Part::Working),
             limit: self.limit,
@@ -438,7 +433,7 @@ mod tests {
     fn the_state_rises_at_each_line_and_falls_only_below_its_band() {
         // Lines at 800 (warn) and 900 (refuse), band 50
         let memory = limited(1000);
-        let c = memory.charge(Part::Payload);
+        let c = memory.charge(Part::Checkpoint);
         let at = |bytes: u64| {
             c.set(bytes);
             memory.state()

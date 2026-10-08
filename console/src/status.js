@@ -50,6 +50,9 @@
     h('tbody', null, rows.length ? rows : h('tr', null, h('td', { colSpan: cols.length, className: 'iw-small iw-muted' }, empty))))));
   const Num = (v) => h('td', { className: 'is-num iw-mono-s' }, v);
   const ago = (micros, now) => (micros ? U.span((now * 1000 - micros) / 1e6) + ' ago' : '—');
+  /** A job's progress as the core reports it: 'pagerank 37 / 100 · 37%', or the units alone without a total. */
+  const progressText = (p) => (!p ? '—' : p.total == null ? p.phase + ' ' + U.num(p.done)
+    : p.phase + ' ' + U.num(p.done) + ' / ' + U.num(p.total) + ' · ' + (p.total ? Math.floor((100 * p.done) / p.total) : 100) + '%');
 
   function nsState(s) {
     if (s.readOnly) return ['failed', '✕ READ-ONLY', s.readOnly];
@@ -177,11 +180,11 @@
                 ? h(I.Meter, { caption: 'MEMORY', value: s.memory.usedBytes, max: limit, warnAt: mem.meterWarnAt, width: 220, readout: U.bytes(s.memory.usedBytes) + ' / ' + U.bytes(limit) })
                 : h('div', null, h('div', { className: 'iw-cap' }, 'MEMORY'), h('div', { className: 'iw-metric' }, U.bytes(s.memory.usedBytes))),
               h('dl', { className: 'cs-dl' },
-                [['GRAPHS', s.memory.graphBytes], ['PAYLOADS', s.memory.payloadBytes], ['CHECKPOINT COPIES', s.memory.checkpointBytes], ['PROJECTIONS, BUILDS, JOB RESULTS', s.memory.workingBytes]]
+                [['GRAPHS AND PAYLOADS', s.memory.graphBytes], ['CHECKPOINT COPIES', s.memory.checkpointBytes], ['PROJECTIONS, BUILDS, JOB RESULTS', s.memory.workingBytes]]
                   .map(([k, v]) => h('div', { key: k }, h('dt', { className: 'iw-cap' }, k), h('dd', { className: 'iw-mono' }, U.bytes(v))))),
               h('div', { className: 'iw-small iw-muted' }, mem
-                ? `What the server counts against its limit (${s.memory.limitSource || 'set'}): it warns at ${U.pct(mem.warnAt)} and refuses writes at ${U.pct(mem.refuseAt)}, each until memory is 5 % below the line. Payloads, projections and builds are estimates.`
-                : 'What the server counts: graphs, payloads (estimated), checkpoint copies, projections and builds. The server has no memory limit.')),
+                ? `What the server counts against its limit (${s.memory.limitSource || 'set'}): it warns at ${U.pct(mem.warnAt)} and refuses writes at ${U.pct(mem.refuseAt)}, each until memory is 5 % below the line. Projections are estimated while they are collected; job results are estimates.`
+                : 'What the server counts: graphs with their payloads, checkpoint copies, projections, builds and job results. The server has no memory limit.')),
             h('dl', { className: 'cs-dl' },
               [['WAL', U.bytes(s.disk.walBytes)], ['CHECKPOINTS', U.bytes(s.disk.checkpointBytes)], ['DISK FREE', U.bytes(s.disk.freeBytes)], ['REQUESTS', U.num(s.requests.total)], ['REJECTED', U.num(s.requests.rejected)], ['TIMED OUT', U.num(s.requests.timedOut)], ['CANCELLED', U.num(s.requests.cancelled)], ['DENIED', U.num(s.requests.denied)]]
                 .map(([k, v]) => h('div', { key: k }, h('dt', { className: 'iw-cap' }, k), h('dd', { className: 'iw-mono' }, v)))),
@@ -209,10 +212,10 @@
               Num(ago(c.lastPollMicros, now)), Num(U.num(c.polls)))),
             empty: 'No one is following a change stream.',
           })),
-        /* Managed analytics jobs (step 16f): the state is the progress, the core reports none (upstream #62) */
+        /* Managed analytics jobs (step 16f): the state, and how far the algorithm has got as the core reports it (upstream #62) */
         h(Section, { title: 'JOBS', meta: s.jobCounts.queued + ' queued · ' + s.jobCounts.running + ' running · ' + s.jobCounts.finished + ' kept · results ' + U.bytes(s.jobCounts.resultBytes), className: 'cs-jobs' },
           h(Table, {
-            cols: [['JOB'], ['KIND'], ['NAMESPACE'], ['USER'], ['STATE'], ['RUNNING', 1], ['PROJECTION', 1], ['ROWS', 1], ['']],
+            cols: [['JOB'], ['KIND'], ['NAMESPACE'], ['USER'], ['STATE'], ['PROGRESS', 1], ['RUNNING', 1], ['PROJECTION', 1], ['ROWS', 1], ['']],
             rows: s.jobs.flatMap((j) => {
               const live = ['queued', 'collecting', 'running'].includes(j.state);
               const cls = j.state === 'failed' ? 'failed' : live ? 'populating' : j.state === 'done' ? 'online' : 'offline';
@@ -220,13 +223,14 @@
                 h('td', { className: 'iw-mono-s' }, j.id), h('td', { className: 'iw-mono' }, j.kind), h('td', { className: 'iw-mono-s' }, j.namespace),
                 h('td', { className: 'iw-mono-s' }, j.user),
                 h('td', null, h('span', { className: 'iw-state is-' + cls }, (live ? '▲ ' : '') + j.state.toUpperCase())),
+                Num(progressText(j.progress)),
                 Num(j.state === 'queued' ? '—' : U.span(j.elapsedMicros / 1e6)),
                 Num(j.nodes == null ? '—' : U.num(j.nodes) + ' / ' + U.num(j.edges)),
                 Num(j.rows == null ? '—' : U.num(j.rows) + (j.truncated ? ' (top)' : '')),
                 h('td', { className: 'is-num' }, live
                   ? h(I.Button, { variant: 'ghost', onClick: () => cancelJob(j.id), title: 'Cancel job ' + j.id + ': it stops at the next check' }, 'CANCEL')
                   : h('span', { className: 'iw-small iw-muted' }, j.expiresMicros ? 'kept ' + U.span(Math.max(0, j.expiresMicros - now * 1000) / 1e6) : '')));
-              return j.error && j.state === 'failed' ? [row, h('tr', { key: j.id + ':why', className: 'cs-why' }, h('td', null), h('td', { colSpan: 8, className: 'iw-small' }, j.error.code + ': ' + j.error.message))] : [row];
+              return j.error && j.state === 'failed' ? [row, h('tr', { key: j.id + ':why', className: 'cs-why' }, h('td', null), h('td', { colSpan: 9, className: 'iw-small' }, j.error.code + ': ' + j.error.message))] : [row];
             }),
             empty: 'No analytics jobs. Start one with StartJob or POST /v1/namespaces/{ns}/jobs.',
           })),

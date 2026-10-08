@@ -41,6 +41,13 @@ Points to decide: what the limit counts and how well, the defaults, where the de
   - A projection is charged `16 bytes × edges + 48 bytes × nodes + 4 bytes × node slots` while it is collected (within 6 % of the measured peaks), then its own `memory_usage` until the job ends.
   - An index build is charged `8 bytes × nodes` for its handles plus `96 bytes × nodes scanned`. That is a marked estimate: it is between the measured 75 bytes (integer key) and 216 bytes (email) per entry. Draft 25 asks the core for the real figure.
 
+*Update, upstream check of 2026-10-07: #61 was fixed in core `c69ef51`.* The parts are now three:
+- **`graph`** is every live namespace's `Graph::memory_usage` with payloads counted. Every namespace's graph turns that on with `count_payloads()` (`Namespace::new`, `from_loaded`), and `DbRecord` implements the core's `HeapSize` (lengths, not capacities, as before).
+- `payload`, `Namespace::payload_bytes`, `DbRecord::heap_bytes` and the per-apply `Touched` sums are gone.
+- `MemoryStatus.payload_bytes` (proto field 3) is deprecated and always 0, because v1 only changes compatibly (`buf breaking`, api/grpc.md). The metric's `part` label has no `payload` value: the `graph` series now includes what it had.
+- An index build is charged its handles plus the core's `IndexBuild::memory_usage`.
+- A projection keeps the formula while it is collected, because it is charged before it allocates. Once collected it is charged `RawProjection::memory_usage`, then the sorted projection's `memory_usage`.
+
 **Not counted:** request and response buffers, the WAL's write buffer, the change stream's reads, idempotency key tables, the runtime, and the allocator's slack. The defaults leave room for them.
 
 **Thresholds** are fractions of the limit: `warn_at` (default 0.80) and `refuse_writes_at` (default 0.90), with `0 < warn_at ≤ refuse_writes_at ≤ 1`. The estimate is 3–8 % above the heap in the measurements, so the 10 % between refusal and the limit is for what isn't counted.
@@ -104,5 +111,5 @@ Its mappings: gRPC `RESOURCE_EXHAUSTED` (which `budget_exceeded` also uses; `iwd
 - The accounting is good to a few percent for the graph and its payloads, and an estimate for builds. RSS can still be higher than `used` by the allocator's slack and the uncounted buffers. An operator who sees the process killed below the limit lowers `refuse_writes_at` (or `limit_bytes`).
 - Under pressure an application can still delete and drop to get below the line, and operators can still log in.
 - Memory freed by a checkpointer is counted when its copy is dropped. A checkpointer's copy is kept between runs (step 5), so it stays in `checkpoint` until the namespace is dropped or the store closes.
-- Per-namespace and per-client limits (step 15d) can build on the per-namespace estimate, `Namespace::memory_bytes` (graph plus payloads).
-- When the core counts payloads (draft 25), `payload` becomes part of `graph` and `DbRecord::heap_bytes` goes. The upstream check lists what to remove.
+- Per-namespace and per-client limits (step 15d) can build on the per-namespace estimate, `Namespace::memory_bytes` (the core's figure, payloads included).
+- ~~When the core counts payloads (draft 25), `payload` becomes part of `graph` and `DbRecord::heap_bytes` goes.~~ Done in the upstream check of 2026-10-07 (core `c69ef51`).

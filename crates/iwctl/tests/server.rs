@@ -283,6 +283,11 @@ fn jobs() {
     let endless = Job::PageRank(PageRank { tol: 0.0, max_iter: 1 << 40, ..PageRank::default() });
     let long = block_on(remote.start_job("default".into(), request(endless), QueryOptions::default(), None)).unwrap();
     let (d, l) = (degree.id.to_string(), long.id.to_string());
+    // Until PageRank has reported an iteration
+    while block_on(remote.job(long.id, None)).unwrap().progress.is_none_or(|p| p.done == 0) {
+        assert!(start.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(5));
+    }
 
     let text = ok(&s.iwctl(&["jobs", "list"]));
     assert!(text.contains(&format!("job {}: degree on default by ann, done", d)), "{}", text);
@@ -291,6 +296,13 @@ fn jobs() {
     assert_eq!(v["jobs"].as_array().unwrap().len(), 2, "{}", v);
     let [v] = s.json(&["jobs", "show", &d]).try_into().unwrap();
     assert_eq!((v["job"]["state"].as_str(), v["job"]["rows"].as_u64()), (Some("done"), Some(41)), "{}", v);
+    // How far the running PageRank has got, in iterations
+    let text = ok(&s.iwctl(&["jobs", "show", &l]));
+    assert!(text.contains("running for ") && text.contains(", pagerank "), "{}", text);
+    assert!(text.contains(&format!("/{}", 1u64 << 40)), "{}", text);
+    let [v] = s.json(&["jobs", "show", &l]).try_into().unwrap();
+    assert_eq!(v["job"]["progress"]["phase"].as_str(), Some("pagerank"), "{}", v);
+    assert!(v["job"]["progress"]["done"].as_u64().is_some_and(|d| d > 0), "{}", v);
     // A page of rows, and where the next starts
     let text = ok(&s.iwctl(&["jobs", "result", &d, "0", "3"]));
     assert_eq!(text.lines().count(), 4, "{}", text);

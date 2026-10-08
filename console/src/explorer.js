@@ -60,7 +60,6 @@
             }));
           }), 'No labels yet.')),
       h('section', null, h('h2', { className: 'iw-cap' }, 'EDGE TYPES'),
-        schema.sampledEdges < schema.edges && h('p', { className: 'iw-small iw-muted cs-struct__note' }, `Counted in the first ${U.num(schema.sampledEdges)} of ${U.num(schema.edges)} edges.`),
         T([['TYPE'], ['EDGES', true]], schema.types.map((t) => h('tr', { key: t.name || '' }, h('td', { className: 'iw-mono iw-accent' }, '→ ' + (t.name || '(untyped)')), h('td', { className: 'is-num iw-mono-s' }, U.num(t.count)))), 'No edges yet.')),
       h('section', null, h('h2', { className: 'iw-cap' }, 'INDEXES'),
         T([['PATH'], ['STATE'], ['WHY'], ['ENTRIES', true], ['DISTINCT', true], ['MEMORY', true]],

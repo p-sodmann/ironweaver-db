@@ -44,16 +44,18 @@
  *                                                                     the last minute and a half, one value per call of server()
  *   Request: {id, operation, namespace, user, client, startedMicros, elapsedMicros, cancellable}
  *   Job (step 16f, ADR 0056): {id, namespace, user, kind, state: 'queued'|'collecting'|'running'|'done'|'failed'|'cancelled'|'expired',
- *    createdMicros, startedMicros|null, endedMicros|null, elapsedMicros, nodes|null, edges|null, rows|null, truncated,
- *    resultBytes, error: {code, message}|null, expiresMicros|null}: the state is the progress (the core reports none)
- *   Memory (step 16d, ADR 0054): {graphBytes, payloadBytes, checkpointBytes, workingBytes, usedBytes (what the limit counts),
+ *    createdMicros, startedMicros|null, endedMicros|null, elapsedMicros, progress: {phase, done, total|null}|null,
+ *    nodes|null, edges|null, rows|null, truncated, resultBytes, error: {code, message}|null, expiresMicros|null}
+ *    progress: how far the algorithm has got, as the core reports it (upstream #62): the phase ('pagerank', 'leiden', ...),
+ *    units done (iterations, runs, nodes) and their total if known; the last report once ended, null before the first
+ *   Memory (step 16d, ADR 0054): {graphBytes (payloads included), checkpointBytes, workingBytes, usedBytes (what the limit counts),
  *    limitBytes|null, warnBytes|null, refuseWritesBytes|null, state: 'normal'|'warn'|'refusing_writes',
  *    limitSource: 'config'|'cgroup v2'|'cgroup v1'|null}: the server's own lines and state, not the console's
  * Writes that add fail with `resource_exhausted` while the state is 'refusing_writes'; deletes and drops go on.
  * Every Source also has `endpoint`, the text of where it reads from.
  *
- * Label counts are exact (the core's label index); keys and edge types come from a sample (ADR 0053): the lists are
- * complete when sampledNodes is nodes and sampledEdges is edges. `find` has no total and explain no match count: both
+ * Labels and edge types are complete, with exact counts (the core's, upstream #60); keys come from a sample (ADR 0053):
+ * they are complete when sampledNodes is nodes (sampledEdges is always edges). `find` has no total and explain no match count: both
  * would be unbounded counts (design rule 5).
  *
  * Authentication (step 15a, ADR 0046): with the server's [auth] enabled every call but login needs a session. The
