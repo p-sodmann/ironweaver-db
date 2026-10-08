@@ -57,7 +57,7 @@ A call over gRPC costs about 50 to 100 µs more than embedded, which is mostly t
 | Load: edges/s | 356 000 | 301 000 | 96 000 |
 | Load: total | 1.3 s | 15.5 s | 133 s |
 | Import (export, then import as a new namespace) | 1.0 s, 26 MiB | 14.9 s, 289 MiB | not run ² |
-| Graph memory (the graph's own estimate, indexes included, payloads not) | 133 MiB | 1.26 GiB | 9.3 GiB |
+| Graph memory (the graph's own estimate, indexes and payloads included ⁵) | 258 MiB | 2.45 GiB | 9.3 GiB (payloads not) |
 | Resident memory per node / per edge | 1.6 KB / 0.59 KB ³ | 1.36 KB / 0.44 KB | ³ |
 | `get_node` | 40 200/s, p99 0.30 ms | 39 200/s, p99 0.32 ms | 39 300/s, p99 0.36 ms |
 | `neighbourhood_depth_2` | 28 600/s, p99 0.42 ms | 28 100/s, p99 0.43 ms | 30 400/s, p99 0.54 ms |
@@ -71,8 +71,9 @@ A call over gRPC costs about 50 to 100 µs more than embedded, which is mostly t
 
 1. Degree 1 instead of 4: 10M nodes with 40M edges need about 30 GB of resident memory, more than this machine has. Even this run went past physical memory: macOS compressed it (peak footprint 20.7 GB, resident at most 8.2 GB, no swapping). Reads that touch random memory (`shortest_path`, `find_indexed_100`) and the load of edges are slower partly for that reason.
 2. Skipped at 10M (`--skip-import`): the imported namespace is a second copy of the graph in memory.
-3. Resident memory is the process's (`ps`): payloads, the WAL's buffers and the allocator's slack, so it is more than the graph's estimate. Under memory compression (the 10M run) it isn't meaningful.
+3. Resident memory is the process's (`ps`): the WAL's buffers and the allocator's slack on top of the graph, so it is more than the graph's estimate. Under memory compression (the 10M run) it isn't meaningful.
 4. See the first finding below.
+5. Since core `c69ef51` (upstream #61) the graph's estimate counts attribute payloads too, so the 100k and 1M rows were measured again (2026-10-08, same machine): 542 bytes per entity at 100k, about twice the earlier 278. The 10M row is from before and doesn't include them. Nothing else changed.
 
 ## Findings
 

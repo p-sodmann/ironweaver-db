@@ -35,7 +35,7 @@ A test keeps this table equal to the metrics the server exports (`METRICS` in `c
 | `iwdb_lock_hold_seconds` | histogram | `lock` | seconds | How long namespace locks were held: `write` by commits (apply and index flush), `read` by reads. |
 | `iwdb_namespace_nodes` | gauge | `namespace` | – | Nodes in the namespace. |
 | `iwdb_namespace_edges` | gauge | `namespace` | – | Edges in the namespace. |
-| `iwdb_namespace_memory_bytes` | gauge | `namespace` | bytes | Approximate bytes the namespace's graph uses, indexes included (attribute payloads not counted; see `iwdb_memory_used_bytes`). |
+| `iwdb_namespace_memory_bytes` | gauge | `namespace` | bytes | Approximate bytes the namespace's graph uses, indexes and attribute payloads included (the core's figure). |
 | `iwdb_wal_bytes` | gauge | `namespace` | bytes | Bytes of the namespace's WAL segments on disk. |
 | `iwdb_checkpoint_bytes` | gauge | `namespace` | bytes | Bytes of the namespace's checkpoints on disk. |
 | `iwdb_checkpoint_lag_commits` | gauge | `namespace` | commits | Commits since the namespace's newest checkpoint: what recovery would replay. |

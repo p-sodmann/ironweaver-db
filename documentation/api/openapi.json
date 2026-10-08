@@ -2468,6 +2468,14 @@
             ],
             "description": "Where the limit came from; unspecified without a limit."
           },
+          "payloadBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Deprecated, always 0: the payloads, once estimated apart. The core\ncounts them in `graph_bytes` now (upstream #61). Kept so that v1 stays\ncompatible."
+          },
           "refuseWritesBytes": {
             "allOf": [
               {

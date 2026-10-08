@@ -84,6 +84,8 @@ fn job_counts_from_pb(c: pb::JobCounts) -> JobCounts {
     }
 }
 
+// Sets the deprecated `payload_bytes` (always 0)
+#[allow(deprecated)]
 fn memory_to_pb(m: &MemoryStatus) -> pb::MemoryStatus {
     let state = match m.state {
         MemoryState::Normal => pb::MemoryState::Normal,
@@ -99,6 +101,8 @@ fn memory_to_pb(m: &MemoryStatus) -> pb::MemoryStatus {
     pb::MemoryStatus {
         graph_bytes: m.graph_bytes,
         limit_bytes: m.limit_bytes,
+        // Deprecated (proto field 3): payloads are in `graph_bytes`
+        payload_bytes: 0,
         checkpoint_bytes: m.checkpoint_bytes,
         working_bytes: m.working_bytes,
         used_bytes: m.used_bytes,

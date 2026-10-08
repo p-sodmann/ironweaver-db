@@ -44,7 +44,7 @@ Points to decide: what the limit counts and how well, the defaults, where the de
 *Update, upstream check of 2026-10-07: #61 was fixed in core `c69ef51`.* The parts are now three:
 - **`graph`** is every live namespace's `Graph::memory_usage` with payloads counted. Every namespace's graph turns that on with `count_payloads()` (`Namespace::new`, `from_loaded`), and `DbRecord` implements the core's `HeapSize` (lengths, not capacities, as before).
 - `payload`, `Namespace::payload_bytes`, `DbRecord::heap_bytes` and the per-apply `Touched` sums are gone.
-- `MemoryStatus.payload_bytes` (proto field 3) is reserved, and the metric's `part` label has no `payload` value. That is a breaking change to the status and the metrics, made before 1.0.
+- `MemoryStatus.payload_bytes` (proto field 3) is deprecated and always 0, because v1 only changes compatibly (`buf breaking`, api/grpc.md). The metric's `part` label has no `payload` value: the `graph` series now includes what it had.
 - An index build is charged its handles plus the core's `IndexBuild::memory_usage`.
 - A projection keeps the formula while it is collected, because it is charged before it allocates. Once collected it is charged `RawProjection::memory_usage`, then the sorted projection's `memory_usage`.
 

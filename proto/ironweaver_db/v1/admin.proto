@@ -125,10 +125,10 @@ message MemoryStatus {
   uint64 graph_bytes = 1;
   // The memory limit; missing: none.
   optional uint64 limit_bytes = 2;
-  // Was `payload_bytes`, the payloads estimated apart: the core counts them
-  // in `graph_bytes` now (upstream #61).
-  reserved 3;
-  reserved "payload_bytes";
+  // Deprecated, always 0: the payloads, once estimated apart. The core
+  // counts them in `graph_bytes` now (upstream #61). Kept so that v1 stays
+  // compatible.
+  uint64 payload_bytes = 3 [deprecated = true];
   // The checkpointers' copies of the namespaces, graphs and payloads.
   uint64 checkpoint_bytes = 4;
   // Analytics projections and index builds while they run, and the stored
