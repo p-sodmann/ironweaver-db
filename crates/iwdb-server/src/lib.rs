@@ -51,6 +51,8 @@ pub mod health;
 pub mod logging;
 pub mod metrics;
 mod ops;
+#[cfg(feature = "otel")]
+pub mod otel;
 #[cfg(feature = "rest")]
 pub mod rest;
 mod serve;

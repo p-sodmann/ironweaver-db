@@ -19,6 +19,9 @@ postgres = ["iwdb/postgres"]
 # The operator console's pages (ADR 0041), compiled in from `console/` and
 # served at /console/ when `[console] enabled = true`; it uses the REST API
 console = ["rest"]
+# OpenTelemetry traces over OTLP (step 16g, ADR 0057), configured in
+# `[tracing]`; it uses the clients' HTTP and TLS stack to reach the collector
+otel = ["client", "dep:http-body-util", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-proto", "dep:tracing-opentelemetry"]
 # The Rust clients (`client::Remote` over gRPC, ADR 0024; with `rest`,
 # `client::RestRemote` over REST, ADR 0030); the tests turn it on
 client = ["hyper/client", "hyper/http1", "hyper-util/client-legacy", "hyper-util/http1", "tonic/tls-ring", "tonic/tls-native-roots", "dep:rustls-native-certs"]
@@ -71,6 +74,11 @@ rustls-native-certs = { workspace = true, optional = true }
 tonic-health.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Traces over OTLP (feature `otel`, ADR 0057)
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-proto = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
 
 [build-dependencies]
 tonic-prost-build.workspace = true
@@ -93,6 +101,9 @@ serde_json = { workspace = true, features = ["unbounded_depth"] }
 postgres.workspace = true
 # Benchmarks (step 14b)
 criterion.workspace = true
+# Traces (step 16g): the SDK's in-memory exporter for the span tree tests
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 
 [[bench]]
 name = "graph"

@@ -31,7 +31,12 @@ use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Layer, fmt};
 
+use iwdb_storage::trace::TARGET as TRACE_TARGET;
+
 use crate::audit::{AuditFiles, TARGET};
+
+/// A layer over the bare registry: the trace exporter's.
+pub type TraceLayer = Box<dyn Layer<tracing_subscriber::Registry> + Send + Sync>;
 
 /// How log lines look.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -71,21 +76,32 @@ pub fn check_level(level: &str) -> Result<(), String> {
 }
 
 /// The filter of `level`, which lets audit entries through unless it
-/// names their target itself (`warn,iwdb::audit=off`).
+/// names their target itself (`warn,iwdb::audit=off`), and keeps trace
+/// spans (ADR 0057) out of the log unless it names theirs.
 fn filter(level: &str) -> Result<EnvFilter, String> {
-    let filter = EnvFilter::builder().parse(level).map_err(|e| e.to_string())?;
-    if level.contains(TARGET) {
-        return Ok(filter);
+    let mut filter = EnvFilter::builder().parse(level).map_err(|e| e.to_string())?;
+    if !level.contains(TARGET) {
+        filter = filter.add_directive(format!("{}=info", TARGET).parse().map_err(|e| format!("{}", e))?);
     }
-    let audit = format!("{}=info", TARGET).parse().map_err(|e| format!("{}", e))?;
-    Ok(filter.add_directive(audit))
+    if !level.contains(TRACE_TARGET) {
+        filter = filter.add_directive(format!("{}=off", TRACE_TARGET).parse().map_err(|e| format!("{}", e))?);
+    }
+    Ok(filter)
 }
 
 /// Install the process's logger: `format` lines on stderr, filtered by
 /// `level`, the same events to `ring` (the log tail), and audit entries to
 /// `audit` too. Call once, early; later calls fail (a logger is
 /// installed).
-pub fn init(format: LogFormat, level: &str, audit: Option<AuditFiles>, ring: Arc<LogRing>) -> Result<(), String> {
+/// `traces` is the layer that exports trace spans, if tracing is on (ADR
+/// 0057, `otel::Tracing::layer`).
+pub fn init(
+    format: LogFormat,
+    level: &str,
+    audit: Option<AuditFiles>,
+    ring: Arc<LogRing>,
+    traces: Option<TraceLayer>,
+) -> Result<(), String> {
     let ring = RingLayer { ring }.with_filter(filter(level).map_err(|e| format!("[log] level: {}", e))?);
     let filter = filter(level).map_err(|e| format!("[log] level: {}", e))?;
     let stderr = fmt::layer().with_writer(std::io::stderr);
@@ -103,6 +119,7 @@ pub fn init(format: LogFormat, level: &str, audit: Option<AuditFiles>, ring: Arc
             .with_filter(Targets::new().with_target(TARGET, LevelFilter::INFO))
     });
     tracing_subscriber::registry()
+        .with(traces)
         .with(stderr.with_filter(filter))
         .with(ring)
         .with(files)
@@ -180,6 +197,10 @@ mod tests {
             assert!(filter(level).expect("filter").to_string().contains("iwdb::audit=info"), "{}", level);
         }
         assert!(!filter("warn,iwdb::audit=off").expect("filter").to_string().contains("iwdb::audit=info"));
+        // Trace spans stay out of the log at any level
+        for level in ["info", "trace", "debug,iwdb_storage=trace"] {
+            assert!(filter(level).expect("filter").to_string().contains("iwdb::trace=off"), "{}", level);
+        }
         assert!(check_level("nonsense=[").is_err());
     }
 
