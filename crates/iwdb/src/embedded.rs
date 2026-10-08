@@ -94,6 +94,7 @@ where
 pub(crate) struct Monitor {
     pub(crate) requests: Arc<Requests>,
     pub(crate) log: Arc<LogRing>,
+    pub(crate) spans: Arc<iwdb_query::trace::SpanCounters>,
     pub(crate) started: CommitTime,
     pub(crate) ready: AtomicBool,
 }
@@ -130,6 +131,7 @@ where
         let monitor = Monitor {
             requests,
             log: Arc::new(LogRing::new(0)),
+            spans: Arc::default(),
             started: CommitTime::now(),
             ready: AtomicBool::new(true),
         };
@@ -186,6 +188,21 @@ where
         let monitor = Monitor {
             requests: self.monitor.requests.clone(),
             log,
+            spans: self.monitor.spans.clone(),
+            started: self.monitor.started,
+            ready: AtomicBool::new(self.monitor.ready.load(Ordering::Acquire)),
+        };
+        self.monitor = Arc::new(monitor);
+        self
+    }
+
+    /// The trace exporter's counts for the metrics (the server's, step 16g,
+    /// ADR 0057). Without them the trace metrics are 0.
+    pub fn with_span_counters(mut self, spans: Arc<iwdb_query::trace::SpanCounters>) -> Self {
+        let monitor = Monitor {
+            requests: self.monitor.requests.clone(),
+            log: self.monitor.log.clone(),
+            spans,
             started: self.monitor.started,
             ready: AtomicBool::new(self.monitor.ready.load(Ordering::Acquire)),
         };
@@ -619,7 +636,9 @@ where
                 if ns.streamable_seq() < from {
                     let margin = (request_.timeout / 10).min(Duration::from_secs(1));
                     let until = request_.deadline.map(|d| d.checked_sub(margin).unwrap_or(d));
-                    if let Wait::Dropped = ns.streamable_wait(from, until)?.await {
+                    let wait = ns.streamable_wait(from, until)?;
+                    let waited = tracing::Instrument::instrument(wait, iwdb_storage::trace_span!("iwdb.changes.wait"));
+                    if let Wait::Dropped = waited.await {
                         return Err(crate::Error::NamespaceDropped { name }.into());
                     }
                     // Nothing came: the empty batch is answered here, as

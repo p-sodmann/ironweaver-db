@@ -106,8 +106,9 @@ impl LimitConfig {
         Ok(())
     }
 
-    /// The limits and the timeout a read with `options` runs under.
-    /// Errors: `invalid_argument` for a limit of 0.
+    /// The limits and the timeout a read with `options` runs under; they
+    /// are recorded on the request's trace span, if one is current (ADR
+    /// 0057). Errors: `invalid_argument` for a limit of 0.
     pub fn resolve(&self, options: &QueryOptions) -> Result<(Bounds, Duration), Error> {
         let one = |name: &str, asked: Option<usize>, default: usize, max: usize| match asked {
             Some(0) => Err(Error::invalid(format!("{} must be at least 1", name))),
@@ -121,6 +122,7 @@ impl LimitConfig {
             max_edges: one("max_edges", l.max_edges, d.max_edges, m.max_edges)?,
         };
         let timeout = options.timeout.unwrap_or(self.default_timeout).min(self.max_timeout);
+        crate::trace::bounds(&bounds, timeout);
         Ok((bounds, timeout))
     }
 }

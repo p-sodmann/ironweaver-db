@@ -306,6 +306,10 @@ impl JobHandle {
     /// The projection to collect has `nodes` nodes and `edges` edges.
     pub fn collecting(&self, nodes: u64, edges: u64) {
         self.update(|e| {
+            if let Some(span) = &e.span {
+                span.record("iwdb.job.nodes", nodes);
+                span.record("iwdb.job.edges", edges);
+            }
             e.info.nodes = Some(nodes);
             e.info.edges = Some(edges);
         });
@@ -335,6 +339,10 @@ struct Entry {
     registration: Option<Registration>,
     result: Option<Arc<JobResult>>,
     charge: Option<Charge>,
+    /// The job's trace span (`iwdb.job`, ADR 0057), until it ends; and its
+    /// wait for a job thread (`iwdb.queue`), until it leaves the queue.
+    span: Option<tracing::Span>,
+    queued: Option<tracing::Span>,
 }
 
 impl Entry {
@@ -507,7 +515,26 @@ impl Jobs {
             registration: Some(registration),
             result: None,
             charge: None,
+            span: None,
+            queued: None,
         };
+        // A trace of its own, linked to the StartJob request that queued it
+        let span = iwdb_storage::trace_span!(
+            parent: None,
+            "iwdb.job",
+            otel.status_code = tracing::field::Empty,
+            db.namespace = namespace,
+            iwdb.request_id = id,
+            iwdb.job.kind = kind,
+            iwdb.job.nodes = tracing::field::Empty,
+            iwdb.job.edges = tracing::field::Empty,
+            iwdb.outcome = tracing::field::Empty,
+        );
+        if !span.is_disabled() {
+            span.follows_from(tracing::Span::current());
+        }
+        let entry =
+            Entry { queued: Some(iwdb_storage::trace_span!(parent: &span, "iwdb.queue")), span: Some(span), ..entry };
         let info = entry.info(config.retention);
         state.entries.insert(id, entry);
         state.queue.push_back(id);
@@ -675,6 +702,14 @@ fn end(entry: &mut Entry, outcome: JobState, error: Option<Error>) {
     entry.info.ended = Some(CommitTime::now());
     entry.ended_at = Some(Instant::now());
     entry.registration = None;
+    entry.queued = None;
+    if let Some(span) = entry.span.take() {
+        let code = entry.info.error.as_ref().map(Error::code);
+        span.record("iwdb.outcome", code.map_or("ok", Code::as_str));
+        if code.is_some() {
+            span.record("otel.status_code", "error");
+        }
+    }
 }
 
 /// Remove the jobs that ended more than the retention ago.
@@ -767,7 +802,7 @@ fn finish(shared: &Shared, id: u64, outcome: Result<Finished, Error>) {
 /// A job thread: take the oldest queued job, run it, store its outcome.
 fn work(shared: &Arc<Shared>) {
     loop {
-        let (handle, job) = {
+        let (handle, job, span) = {
             let mut state = lock(&shared.state);
             loop {
                 if state.shutdown {
@@ -780,6 +815,8 @@ fn work(shared: &Arc<Shared>) {
                         entry.info.state = JobState::Collecting;
                         entry.info.started = Some(CommitTime::now());
                         entry.started_at = Some(Instant::now());
+                        entry.queued = None;
+                        let span = entry.span.clone().unwrap_or_else(tracing::Span::none);
                         let handle = JobHandle {
                             shared: shared.clone(),
                             id,
@@ -787,14 +824,15 @@ fn work(shared: &Arc<Shared>) {
                             progress: entry.progress.clone(),
                             timeout: entry.timeout,
                         };
-                        break (handle, job);
+                        break (handle, job, span);
                     }
                     continue;
                 }
                 state = shared.ready.wait(state).unwrap_or_else(PoisonError::into_inner);
             }
         };
-        let outcome = crate::exec::catch(|| job(&handle));
+        let outcome = span.in_scope(|| crate::exec::catch(|| job(&handle)));
+        drop(span);
         finish(shared, handle.id, outcome);
     }
 }

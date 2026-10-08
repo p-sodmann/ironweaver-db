@@ -85,7 +85,12 @@ fn shell(args: &[&str], script: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+    // A shell that exits before reading its script (a usage error, a server
+    // it can't reach) closes stdin: the test checks its exit code instead
+    match child.stdin.take().unwrap().write_all(script.as_bytes()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        written => written.unwrap(),
+    }
     child.wait_with_output().unwrap()
 }
 
@@ -233,7 +238,12 @@ fn users_and_tokens_on_a_server() {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        // A command that exits before reading stdin closes it; the test
+        // checks its exit code instead
+        match child.stdin.take().unwrap().write_all(input.as_bytes()) {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            written => written.unwrap(),
+        }
         child.wait_with_output().unwrap()
     };
     let ep = server.endpoint.as_str();

@@ -63,8 +63,8 @@ use crate::proto::database_service_client::DatabaseServiceClient;
 use crate::status::from_status;
 pub use crate::tls::ClientTls;
 
-#[cfg(feature = "rest")]
-mod https;
+#[cfg(any(feature = "rest", feature = "otel"))]
+pub(crate) mod https;
 #[cfg(feature = "rest")]
 mod rest;
 #[cfg(feature = "rest")]
@@ -118,7 +118,7 @@ fn tls_file(what: &str, path: &std::path::Path) -> Result<Vec<u8>, Error> {
 
 /// tonic's TLS settings from `tls`. The files are checked by our own PEM
 /// reader first, so no error quotes a key.
-fn tonic_tls(tls: &ClientTls) -> Result<ClientTlsConfig, Error> {
+pub(crate) fn tonic_tls(tls: &ClientTls) -> Result<ClientTlsConfig, Error> {
     let invalid = |e: crate::tls::TlsError| Error::invalid(e.to_string());
     let mut config = ClientTlsConfig::new();
     config = match &tls.ca {

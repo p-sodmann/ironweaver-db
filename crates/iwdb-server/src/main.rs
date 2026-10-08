@@ -16,12 +16,13 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use iwdb::projection::ProjectionHandle;
 use iwdb::{Embedded, Store};
 use iwdb_query::log::LogRing;
+use iwdb_query::trace::SpanCounters;
 use iwdb_server::auth::AuthMode;
 use iwdb_server::config::Config;
 use iwdb_server::health::{Health, Phase};
@@ -72,6 +73,8 @@ const FEATURES: &[&str] = &[
     "postgres",
     #[cfg(feature = "console")]
     "console",
+    #[cfg(feature = "otel")]
+    "otel",
 ];
 
 enum Command {
@@ -163,7 +166,16 @@ fn main() -> ExitCode {
     };
     // The log tail (step 16c): the events the logger writes, for GetLog
     let ring = Arc::new(LogRing::new(config.log.tail_events));
-    if let Err(e) = logging::init(config.log.format, &config.log.level, audit, ring.clone()) {
+    // Traces (step 16g, ADR 0057): the exporter's layer joins the logger's
+    let spans = Arc::new(SpanCounters::default());
+    let traces = match start_traces(&config, spans.clone()) {
+        Ok(traces) => traces,
+        Err(e) => {
+            eprintln!("iwdb-server: {}", e);
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(e) = logging::init(config.log.format, &config.log.level, audit, ring.clone(), trace_layer(&traces)) {
         eprintln!("iwdb-server: {}", e);
         return ExitCode::from(2);
     }
@@ -179,16 +191,72 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(&config, tls, ring) {
+    let stopping = Arc::new(OnceLock::new());
+    let code = match run(&config, tls, ring, spans, stopping.clone()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             tracing::error!(error = %message, "iwdb-server failed");
             ExitCode::FAILURE
         }
+    };
+    // The spans of the drain and the final checkpoint too, within what is
+    // left of the drain's deadline (at least a second)
+    let left = stopping
+        .get()
+        .map_or(config.drain_timeout(), |at: &Instant| config.drain_timeout().saturating_sub(at.elapsed()));
+    stop_traces(traces, left.max(Duration::from_secs(1)));
+    code
+}
+
+#[cfg(feature = "otel")]
+type Traces = iwdb_server::otel::Tracing;
+#[cfg(not(feature = "otel"))]
+type Traces = ();
+
+/// The trace exporter, if `[tracing] enabled` (only in a build with `otel`;
+/// the configuration refuses it otherwise).
+#[cfg(feature = "otel")]
+fn start_traces(config: &Config, spans: Arc<SpanCounters>) -> Result<Option<Traces>, String> {
+    if !config.tracing.enabled {
+        return Ok(None);
+    }
+    let settings = iwdb_server::otel::Settings::of(config)?;
+    iwdb_server::otel::Tracing::start(&settings, spans).map(Some)
+}
+
+#[cfg(not(feature = "otel"))]
+fn start_traces(_config: &Config, _spans: Arc<SpanCounters>) -> Result<Option<Traces>, String> {
+    Ok(None)
+}
+
+#[cfg(feature = "otel")]
+fn trace_layer(traces: &Option<Traces>) -> Option<logging::TraceLayer> {
+    use tracing_subscriber::Layer;
+    traces.as_ref().map(|t| t.layer().boxed())
+}
+
+#[cfg(not(feature = "otel"))]
+fn trace_layer(_traces: &Option<Traces>) -> Option<logging::TraceLayer> {
+    None
+}
+
+#[cfg(feature = "otel")]
+fn stop_traces(traces: Option<Traces>, timeout: Duration) {
+    if let Some(traces) = traces {
+        traces.shutdown(timeout);
     }
 }
 
-fn run(config: &Config, tls: Option<Arc<ServerTls>>, ring: Arc<LogRing>) -> Result<(), String> {
+#[cfg(not(feature = "otel"))]
+fn stop_traces(_traces: Option<Traces>, _timeout: Duration) {}
+
+fn run(
+    config: &Config,
+    tls: Option<Arc<ServerTls>>,
+    ring: Arc<LogRing>,
+    spans: Arc<SpanCounters>,
+    stopping: Arc<OnceLock<Instant>>,
+) -> Result<(), String> {
     let dir = config.data_dir.display().to_string();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -200,7 +268,7 @@ fn run(config: &Config, tls: Option<Arc<ServerTls>>, ring: Arc<LogRing>) -> Resu
     let projections: Arc<Mutex<Vec<ProjectionHandle>>> = Arc::default();
     let open = {
         let (config, projections) = (config.clone(), projections.clone());
-        move || open(&config, &projections, ring)
+        move || open(&config, &projections, ring, spans)
     };
     let options = LaunchOptions {
         max_message_bytes: config.server.max_message_bytes,
@@ -220,6 +288,7 @@ fn run(config: &Config, tls: Option<Arc<ServerTls>>, ring: Arc<LogRing>) -> Resu
         let (mut first, mut second) = (signals.clone(), signals);
         let stop = async move {
             let _ = first.wait_for(|n| *n >= 1).await;
+            let _ = stopping.set(Instant::now());
             tracing::info!(drain_ms = drain.as_millis() as u64, "shutting down; running calls may finish");
         };
         let give_up = move || async move {
@@ -256,7 +325,12 @@ fn run(config: &Config, tls: Option<Arc<ServerTls>>, ring: Arc<LogRing>) -> Resu
 }
 
 /// Open the store (recovery), start the projections, and serve it.
-fn open(config: &Config, projections: &Mutex<Vec<ProjectionHandle>>, ring: Arc<LogRing>) -> Result<Embedded, String> {
+fn open(
+    config: &Config,
+    projections: &Mutex<Vec<ProjectionHandle>>,
+    ring: Arc<LogRing>,
+    spans: Arc<SpanCounters>,
+) -> Result<Embedded, String> {
     let dir = config.data_dir.display();
     let started = Instant::now();
     let store = Store::open(&config.data_dir, config.store_options()).map_err(|e| format!("opening {}: {}", dir, e))?;
@@ -284,7 +358,7 @@ fn open(config: &Config, projections: &Mutex<Vec<ProjectionHandle>>, ring: Arc<L
         list.extend(started);
     }
     let db = Embedded::new(store, config.query_config())
-        .map(|db| db.with_auth(config.auth_settings()).with_log(ring))
+        .map(|db| db.with_auth(config.auth_settings()).with_log(ring).with_span_counters(spans))
         .map_err(|e| e.to_string())?;
     match &config.backup.dir {
         Some(dir) => db.with_backup_dir(dir).map_err(|e| format!("[backup] dir: {}", e.message())),

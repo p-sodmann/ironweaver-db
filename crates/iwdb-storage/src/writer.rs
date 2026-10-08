@@ -247,6 +247,9 @@ impl<F: LogFs> Wal<F> {
         }
         let (kind, payload) = format::encode_payload(record)?;
         let frame_len = (FRAME_HEADER_LEN + payload.len()) as u64;
+        let span =
+            crate::trace_span!("iwdb.wal.append", iwdb.wal.bytes = frame_len, iwdb.wal.synced = tracing::field::Empty);
+        let _entered = span.enter();
         if self.segment_records > 0 && self.segment_len + frame_len > self.options.segment_size {
             self.rotate()?;
         }
@@ -271,8 +274,10 @@ impl<F: LogFs> Wal<F> {
             FsyncPolicy::Off => false,
         };
         if due {
-            self.sync_now()?;
+            self.traced_sync()?;
         }
+        // Recorded once: an exporter may keep both values of a field set twice
+        span.record("iwdb.wal.synced", due);
         Ok(())
     }
 
@@ -281,7 +286,7 @@ impl<F: LogFs> Wal<F> {
     pub fn sync(&mut self) -> Result<(), Error> {
         self.check_usable()?;
         if self.unsynced() > 0 {
-            self.sync_now()?;
+            self.traced_sync()?;
         }
         Ok(())
     }
@@ -361,6 +366,21 @@ impl<F: LogFs> Wal<F> {
             Some(cause) => Err(Error::ReadOnly { cause: cause.clone() }),
             None => Ok(()),
         }
+    }
+
+    /// [`sync_now`](Self::sync_now) in a trace span (ADR 0057): a commit's
+    /// own fsync, or an explicit [`sync`](Self::sync). The timer's
+    /// [`sync_due`](Self::sync_due) isn't traced (a trace per interval).
+    fn traced_sync(&mut self) -> Result<(), Error> {
+        let policy = match self.options.fsync {
+            FsyncPolicy::Always => "always",
+            FsyncPolicy::Group { .. } => "group",
+            FsyncPolicy::Off => "off",
+        };
+        let span =
+            crate::trace_span!("iwdb.wal.fsync", iwdb.wal.fsync_policy = policy, iwdb.wal.batch = self.unsynced());
+        let _entered = span.enter();
+        self.sync_now()
     }
 
     /// Fsync the current segment. With `Off`, first every other segment

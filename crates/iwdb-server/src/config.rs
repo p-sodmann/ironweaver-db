@@ -181,6 +181,8 @@ pub struct Config {
     pub backup: BackupSection,
     #[serde(default)]
     pub jobs: JobsSection,
+    #[serde(default)]
+    pub tracing: TracingSection,
     /// `[[projection]]` sections (ADR 0032).
     #[serde(default, rename = "projection")]
     pub projections: Vec<ProjectionSection>,
@@ -191,6 +193,61 @@ pub struct Config {
     /// (`IWDB_AUTH_BOOTSTRAP_USER` and `IWDB_AUTH_BOOTSTRAP_PASSWORD`).
     #[serde(skip)]
     pub bootstrap: Option<(String, Secret)>,
+    /// The `OTEL_*` variables that were set: not read (ADR 0057), so the
+    /// server warns about them.
+    #[serde(skip)]
+    otel_vars: Vec<String>,
+}
+
+/// `[tracing]`: OpenTelemetry traces over OTLP (step 16g, ADR 0057; feature
+/// `otel`).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TracingSection {
+    pub enabled: bool,
+    /// The collector. Unset: the protocol's default on this host
+    /// ([`OtlpProtocol::default_endpoint`]).
+    pub endpoint: Option<String>,
+    pub protocol: OtlpProtocol,
+    /// The share of new traces sampled, 0 to 1; a request with a parent
+    /// follows the parent's decision.
+    pub sample_ratio: f64,
+    pub service_name: String,
+    /// `name=value,name=value`, sent with every export.
+    pub headers: Option<String>,
+}
+
+impl Default for TracingSection {
+    fn default() -> Self {
+        TracingSection {
+            enabled: false,
+            endpoint: None,
+            protocol: OtlpProtocol::Grpc,
+            sample_ratio: 1.0,
+            service_name: "iwdb-server".into(),
+            headers: None,
+        }
+    }
+}
+
+/// How spans are exported: OTLP over gRPC, or protobuf over HTTP.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum OtlpProtocol {
+    #[default]
+    #[serde(rename = "grpc")]
+    Grpc,
+    #[serde(rename = "http/protobuf")]
+    HttpProtobuf,
+}
+
+impl OtlpProtocol {
+    /// The collector's conventional address on this host.
+    pub fn default_endpoint(self) -> &'static str {
+        match self {
+            OtlpProtocol::Grpc => "http://127.0.0.1:4317",
+            OtlpProtocol::HttpProtobuf => "http://127.0.0.1:4318/v1/traces",
+        }
+    }
 }
 
 /// `[auth]`: authentication (step 15a, ADRs 0044 and 0047).
@@ -401,9 +458,11 @@ impl Default for Config {
             audit: AuditSection::default(),
             backup: BackupSection::default(),
             jobs: JobsSection::default(),
+            tracing: TracingSection::default(),
             projections: Vec::new(),
             sources: BTreeMap::new(),
             bootstrap: None,
+            otel_vars: Vec::new(),
         }
     }
 }
@@ -474,7 +533,7 @@ macro_rules! serde_env {
         }
     )*};
 }
-serde_env!(Fsync, LogFormat, ClientAuth);
+serde_env!(Fsync, LogFormat, ClientAuth, OtlpProtocol);
 
 macro_rules! keys {
     ($($key:literal $var:literal => $($field:ident).+;)*) => {
@@ -543,6 +602,12 @@ keys! {
     "jobs.retention_secs" "IWDB_JOBS_RETENTION_SECS" => jobs.retention_secs;
     "jobs.max_finished" "IWDB_JOBS_MAX_FINISHED" => jobs.max_finished;
     "jobs.result_bytes" "IWDB_JOBS_RESULT_BYTES" => jobs.result_bytes;
+    "tracing.enabled" "IWDB_TRACING_ENABLED" => tracing.enabled;
+    "tracing.endpoint" "IWDB_TRACING_ENDPOINT" => tracing.endpoint;
+    "tracing.protocol" "IWDB_TRACING_PROTOCOL" => tracing.protocol;
+    "tracing.sample_ratio" "IWDB_TRACING_SAMPLE_RATIO" => tracing.sample_ratio;
+    "tracing.service_name" "IWDB_TRACING_SERVICE_NAME" => tracing.service_name;
+    "tracing.headers" "IWDB_TRACING_HEADERS" => tracing.headers;
 }
 
 /// Variables with these prefixes must name a setting.
@@ -558,6 +623,7 @@ const SECTION_PREFIXES: &[&str] = &[
     "IWDB_AUDIT_",
     "IWDB_BACKUP_",
     "IWDB_JOBS_",
+    "IWDB_TRACING_",
 ];
 
 /// The settings that are paths, resolved against the file's directory when
@@ -814,8 +880,18 @@ fn lookup<'a>(table: &'a toml::Table, key: &str) -> Option<&'a toml::Value> {
 fn unset(key: &str) -> &'static str {
     match key {
         "memory.limit_bytes" => "the cgroup's, or none",
+        "tracing.endpoint" => "the protocol's",
         _ if key.starts_with("limits.") => "built in",
         _ => "unset",
+    }
+}
+
+/// An OTLP endpoint: an `http://` or `https://` URL with a host.
+fn check_endpoint(endpoint: &str) -> Result<(), String> {
+    let uri: http::Uri = endpoint.parse().map_err(|_| format!("{:?} isn't a URL", endpoint))?;
+    match (uri.scheme_str(), uri.host()) {
+        (Some("http" | "https"), Some(_)) => Ok(()),
+        _ => Err(format!("{:?} must be an http:// or https:// URL with a host", endpoint)),
     }
 }
 
@@ -927,6 +1003,8 @@ impl Config {
                 None => {}
             }
         }
+        config.otel_vars = env.iter().filter(|(var, _)| var.starts_with("OTEL_")).map(|(var, _)| var.clone()).collect();
+        config.otel_vars.sort();
         // An empty variable is an unset one (compose's `${VAR:-}`)
         let get = |name: &str| env.iter().find(|(var, v)| var == name && !v.is_empty()).map(|(_, v)| v.clone());
         match (get(BOOTSTRAP_USER_VAR), get(BOOTSTRAP_PASSWORD_VAR)) {
@@ -1012,6 +1090,7 @@ impl Config {
             );
         }
         problems.extend(self.check_tls());
+        problems.extend(self.check_tracing());
         if self.auth.session_lifetime_secs == 0 {
             problems.push(format!("{} must be at least 1", self.at("auth.session_lifetime_secs")));
         }
@@ -1128,6 +1207,64 @@ impl Config {
         problems
     }
 
+    /// `[tracing]`: the feature, the ratio, the endpoint and the headers
+    /// (never quoting a header's value: it may be a key).
+    fn check_tracing(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let t = &self.tracing;
+        if t.enabled && cfg!(not(feature = "otel")) {
+            problems.push(format!(
+                "{}: this iwdb-server was built without the otel feature, so it can't export traces",
+                self.at("tracing.enabled")
+            ));
+        }
+        if !(0.0..=1.0).contains(&t.sample_ratio) {
+            problems.push(format!(
+                "{} must be between 0 and 1, not {}",
+                self.at("tracing.sample_ratio"),
+                t.sample_ratio
+            ));
+        }
+        if t.service_name.trim().is_empty() {
+            problems.push(format!("{} must not be empty", self.at("tracing.service_name")));
+        }
+        if let Some(endpoint) = &t.endpoint
+            && let Err(e) = check_endpoint(endpoint)
+        {
+            problems.push(format!("{}: {}", self.at("tracing.endpoint"), e));
+        }
+        if let Err(e) = self.tracing_headers() {
+            problems.push(format!("{}: {}", self.at("tracing.headers"), e));
+        }
+        problems
+    }
+
+    /// The collector's address: `[tracing] endpoint`, or the protocol's
+    /// default.
+    pub fn tracing_endpoint(&self) -> String {
+        self.tracing.endpoint.clone().unwrap_or_else(|| self.tracing.protocol.default_endpoint().to_owned())
+    }
+
+    /// `[tracing] headers` as names and values. Errors never quote a value.
+    pub fn tracing_headers(&self) -> Result<Vec<(String, String)>, String> {
+        let Some(text) = &self.tracing.headers else { return Ok(Vec::new()) };
+        let mut headers = Vec::new();
+        for (i, pair) in text.split(',').map(str::trim).filter(|p| !p.is_empty()).enumerate() {
+            let Some((name, value)) = pair.split_once('=') else {
+                return Err(format!("header {} isn't name=value", i + 1));
+            };
+            let name = name.trim().to_ascii_lowercase();
+            if http::HeaderName::from_bytes(name.as_bytes()).is_err() {
+                return Err(format!("header {}: {:?} isn't a valid header name", i + 1, name));
+            }
+            if http::HeaderValue::from_str(value.trim()).is_err() {
+                return Err(format!("header {} ({}): the value isn't valid in a header", i + 1, name));
+            }
+            headers.push((name, value.trim().to_owned()));
+        }
+        Ok(headers)
+    }
+
     /// Settings that are allowed but probably not meant; the server logs
     /// them as warnings at start.
     pub fn warnings(&self) -> Vec<String> {
@@ -1148,6 +1285,13 @@ impl Config {
                     warnings.push(format!("{} is set, but TLS is off: ignored", self.at(key)));
                 }
             }
+        }
+        if !self.otel_vars.is_empty() {
+            warnings.push(format!(
+                "{} {} set but not read: [tracing] and IWDB_TRACING_* configure traces (documentation/api/config.md#traces)",
+                self.otel_vars.join(", "),
+                if self.otel_vars.len() == 1 { "is" } else { "are" }
+            ));
         }
         warnings
     }
@@ -1170,6 +1314,12 @@ impl Config {
                 Source::Env(var) => var.to_owned(),
             };
             let line = match (k.get)(self) {
+                // A header's value may be a key: only the names are shown
+                Some(_) if k.key == "tracing.headers" => {
+                    let names: Vec<String> =
+                        self.tracing_headers().unwrap_or_default().into_iter().map(|h| h.0).collect();
+                    format!("# {} = (set: {}; values not shown)", name, names.join(", "))
+                }
                 Some(value) => format!("{} = {}", name, value),
                 None => format!("# {} = ({})", name, unset(k.key)),
             };
@@ -1520,6 +1670,94 @@ mod tests {
         let problems = Config::build(Some("data_dir = 3\n"), &env(&[("IWDB_LISTEN", "x")])).unwrap_err();
         assert_eq!(problems.len(), 2, "{:?}", problems);
         assert!(problems.iter().any(|p| p.contains("line 1")), "{:?}", problems);
+    }
+
+    #[test]
+    fn tracing_is_off_by_default_and_needs_its_feature() {
+        let config = plain("data_dir = \"d\"\n").unwrap();
+        assert!(!config.tracing.enabled);
+        assert_eq!(config.tracing_endpoint(), "http://127.0.0.1:4317");
+        assert_eq!((config.tracing.sample_ratio, config.tracing.service_name.as_str()), (1.0, "iwdb-server"));
+        let on = plain("data_dir = \"d\"\n[tracing]\nenabled = true\n");
+        if cfg!(feature = "otel") {
+            assert!(on.is_ok(), "{:?}", on);
+        } else {
+            let e = on.unwrap_err();
+            assert!(e.contains("[tracing] enabled") && e.contains("without the otel feature"), "{}", e);
+        }
+        // From a variable too, and the message names it
+        let e =
+            Config::build(Some("data_dir = \"d\"\n[tls]\nenabled = false\n"), &env(&[("IWDB_TRACING_ENABLED", "1")]));
+        if cfg!(not(feature = "otel")) {
+            assert!(e.unwrap_err().iter().any(|p| p.contains("(from IWDB_TRACING_ENABLED)")));
+        }
+    }
+
+    #[test]
+    fn tracing_settings_from_the_file_and_the_environment() {
+        let text =
+            "data_dir = \"d\"\n[tls]\nenabled = false\n[tracing]\nprotocol = \"http/protobuf\"\nsample_ratio = 0.25\n";
+        let config = Config::build(
+            Some(text),
+            &env(&[
+                ("IWDB_TRACING_SERVICE_NAME", "graph-1"),
+                ("IWDB_TRACING_HEADERS", "Authorization=Bearer s3cret, x-team = db"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(config.tracing.protocol, OtlpProtocol::HttpProtobuf);
+        assert_eq!(config.tracing_endpoint(), "http://127.0.0.1:4318/v1/traces");
+        assert_eq!(config.tracing.sample_ratio, 0.25);
+        assert_eq!(config.tracing.service_name, "graph-1");
+        assert_eq!(
+            config.tracing_headers().unwrap(),
+            [("authorization".to_owned(), "Bearer s3cret".to_owned()), ("x-team".to_owned(), "db".to_owned())]
+        );
+        let env_protocol = Config::build(Some(text), &env(&[("IWDB_TRACING_PROTOCOL", "grpc")])).unwrap();
+        assert_eq!(env_protocol.tracing.protocol, OtlpProtocol::Grpc);
+        // --check-config names the headers, never their values
+        let described = config.describe();
+        assert!(described.contains("authorization, x-team; values not shown"), "{}", described);
+        assert!(!described.contains("s3cret"), "{}", described);
+        // A typo under the section is an error
+        let e = Config::build(Some(text), &env(&[("IWDB_TRACING_SAMPLE", "1")])).unwrap_err();
+        assert!(e.iter().any(|p| p.contains("IWDB_TRACING_SAMPLE: no such setting")), "{:?}", e);
+    }
+
+    #[test]
+    fn tracing_settings_are_checked_without_quoting_secrets() {
+        let base = "data_dir = \"d\"\n[tls]\nenabled = false\n";
+        let problems = |vars: &[(&str, &str)]| Config::build(Some(base), &env(vars)).unwrap_err().join("\n");
+        assert!(problems(&[("IWDB_TRACING_SAMPLE_RATIO", "1.5")]).contains("between 0 and 1"));
+        assert!(problems(&[("IWDB_TRACING_SAMPLE_RATIO", "-0.1")]).contains("between 0 and 1"));
+        assert!(problems(&[("IWDB_TRACING_PROTOCOL", "http/json")]).contains("IWDB_TRACING_PROTOCOL"));
+        assert!(problems(&[("IWDB_TRACING_SERVICE_NAME", " ")]).contains("must not be empty"));
+        for bad in ["collector:4317", "ftp://c", "http://"] {
+            assert!(problems(&[("IWDB_TRACING_ENDPOINT", bad)]).contains("[tracing] endpoint"), "{}", bad);
+        }
+        let e = problems(&[("IWDB_TRACING_HEADERS", "authorization=Bearer s3cret\u{7f}")]);
+        assert!(e.contains("authorization") && !e.contains("s3cret"), "{}", e);
+        assert!(problems(&[("IWDB_TRACING_HEADERS", "no-equals-sign")]).contains("isn't name=value"));
+    }
+
+    #[test]
+    fn otel_variables_are_not_read_but_warned_about() {
+        let base = "data_dir = \"d\"\n[tls]\nenabled = false\n";
+        let config = Config::build(
+            Some(base),
+            &env(&[("OTEL_EXPORTER_OTLP_ENDPOINT", "http://elsewhere:4317"), ("OTEL_SERVICE_NAME", "other")]),
+        )
+        .unwrap();
+        assert_eq!(config.tracing_endpoint(), "http://127.0.0.1:4317");
+        assert_eq!(config.tracing.service_name, "iwdb-server");
+        let warnings = config.warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.starts_with("OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_SERVICE_NAME are set but not read")),
+            "{:?}",
+            warnings
+        );
     }
 
     #[test]

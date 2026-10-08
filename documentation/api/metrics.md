@@ -57,6 +57,8 @@ A test keeps this table equal to the metrics the server exports (`METRICS` in `c
 | `iwdb_jobs_running` | gauge | – | – | Managed analytics jobs collecting their projection or running. |
 | `iwdb_jobs_total` | counter | `outcome` | – | Managed analytics jobs that ended, by outcome: `done`, `failed` or `cancelled`. |
 | `iwdb_job_result_bytes` | gauge | – | bytes | The stored job results' estimated size (counted in the `working` memory part). |
+| `iwdb_trace_spans_exported_total` | counter | – | – | Trace spans the collector accepted (`[tracing]`, ADR 0057); 0 with tracing off. |
+| `iwdb_trace_spans_dropped_total` | counter | `reason` | – | Trace spans dropped, by reason: `queue_full` (the export queue was full) or `export_failed` (the collector didn't take their batch). |
 
 ## Examples
 
@@ -64,5 +66,6 @@ A test keeps this table equal to the metrics the server exports (`METRICS` in `c
 - Rejected requests (a full queue, or draining): `rate(iwdb_requests_total{code="unavailable"}[5m])`; timed out: `code="timeout"`.
 - Memory: `sum(iwdb_memory_used_bytes) / iwdb_memory_limit_bytes` is the fraction of the limit in use ([ADR 0054](../adr/0054-the-memory-limit.md)); alert on `iwdb_memory_state >= 1`, and page on `iwdb_memory_state == 2` (writes refused: `rate(iwdb_requests_total{code="resource_exhausted"}[5m])`).
 - Backups ([ADR 0055](../adr/0055-admin-writes-and-iwctl-against-a-server.md)): a backup's copy rate is `rate(iwdb_backup_bytes_total[1m])`; checkpoints are held back while `iwdb_backup_running > 0`; alert on `time() - iwdb_last_backup_timestamp_seconds` above your backup interval, and on `increase(iwdb_backups_total{outcome="failed"}[1d]) > 0`.
+- Traces ([ADR 0057](../adr/0057-traces.md)): `rate(iwdb_trace_spans_dropped_total{reason="export_failed"}[5m]) > 0` means the collector isn't taking spans (requests are unaffected); `queue_full` drops mean more spans than one exporter sends: lower `[tracing] sample_ratio`.
 - Managed jobs ([ADR 0056](../adr/0056-managed-analytics-jobs.md)): `iwdb_jobs_queued` near `[jobs] queued` means starts are about to be refused (`unavailable`); alert on `increase(iwdb_jobs_total{outcome="failed"}[1h]) > 0` if failed jobs matter; stored results are part of `iwdb_memory_used_bytes{part="working"}`.
 - A namespace that went read-only: `iwdb_namespace_read_only == 1`. Checkpoints falling behind: `iwdb_checkpoint_lag_commits`, `time() - iwdb_last_checkpoint_timestamp_seconds`.

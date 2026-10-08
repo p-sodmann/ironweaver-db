@@ -317,7 +317,18 @@ impl<F: LogFs> Checkpointer<F> {
     /// synced seq of the log. A target at or below the checkpointer's own
     /// seq writes nothing new.
     pub fn run(&mut self, target: u64) -> Result<CheckpointOutcome, Error> {
+        let span = crate::trace_span!(
+            "iwdb.checkpoint",
+            db.namespace = %self.name,
+            iwdb.seq = tracing::field::Empty,
+            iwdb.checkpoint.written = tracing::field::Empty
+        );
+        let _entered = span.enter();
         let result = self.run_once(target);
+        if let Ok(outcome) = &result {
+            span.record("iwdb.seq", outcome.seq);
+            span.record("iwdb.checkpoint.written", outcome.written);
+        }
         if let Some(charge) = &self.charge {
             charge.set(self.namespace.as_ref().map_or(0, |ns| ns.memory_bytes() as u64));
         }
@@ -328,18 +339,22 @@ impl<F: LogFs> Checkpointer<F> {
         if let Some(cause) = &self.disabled {
             return Err(Error::CheckpointsDisabled { cause: cause.clone() });
         }
-        let seq = self.advance(target)?;
+        let seq = crate::trace_span!("iwdb.checkpoint.replay").in_scope(|| self.advance(target))?;
         if self.newest == Some(seq) || seq == 0 {
             return Ok(CheckpointOutcome { seq: self.newest.unwrap_or(0), ..CheckpointOutcome::default() });
         }
         let Some(namespace) = &self.namespace else {
             return Ok(CheckpointOutcome::default());
         };
+        let write = crate::trace_span!("iwdb.checkpoint.write");
+        let writing = write.enter();
         write_checkpoint(&self.fs, &self.checkpoints, namespace)?;
         let dir = self.checkpoints.clone();
         self.sync(&dir)?;
+        drop(writing);
         self.newest = Some(seq);
         self.bad.remove(&seq);
+        let _pruning = crate::trace_span!("iwdb.checkpoint.prune").entered();
         let (cutoff, removed_checkpoints) = self.remove_old_checkpoints(seq)?;
         let cutoff = cutoff.min(seq.saturating_sub(self.retention.records));
         let removed_segments = self.remove_segments(cutoff)?;

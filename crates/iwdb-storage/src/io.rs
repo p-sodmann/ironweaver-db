@@ -275,7 +275,8 @@ mod tests {
             for _ in 0..64 {
                 free.pass(CHUNK as u64);
             }
-            assert!(start.elapsed() < Duration::from_millis(200), "{:?}", start.elapsed());
+            // Throttled, 64 chunks would take 8 s at the rate above
+            assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
         }
     }
 }

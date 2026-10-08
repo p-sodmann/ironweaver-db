@@ -13,7 +13,7 @@ iwdb-server --check-config --config server.toml       # validate; print the effe
 
 - **Names.** A setting's variable is `IWDB_` and its path in the file in upper case, with `.` as `_`: `store.fsync` is `IWDB_STORE_FSYNC`, `limits.max.timeout_ms` is `IWDB_LIMITS_MAX_TIMEOUT_MS`.
 - **Values.** Numbers as digits (fractions like `0.9`), booleans as `true`/`false` (or `1`/`0`), choices by name (`group`), paths and addresses as they are.
-- **Typos are errors.** A variable that starts like a section (`IWDB_STORE_`, `IWDB_SERVER_`, `IWDB_MEMORY_`, `IWDB_LIMITS_`, `IWDB_LOG_`, `IWDB_CONSOLE_`, `IWDB_AUTH_`, `IWDB_TLS_`, `IWDB_AUDIT_`, `IWDB_BACKUP_`) but names no setting stops the server (apart from the two bootstrap variables below). Other `IWDB_*` variables (test harnesses use some) are ignored.
+- **Typos are errors.** A variable that starts like a section (`IWDB_STORE_`, `IWDB_SERVER_`, `IWDB_MEMORY_`, `IWDB_LIMITS_`, `IWDB_LOG_`, `IWDB_CONSOLE_`, `IWDB_AUTH_`, `IWDB_TLS_`, `IWDB_AUDIT_`, `IWDB_BACKUP_`, `IWDB_JOBS_`, `IWDB_TRACING_`) but names no setting stops the server (apart from the two bootstrap variables below). Other `IWDB_*` variables (test harnesses use some) are ignored.
 - **Every problem at once.** Startup checks the file and the variables before it opens the store, and lists every problem with where it came from (the file, a variable), then exits with code 2. A TOML syntax or type error in the file is reported with its line; the file's other checks wait until it parses.
 - **Relative paths** (`data_dir`, `tls.cert`, `tls.key`, `tls.client_ca`, `audit.dir`, `store.archive`, `backup.dir`). From the file: relative to the file's directory. From a variable: relative to the working directory.
 - **Projections** (`[[projection]]`, [projections.md](projections.md)) are set in the file only; a projection's Postgres URL can come from a variable of your choice (`url_env`).
@@ -73,6 +73,13 @@ iwdb-server --check-config --config server.toml       # validate; print the effe
 | `jobs.retention_secs` | `IWDB_JOBS_RETENTION_SECS` | `3600` | How long an ended job and its result are kept; then `GetJob` answers `not_found`. |
 | `jobs.max_finished` | `IWDB_JOBS_MAX_FINISHED` | `100` | Ended jobs kept at most; the one that ended first goes first. |
 | `jobs.result_bytes` | `IWDB_JOBS_RESULT_BYTES` | `67108864` | Stored results' estimated size, all together (64 MiB). A new result drops the oldest (their jobs become `expired`); a result alone larger fails its job with `budget_exceeded`. Counted in the memory limit's `working` part. |
+
+| `tracing.enabled` | `IWDB_TRACING_ENABLED` | `false` | Export traces over OTLP (needs a build with the `otel` feature; one without it refuses to start). See [Traces](#traces) ([ADR 0057](../adr/0057-traces.md)). |
+| `tracing.endpoint` | `IWDB_TRACING_ENDPOINT` | `the protocol's` | The collector: `http://` or `https://` (verified against the system's roots). Unset: `http://127.0.0.1:4317` for `grpc`, `http://127.0.0.1:4318/v1/traces` for `http/protobuf`. For `http/protobuf`, `/v1/traces` is added to an endpoint without a path. |
+| `tracing.protocol` | `IWDB_TRACING_PROTOCOL` | `"grpc"` | `grpc` (OTLP/gRPC) or `http/protobuf`. |
+| `tracing.sample_ratio` | `IWDB_TRACING_SAMPLE_RATIO` | `1.0` | The share of new traces that are sampled, 0 to 1. A request with a `traceparent` follows its caller's decision. |
+| `tracing.service_name` | `IWDB_TRACING_SERVICE_NAME` | `"iwdb-server"` | The traces' `service.name`. |
+| `tracing.headers` | `IWDB_TRACING_HEADERS` | `unset` | Headers sent with every export, `name=value,name=value` (a vendor's API key: `authorization=Bearer ...`). `--check-config` prints their names, not their values. |
 
 A test keeps this table equal to the code's list (`iwdb_server::config::KEYS`).
 
@@ -149,3 +156,25 @@ Every login (and failed login), logout, user, grant, token, namespace and catalo
 - **How long they are kept.** The audit files: `audit.retention_days` (30 by default). Entries in the log (stderr) are kept as long as whatever collects it keeps them: set its limits there (Docker: the log driver's `max-size` and `max-file`; journald: `MaxRetentionSec`, `SystemMaxUse`).
 - **Fields** (absent ones left out): `operation` (the RPC: `Login`, `CreateUser`, `CommitCatalog`, ...), `outcome` (`success` or `failure`), `code` (the error code of a failure), `user`, `auth` (`session`, `api_token`, `certificate`, `off`), `client` (the client's IP address), `namespace`, `subject` (the user an account change is about), `token_name`, `role`, `admin`, `seq` (a catalog change's commit), `namespace_event` (a namespace's creation or drop), `request` (the id of the request a `CancelRequest` cancels, or of the job a `StartJob` started or a `CancelJob` cancels; a cancelled one's owner is the `subject`), `backup` (the backup a `Backup`, `Verify` or `PruneArchive` names, by its name in the backup directory). Never a password, a token or its hash, a certificate, an error message or a value of the data.
 - **Best effort.** An entry is written after the outcome is known, without fsync: a crash can lose the last entries, never the changes, which are in the WAL.
+
+## Traces
+
+With a build that has the `otel` feature (the Docker image has it) and `tracing.enabled = true`, the server exports a trace of every request to an OpenTelemetry collector over OTLP ([ADR 0057](../adr/0057-traces.md)): the request, its wait for a worker, its execution, and for writes the commit, the WAL append and the fsync. guarantees.md's [Traces](../guarantees.md#traces-step-16g) lists the spans and what is never in them.
+
+```
+IWDB_TRACING_ENABLED=true IWDB_TRACING_ENDPOINT=http://otel-collector:4317 iwdb-server --config server.toml
+```
+
+- **Callers' traces.** A request with a W3C `traceparent` (and `tracestate`) header, over gRPC or REST, joins the caller's trace; a malformed one is ignored and the request starts a new trace. Nothing is echoed in the answer.
+- **When the collector is down** spans are dropped, never waited for: requests don't slow down or fail. `iwdb_trace_spans_dropped_total` counts the drops ([metrics.md](metrics.md)), and the log says once when exports start failing and once when they work again.
+- **Shutdown** exports what is queued, within what is left of `server.drain_timeout_secs` (at least a second).
+- **`OTEL_*` variables are not read**: set the `IWDB_TRACING_*` ones instead. The server warns at start about `OTEL_*` variables it finds.
+
+Instead of the standard variables:
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`: `IWDB_TRACING_ENDPOINT`
+- `OTEL_EXPORTER_OTLP_PROTOCOL`: `IWDB_TRACING_PROTOCOL`
+- `OTEL_EXPORTER_OTLP_HEADERS`: `IWDB_TRACING_HEADERS`
+- `OTEL_SERVICE_NAME`: `IWDB_TRACING_SERVICE_NAME`
+- `OTEL_TRACES_SAMPLER_ARG` (with `parentbased_traceidratio`): `IWDB_TRACING_SAMPLE_RATIO`
+- `OTEL_SDK_DISABLED`, `OTEL_TRACES_EXPORTER=none`: `IWDB_TRACING_ENABLED=false`

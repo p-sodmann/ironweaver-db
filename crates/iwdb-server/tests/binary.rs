@@ -252,6 +252,22 @@ fn the_version_lists_the_features() {
     assert!(out.status.success() && text.contains("(grpc"), "{}", text);
     assert_eq!(text.contains("rest"), cfg!(feature = "rest"), "{}", text);
     assert_eq!(text.contains("postgres"), cfg!(feature = "postgres"), "{}", text);
+    assert_eq!(text.contains("otel"), cfg!(feature = "otel"), "{}", text);
+    // A build without traces refuses a config that turns them on (ADR 0057)
+    #[cfg(not(feature = "otel"))]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let out =
+            bin().env("IWDB_DATA_DIR", dir.path().join("d")).env("IWDB_TRACING_ENABLED", "true").output().unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("[tracing] enabled (from IWDB_TRACING_ENABLED)") && stderr.contains("otel feature"),
+            "{}",
+            stderr
+        );
+        assert!(!dir.path().join("d").exists(), "the store was opened");
+    }
     #[cfg(not(feature = "postgres"))]
     {
         let dir = tempfile::tempdir().unwrap();
@@ -836,4 +852,156 @@ fn serves_the_metrics_to_prometheus() {
     sigterm(&child);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
+}
+
+/// With traces sent to a collector that isn't there, requests are as fast
+/// as ever and none fails; the drops are counted in the metrics and said
+/// once in the log (step 16g, ADR 0057).
+#[cfg(feature = "otel")]
+#[test]
+fn a_collector_that_is_down_slows_and_fails_no_request() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut child, lines, reader) = spawn(
+        bin()
+            .env("IWDB_DATA_DIR", dir.path().join("data"))
+            .env("IWDB_LISTEN", "127.0.0.1:0")
+            .env("IWDB_SERVER_DRAIN_TIMEOUT_SECS", "3")
+            .env("IWDB_TRACING_ENABLED", "true")
+            .env("IWDB_TRACING_ENDPOINT", format!("http://127.0.0.1:{}", port)),
+    );
+    let mut seen = Vec::new();
+    let address = ready_address(&lines, &mut seen);
+    let remote = admin(&address);
+    let start = std::time::Instant::now();
+    for i in 0..200 {
+        block_on(remote.commit("default", vec![node(&format!("n{}", i))], CommitOptions::default())).unwrap();
+        block_on(remote.get_nodes("default", vec![format!("n{}", i)], Default::default())).unwrap();
+    }
+    assert!(start.elapsed() < Duration::from_secs(20), "400 requests took {:?}", start.elapsed());
+    // The batch is sent after its delay (5 s) and fails
+    let token = block_on(remote.create_token("admin", "prometheus", None)).unwrap().token;
+    let failed = |text: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix("iwdb_trace_spans_dropped_total{reason=\"export_failed\"} "))
+            .map_or(0, |n| n.parse::<u64>().unwrap())
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let (status, _, text) = https_get(&address, "/metrics", Some(token.expose()));
+        assert_eq!(status, 200);
+        if failed(&text) > 0 {
+            assert!(text.contains("iwdb_trace_spans_exported_total 0\n"), "{}", text);
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "no failed export counted: {}", text);
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let start = std::time::Instant::now();
+    sigterm(&child);
+    assert!(child.wait().unwrap().success());
+    assert!(start.elapsed() < Duration::from_secs(15), "shutdown took {:?}", start.elapsed());
+    reader.join().unwrap();
+    seen.extend(lines.try_iter());
+    let warned = seen.iter().filter(|l| l.contains("trace export failed")).count();
+    assert_eq!(warned, 1, "{:#?}", seen);
+}
+
+/// A collector of OTLP over HTTP: each request's `x-collector-key` header
+/// and its body, decoded.
+#[cfg(feature = "otel")]
+type Received = (Option<String>, opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest);
+
+#[cfg(feature = "otel")]
+fn collector() -> (u16, mpsc::Receiver<Received>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut writer = stream;
+                loop {
+                    let mut length = 0;
+                    let mut key = None;
+                    let mut line = String::new();
+                    let mut first = true;
+                    loop {
+                        line.clear();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        if first {
+                            assert!(line.starts_with("POST /v1/traces "), "{}", line);
+                            first = false;
+                        }
+                        if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                            length = v.trim().parse().unwrap();
+                        }
+                        if let Some(v) = line.to_ascii_lowercase().strip_prefix("x-collector-key:") {
+                            key = Some(v.trim().to_owned());
+                        }
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    let mut body = vec![0; length];
+                    reader.read_exact(&mut body).unwrap();
+                    let request = prost::Message::decode(body.as_slice()).unwrap();
+                    let _ = tx.send((key, request));
+                    writer.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").unwrap();
+                }
+            });
+        }
+    });
+    (port, rx)
+}
+
+/// Spans reach a collector over OTLP/HTTP, with the service's name; a
+/// shutdown sends what is queued before the batch's delay (ADR 0057).
+#[cfg(feature = "otel")]
+#[test]
+fn the_shutdown_sends_the_queued_spans_to_the_collector() {
+    let (port, received) = collector();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut child, lines, reader) = spawn(
+        bin()
+            .env("IWDB_DATA_DIR", dir.path().join("data"))
+            .env("IWDB_LISTEN", "127.0.0.1:0")
+            .env("IWDB_TRACING_ENABLED", "true")
+            .env("IWDB_TRACING_PROTOCOL", "http/protobuf")
+            .env("IWDB_TRACING_ENDPOINT", format!("http://127.0.0.1:{}", port))
+            .env("IWDB_TRACING_SERVICE_NAME", "iwdb-binary-test")
+            .env("IWDB_TRACING_HEADERS", "x-collector-key=k1"),
+    );
+    let address = ready_address(&lines, &mut Vec::new());
+    let remote = admin(&address);
+    block_on(remote.commit("default", vec![node("n1")], CommitOptions::default())).unwrap();
+    sigterm(&child);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    let mut names = Vec::new();
+    while let Ok((key, request)) = received.recv_timeout(Duration::from_secs(5)) {
+        assert_eq!(key.as_deref(), Some("k1"));
+        for resource in request.resource_spans {
+            let attrs = resource.resource.unwrap().attributes;
+            let service = attrs.iter().find(|kv| kv.key == "service.name").unwrap();
+            assert!(format!("{:?}", service.value).contains("iwdb-binary-test"), "{:?}", service);
+            for scope in resource.scope_spans {
+                names.extend(scope.spans.into_iter().map(|s| s.name));
+            }
+        }
+        if names.iter().any(|n| n == "iwdb.checkpoint") {
+            break;
+        }
+    }
+    for expected in
+        ["Login", "Commit", "iwdb.queue", "iwdb.execute", "iwdb.commit", "iwdb.wal.fsync", "iwdb.checkpoint"]
+    {
+        assert!(names.iter().any(|n| n == expected), "{} not in {:?}", expected, names);
+    }
 }

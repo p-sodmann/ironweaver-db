@@ -37,6 +37,7 @@ pub mod read;
 mod request;
 pub mod requests;
 mod service;
+pub mod trace;
 
 #[cfg(feature = "conformance")]
 pub mod conformance;

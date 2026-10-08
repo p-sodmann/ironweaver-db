@@ -256,6 +256,41 @@ What it doesn't guarantee:
 - **Expiry is checked when the registry is used**, not by a timer: an expired result is never served, but may hold its memory until the next call that looks.
 - **Jobs start while writes are refused**, as reads do: what they add is bounded (`[jobs] running` projections and `[jobs] result_bytes`) and counted, not refused.
 
+## Traces (step 16g)
+
+[ADR 0057](adr/0057-traces.md); [api/config.md](api/config.md#traces) (`[tracing]`, feature `otel`).
+
+What is traced: each request that reaches the authorisation point is one trace (or joins its caller's, by `traceparent`), with this tree:
+
+| Span | Parent | When |
+|---|---|---|
+| the operation's name (`Find`, `Commit`, `StartJob`, ...) | the caller's span, or none | every request the gate lets through, refused ones included; `Login` too |
+| `iwdb.queue`, then `iwdb.execute` | the request | the wait for a query worker, then the work (admin writes: `iwdb.execute` on their own thread) |
+| `iwdb.commit` | `iwdb.execute` | a commit or catalog change: waiting for the writer, then its phases |
+| `iwdb.prepare`, `iwdb.wal.append`, `iwdb.apply` | `iwdb.commit` | resolve and validate; the WAL write; the apply |
+| `iwdb.wal.fsync` | `iwdb.wal.append` | the fsync this commit pays: every commit under `always`, the one that closes a batch under `group` (`iwdb.wal.batch` records made durable), never under `off` |
+| `iwdb.changes.wait` | the request | a change-stream long poll waiting for commits |
+| `iwdb.collect`, `iwdb.algorithm` | `iwdb.execute`, or `iwdb.job` | an analytics projection collected under the read lock; the algorithm |
+| `iwdb.checkpoint` (`.replay`, `.write`, `.prune`), `iwdb.backup`, `iwdb.verify` (`iwdb.verify.namespace`) | `iwdb.execute`, or none | admin writes; a background checkpoint is a trace of its own |
+| `iwdb.job` (`iwdb.queue`, then the analytics spans) | none: linked to its `StartJob` | a managed job, from queued to ended |
+
+What it guarantees:
+
+- **One trace per request**, with that tree and the attributes of ADR 0057 (operation, namespace, request id, bounds, the answer's seq and work counts, outcome code), over gRPC and REST alike (`crates/iwdb-server/tests/traces.rs`).
+- **The caller's trace**: a valid `traceparent` is the request span's parent, `tracestate` travels with it, and a caller that didn't sample isn't sampled here. A malformed `traceparent` is ignored (a new root); the request never fails for it.
+- **Never in a span**: an attribute value, a filter, a pattern, a node or edge id, a mutation, an error message, a user, a client address, a token or a password. Span names are fixed strings: the `iwdb.*` names and the operations' names (`no_span_name_holds_an_id_or_a_value`).
+- **The collector can't slow or fail a request**: ending a span is a push onto a bounded queue (2048 spans); a full queue drops the span; an export that fails or takes over 10 s drops its batch. Both are counted (`iwdb_trace_spans_dropped_total`), and the log says once when exports start failing and once when they work again (`a_collector_that_is_down_slows_and_fails_no_request` in `binary.rs`).
+- **Shutdown sends what is queued**, waiting at most what is left of the drain's deadline (at least 1 s), after the final checkpoint so its spans are included (`the_shutdown_sends_the_queued_spans_to_the_collector`).
+- **Off costs nothing measurable**: with tracing off or the feature out, every span is a disabled callsite (see step 16g's benchmarks). Without `otel` no OpenTelemetry crate is built in (CI checks the tree), and `[tracing] enabled = true` is refused at startup.
+- **A connection only when configured**: the server connects to the collector only with `[tracing] enabled = true`.
+
+What it doesn't guarantee:
+
+- **Spans are best effort**: what the queue drops, a failed export, a crash, or a shutdown past its deadline loses is gone; there are no retries. Sampling (`[tracing] sample_ratio`) leaves out whole traces.
+- **Requests the gate refuses** before an operation runs (no credentials, an unknown token, the server still recovering) have no span: the audit log and `iwdb_requests_total` count them.
+- **No span inside the core's algorithms**, per node, edge, row or WAL record; the group-commit timer's fsync and recovery aren't traced; nor is the embedded library or Python (no exporter there).
+- **Log lines don't carry trace ids**: a trace and a log line meet by time and the request's route.
+
 ## The memory limit (step 16d)
 
 [ADR 0054](adr/0054-the-memory-limit.md); [api/config.md](api/config.md) (`[memory]`), [api/errors.md](api/errors.md) (`resource_exhausted`), [api/metrics.md](api/metrics.md).

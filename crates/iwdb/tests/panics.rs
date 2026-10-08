@@ -24,7 +24,10 @@ const CHILD: &str = "IWDB_PANIC_CHILD";
 fn opts(group: bool) -> StoreOptions {
     let mut opts = options(2);
     if group {
-        opts.wal.fsync = FsyncPolicy::Group { max_delay: Duration::from_millis(40), max_batch: 1000 };
+        // A burst (below) must end within max_delay, or a commit pays the
+        // fsync instead of the timer: 200 ms leaves room on slow runners
+        // (40 ms didn't on a macOS one)
+        opts.wal.fsync = FsyncPolicy::Group { max_delay: Duration::from_millis(200), max_batch: 1000 };
         // No rotation, so only the timer fsyncs
         opts.wal.segment_size = iwdb_storage::DEFAULT_SEGMENT_SIZE;
     }
@@ -44,9 +47,10 @@ fn child_panics_in_the_commit_path() {
     let mut out = std::io::stdout();
     for (i, step) in workload(80, 40).into_iter().enumerate() {
         // With group, bursts shorter than max_delay and pauses longer than
-        // it: the timer does the fsyncs, not the commits
+        // twice it (the timer wakes every max_delay): the timer does the
+        // fsyncs, not the commits
         if group && i % 8 == 7 {
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(600));
         }
         let result = match step {
             Step::Tx(m) => store.commit(&m),

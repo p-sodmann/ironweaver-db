@@ -28,6 +28,7 @@ use ironweaver_core::EdgeId;
 use iwdb_engine::catalog::NamespaceCatalog;
 use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, Mutation};
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
+use tracing::{Instrument, Span};
 
 use crate::admin::{
     Admin, BackupDone, BackupRequest, Checkpointed, JobInfo, JobOwner, JobPage, Listed, PruneReport, ServerStatus,
@@ -38,6 +39,7 @@ use crate::log::LogTail;
 use crate::metrics::Metrics;
 use crate::read::Explain;
 use crate::requests::{Call, ConsumerInfo, RequestInfo, Requests};
+use crate::trace;
 use crate::{
     AnalyticsRequest, Answer, Changes, ChangesRequest, Code, CommitOptions, Database, Edge, Error, ExplainRequest,
     FindRequest, JobResult, MatchRequest, MatchRow, NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest,
@@ -527,9 +529,10 @@ impl<D> Clone for Authorized<D> {
 }
 
 /// A checked call: its audit entry, recorded once its outcome is known
-/// (`None` if the operation is audited only when refused), and its
-/// registration in the request registry (step 16c).
-struct Pending(Option<AuditEntry>, Option<Call>);
+/// (`None` if the operation is audited only when refused), its
+/// registration in the request registry (step 16c), and its trace span
+/// (ADR 0057).
+struct Pending(Option<AuditEntry>, Option<Call>, Span);
 
 /// What an audit entry takes from a call's answer (its seq).
 type Seq<T> = fn(&T, &mut AuditEntry);
@@ -570,18 +573,23 @@ impl<D> Authorized<D> {
             via: Some(self.principal.via),
             ..entry
         };
+        let span = trace::request(op, entry.namespace.as_deref());
         match op.check(&self.principal, subject) {
             Ok(()) => {
                 let call = self
                     .requests
                     .as_ref()
                     .map(|r| r.begin(op, entry.namespace.as_deref(), &self.principal.user, self.audit.client));
-                Ok(Pending((op.audited() == Audited::Always).then_some(entry), call))
+                if let Some(call) = &call {
+                    span.record("iwdb.request_id", call.id());
+                }
+                Ok(Pending((op.audited() == Audited::Always).then_some(entry), call, span))
             }
             Err(e) => {
                 if let Some(requests) = &self.requests {
                     requests.refused(op, e.code());
                 }
+                trace::outcome(&span, Some(e.code()));
                 entry.code = Some(e.code());
                 self.audit.record(entry);
                 Err(e)
@@ -591,7 +599,8 @@ impl<D> Authorized<D> {
 
     /// Record a checked call's outcome.
     fn finish<T>(&self, pending: Pending, result: &Result<T, Error>, seq: Seq<T>) {
-        if let Pending(Some(mut entry), _) = pending {
+        trace::outcome(&pending.2, result.as_ref().err().map(Error::code));
+        if let Pending(Some(mut entry), _, _) = pending {
             match result {
                 Ok(answer) => seq(answer, &mut entry),
                 Err(e) => entry.code = Some(e.code()),
@@ -604,14 +613,25 @@ impl<D> Authorized<D> {
 /// Run a checked call (`$checked`, checked when the method was called),
 /// registered while it runs (and cancellable, if its operation is), and
 /// record its outcome.
+/// The call's future is built inside its trace span (`Embedded` submits
+/// to the pool when a method is called) and runs in it; `$report` records
+/// what the answer reports on the span.
 macro_rules! run {
     ($self:ident, $checked:ident, $call:expr, $seq:expr) => {
+        run!($self, $checked, $call, $seq, trace::nothing)
+    };
+    ($self:ident, $checked:ident, $call:expr, $seq:expr, $report:expr) => {
         async move {
             let mut pending = $checked?;
+            let span = pending.2.clone();
+            let inner = span.in_scope(|| $call);
             let result = match pending.1.take() {
-                Some(call) => call.run($call).await,
-                None => $call.await,
+                Some(call) => call.run(inner).instrument(span.clone()).await,
+                None => inner.instrument(span.clone()).await,
             };
+            if let Ok(answer) = &result {
+                $report(answer, &span);
+            }
             $self.finish(pending, &result, $seq);
             result
         }
@@ -648,7 +668,9 @@ fn is_user_name(name: &str) -> bool {
 pub async fn login<D: Authenticate>(db: &D, audit: &Audit, user: &str, password: Secret) -> Result<Session, Error> {
     let mut entry = AuditEntry::of(Operation::Login);
     entry.user = is_user_name(user).then(|| user.to_owned());
-    let result = db.login(user, password, audit.client).await;
+    let span = trace::request(Operation::Login, None);
+    let result = db.login(user, password, audit.client).instrument(span.clone()).await;
+    trace::outcome(&span, result.as_ref().err().map(Error::code));
     match &result {
         Ok(_) => entry.via = Some(Via::Session),
         Err(e) => entry.code = Some(e.code()),
@@ -675,7 +697,7 @@ macro_rules! read {
             options: QueryOptions,
         ) -> impl Future<Output = Result<$answer, Error>> + Send {
             let checked = self.check(Operation::$op, namespace, on(namespace));
-            run!(self, checked, self.inner.$method(namespace, request, options), no_seq)
+            run!(self, checked, self.inner.$method(namespace, request, options), no_seq, trace::answer)
         }
     };
 }
@@ -688,7 +710,7 @@ impl<D: Database + Accounts> Database for Authorized<D> {
         options: CommitOptions,
     ) -> impl Future<Output = Result<CommitResult, Error>> + Send {
         let checked = self.check(Operation::Commit, namespace, on(namespace));
-        run!(self, checked, self.inner.commit(namespace, mutations, options), no_seq)
+        run!(self, checked, self.inner.commit(namespace, mutations, options), no_seq, trace::committed)
     }
 
     fn commit_catalog(
@@ -698,9 +720,8 @@ impl<D: Database + Accounts> Database for Authorized<D> {
         options: CommitOptions,
     ) -> impl Future<Output = Result<CommitResult, Error>> + Send {
         let checked = self.check(Operation::CommitCatalog, namespace, on(namespace));
-        run!(self, checked, self.inner.commit_catalog(namespace, change, options), |r: &CommitResult, e| {
-            e.seq = Some(r.seq)
-        })
+        let seq = |r: &CommitResult, e: &mut AuditEntry| e.seq = Some(r.seq);
+        run!(self, checked, self.inner.commit_catalog(namespace, change, options), seq, trace::committed)
     }
 
     fn wait_for_seq(
@@ -740,7 +761,7 @@ impl<D: Database + Accounts> Database for Authorized<D> {
             }
             Ok(answer)
         };
-        run!(self, checked, read, no_seq)
+        run!(self, checked, read, no_seq, trace::answer)
     }
 
     fn catalog(

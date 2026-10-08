@@ -14,6 +14,8 @@ ironweaver-core.workspace = true
 iwdb-engine = { path = "../iwdb-engine" }
 # The memory limit's changes of state (step 16d); in the tree already (iwdb)
 log.workspace = true
+# Trace spans (step 16g, ADR 0057): target `iwdb::trace`, free without a subscriber
+tracing.workspace = true
 postcard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
