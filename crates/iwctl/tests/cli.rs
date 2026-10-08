@@ -283,7 +283,12 @@ fn iwctl_with(args: &[&str], input: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    // A command that exits before reading stdin closes it; the test
+    // checks its exit code instead
+    match child.stdin.take().unwrap().write_all(input.as_bytes()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        written => written.unwrap(),
+    }
     child.wait_with_output().unwrap()
 }
 
