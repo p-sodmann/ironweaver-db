@@ -533,7 +533,8 @@ impl Jobs {
         if !span.is_disabled() {
             span.follows_from(tracing::Span::current());
         }
-        let entry = Entry { queued: Some(iwdb_storage::trace_span!(parent: &span, "iwdb.queue")), span: Some(span), ..entry };
+        let entry =
+            Entry { queued: Some(iwdb_storage::trace_span!(parent: &span, "iwdb.queue")), span: Some(span), ..entry };
         let info = entry.info(config.retention);
         state.entries.insert(id, entry);
         state.queue.push_back(id);

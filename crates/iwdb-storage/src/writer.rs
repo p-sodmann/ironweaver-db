@@ -377,7 +377,8 @@ impl<F: LogFs> Wal<F> {
             FsyncPolicy::Group { .. } => "group",
             FsyncPolicy::Off => "off",
         };
-        let span = crate::trace_span!("iwdb.wal.fsync", iwdb.wal.fsync_policy = policy, iwdb.wal.batch = self.unsynced());
+        let span =
+            crate::trace_span!("iwdb.wal.fsync", iwdb.wal.fsync_policy = policy, iwdb.wal.batch = self.unsynced());
         let _entered = span.enter();
         self.sync_now()
     }

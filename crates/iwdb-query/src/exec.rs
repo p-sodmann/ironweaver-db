@@ -270,9 +270,8 @@ pub fn spawn<T: Send + 'static>(
     let slot = Arc::new(Slot::default());
     let filled = slot.clone();
     let execute = iwdb_storage::trace_span!("iwdb.execute");
-    let started = std::thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(move || filled.fill(execute.in_scope(|| catch(job))));
+    let started =
+        std::thread::Builder::new().name(name.to_owned()).spawn(move || filled.fill(execute.in_scope(|| catch(job))));
     match started {
         Ok(_) => Pending { slot, token: None },
         Err(e) => Pending::ready(Err(Error::internal(format!("can't start a thread: {}", e)))),

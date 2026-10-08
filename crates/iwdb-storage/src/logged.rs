@@ -589,7 +589,8 @@ impl<F: LogFs> LoggedNamespace<F> {
         build: Option<IndexBuild>,
         prepare: impl FnOnce(&Namespace) -> Result<Prepare, iwdb_engine::Error>,
     ) -> Result<CommitResult, Error> {
-        let span = crate::trace_span!("iwdb.commit", iwdb.seq = tracing::field::Empty, iwdb.ops = tracing::field::Empty);
+        let span =
+            crate::trace_span!("iwdb.commit", iwdb.seq = tracing::field::Empty, iwdb.ops = tracing::field::Empty);
         let _entered = span.enter();
         let start = Instant::now();
         let result = self.commit_now(&span, build, prepare);

@@ -802,7 +802,8 @@ where
         let mut states = self.shared.states();
         states.sort_by_key(|s| s.info.id);
         for state in states {
-            let _namespace = iwdb_storage::trace_span!("iwdb.verify.namespace", db.namespace = %state.info.name).entered();
+            let _namespace =
+                iwdb_storage::trace_span!("iwdb.verify.namespace", db.namespace = %state.info.name).entered();
             let guard = lock(&state.checkpointer);
             let live = &state.live;
             // A read-only namespace appends nothing more: read it to its end

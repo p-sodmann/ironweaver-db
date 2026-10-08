@@ -60,13 +60,15 @@ pub(crate) fn outcome(span: &Span, code: Option<Code>) {
     }
 }
 
-/// Record a read's resolved bounds on the current span, if it is a
-/// request's (other spans don't have the fields).
+/// Record a read's resolved bounds on the current span, if it is a trace
+/// span (only the request's has the fields). Not `tracing::enabled!`: when
+/// every layer says no, tracing-subscriber's per-layer filters then drop
+/// the next event on the thread.
 pub(crate) fn bounds(bounds: &Bounds, timeout: Duration) {
-    if !tracing::enabled!(target: "iwdb::trace", tracing::Level::INFO) {
+    let span = Span::current();
+    if !span.metadata().is_some_and(|m| m.target() == iwdb_storage::trace::TARGET) {
         return;
     }
-    let span = Span::current();
     span.record("iwdb.max_results", bounds.max_results);
     span.record("iwdb.max_visited", bounds.max_visited);
     span.record("iwdb.max_edges", bounds.max_edges);

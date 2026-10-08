@@ -257,14 +257,15 @@ fn the_version_lists_the_features() {
     #[cfg(not(feature = "otel"))]
     {
         let dir = tempfile::tempdir().unwrap();
-        let out = bin()
-            .env("IWDB_DATA_DIR", dir.path().join("d"))
-            .env("IWDB_TRACING_ENABLED", "true")
-            .output()
-            .unwrap();
+        let out =
+            bin().env("IWDB_DATA_DIR", dir.path().join("d")).env("IWDB_TRACING_ENABLED", "true").output().unwrap();
         assert_eq!(out.status.code(), Some(2));
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("[tracing] enabled (from IWDB_TRACING_ENABLED)") && stderr.contains("otel feature"), "{}", stderr);
+        assert!(
+            stderr.contains("[tracing] enabled (from IWDB_TRACING_ENABLED)") && stderr.contains("otel feature"),
+            "{}",
+            stderr
+        );
         assert!(!dir.path().join("d").exists(), "the store was opened");
     }
     #[cfg(not(feature = "postgres"))]
@@ -998,7 +999,9 @@ fn the_shutdown_sends_the_queued_spans_to_the_collector() {
             break;
         }
     }
-    for expected in ["Login", "Commit", "iwdb.queue", "iwdb.execute", "iwdb.commit", "iwdb.wal.fsync", "iwdb.checkpoint"] {
+    for expected in
+        ["Login", "Commit", "iwdb.queue", "iwdb.execute", "iwdb.commit", "iwdb.wal.fsync", "iwdb.checkpoint"]
+    {
         assert!(names.iter().any(|n| n == expected), "{} not in {:?}", expected, names);
     }
 }

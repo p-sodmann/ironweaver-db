@@ -335,11 +335,11 @@ where
                 };
                 let connection = self.connection.clone();
                 // W3C trace context (ADR 0057): the request span, made by the
-                // authorisation point, takes it as its parent
+                // authorisation point, takes it as its parent. Not
+                // `tracing::enabled!`: with every layer saying no, it made
+                // tracing-subscriber drop the next event (the gate's audit)
                 #[cfg(feature = "otel")]
-                let remote = tracing::enabled!(target: "iwdb::trace", tracing::Level::INFO)
-                    .then(|| crate::otel::remote_context(request.headers()))
-                    .flatten();
+                let remote = crate::otel::active().then(|| crate::otel::remote_context(request.headers())).flatten();
                 let call = Box::pin(
                     async move {
                         let mut request = request;

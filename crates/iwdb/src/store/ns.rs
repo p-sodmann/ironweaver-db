@@ -293,18 +293,20 @@ where
         // the raw projection's, then the sorted one's until the job ends
         let charge = self.store.shared.memory.charge(Part::Working);
         let collect = iwdb_storage::trace_span!("iwdb.collect");
-        let (raw, seq) = collect.in_scope(|| self.read(|ns| {
-            let g = ns.graph();
-            charge.set(projection_estimate(g.node_count(), g.edge_count(), g.node_bound()));
-            let raw = Projection::collect::<_, _, GraphError>(
-                ns.graph(),
-                spec.direction,
-                &spec.cost,
-                |_, _| Ok(true),
-                |_, _| Ok(true),
-            );
-            (raw, ns.seq())
-        }));
+        let (raw, seq) = collect.in_scope(|| {
+            self.read(|ns| {
+                let g = ns.graph();
+                charge.set(projection_estimate(g.node_count(), g.edge_count(), g.node_bound()));
+                let raw = Projection::collect::<_, _, GraphError>(
+                    ns.graph(),
+                    spec.direction,
+                    &spec.cost,
+                    |_, _| Ok(true),
+                    |_, _| Ok(true),
+                );
+                (raw, ns.seq())
+            })
+        });
         drop(collect);
         let raw = raw.map_err(iwdb_engine::Error::from)?;
         charge.set(raw.memory_usage() as u64);

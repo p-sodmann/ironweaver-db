@@ -20,6 +20,7 @@
 //!   `tracestate` of a request; a malformed one is ignored.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -146,6 +147,7 @@ impl Tracing {
     where
         S: tracing::Subscriber + Send + Sync + for<'a> LookupSpan<'a>,
     {
+        ACTIVE.store(true, Ordering::Release);
         let tracer = self.provider.tracer("iwdb");
         tracing_opentelemetry::layer()
             .with_tracer(tracer)
@@ -170,6 +172,15 @@ impl Tracing {
     pub fn flush(&self) -> Result<(), String> {
         self.provider.force_flush().map_err(|e| e.to_string())
     }
+}
+
+/// Whether a trace layer was made ([`Tracing::layer`]): the gate reads
+/// trace context only then.
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Whether this process exports traces.
+pub fn active() -> bool {
+    ACTIVE.load(Ordering::Acquire)
 }
 
 /// The W3C trace context of a request's headers (gRPC metadata are HTTP/2
@@ -389,7 +400,8 @@ pub struct Otlp {
 
 enum Transport {
     Grpc { client: TraceServiceClient<Channel>, headers: tonic::metadata::MetadataMap },
-    Http { client: Client<Connector, Full<Bytes>>, uri: http::Uri, headers: http::HeaderMap },
+    // Boxed: the HTTP client is much larger than the gRPC one
+    Http { client: Box<Client<Connector, Full<Bytes>>>, uri: http::Uri, headers: http::HeaderMap },
 }
 
 impl std::fmt::Debug for Otlp {
@@ -419,7 +431,9 @@ impl Otlp {
         let uri = Otlp::uri(endpoint, protocol)?;
         if uri.scheme_str() == Some("https") {
             match protocol {
-                OtlpProtocol::Grpc => crate::client::tonic_tls(&ClientTls::default()).map(|_| ()).map_err(|e| e.to_string()),
+                OtlpProtocol::Grpc => {
+                    crate::client::tonic_tls(&ClientTls::default()).map(|_| ()).map_err(|e| e.to_string())
+                }
                 OtlpProtocol::HttpProtobuf => {
                     ClientTls::default().rustls_config(&[b"http/1.1"]).map(|_| ()).map_err(|e| e.to_string())
                 }
@@ -463,7 +477,7 @@ impl Otlp {
                 } else {
                     None
                 };
-                let client = Client::builder(TokioExecutor::new()).build(Connector::new(tls));
+                let client = Box::new(Client::builder(TokioExecutor::new()).build(Connector::new(tls)));
                 let mut map = http::HeaderMap::new();
                 for (name, value) in headers {
                     let name = http::HeaderName::from_bytes(name.as_bytes())

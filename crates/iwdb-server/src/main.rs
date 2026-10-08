@@ -201,9 +201,9 @@ fn main() -> ExitCode {
     };
     // The spans of the drain and the final checkpoint too, within what is
     // left of the drain's deadline (at least a second)
-    let left = stopping.get().map_or(config.drain_timeout(), |at: &Instant| {
-        config.drain_timeout().saturating_sub(at.elapsed())
-    });
+    let left = stopping
+        .get()
+        .map_or(config.drain_timeout(), |at: &Instant| config.drain_timeout().saturating_sub(at.elapsed()));
     stop_traces(traces, left.max(Duration::from_secs(1)));
     code
 }

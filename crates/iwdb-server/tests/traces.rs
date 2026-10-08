@@ -127,7 +127,8 @@ fn names(map: &BTreeMap<String, &SpanData>) -> Vec<String> {
 
 /// A trace id and a parent span id for a `traceparent` (sampled).
 fn parent(n: u8) -> (TraceId, SpanId, String) {
-    let trace = TraceId::from_hex(&format!("{:032x}", 0x0af7_6519_16cd_43dd_8448_eb21_1c80_3100_u128 + n as u128)).unwrap();
+    let trace =
+        TraceId::from_hex(&format!("{:032x}", 0x0af7_6519_16cd_43dd_8448_eb21_1c80_3100_u128 + n as u128)).unwrap();
     let span = SpanId::from_hex(&format!("{:016x}", 0xb7ad_6b71_6920_3300_u64 + n as u64)).unwrap();
     (trace, span, format!("00-{}-{}-01", trace, span))
 }
@@ -236,10 +237,11 @@ fn a_rest_request_is_one_trace_under_its_callers_span() {
     let (_turn, traces) = turn();
     let (server, _dir) = server_with(FsyncPolicy::Always);
     let (trace, span, header) = parent(2);
-    let status = rest_get(server.addr, "/v1/namespaces/default/nodes/n1", &[
-        ("traceparent", &header),
-        ("tracestate", "vendor=1"),
-    ]);
+    let status = rest_get(
+        server.addr,
+        "/v1/namespaces/default/nodes/n1",
+        &[("traceparent", &header), ("tracestate", "vendor=1")],
+    );
     assert_eq!(status, 200);
     check_read(&traces.trace(trace), "GetNodes", span);
 }
@@ -299,7 +301,12 @@ fn a_write_shows_its_commit_append_and_fsync_per_policy() {
         assert_eq!(names(&children(&spans, commit)), ["iwdb.apply", "iwdb.prepare", "iwdb.wal.append"], "{}", what);
         let append = children(&spans, commit)["iwdb.wal.append"];
         assert!(attr(append, "iwdb.wal.bytes").is_some_and(|b| b.parse::<u64>().unwrap() > 0));
-        assert_eq!(attr(append, "iwdb.wal.synced").as_deref(), Some(if fsync.is_some() { "true" } else { "false" }), "{}", what);
+        assert_eq!(
+            attr(append, "iwdb.wal.synced").as_deref(),
+            Some(if fsync.is_some() { "true" } else { "false" }),
+            "{}",
+            what
+        );
         let synced = children(&spans, append);
         match fsync {
             Some(policy) => {
@@ -370,7 +377,8 @@ fn no_span_name_holds_an_id_or_a_value() {
     let client = server.client();
     block_on(client.create_namespace("secret-namespace-name", None)).unwrap();
     block_on(client.commit("secret-namespace-name", vec![node("secret-node-id")], Default::default())).unwrap();
-    block_on(client.get_nodes("secret-namespace-name", vec!["secret-node-id".into()], QueryOptions::default())).unwrap();
+    block_on(client.get_nodes("secret-namespace-name", vec!["secret-node-id".into()], QueryOptions::default()))
+        .unwrap();
     block_on(client.checkpoint(Some("secret-namespace-name".into()))).unwrap();
     rest_get(server.addr, "/v1/namespaces/secret-namespace-name/nodes/secret-node-id", &[]);
     let spans = traces.spans();

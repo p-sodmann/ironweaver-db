@@ -1219,7 +1219,11 @@ impl Config {
             ));
         }
         if !(0.0..=1.0).contains(&t.sample_ratio) {
-            problems.push(format!("{} must be between 0 and 1, not {}", self.at("tracing.sample_ratio"), t.sample_ratio));
+            problems.push(format!(
+                "{} must be between 0 and 1, not {}",
+                self.at("tracing.sample_ratio"),
+                t.sample_ratio
+            ));
         }
         if t.service_name.trim().is_empty() {
             problems.push(format!("{} must not be empty", self.at("tracing.service_name")));
@@ -1312,7 +1316,8 @@ impl Config {
             let line = match (k.get)(self) {
                 // A header's value may be a key: only the names are shown
                 Some(_) if k.key == "tracing.headers" => {
-                    let names: Vec<String> = self.tracing_headers().unwrap_or_default().into_iter().map(|h| h.0).collect();
+                    let names: Vec<String> =
+                        self.tracing_headers().unwrap_or_default().into_iter().map(|h| h.0).collect();
                     format!("# {} = (set: {}; values not shown)", name, names.join(", "))
                 }
                 Some(value) => format!("{} = {}", name, value),
@@ -1681,7 +1686,8 @@ mod tests {
             assert!(e.contains("[tracing] enabled") && e.contains("without the otel feature"), "{}", e);
         }
         // From a variable too, and the message names it
-        let e = Config::build(Some("data_dir = \"d\"\n[tls]\nenabled = false\n"), &env(&[("IWDB_TRACING_ENABLED", "1")]));
+        let e =
+            Config::build(Some("data_dir = \"d\"\n[tls]\nenabled = false\n"), &env(&[("IWDB_TRACING_ENABLED", "1")]));
         if cfg!(not(feature = "otel")) {
             assert!(e.unwrap_err().iter().any(|p| p.contains("(from IWDB_TRACING_ENABLED)")));
         }
@@ -1689,7 +1695,8 @@ mod tests {
 
     #[test]
     fn tracing_settings_from_the_file_and_the_environment() {
-        let text = "data_dir = \"d\"\n[tls]\nenabled = false\n[tracing]\nprotocol = \"http/protobuf\"\nsample_ratio = 0.25\n";
+        let text =
+            "data_dir = \"d\"\n[tls]\nenabled = false\n[tracing]\nprotocol = \"http/protobuf\"\nsample_ratio = 0.25\n";
         let config = Config::build(
             Some(text),
             &env(&[
@@ -1745,7 +1752,9 @@ mod tests {
         assert_eq!(config.tracing.service_name, "iwdb-server");
         let warnings = config.warnings();
         assert!(
-            warnings.iter().any(|w| w.starts_with("OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_SERVICE_NAME are set but not read")),
+            warnings
+                .iter()
+                .any(|w| w.starts_with("OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_SERVICE_NAME are set but not read")),
             "{:?}",
             warnings
         );
