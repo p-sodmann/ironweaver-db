@@ -143,8 +143,16 @@ impl Pool {
             }
             key
         });
+        // Trace spans (ADR 0057): the wait for a worker, then the work, a
+        // child of the submitting span. Without a subscriber that wants
+        // them, the current span isn't even looked up
+        let queue = iwdb_storage::trace_span!("iwdb.queue");
+        let parent = if queue.is_disabled() { tracing::Span::none() } else { tracing::Span::current() };
         let (job_token, job_slot, shared) = (token.clone(), slot.clone(), self.shared.clone());
         let run: Job = Box::new(move || {
+            drop(queue);
+            let execute = iwdb_storage::trace_span!(parent: &parent, "iwdb.execute");
+            let _entered = execute.enter();
             let result = catch(|| job(&job_token));
             if let Some(key) = timer {
                 lock(&shared.timers).due.remove(&key);
@@ -261,7 +269,10 @@ pub fn spawn<T: Send + 'static>(
 ) -> Pending<Result<T, Error>> {
     let slot = Arc::new(Slot::default());
     let filled = slot.clone();
-    let started = std::thread::Builder::new().name(name.to_owned()).spawn(move || filled.fill(catch(job)));
+    let execute = iwdb_storage::trace_span!("iwdb.execute");
+    let started = std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || filled.fill(execute.in_scope(|| catch(job))));
     match started {
         Ok(_) => Pending { slot, token: None },
         Err(e) => Pending::ready(Err(Error::internal(format!("can't start a thread: {}", e)))),

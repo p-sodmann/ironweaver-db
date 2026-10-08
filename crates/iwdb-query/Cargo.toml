@@ -19,6 +19,8 @@ iwdb-engine = { path = "../iwdb-engine" }
 # Error mapping (`From<iwdb_storage::Error>`), history ids, namespace types
 iwdb-storage = { path = "../iwdb-storage" }
 thiserror.workspace = true
+# Trace spans (step 16g, ADR 0057): target `iwdb::trace`, free without a subscriber
+tracing.workspace = true
 serde.workspace = true
 # Request fingerprints for cursors: the core's serde encoding of `Expr` and `Pattern`
 serde_json.workspace = true

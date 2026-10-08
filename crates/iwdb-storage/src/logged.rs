@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use iwdb_engine::catalog::AttrPath;
 use iwdb_engine::metrics::{Histogram, HistogramSnapshot};
-use iwdb_engine::{CatalogChange, CommitResult, IdempotencyKey, IndexBuild, MarkUpdate, Mutation, Namespace, Prepare};
+use iwdb_engine::{
+    CatalogChange, Change, CommitResult, IdempotencyKey, IndexBuild, MarkUpdate, Mutation, Namespace, Prepare,
+};
 
 use crate::io::{LogFs, StdFs};
 use crate::memory::{Charge, Memory, Part};
@@ -587,14 +589,20 @@ impl<F: LogFs> LoggedNamespace<F> {
         build: Option<IndexBuild>,
         prepare: impl FnOnce(&Namespace) -> Result<Prepare, iwdb_engine::Error>,
     ) -> Result<CommitResult, Error> {
+        let span = crate::trace_span!("iwdb.commit", iwdb.seq = tracing::field::Empty, iwdb.ops = tracing::field::Empty);
+        let _entered = span.enter();
         let start = Instant::now();
-        let result = self.commit_now(build, prepare);
+        let result = self.commit_now(&span, build, prepare);
         self.stats.commits.observe(start.elapsed());
+        if let Ok(r) = &result {
+            span.record("iwdb.seq", r.seq);
+        }
         result
     }
 
     fn commit_now(
         &self,
+        span: &tracing::Span,
         build: Option<IndexBuild>,
         prepare: impl FnOnce(&Namespace) -> Result<Prepare, iwdb_engine::Error>,
     ) -> Result<CommitResult, Error> {
@@ -604,7 +612,8 @@ impl<F: LogFs> LoggedNamespace<F> {
         }
         // The lookup of a key comes first: a duplicate's commit was applied,
         // so its result stands even when the namespace is read-only now
-        let prepared = match (prepare(&self.namespace()), self.read_only()) {
+        let prepared = crate::trace_span!("iwdb.prepare").in_scope(|| prepare(&self.namespace()));
+        let prepared = match (prepared, self.read_only()) {
             (Ok(Prepare::Duplicate(result)), _) => return Ok(result),
             (_, Some(cause)) => return Err(Error::ReadOnly { cause }),
             (Ok(Prepare::New(prepared)), None) => prepared,
@@ -615,10 +624,15 @@ impl<F: LogFs> LoggedNamespace<F> {
         if self.limited && !prepared.only_removes() {
             self.memory().check_write()?;
         }
+        if let Change::Data(ops) = &prepared.record().change {
+            span.record("iwdb.ops", ops.len());
+        }
         let appended = wal.append(prepared.record());
         self.note_failure(&wal, &appended);
         let time = appended?;
 
+        let apply = crate::trace_span!("iwdb.apply");
+        let applying = apply.enter();
         let start = Instant::now();
         self.applies_waiting.fetch_add(1, Ordering::AcqRel);
         let mut namespace = self.namespace.write().unwrap_or_else(PoisonError::into_inner);
@@ -634,6 +648,7 @@ impl<F: LogFs> LoggedNamespace<F> {
         self.graph_charge.set(g.memory_usage() as u64);
         drop(namespace);
         self.stats.record(start.elapsed());
+        drop(applying);
         match applied {
             Ok(result) => {
                 self.publish(&wal, seq);

@@ -292,7 +292,8 @@ where
         // collected (charged before it allocates), then the core's figures:
         // the raw projection's, then the sorted one's until the job ends
         let charge = self.store.shared.memory.charge(Part::Working);
-        let (raw, seq) = self.read(|ns| {
+        let collect = iwdb_storage::trace_span!("iwdb.collect");
+        let (raw, seq) = collect.in_scope(|| self.read(|ns| {
             let g = ns.graph();
             charge.set(projection_estimate(g.node_count(), g.edge_count(), g.node_bound()));
             let raw = Projection::collect::<_, _, GraphError>(
@@ -303,7 +304,8 @@ where
                 |_, _| Ok(true),
             );
             (raw, ns.seq())
-        });
+        }));
+        drop(collect);
         let raw = raw.map_err(iwdb_engine::Error::from)?;
         charge.set(raw.memory_usage() as u64);
         let run = || {
@@ -311,6 +313,7 @@ where
             charge.set(projection.memory_usage() as u64);
             job(&projection)
         };
+        let _algorithm = iwdb_storage::trace_span!("iwdb.algorithm").entered();
         let outcome = match progress {
             Some(progress) => cancel::run_with_progress(&token, progress, run),
             None => cancel::run(&token, run),

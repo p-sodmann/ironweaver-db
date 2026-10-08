@@ -102,6 +102,8 @@ metrics! {
     JOBS_RUNNING: "iwdb_jobs_running", Gauge, [], "", "Managed analytics jobs collecting their projection or running.";
     JOBS: "iwdb_jobs_total", Counter, ["outcome"], "", "Managed analytics jobs that ended, by outcome: `done`, `failed` or `cancelled`.";
     JOB_RESULT_BYTES: "iwdb_job_result_bytes", Gauge, [], "bytes", "The stored job results' estimated size (counted in the `working` memory part).";
+    TRACE_SPANS_EXPORTED: "iwdb_trace_spans_exported_total", Counter, [], "", "Trace spans the collector accepted (`[tracing]`, ADR 0057); 0 with tracing off.";
+    TRACE_SPANS_DROPPED: "iwdb_trace_spans_dropped_total", Counter, ["reason"], "", "Trace spans dropped, by reason: `queue_full` (the export queue was full) or `export_failed` (the collector didn't take their batch).";
 }
 
 /// A metric's value in one sample.
@@ -271,7 +273,7 @@ mod tests {
                 assert!(base.ends_with(&format!("_{}", d.unit)), "{} in {}", d.name, d.unit);
             }
             for label in d.labels {
-                let bounded = ["operation", "code", "lock", "namespace", "part", "outcome", "version"];
+                let bounded = ["operation", "code", "lock", "namespace", "part", "outcome", "version", "reason"];
                 assert!(bounded.contains(label), "{}", label);
             }
         }

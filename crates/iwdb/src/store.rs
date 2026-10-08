@@ -745,6 +745,7 @@ where
     /// (`None` or 0: unthrottled). Checkpoints wait for the whole copy, so
     /// a slower one holds them back longer (ADR 0055).
     pub fn backup_with(&self, dest: &Path, max_bytes_per_second: Option<u64>) -> Result<BackupReport, Error> {
+        let _span = iwdb_storage::trace_span!("iwdb.backup").entered();
         let stats = &self.shared.backups;
         stats.running.fetch_add(1, Ordering::AcqRel);
         let result = self.backup_now(dest, max_bytes_per_second);
@@ -791,6 +792,7 @@ where
     /// after any failed fsync); [`Error::Io`] for a directory that can't be
     /// listed.
     pub fn verify(&self) -> Result<VerifyReport, Error> {
+        let _span = iwdb_storage::trace_span!("iwdb.verify").entered();
         let root = self.dir.root();
         let mut report = VerifyReport::new(root, Kind::DataDir);
         if let Ok(Some(marker)) = iwdb_storage::layout::read_marker(root) {
@@ -800,6 +802,7 @@ where
         let mut states = self.shared.states();
         states.sort_by_key(|s| s.info.id);
         for state in states {
+            let _namespace = iwdb_storage::trace_span!("iwdb.verify.namespace", db.namespace = %state.info.name).entered();
             let guard = lock(&state.checkpointer);
             let live = &state.live;
             // A read-only namespace appends nothing more: read it to its end

@@ -49,11 +49,22 @@ rustls-native-certs = "0.8"
 # The standard gRPC health service grpc.health.v1 (step 16b): Kubernetes'
 # gRPC probes and grpc_health_probe speak it; from the tonic project
 tonic-health = { version = "0.14", default-features = false }
-# Structured logs (step 16b, iwdb-server only): tracing is already in the tree
-# through tokio; tracing-subscriber writes JSON or text lines, filters them, and
-# bridges the `log` records of the library crates
-tracing = "0.1"
+# Structured logs (step 16b): tracing is already in the tree through tokio;
+# tracing-subscriber writes JSON or text lines, filters them, and bridges the
+# `log` records of the library crates. Spans (step 16g, ADR 0057): the storage,
+# query and store crates open trace spans with the facade alone (no proc macros)
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "json", "env-filter", "ansi", "tracing-log"] }
+# OpenTelemetry traces (step 16g, ADR 0057; iwdb-server feature `otel` only),
+# all from the OpenTelemetry project, Apache-2.0, without default features:
+# the API (spans, context, propagation)
+opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
+# the SDK: the tracer provider, the parent-based ratio sampler and the W3C propagator
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace"] }
+# OTLP's messages, the SDK's spans converted to them, and the gRPC client (on our tonic)
+opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic", "trace"] }
+# tracing's spans as OpenTelemetry spans, so the library crates need only `tracing`
+tracing-opentelemetry = { version = "0.34", default-features = false }
 # Streamed answers as a stream of chunks (already in the tree through tonic)
 tokio-stream = { version = "0.1", default-features = false }
 # The server's config file

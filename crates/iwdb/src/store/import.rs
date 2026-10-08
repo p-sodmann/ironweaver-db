@@ -153,6 +153,7 @@ where
         progress: Option<OnProgress<'_>>,
         what: &Path,
     ) -> Result<ImportReport, Error> {
+        let _span = iwdb_storage::trace_span!("iwdb.import", iwdb.import.format = format.name()).entered();
         let name = super::public_name(name)?;
         if lock(&self.shared.catalog).log.table().get(&name).is_some() {
             return Err(Error::NamespaceExists { name: name.to_string() });
@@ -299,6 +300,7 @@ where
         progress: Option<OnProgress<'_>>,
         what: &Path,
     ) -> Result<MergeReport, Error> {
+        let _span = iwdb_storage::trace_span!("iwdb.import", iwdb.import.format = format.name()).entered();
         if self.state.live.is_dropped() {
             return Err(Error::NamespaceDropped { name: self.name().to_owned() });
         }

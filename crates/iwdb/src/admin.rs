@@ -153,6 +153,10 @@ where
     out.add(m::JOBS, &["failed"], Value::Counter(jobs.failed_total));
     out.add(m::JOBS, &["cancelled"], Value::Counter(jobs.cancelled_total));
     out.add(m::JOB_RESULT_BYTES, &[], Value::Gauge(jobs.result_bytes as f64));
+    let (exported, queue_full, export_failed) = monitor.spans.read();
+    out.add(m::TRACE_SPANS_EXPORTED, &[], Value::Counter(exported));
+    out.add(m::TRACE_SPANS_DROPPED, &["queue_full"], Value::Counter(queue_full));
+    out.add(m::TRACE_SPANS_DROPPED, &["export_failed"], Value::Counter(export_failed));
     out
 }
 

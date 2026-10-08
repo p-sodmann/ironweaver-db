@@ -71,6 +71,7 @@ pub mod namespaces;
 mod reader;
 mod recovery;
 pub mod restore;
+pub mod trace;
 pub mod verify;
 mod writer;
 
