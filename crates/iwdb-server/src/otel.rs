@@ -638,7 +638,11 @@ mod tests {
             let start = Instant::now();
             tracing.shutdown(Duration::from_secs(10));
             assert!(start.elapsed() < Duration::from_secs(10), "{:?}", start.elapsed());
-            assert_eq!(counters.read(), (0, 0, 3000), "{:?}", protocol);
+            // Every span is dropped and counted: by a failed export, or at
+            // the queue while a slow failing export holds it up
+            let (exported, queue_full, failed) = counters.read();
+            assert_eq!((exported, queue_full + failed), (0, 3000), "{:?}", protocol);
+            assert!(failed > 0, "{:?}: {:?}", protocol, counters.read());
         }
     }
 
