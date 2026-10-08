@@ -40,7 +40,7 @@ A request can be followed through the server in a tracing backend.
   | `read/grpc/find_indexed_100` | 806 µs | 798 µs | −1.0 % |
 
   Every difference is within the spread of the runs of one build (`find_indexed_100` embedded ranged 488 to 631 µs before), so the spans cost nothing measurable. A first after-run against a baseline saved an hour earlier showed −51 % to +130 % swings on this machine, which is why the runs alternate.
-- Found and fixed on the way: the upstream check of `c69ef51` (PR #19) changed metrics.md's text for `iwdb_memory_used_bytes` but not the code's help, so the metrics docs test failed.
+- A test that raced on slow runners, unrelated to traces, was made robust: `a_panic_in_the_group_commit_timer_aborts_and_loses_nothing` (`crates/iwdb/tests/panics.rs`) assumed a burst of commits finishes within the group commit's 40 ms, so that only the timer fsyncs. On a macOS runner a commit paid the fsync and took the injected panic. The delay is now 1 s and the bursts shorter.
 
 ## Non-goals
 
