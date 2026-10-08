@@ -58,6 +58,15 @@ jobs:
             echo "pyo3 must not be a dependency of the engine, storage, store, server or CLI crates" >&2
             exit 1
           fi
+      - name: No OpenTelemetry without the otel feature
+        # ADR 0057: the exporter's crates are in the tree only with `otel`
+        run: |
+          for features in "" "--no-default-features"; do
+            if cargo tree -p iwdb-server $features -e normal | grep -E ' (opentelemetry|opentelemetry_sdk|opentelemetry-proto|tracing-opentelemetry) '; then
+              echo "iwdb-server without the otel feature must not depend on OpenTelemetry crates" >&2
+              exit 1
+            fi
+          done
 
   features:
     # Step 13a (ADR 0034): iwdb-server without its default features (gRPC
@@ -70,7 +79,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: ["", "rest", "postgres", "rest console"]
+        features: ["", "rest", "postgres", "rest console", "otel", "rest otel"]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable

@@ -50,7 +50,7 @@ Out of scope:
 
 Ironweaver DB collects no data. The server, the libraries, `iwctl`, the Python package and the console send no telemetry, usage statistics, crash reports or update checks to anyone.
 
-- The server opens no network connection of its own except to the projection sources you configure (Postgres, [projections.md](documentation/api/projections.md)). A test runs the server through logins, user, token, namespace and catalog changes and checks that its only sockets are its listener and the connections to it.
+- The server opens no network connection of its own except to the projection sources you configure (Postgres, [projections.md](documentation/api/projections.md)) and, if you turn tracing on, the OpenTelemetry collector you name (`[tracing]`, [config.md](documentation/api/config.md#traces)). Traces hold no user, client address, value of the data or error message. A test runs the server through logins, user, token, namespace and catalog changes and checks that its only sockets are its listener and the connections to it.
 - The console's pages, fonts included, are served by the server itself and load nothing from another site.
 - The logs and the audit log ([ADR 0049](documentation/adr/0049-audit-log.md)) stay where you configure them.
 - Metrics are pulled, never pushed: a scraper you set up reads `GET /metrics`, with a token like any route ([metrics.md](documentation/api/metrics.md)). The log tail (`GetLog`, for the operator console) is held in the server's memory and readable by server admins only.

@@ -3,14 +3,15 @@
 # The iwdb-server image (step 13a, ADR 0034): iwdb-server and iwctl on Debian
 # slim, as a non-root user, with the data directory as a volume.
 #
-#   docker build -t iwdb .                                # gRPC, REST, Postgres projections, console
+#   docker build -t iwdb .                                # gRPC, REST, Postgres projections, console, traces
 #   docker build --build-arg FEATURES="" -t iwdb:grpc .   # gRPC only
 #   docker run -p 127.0.0.1:7600:7600 -v iwdb-data:/var/lib/iwdb \
 #     -v "$PWD/docker/tls:/etc/iwdb/tls:ro" -e IWDB_AUTH_BOOTSTRAP_PASSWORD=... iwdb
 #
-# FEATURES are iwdb-server's cargo features (rest, postgres, console), space
-# separated. The console is compiled in but off: IWDB_CONSOLE_ENABLED=true
-# turns it on. The server speaks TLS only (step 15b): mount the certificate
+# FEATURES are iwdb-server's cargo features (rest, postgres, console, otel),
+# space separated. The console is compiled in but off: IWDB_CONSOLE_ENABLED=true
+# turns it on. So are traces (ADR 0057): IWDB_TRACING_ENABLED=true and
+# IWDB_TRACING_ENDPOINT=http://<collector>:4317 send them over OTLP. The server speaks TLS only (step 15b): mount the certificate
 # and key at /etc/iwdb/tls/server.pem and server.key (docker/dev-cert.sh makes
 # a pair for development). The image holds no certificate or key. Plaintext
 # needs IWDB_TLS_ENABLED=false and IWDB_SERVER_PLAINTEXT_PUBLIC=true.
@@ -21,7 +22,7 @@ ARG RUST_VERSION=1.99
 ARG DEBIAN=trixie
 
 FROM rust:${RUST_VERSION}-${DEBIAN} AS build
-ARG FEATURES="rest postgres console"
+ARG FEATURES="rest postgres console otel"
 WORKDIR /src
 COPY . .
 # rust-toolchain.toml is left out (.dockerignore): the image's toolchain

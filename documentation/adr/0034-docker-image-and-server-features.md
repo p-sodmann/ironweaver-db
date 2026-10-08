@@ -32,4 +32,5 @@ Defaults stay on, so nothing changes for existing builds, users or CI's `--all-f
 - Leaving out `rest` saves the REST crates and code generation. Leaving out `postgres` saves the Postgres client and its own tokio runtime thread per source.
 - Tests that need a feature are gated on it. CI runs `iwdb-server` without features and with each feature alone (job `features`), and builds and smoke-tests both images (job `docker`). The test crate's dev-dependency on itself sets `default-features = false`; otherwise it would turn the defaults back on and `--no-default-features` would test nothing.
 - Each new optional dependency of the server should be a feature too if a deployment can do without it.
+- Step 16g added the feature `otel` (traces over OTLP, [ADR 0057](0057-traces.md)): off by default for `cargo build`, in the image, off unless `IWDB_TRACING_ENABLED=true`.
 - Step 17 publishes this image (multi-arch, registry, tags) instead of writing one. Step 16's environment overrides will let the image be configured without mounting a file.

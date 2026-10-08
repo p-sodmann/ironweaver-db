@@ -37,7 +37,9 @@ Ironweaver DB is a **separate project** that turns `ironweaver-core` into a dura
 | Catalog | `iwdb-engine` | Postgres `pg_catalog`: databases (namespaces), indexes, constraints, roles, all changed through logged operations |
 | Query | `iwdb-query` | Postgres `EXPLAIN` and `statement_timeout`; Neo4j Cypher (via the core's pattern language) |
 | Service and access | `iwdb` (embedded facade), `iwdb-python`, `iwdb-server`, `iwctl` | SQLite (embedded), etcd (gRPC and Watch from a revision), Neo4j HTTP API, CouchDB `_changes`, `psql` / `redis-cli` |
-| Operations | `iwdb-server`, `iwctl` | Postgres `pg_stat_*` views and roles/GRANT; Prometheus conventions |
+| Operations | `iwdb-server`, `iwctl` | Postgres `pg_stat_*` views and roles/GRANT; Prometheus conventions; OpenTelemetry (W3C trace context, OTLP) |
+
+Traces cut across the layers ([ADR 0057](adr/0057-traces.md)): the service, query and storage crates open `tracing` spans for their own phases (the request at the authorisation point, the queue and execution in the worker pool, the commit, WAL append and fsync in storage), and only `iwdb-server` turns them into OpenTelemetry spans and exports them (feature `otel`).
 
 ## Access methods
 

@@ -21,3 +21,5 @@ New crates (beyond `tracing`, already in the tree through tokio): `tracing-subsc
 - Log collectors parse lines without a pattern; the `serving` event carries `address` as a field.
 - Configuration errors are still printed as plain text before the logger exists (exit 2).
 - Step 16g adds OpenTelemetry export on the same `tracing` spans.
+
+*Update, step 16g ([ADR 0057](0057-traces.md)):* `iwdb-storage`, `iwdb-query` and `iwdb` now depend on `tracing` to open trace spans (target `iwdb::trace`, kept out of the log by its filter). They still log through `log`.

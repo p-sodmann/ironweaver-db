@@ -68,23 +68,24 @@ timeout_ms = 300000
 
 ### Features and Docker
 
-`iwdb-server` has three cargo features (ADR 0034); the first two are on by default:
+`iwdb-server` has four cargo features (ADR 0034); the first two are on by default:
 
 - `rest`: the REST/JSON API on the same port ([rest.md](rest.md)). Without it the server speaks gRPC only, and answers every other request 404.
 - `postgres`: the Postgres source of `[[projection]]`s. Without it, a config file with a Postgres source is refused at startup (exit 2).
 - `console` (off by default; implies `rest`): the operator console's pages, compiled in and served at `/console/` when `[console] enabled = true` ([ADR 0041](../adr/0041-console-served-by-the-server.md)).
+- `otel` (off by default): traces exported over OTLP when `[tracing] enabled = true` ([config.md](config.md#traces), [ADR 0057](../adr/0057-traces.md)). Without it no OpenTelemetry crate is built in, and a config that turns tracing on is refused at startup (exit 2).
 
 `cargo build -p iwdb-server --no-default-features` builds a gRPC-only server. `iwdb-server --version` lists what a binary has.
 
 The `Dockerfile` at the root builds an image with `iwdb-server` and `iwctl`, with the same features chosen by the `FEATURES` build argument:
 
 ```
-docker build -t iwdb .                                # gRPC, REST, Postgres projections, console
+docker build -t iwdb .                                # gRPC, REST, Postgres projections, console, traces
 docker build --build-arg FEATURES="" -t iwdb:grpc .   # gRPC only
 docker run -p 127.0.0.1:7600:7600 -v iwdb-data:/var/lib/iwdb iwdb
 ```
 
-The image runs as the user `iwdb` (uid 10001), keeps its data in the volume `/var/lib/iwdb`, and reads `/etc/iwdb/iwdb.toml` ([docker/iwdb.toml](../../docker/iwdb.toml): listens on `0.0.0.0:7600` over TLS with the certificate and key mounted at `/etc/iwdb/tls/server.pem` and `server.key`, drains for 8 s so that `docker stop` ends with a checkpoint). The image holds no certificate or key, and doesn't start without them: mount yours (`-v /path/to/tls:/etc/iwdb/tls:ro`), or for development the pair `sh docker/dev-cert.sh` makes in `docker/tls`, which `compose.yaml` mounts. Mount your own config there, or set `IWDB_*` variables (`docker run -e IWDB_STORE_FSYNC=group ...`); if you raise `drain_timeout_secs`, raise `docker stop -t` above it. `compose.yaml` runs it, and with `--profile postgres` a Postgres with an example projection. Run `iwctl` against the volume only while the server is stopped: one process opens a data directory at a time. The image's `HEALTHCHECK` runs `iwdb-server --probe --config /etc/iwdb/iwdb.toml` (ready once recovery has finished; over TLS unless it is off, without verifying the certificate). `docker kill --signal HUP` reloads the certificate. Plaintext needs `-e IWDB_TLS_ENABLED=false -e IWDB_SERVER_PLAINTEXT_PUBLIC=true` (the container listens on `0.0.0.0`): only behind a TLS-terminating proxy on a private network. The first start needs `-e IWDB_AUTH_BOOTSTRAP_PASSWORD=...` (the user `admin`; there is no default password). The console is compiled in but off: `-e IWDB_CONSOLE_ENABLED=true` serves it at `https://127.0.0.1:7600/console/`, behind the login.
+The image runs as the user `iwdb` (uid 10001), keeps its data in the volume `/var/lib/iwdb`, and reads `/etc/iwdb/iwdb.toml` ([docker/iwdb.toml](../../docker/iwdb.toml): listens on `0.0.0.0:7600` over TLS with the certificate and key mounted at `/etc/iwdb/tls/server.pem` and `server.key`, drains for 8 s so that `docker stop` ends with a checkpoint). The image holds no certificate or key, and doesn't start without them: mount yours (`-v /path/to/tls:/etc/iwdb/tls:ro`), or for development the pair `sh docker/dev-cert.sh` makes in `docker/tls`, which `compose.yaml` mounts. Mount your own config there, or set `IWDB_*` variables (`docker run -e IWDB_STORE_FSYNC=group ...`); if you raise `drain_timeout_secs`, raise `docker stop -t` above it. `compose.yaml` runs it, and with `--profile postgres` a Postgres with an example projection. Run `iwctl` against the volume only while the server is stopped: one process opens a data directory at a time. The image's `HEALTHCHECK` runs `iwdb-server --probe --config /etc/iwdb/iwdb.toml` (ready once recovery has finished; over TLS unless it is off, without verifying the certificate). `docker kill --signal HUP` reloads the certificate. Plaintext needs `-e IWDB_TLS_ENABLED=false -e IWDB_SERVER_PLAINTEXT_PUBLIC=true` (the container listens on `0.0.0.0`): only behind a TLS-terminating proxy on a private network. The first start needs `-e IWDB_AUTH_BOOTSTRAP_PASSWORD=...` (the user `admin`; there is no default password). The console is compiled in but off: `-e IWDB_CONSOLE_ENABLED=true` serves it at `https://127.0.0.1:7600/console/`, behind the login. Traces too: `-e IWDB_TRACING_ENABLED=true -e IWDB_TRACING_ENDPOINT=http://<collector>:4317` exports them over OTLP.
 
 ## RPCs
 
