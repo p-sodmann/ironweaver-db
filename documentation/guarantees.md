@@ -345,7 +345,7 @@ Linux, macOS and, since step 16h, Windows ([ADR 0058](adr/0058-windows.md)), wit
 
 What differs on Windows:
 
-- **File systems.** NTFS (and ReFS). The directory fsync is `FlushFileBuffers` on a directory handle, which these journal; FAT32, exFAT and network shares (SMB, a UNC path to another machine) make no such promise and aren't supported, as network file systems aren't on Unix. A failed directory fsync fails the operation, as on Unix.
+- **File systems.** NTFS (and ReFS). The directory fsync is `FlushFileBuffers` on a directory handle, which these journal; FAT32, exFAT and network shares (SMB, a UNC path) make no such promise and aren't supported, as network file systems aren't on Unix; on a share the directory flush fails, so a store there refuses to open (`data_directories_at_unusual_paths`). A failed directory fsync fails the operation, as on Unix.
 - **The kill** in the crash harness is `TerminateProcess`; an abort ends a process with exit code `0xC0000409` (`__fastfail`), not `SIGABRT`. The same scenarios and checks run.
 - **Files open elsewhere.** Every file is opened with `FILE_SHARE_DELETE`, so the checkpointer removes a WAL segment or checkpoint that a change-stream reader has open, and a reader reads its open file to the end, as on Unix (`files_that_readers_hold_open_are_removed_and_the_readers_finish`).
 - **The lock** is `LockFileEx` (std's `File::try_lock`): a second store is refused; a killed process releases it (`the_lock_is_released_when_the_process_dies`).

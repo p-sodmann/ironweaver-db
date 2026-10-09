@@ -258,10 +258,11 @@ fn reopening_while_another_thread_spawns_processes() {
 }
 
 /// A data directory, its backup and a restore at paths with spaces, longer
-/// than Windows' 260 characters, and on Windows a verbatim (`\\?\`) and a
-/// UNC path (`\\localhost\C$\...`, if the machine shares its drives): the
-/// store opens, commits, checkpoints, backs up, verifies, reopens and
-/// restores the same state (ADR 0058).
+/// than Windows' 260 characters, and on Windows a verbatim (`\\?\`) path:
+/// the store opens, commits, checkpoints, backs up, verifies, reopens and
+/// restores the same state. On a share (`\\localhost\C$\...`, if the
+/// machine shares its drives) the directory can't be flushed, and the store
+/// refuses to open (ADR 0058).
 #[test]
 fn data_directories_at_unusual_paths() {
     let tmp = tempfile::tempdir().unwrap();
@@ -278,8 +279,12 @@ fn data_directories_at_unusual_paths() {
         roots.push(base.join("verbatim"));
         let plain = base.to_string_lossy().trim_start_matches(r"\\?\").to_owned();
         let unc = format!(r"\\localhost\{}${}", &plain[..1], &plain[2..]);
+        // A share: the directory flush fails there (`ERROR_INVALID_FUNCTION`
+        // over SMB), and a store refuses to open rather than ignore it
         if fs::metadata(&unc).is_ok() {
-            roots.push(std::path::PathBuf::from(unc).join("unc"));
+            let data = std::path::PathBuf::from(unc).join("unc").join("data");
+            fs::create_dir_all(data.parent().unwrap()).unwrap();
+            assert_matches!(Store::open(&data, options(2)), Err(Error::Io { op: "sync directory", .. }));
         } else {
             eprintln!("{} isn't reachable: no UNC path checked", unc);
         }
