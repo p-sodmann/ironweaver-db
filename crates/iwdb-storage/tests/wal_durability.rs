@@ -16,6 +16,7 @@ use ironweaver_core::Value;
 use iwdb_engine::testutil::workload::{Step, seed, step};
 use iwdb_engine::{CommitRecord, CommitResult, Namespace};
 use iwdb_storage::format::{MAX_RECORD_LEN, SEGMENT_HEADER_LEN};
+use iwdb_storage::io::{LogFs, StdFs};
 use iwdb_storage::{
     DEFAULT_SEGMENT_SIZE, Error, FsyncPolicy, LoggedNamespace, MIN_SEGMENT_SIZE, Wal, WalOptions, WalReader, read_log,
 };
@@ -267,6 +268,103 @@ fn off_sync_skips_a_segment_removed_meanwhile() {
     assert_eq!(logged.wal().synced_seq(), 60);
     assert!(logged.read_only().is_none());
     assert_eq!(fs.count(Call::Sync), segments.len() - 1);
+}
+
+/// The real file system, except that opening `path` for appending fails
+/// as Windows fails it on a "delete pending" name (`PermissionDenied`,
+/// `ERROR_ACCESS_DENIED`): `refusals` times, then the file is removed (the
+/// last handle closed), or for good with `None`.
+#[derive(Clone)]
+struct PendingFs {
+    path: std::path::PathBuf,
+    refusals: std::sync::Arc<std::sync::Mutex<Option<usize>>>,
+}
+
+impl LogFs for PendingFs {
+    type File = fs::File;
+
+    fn open_append(&self, path: &std::path::Path) -> std::io::Result<fs::File> {
+        if path == self.path {
+            let mut refusals = self.refusals.lock().unwrap();
+            match *refusals {
+                Some(0) => {
+                    let _ = fs::remove_file(path);
+                }
+                Some(n) => *refusals = Some(n - 1),
+                None => {}
+            }
+            if *refusals != Some(0) || path.exists() {
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
+        }
+        StdFs.open_append(path)
+    }
+    fn create(&self, path: &std::path::Path) -> std::io::Result<fs::File> {
+        StdFs.create(path)
+    }
+    fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        StdFs.rename(from, to)
+    }
+    fn sync_dir(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        StdFs.sync_dir(dir)
+    }
+    fn write_atomic(
+        &self,
+        path: &std::path::Path,
+        write: &mut dyn FnMut(&mut dyn std::io::Write) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        StdFs.write_atomic(path, write)
+    }
+    fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+        StdFs.remove_file(path)
+    }
+    fn truncate(&self, path: &std::path::Path, len: u64) -> std::io::Result<()> {
+        StdFs.truncate(path, len)
+    }
+    fn create_dir(&self, path: &std::path::Path) -> std::io::Result<()> {
+        StdFs.create_dir(path)
+    }
+    fn remove_dir_all(&self, path: &std::path::Path) -> std::io::Result<()> {
+        StdFs.remove_dir_all(path)
+    }
+}
+
+/// With `off`, a segment that the checkpointer is removing when the sync
+/// opens it may be "delete pending" on Windows (ADR 0058: a handle that
+/// isn't ours, such as a virus scanner's, defeats POSIX semantics on NTFS
+/// too). The open is refused until the name goes; the sync waits for that
+/// and skips the segment, as it skips one already gone, instead of failing
+/// the log. A refusal that doesn't end is an error, and so is any refusal
+/// off Windows. (The Windows crash harness hit this on CI.)
+#[test]
+fn off_sync_waits_for_a_segment_whose_removal_is_pending() {
+    let run = |refusals: Option<usize>| {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Wal::create(dir.path(), options(FsyncPolicy::Off, MIN_SEGMENT_SIZE), 1).unwrap();
+        let logged = LoggedNamespace::new(namespace(), wal).unwrap();
+        for i in 0..60 {
+            logged.commit(&[upsert("a", Value::Int(i))]).unwrap();
+        }
+        drop(logged);
+        let first = segments(dir.path())[0].clone();
+        let fs = PendingFs { path: first.clone(), refusals: std::sync::Arc::new(std::sync::Mutex::new(refusals)) };
+        let wal = Wal::create_with(fs, dir.path(), options(FsyncPolicy::Off, MIN_SEGMENT_SIZE), 61).unwrap();
+        let (records, _) = read_log(dir.path(), 1).unwrap();
+        let logged = LoggedNamespace::new(replay(records), wal).unwrap();
+        logged.commit(&[upsert("a", Value::Int(60))]).unwrap();
+        (logged.sync(), logged.read_only().is_some(), first.exists())
+    };
+
+    let (synced, read_only, exists) = run(Some(3));
+    if cfg!(windows) {
+        assert!(synced.is_ok() && !read_only && !exists, "{:?}", synced);
+    } else {
+        assert_matches!(synced, Err(Error::Io { .. }));
+        assert!(read_only && exists);
+    }
+    let (synced, read_only, _) = run(None);
+    assert_matches!(synced, Err(Error::Io { .. }));
+    assert!(read_only);
 }
 
 #[test]

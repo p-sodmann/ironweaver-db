@@ -168,6 +168,36 @@ pub(crate) fn sync_dir<F: LogFs>(fs: &F, dir: &Path) -> Result<(), Error> {
     fs.sync_dir(dir).map_err(|e| Error::io("sync directory", dir, e))
 }
 
+/// How long [`open_unless_removed`] waits for a "delete pending" name to go.
+const DELETE_PENDING_WAIT: Duration = Duration::from_millis(500);
+
+/// Open `path` through `open`, for a file that the checkpointer may remove
+/// after it was listed: `Ok(None)` if it was. On Unix, and on Windows when
+/// the removal had POSIX semantics, the name goes at once (`NotFound`). On
+/// Windows a removal can also leave the name "delete pending" until the
+/// last handle closes (another process's too, such as a virus scanner's:
+/// ADR 0058), and opening it fails with `PermissionDenied`; that is
+/// retried for up to [`DELETE_PENDING_WAIT`]. A file still refused then is
+/// an error, as a real permission error is everywhere.
+pub(crate) fn open_unless_removed<T>(
+    path: &Path,
+    mut open: impl FnMut(&Path) -> io::Result<T>,
+) -> io::Result<Option<T>> {
+    let deadline = Instant::now() + DELETE_PENDING_WAIT;
+    let mut pause = Duration::from_millis(1);
+    loop {
+        match open(path) {
+            Ok(file) => return Ok(Some(file)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied && Instant::now() < deadline => {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_millis(50));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 pub(crate) fn write_atomic<F: LogFs>(fs: &F, path: &Path, bytes: &[u8]) -> Result<(), Error> {
     fs.write_atomic(path, &mut |out| out.write_all(bytes)).map_err(|e| Error::io("write", path, e))
 }
@@ -274,6 +304,32 @@ pub(crate) fn copy_file_throttled<F: LogFs>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file removed meanwhile is `None`; on Windows a "delete pending"
+    /// refusal is waited out, a lasting one (and any elsewhere) is an error.
+    #[test]
+    fn a_file_removed_meanwhile_is_none() {
+        let path = Path::new("segment");
+        let refused = || io::Error::from(io::ErrorKind::PermissionDenied);
+        assert_eq!(open_unless_removed(path, |_| Ok(1)).unwrap(), Some(1));
+        assert_eq!(open_unless_removed(path, |_| Err::<(), _>(io::ErrorKind::NotFound.into())).unwrap(), None);
+        let mut calls = 0;
+        let pending = open_unless_removed(path, |_| {
+            calls += 1;
+            if calls < 3 { Err::<(), _>(refused()) } else { Err(io::ErrorKind::NotFound.into()) }
+        });
+        if cfg!(windows) {
+            assert_eq!((pending.unwrap(), calls), (None, 3));
+        } else {
+            assert_eq!((pending.unwrap_err().kind(), calls), (io::ErrorKind::PermissionDenied, 1));
+        }
+        let start = Instant::now();
+        let lasting = open_unless_removed(path, |_| Err::<(), _>(refused()));
+        assert_eq!(lasting.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        if cfg!(windows) {
+            assert!(start.elapsed() >= DELETE_PENDING_WAIT);
+        }
+    }
 
     /// The real directory sync works on the file system tests run on (NTFS
     /// on the Windows runner, ADR 0058), and so does `write_atomic` with
