@@ -20,8 +20,9 @@ with iwdb.Store.open("data") as store:
 iwdb.restore("restored", backup="backups/today")
 ```
 
-Wheels for Linux and macOS (x86_64 and arm64), CPython 3.9 and later
-(abi3). Windows isn't supported yet.
+Wheels for Linux and macOS (x86_64 and arm64) and Windows (x86_64), CPython
+3.9 and later (abi3): `pip install ironweaver-db`. On Windows, keep the data
+directory on a local NTFS volume (not FAT/exFAT or a network share).
 
 - [Python API](https://github.com/p-sodmann/ironweaver-db/blob/main/documentation/python-api.md)
 - [Guarantees](https://github.com/p-sodmann/ironweaver-db/blob/main/documentation/guarantees.md)
