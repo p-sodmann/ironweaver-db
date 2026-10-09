@@ -220,6 +220,8 @@ fn walk(dir: &std::path::Path) -> Vec<Vec<u8>> {
         let path = entry.unwrap().path();
         if path.is_dir() {
             out.extend(walk(&path));
+        } else if path.file_name().is_some_and(|name| name == "LOCK") {
+            // Locked while a store is open: unreadable on Windows (ADR 0058)
         } else {
             out.push(std::fs::read(&path).unwrap());
         }

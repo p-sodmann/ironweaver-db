@@ -631,7 +631,9 @@ mod tests {
             for entry in std::fs::read_dir(&tmp_dir).unwrap() {
                 let entry = entry.unwrap();
                 if entry.file_name().to_string_lossy().ends_with(".tmp") {
-                    seen.lock().unwrap().push(entry.metadata().unwrap().len());
+                    // The file's own size: on Windows a directory entry's
+                    // lags behind an open file
+                    seen.lock().unwrap().push(std::fs::metadata(entry.path()).unwrap().len());
                 }
             }
         })));

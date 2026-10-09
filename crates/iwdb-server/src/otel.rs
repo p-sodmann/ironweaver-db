@@ -635,8 +635,11 @@ mod tests {
             let start = Instant::now();
             spans(&tracing, 1000);
             assert!(start.elapsed() < Duration::from_secs(5), "{:?}: {:?}", protocol, start.elapsed());
+            // The shutdown's deadline holds (with room for a stalled
+            // runner): on Windows a connection to a closed port takes about
+            // 2 s to fail, so the exports run until the deadline
             let start = Instant::now();
-            tracing.shutdown(Duration::from_secs(10));
+            tracing.shutdown(Duration::from_secs(5));
             assert!(start.elapsed() < Duration::from_secs(10), "{:?}", start.elapsed());
             // Every span is dropped and counted: by a failed export, or at
             // the queue while a slow failing export holds it up

@@ -1981,12 +1981,16 @@ mod tests {
     fn relative_paths_are_relative_to_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("server.toml");
-        let text = "data_dir = \"data\"\n[tls]\ncert = \"tls/c.pem\"\nkey = \"/abs/k.pem\"\nclient_ca = \"ca.pem\"\n";
+        // Absolute on the platform (`/abs` has no drive on Windows: it would
+        // be on the file's drive)
+        let abs = if cfg!(windows) { "C:/abs/k.pem" } else { "/abs/k.pem" };
+        let text =
+            format!("data_dir = \"data\"\n[tls]\ncert = \"tls/c.pem\"\nkey = \"{}\"\nclient_ca = \"ca.pem\"\n", abs);
         std::fs::write(&path, text).unwrap();
         let config = Config::load(&path).unwrap();
         assert_eq!(config.data_dir, dir.path().join("data"));
         assert_eq!(config.tls.cert, Some(dir.path().join("tls/c.pem")));
-        assert_eq!(config.tls.key, Some(PathBuf::from("/abs/k.pem")));
+        assert_eq!(config.tls.key, Some(PathBuf::from(abs)));
         assert_eq!(config.tls.client_ca, Some(dir.path().join("ca.pem")));
         // From a variable: relative to the working directory
         let config = Config::from_sources(Some(&path), env(&[("IWDB_TLS_CERT", "rel.pem")])).unwrap();

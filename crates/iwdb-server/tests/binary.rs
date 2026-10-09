@@ -378,7 +378,9 @@ fn a_bad_configuration_lists_every_problem() {
 fn check_config_prints_the_effective_settings() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("server.toml");
-    std::fs::write(&config, "data_dir = \"/var/lib/iwdb\"\n[store]\nretain_records = 7\n").unwrap();
+    // Absolute on the platform (Windows needs a drive)
+    let data = if cfg!(windows) { "C:/var/lib/iwdb" } else { "/var/lib/iwdb" };
+    std::fs::write(&config, format!("data_dir = \"{}\"\n[store]\nretain_records = 7\n", data)).unwrap();
     let out = tls(Command::new(BIN).arg("--check-config").arg("--config").arg(&config).env("IWDB_STORE_FSYNC", "off"))
         .output()
         .unwrap();
@@ -392,7 +394,7 @@ fn check_config_prints_the_effective_settings() {
     let back = iwdb_server::config::Config::parse(&text).unwrap();
     assert_eq!(back.store.fsync, iwdb_server::config::Fsync::Off);
     assert_eq!(back.store.retain_records, 7);
-    assert_eq!(back.data_dir, std::path::PathBuf::from("/var/lib/iwdb"));
+    assert_eq!(back.data_dir, std::path::PathBuf::from(data));
 }
 
 /// Readiness against a real recovery (design rule 3): a WAL large enough
@@ -766,6 +768,7 @@ fn plaintext_needs_explicit_flags_and_tls_needs_a_certificate() {
 
 /// The process's internet sockets, as `lsof` lists them: `(protocol,
 /// name)`, the name `local` or `local->remote`. `None` without `lsof`.
+#[cfg(not(windows))]
 fn sockets(pid: u32) -> Option<Vec<(String, String)>> {
     let output = Command::new("lsof").args(["-a", "-n", "-P", "-i", "-F", "Pn", "-p"]).arg(pid.to_string()).output();
     let output = output.ok()?;
@@ -776,6 +779,25 @@ fn sockets(pid: u32) -> Option<Vec<(String, String)>> {
             protocol = p.to_owned();
         } else if let Some(name) = line.strip_prefix('n') {
             sockets.push((protocol.clone(), name.to_owned()));
+        }
+    }
+    Some(sockets)
+}
+
+/// The same from `netstat -ano` on Windows (ADR 0058): a listener's name is
+/// its local address, a connection's `local->remote`.
+#[cfg(windows)]
+fn sockets(pid: u32) -> Option<Vec<(String, String)>> {
+    let output = Command::new("netstat").arg("-ano").output().ok()?;
+    let pid = pid.to_string();
+    let mut sockets = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        match words.as_slice() {
+            ["TCP", local, _, "LISTENING", p] if *p == pid => sockets.push(("TCP".into(), (*local).to_owned())),
+            ["TCP", local, remote, _, p] if *p == pid => sockets.push(("TCP".into(), format!("{}->{}", local, remote))),
+            ["UDP", local, _, p] if *p == pid => sockets.push(("UDP".into(), (*local).to_owned())),
+            _ => {}
         }
     }
     Some(sockets)
@@ -817,11 +839,11 @@ fn opens_no_connection_it_was_not_configured_for() {
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
     let Some(listed) = listed else {
-        assert!(std::env::var_os("CI").is_none(), "lsof is needed on CI");
+        assert!(std::env::var_os("CI").is_none(), "lsof (netstat on Windows) is needed on CI");
         eprintln!("skipped: no lsof");
         return;
     };
-    assert!(!listed.is_empty(), "lsof listed nothing: is it working?");
+    assert!(!listed.is_empty(), "lsof (netstat) listed nothing: is it working?");
     let local_port = |name: &str| name.split("->").next().unwrap().rsplit(':').next().unwrap().to_owned();
     for (protocol, name) in &listed {
         assert_eq!(protocol, "TCP", "{}", name);
