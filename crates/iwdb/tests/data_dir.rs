@@ -108,7 +108,7 @@ fn the_lock_is_released_when_the_process_dies() {
     assert!(locked, "the child opened the store");
     assert_matches!(Store::open(dir.path(), options(2)), Err(Error::Locked { .. }));
 
-    // SIGKILL on Unix: no destructor runs
+    // SIGKILL on Unix, TerminateProcess on Windows: no destructor runs
     child.kill().unwrap();
     child.wait().unwrap();
     let store = Store::open(dir.path(), options(2)).unwrap();
@@ -214,8 +214,9 @@ fn backups_and_interrupted_restores_are_refused() {
 /// open files until it execs, the lock file included, so the lock of a
 /// store that was just closed can look held for that moment. Opening must
 /// not fail then (a step 5 bug, found in step 7: about 3.5% of reopens
-/// failed with `Locked` while another thread spawned processes).
-#[cfg(unix)]
+/// failed with `Locked` while another thread spawned processes). Windows
+/// doesn't hand our handles to child processes, so there it shows that
+/// nothing like it happens (ADR 0058).
 #[test]
 fn reopening_while_another_thread_spawns_processes() {
     use std::sync::Arc;
@@ -230,7 +231,10 @@ fn reopening_while_another_thread_spawns_processes() {
         std::thread::spawn(move || {
             let mut spawned = 0;
             while !stop.load(Ordering::Relaxed) {
+                #[cfg(unix)]
                 Command::new("true").status().unwrap();
+                #[cfg(windows)]
+                Command::new("cmd").args(["/C", "rem"]).status().unwrap();
                 spawned += 1;
             }
             spawned
@@ -248,6 +252,7 @@ fn reopening_while_another_thread_spawns_processes() {
         }
     }
     stop.store(true, Ordering::Relaxed);
-    assert!(spawner.join().unwrap() > 100);
+    // (Windows starts processes more slowly)
+    assert!(spawner.join().unwrap() > if cfg!(windows) { 10 } else { 100 });
     assert_eq!(locked, 0);
 }
