@@ -397,27 +397,29 @@ where
     }
 
     /// [`export`](Self::export) into the file `path`, written atomically: a
-    /// temporary file, fsynced, then renamed over `path`. The format is
-    /// `format`, or [`ExportFormat::from_path`].
+    /// temporary file, fsynced, then renamed over `path`, and the directory
+    /// fsynced ([`StdFs::write_atomic`](iwdb_storage::io::StdFs)). The format
+    /// is `format`, or [`ExportFormat::from_path`].
     pub fn export_file(
         &self,
         path: &Path,
         format: Option<ExportFormat>,
-        progress: Option<OnProgress<'_>>,
+        mut progress: Option<OnProgress<'_>>,
     ) -> Result<ExportReport, Error> {
         let format = format.unwrap_or_else(|| ExportFormat::from_path(path));
         let mut result = None;
-        ironweaver_core::format::write_atomic(path, |out| {
-            let r = self.export_to(out, format, progress, path);
-            let failed = r.is_err();
-            result = Some(r);
-            if failed { Err(io::Error::other("the export failed")) } else { Ok(()) }
-        })
-        .or_else(|e| match &result {
-            // The export's own error is the one to report
-            Some(Err(_)) => Ok(()),
-            _ => Err(Error::Io { op: "write", path: path.into(), source: e }),
-        })?;
+        iwdb_storage::io::StdFs
+            .write_atomic(path, &mut |out| {
+                let r = self.export_to(out, format, progress.take(), path);
+                let failed = r.is_err();
+                result = Some(r);
+                if failed { Err(io::Error::other("the export failed")) } else { Ok(()) }
+            })
+            .or_else(|e| match &result {
+                // The export's own error is the one to report
+                Some(Err(_)) => Ok(()),
+                _ => Err(Error::Io { op: "write", path: path.into(), source: e }),
+            })?;
         result.unwrap_or_else(|| {
             Err(Error::Io { op: "write", path: path.into(), source: io::Error::other("not written") })
         })

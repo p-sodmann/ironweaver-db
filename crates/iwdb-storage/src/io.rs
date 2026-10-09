@@ -34,10 +34,12 @@ pub trait LogFs {
     /// `format::write_atomic`: into a temporary file next to it (named
     /// `.<name>.<pid>.<n>.tmp`), fsynced, then renamed over `path`. On
     /// error the temporary file is removed when possible and a previous
-    /// file at `path` is untouched. On Unix the core then fsyncs the
-    /// directory and returns its error, so `Ok` means the rename is durable
-    /// (since `3b15149`, upstream #32). An error can still come after the
-    /// rename: the new file may then be in place but not durable.
+    /// file at `path` is untouched. Then the directory is fsynced and its
+    /// error returned, so `Ok` means the rename is durable: on Unix by the
+    /// core (since `3b15149`, upstream #32), on Windows by [`StdFs`] after
+    /// the core's call (ADR 0058; the core skips it there, upstream #71).
+    /// An error can still come after the rename: the new file may then be
+    /// in place but not durable.
     fn write_atomic(&self, path: &Path, write: &mut dyn FnMut(&mut dyn Write) -> io::Result<()>) -> io::Result<()>;
     /// Remove a file.
     fn remove_file(&self, path: &Path) -> io::Result<()>;
@@ -85,7 +87,17 @@ impl LogFs for StdFs {
     }
 
     fn write_atomic(&self, path: &Path, write: &mut dyn FnMut(&mut dyn Write) -> io::Result<()>) -> io::Result<()> {
-        ironweaver_core::format::write_atomic(path, |out| write(out))
+        ironweaver_core::format::write_atomic(path, |out| write(out))?;
+        // Workaround for upstream #71: the core syncs the directory on Unix
+        // only. Remove once it does on Windows too (upstream check)
+        #[cfg(windows)]
+        if let Some(dir) = path.parent() {
+            let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+            fsync_dir(dir).map_err(|e| {
+                io::Error::new(e.kind(), format!("saved, but syncing the directory {} failed: {}", dir.display(), e))
+            })?;
+        }
+        Ok(())
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -119,16 +131,22 @@ impl LogFile for File {
 }
 
 /// Sync a directory: open it and `sync_all` it (on macOS, `F_FULLFSYNC` on
-/// the directory). Windows can't open directories this way; there it does
-/// nothing (Windows is not a supported platform yet).
-#[cfg(unix)]
+/// the directory). On Windows, `FlushFileBuffers` on a handle opened with
+/// `FILE_FLAG_BACKUP_SEMANTICS` (the only way to open a directory) and
+/// write access (which the flush needs); on NTFS that makes the
+/// directory's entries durable (ADR 0058). An error is returned, never
+/// ignored, on every platform (ADR 0005).
+#[cfg(not(windows))]
 fn fsync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
-#[cfg(not(unix))]
-fn fsync_dir(_dir: &Path) -> io::Result<()> {
-    Ok(())
+#[cfg(windows)]
+fn fsync_dir(dir: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    /// `FILE_FLAG_BACKUP_SEMANTICS` (winbase.h), part of the Win32 ABI.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    OpenOptions::new().write(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(dir)?.sync_all()
 }
 
 /// The size of the chunks files are written, copied and compared in.
@@ -256,6 +274,59 @@ pub(crate) fn copy_file_throttled<F: LogFs>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real directory sync works on the file system tests run on (NTFS
+    /// on the Windows runner, ADR 0058), and so does `write_atomic` with
+    /// it, over a file that a reader has open.
+    #[test]
+    fn directories_are_synced_for_real() {
+        let dir = tempfile::tempdir().unwrap();
+        StdFs.sync_dir(dir.path()).unwrap();
+        let sub = dir.path().join("a b");
+        StdFs.create_dir(&sub).unwrap();
+        StdFs.sync_dir(&sub).unwrap();
+        let path = sub.join("file");
+        StdFs.write_atomic(&path, &mut |out| out.write_all(b"one")).unwrap();
+        let mut reader = File::open(&path).unwrap();
+        StdFs.write_atomic(&path, &mut |out| out.write_all(b"two")).unwrap();
+        let mut old = String::new();
+        reader.read_to_string(&mut old).unwrap();
+        assert_eq!((old.as_str(), fs::read(&path).unwrap()), ("one", b"two".to_vec()));
+        // A directory that isn't there is an error, not a silent success
+        assert_eq!(StdFs.sync_dir(&dir.path().join("missing")).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    /// The workaround for upstream #71: on Windows the core's
+    /// `write_atomic` doesn't sync the directory, `StdFs` does, and reports
+    /// a failure. The directory denies the current user writing its
+    /// extended attributes (`icacls`): files can be created and renamed in
+    /// it, but it can't be opened for writing, which `FlushFileBuffers`
+    /// needs.
+    #[cfg(windows)]
+    #[test]
+    fn write_atomic_reports_a_failed_directory_sync_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        let user = std::process::Command::new("whoami").output().unwrap();
+        let user = String::from_utf8_lossy(&user.stdout).trim().to_owned();
+        let icacls = |args: &[&str]| {
+            let out = std::process::Command::new("icacls").arg(&sub).args(args).output().unwrap();
+            assert!(out.status.success(), "icacls: {}", String::from_utf8_lossy(&out.stdout));
+        };
+        icacls(&["/deny", &format!("{}:(WEA)", user)]);
+        let synced = StdFs.sync_dir(&sub);
+        let result = StdFs.write_atomic(&sub.join("file"), &mut |out| out.write_all(b"data"));
+        icacls(&["/remove:d", &user]);
+        if synced.is_ok() {
+            // An account whose privileges override the ACL: nothing to show
+            return;
+        }
+        let e = result.unwrap_err();
+        assert!(e.to_string().contains("syncing the directory"), "{}", e);
+        // The rename happened: the new file is in place, just not known durable
+        assert_eq!(fs::read(sub.join("file")).unwrap(), b"data");
+    }
 
     #[test]
     fn a_throttle_holds_a_copy_to_its_rate_and_counts() {
