@@ -73,6 +73,12 @@ pub fn read_secret(prompt: &str) -> io::Result<Secret> {
     }
     eprint!("{}", prompt);
     io::stderr().flush()?;
+    read_hidden(&stdin)
+}
+
+/// A line from the terminal with its echo off (`stty`).
+#[cfg(not(windows))]
+fn read_hidden(stdin: &io::Stdin) -> io::Result<Secret> {
     let echo = set_echo(false);
     let mut line = String::new();
     let read = stdin.lock().read_line(&mut line);
@@ -84,7 +90,15 @@ pub fn read_secret(prompt: &str) -> io::Result<Secret> {
     Ok(Secret::new(line.trim_end_matches(['\n', '\r'])))
 }
 
+/// A line from the console without echo; rpassword ends the line itself
+/// (ADR 0058).
+#[cfg(windows)]
+fn read_hidden(_stdin: &io::Stdin) -> io::Result<Secret> {
+    rpassword::read_password().map(Secret::new)
+}
+
 /// Turn the terminal's echo off or on (`stty`); whether it worked.
+#[cfg(not(windows))]
 fn set_echo(on: bool) -> bool {
     #[cfg(unix)]
     {

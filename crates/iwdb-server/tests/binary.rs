@@ -7,8 +7,11 @@
 //! private key, nor a value of the data) reaches the logs or the audit
 //! file (step 15c). TLS is on (the default, step 15b) with
 //! the test certificate of `tests/fixtures/tls`; SIGHUP reloads it.
+//!
+//! On Windows (ADR 0058) the server runs in a process group of its own and
+//! shuts down on Ctrl-Break, which [`shut_down`] sends; SIGHUP has no
+//! counterpart there, so the reload tests are Unix only.
 
-#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{BufRead, BufReader};
@@ -71,6 +74,10 @@ fn serving(line: &str) -> Option<String> {
 /// Start `command` and read its stderr on a thread: the lines arrive on the
 /// receiver.
 fn spawn(command: &mut Command) -> (std::process::Child, mpsc::Receiver<String>, std::thread::JoinHandle<()>) {
+    // A process group of its own, so that Ctrl-Break reaches the server
+    // alone (`shut_down`)
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(command, CREATE_NEW_PROCESS_GROUP);
     let mut child = command.stderr(Stdio::piped()).spawn().unwrap();
     let (lines_tx, lines) = mpsc::channel::<String>();
     let stderr = child.stderr.take().unwrap();
@@ -105,7 +112,7 @@ fn node(id: &str) -> Mutation {
 }
 
 #[test]
-fn serves_its_data_directory_and_shuts_down_on_sigterm() {
+fn serves_its_data_directory_and_shuts_down_gracefully() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("server.toml");
     std::fs::write(&config, "data_dir = \"data\"\nlisten = \"127.0.0.1:0\"\n[server]\ndrain_timeout_secs = 5\n")
@@ -137,8 +144,7 @@ fn serves_its_data_directory_and_shuts_down_on_sigterm() {
     let bare = Command::new(BIN).arg("--probe").arg(&address).output().unwrap();
     assert_eq!(bare.status.code(), Some(2), "{:?}", bare);
 
-    let killed = Command::new("kill").arg("-TERM").arg(child.id().to_string()).status().unwrap();
-    assert!(killed.success());
+    shut_down(&child);
     let status = child.wait().unwrap();
     reader.join().unwrap();
     let output: Vec<String> = lines.try_iter().collect();
@@ -228,7 +234,7 @@ mutations = [{ upsert_node = { id = "${who}", labels = ["Person"], attr = { gree
         };
         assert_eq!(marks.len(), 1, "{:?}", marks);
         assert_eq!((marks[0].name.as_str(), marks[0].position), ("greetings", expected_mark));
-        Command::new("kill").arg("-TERM").arg(child.id().to_string()).status().unwrap();
+        shut_down(&child);
         let status = child.wait().unwrap();
         reader.join().unwrap();
         assert!(status.success(), "{:?}: {:?}", status, lines.try_iter().collect::<Vec<_>>());
@@ -281,9 +287,31 @@ fn the_version_lists_the_features() {
     }
 }
 
-fn sigterm(child: &std::process::Child) {
-    let killed = Command::new("kill").arg("-TERM").arg(child.id().to_string()).status().unwrap();
-    assert!(killed.success());
+/// `CREATE_NEW_PROCESS_GROUP` (winbase.h).
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+/// Ask the server to shut down gracefully: SIGTERM on Unix; on Windows
+/// Ctrl-Break to its process group (`spawn` made one), sent by PowerShell
+/// with `GenerateConsoleCtrlEvent` (no unsafe code here), which works where
+/// the tests and the server share a console.
+fn shut_down(child: &std::process::Child) {
+    #[cfg(unix)]
+    let sent = Command::new("kill").arg("-TERM").arg(child.id().to_string()).output().unwrap();
+    #[cfg(windows)]
+    let sent = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg(format!(
+            "$k = Add-Type -Name Console -Namespace Iwdb -PassThru -MemberDefinition '[DllImport(\"kernel32.dll\", \
+             SetLastError = true)] public static extern bool GenerateConsoleCtrlEvent(uint e, uint group);'; \
+             if (-not $k::GenerateConsoleCtrlEvent(1, {})) {{ \
+             Write-Error ('GenerateConsoleCtrlEvent: ' + [Runtime.InteropServices.Marshal]::GetLastWin32Error()); \
+             exit 1 }}",
+            child.id()
+        ))
+        .output()
+        .unwrap();
+    assert!(sent.status.success(), "{:?}", sent);
 }
 
 /// No file: `IWDB_DATA_DIR` and the other variables are the whole
@@ -303,7 +331,7 @@ fn runs_from_the_environment_alone() {
     let address = ready_address(&lines, &mut Vec::new());
     let remote = admin(&address);
     block_on(remote.commit("default", vec![node("e")], CommitOptions::default())).unwrap();
-    sigterm(&child);
+    shut_down(&child);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
     let store = Store::open(&data, Default::default()).unwrap();
@@ -410,7 +438,7 @@ fn ready_only_after_a_large_recovery() {
     ready_address(&lines, &mut seen);
     let recovered = seen.iter().map(|l| event(l)).find(|e| e["message"] == "recovered").unwrap();
     assert_eq!(recovered["replayed"], BATCHES as u64);
-    sigterm(&child);
+    shut_down(&child);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
 }
@@ -444,7 +472,7 @@ fn a_store_without_users_refuses_to_start() {
     let remote = client(&address);
     assert_eq!(block_on(remote.login("admin", Secret::new(ADMIN_PASSWORD))).unwrap_err().code(), Code::Unauthenticated);
     block_on(remote.login("root", Secret::new("root-password"))).unwrap();
-    sigterm(&child);
+    shut_down(&child);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
     // Off, no users are needed (and in plaintext on loopback, which needs
@@ -461,13 +489,14 @@ fn a_store_without_users_refuses_to_start() {
     let address = ready_address(&lines, &mut Vec::new());
     let remote = Remote::connect(&format!("http://{}", address)).unwrap();
     block_on(remote.commit("default", vec![node("x")], CommitOptions::default())).unwrap();
-    sigterm(&child);
+    shut_down(&child);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
 }
 
 /// Send SIGHUP to the server, and wait for its log line that contains
 /// `expected`.
+#[cfg(unix)]
 fn hangup(child: &std::process::Child, lines: &mpsc::Receiver<String>, seen: &mut Vec<String>, expected: &str) {
     let sent = Command::new("kill").arg("-HUP").arg(child.id().to_string()).status().unwrap();
     assert!(sent.success());
@@ -547,15 +576,18 @@ fn no_secret_reaches_the_logs() {
         assert!(block_on(rest.login("ann", Secret::new("wrong-password-rest"))).is_err());
         secrets.push("wrong-password-rest".into());
     }
-    // Private keys: reloads that fail, then one that works
+    // Private keys: reloads that fail, then one that works (SIGHUP: Unix only)
     let (own, other) =
         (std::fs::read_to_string(&key).unwrap(), std::fs::read_to_string(fixture("client-ann.key")).unwrap());
-    std::fs::write(&key, &other).unwrap();
-    hangup(&child, &lines, &mut seen, "reloading TLS failed");
-    std::fs::write(&key, &own[..own.len() / 2]).unwrap();
-    hangup(&child, &lines, &mut seen, "reloading TLS failed");
-    std::fs::write(&key, &own).unwrap();
-    hangup(&child, &lines, &mut seen, "reloaded the TLS certificate");
+    #[cfg(unix)]
+    {
+        std::fs::write(&key, &other).unwrap();
+        hangup(&child, &lines, &mut seen, "reloading TLS failed");
+        std::fs::write(&key, &own[..own.len() / 2]).unwrap();
+        hangup(&child, &lines, &mut seen, "reloading TLS failed");
+        std::fs::write(&key, &own).unwrap();
+        hangup(&child, &lines, &mut seen, "reloaded the TLS certificate");
+    }
     for pem in [&own, &other] {
         // The base64 lines of the keys (long enough not to match by chance)
         secrets.extend(pem.lines().filter(|l| !l.starts_with("-----") && l.len() >= 16).map(str::to_owned));
@@ -580,13 +612,14 @@ fn no_secret_reaches_the_logs() {
     assert!(
         tail.iter().any(|e| e.target == "iwdb::audit" && e.fields.contains(&("operation".into(), "CreateUser".into())))
     );
+    #[cfg(unix)]
     assert!(tail_text.iter().any(|l| l.contains("reloading TLS failed")), "{:?}", tail_text);
     for line in &tail_text {
         for secret in &secrets {
             assert!(!line.contains(secret.as_str()), "a secret in the log tail: {}", line);
         }
     }
-    sigterm(&child);
+    shut_down(&child);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
     seen.extend(lines.try_iter());
@@ -633,6 +666,7 @@ fn no_secret_reaches_the_logs() {
 }
 
 /// The certificate a TLS server at `address` presents.
+#[cfg(unix)]
 fn presented(address: &str) -> Vec<u8> {
     let tls = ClientTls { ca: Some(fixture("ca.pem")), ..ClientTls::default() };
     let config = std::sync::Arc::new(tls.rustls_config(&[b"h2"]).unwrap());
@@ -645,6 +679,7 @@ fn presented(address: &str) -> Vec<u8> {
     connection.peer_certificates().unwrap()[0].to_vec()
 }
 
+#[cfg(unix)]
 fn der(name: &str) -> Vec<u8> {
     use rustls_pki_types::pem::PemObject;
     rustls_pki_types::CertificateDer::from_pem_file(fixture(name)).unwrap().to_vec()
@@ -652,6 +687,9 @@ fn der(name: &str) -> Vec<u8> {
 
 /// SIGHUP reloads the certificate (ADR 0048): new connections get the new
 /// one, a reload that fails keeps it, and the server goes on serving.
+/// Unix only: Windows has no SIGHUP, and rotating the certificate there
+/// means a restart (ADR 0058).
+#[cfg(unix)]
 #[test]
 fn sighup_reloads_the_certificate() {
     let dir = tempfile::tempdir().unwrap();
@@ -680,7 +718,7 @@ fn sighup_reloads_the_certificate() {
     assert_eq!(presented(&address), der("server-renewed.pem"));
     block_on(remote.commit("default", vec![node("after")], CommitOptions::default())).unwrap();
     admin(&address);
-    sigterm(&child);
+    shut_down(&child);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
 }
@@ -775,7 +813,7 @@ fn opens_no_connection_it_was_not_configured_for() {
     // Give anything started in the background a moment
     std::thread::sleep(Duration::from_millis(300));
     let listed = sockets(child.id());
-    sigterm(&child);
+    shut_down(&child);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
     let Some(listed) = listed else {
@@ -849,7 +887,7 @@ fn serves_the_metrics_to_prometheus() {
     assert!(text.contains("iwdb_requests_total{operation=\"Commit\",code=\"ok\"} 1\n"), "{}", text);
     assert!(text.contains("iwdb_ready 1\n"));
     assert!(!text.contains(token.expose()) && !text.contains(ADMIN_PASSWORD));
-    sigterm(&child);
+    shut_down(&child);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
 }
@@ -898,7 +936,7 @@ fn a_collector_that_is_down_slows_and_fails_no_request() {
         std::thread::sleep(Duration::from_millis(200));
     }
     let start = std::time::Instant::now();
-    sigterm(&child);
+    shut_down(&child);
     assert!(child.wait().unwrap().success());
     assert!(start.elapsed() < Duration::from_secs(15), "shutdown took {:?}", start.elapsed());
     reader.join().unwrap();
@@ -981,7 +1019,7 @@ fn the_shutdown_sends_the_queued_spans_to_the_collector() {
     let address = ready_address(&lines, &mut Vec::new());
     let remote = admin(&address);
     block_on(remote.commit("default", vec![node("n1")], CommitOptions::default())).unwrap();
-    sigterm(&child);
+    shut_down(&child);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
     let mut names = Vec::new();

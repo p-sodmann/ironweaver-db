@@ -23,6 +23,11 @@ iwdb-server = { path = "../iwdb-server", default-features = false, features = ["
 # --json output (already in the tree)
 serde_json.workspace = true
 
+# A password from the console without echo on Windows (ADR 0058), where
+# there is no `stty`; well known, on windows-sys (already in the tree)
+[target.'cfg(windows)'.dependencies]
+rpassword = "7.5"
+
 [dev-dependencies]
 tempfile.workspace = true
 # The shell's tests serve a store in-process (iwdb_server::Server)

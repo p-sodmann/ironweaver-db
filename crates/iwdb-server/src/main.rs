@@ -1,9 +1,10 @@
 //! `iwdb-server [--config <file>]`: serve the data directory the
 //! configuration names (file and `IWDB_*` variables, ADR 0039) over gRPC
 //! and REST (one port), over TLS unless the configuration turns it off
-//! (ADR 0048), until SIGINT or SIGTERM, then shut down gracefully (ADR
-//! 0027). A second signal ends the drain early. SIGHUP reloads the TLS
-//! certificate, key and client CA.
+//! (ADR 0048), until SIGINT or SIGTERM (on Windows Ctrl-C, Ctrl-Break, the
+//! console's close or the system's shutdown, ADR 0058), then shut down
+//! gracefully (ADR 0027). A second signal ends the drain early. SIGHUP
+//! reloads the TLS certificate, key and client CA (Unix only).
 //!
 //! The port opens first and answers health while the store recovers; the
 //! server is ready once recovery has finished (ADR 0040). Logs are JSON
@@ -61,8 +62,9 @@ ready once recovery has finished. --probe asks a server's readiness and exits
 a wildcard listen address as loopback, TLS as configured), or the URL given.
 It doesn't verify the server's certificate and sends no credentials.
 
-SIGINT or SIGTERM shuts down gracefully; a second one cancels the calls
-still running.";
+SIGINT or SIGTERM (on Windows Ctrl-C, Ctrl-Break, closing the console or a
+system shutdown) shuts down gracefully; a second one cancels the calls still
+running. SIGHUP reloads the TLS certificate (Unix only).";
 
 /// What this build serves and reads (ADR 0034), for `--version`.
 const FEATURES: &[&str] = &[
@@ -419,17 +421,34 @@ fn reload_on_hangup(tls: Arc<ServerTls>) -> Result<(), String> {
     Ok(())
 }
 
+/// Windows has no SIGHUP, and the certificate isn't reloaded there: rotating
+/// it means a restart (ADR 0058).
 #[cfg(not(unix))]
 fn reload_on_hangup(_tls: Arc<ServerTls>) -> Result<(), String> {
     Ok(())
 }
 
-/// A counter of the shutdown signals received (SIGINT, and SIGTERM on Unix).
+/// A counter of the shutdown signals received: SIGINT and SIGTERM on Unix;
+/// Ctrl-C, Ctrl-Break, the console's close and the system's shutdown on
+/// Windows (ADR 0058), where the system ends the process a few seconds
+/// after the last two whatever we do (a drain cut short is a kill, which
+/// recovery handles).
 fn signals() -> Result<watch::Receiver<u32>, String> {
     let (count, received) = watch::channel(0u32);
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| format!("listening for SIGTERM: {}", e))?;
+    #[cfg(windows)]
+    let (mut ctrl_c, mut ctrl_break, mut close, mut shutdown) = {
+        use tokio::signal::windows;
+        let listen = |event: &str, e: std::io::Error| format!("listening for {}: {}", event, e);
+        (
+            windows::ctrl_c().map_err(|e| listen("Ctrl-C", e))?,
+            windows::ctrl_break().map_err(|e| listen("Ctrl-Break", e))?,
+            windows::ctrl_close().map_err(|e| listen("the console's close", e))?,
+            windows::ctrl_shutdown().map_err(|e| listen("the system's shutdown", e))?,
+        )
+    };
     tokio::spawn(async move {
         loop {
             #[cfg(unix)]
@@ -437,7 +456,14 @@ fn signals() -> Result<watch::Receiver<u32>, String> {
                 r = tokio::signal::ctrl_c() => r.is_ok(),
                 r = terminate.recv() => r.is_some(),
             };
-            #[cfg(not(unix))]
+            #[cfg(windows)]
+            let got = tokio::select! {
+                r = ctrl_c.recv() => r.is_some(),
+                r = ctrl_break.recv() => r.is_some(),
+                r = close.recv() => r.is_some(),
+                r = shutdown.recv() => r.is_some(),
+            };
+            #[cfg(not(any(unix, windows)))]
             let got = tokio::signal::ctrl_c().await.is_ok();
             if !got {
                 return;
