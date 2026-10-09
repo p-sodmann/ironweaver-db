@@ -1,6 +1,6 @@
 # Review: `ironweaver-core` 0.2 as a database foundation
 
-Reviewed: Ironweaver `origin/main` at `c69ef51` (2026-10-07, "0.2.0 — unreleased", merge of PR #65), crate `crates/ironweaver-core`. Previous reviews: `7e7b7fa`, `ca308f0`, `d15a7ec`, `ace9a0d`, `cd09ea0`, `3b15149`, `a14149e`, `02cefab`.
+Reviewed: Ironweaver `origin/main` at `9cec233` (2026-10-09, "0.2.0 — unreleased", merge of PR #70), crate `crates/ironweaver-core`. Previous reviews: `c69ef51`, `7e7b7fa`, `ca308f0`, `d15a7ec`, `ace9a0d`, `cd09ea0`, `3b15149`, `a14149e`, `02cefab`.
 Question: which changes does Ironweaver need so that a production-grade database can sit on top of it?
 Verified: the claims below are checked against the pinned revision by `crates/iwdb-engine/tests/core_smoke.rs`, or, where the database relies on them through its own types, by `db_graph.rs` (saves, loads, indexes), `commit_model.rs` (op replay with explicit edge ids) and `crates/iwdb/tests/concurrency.rs` (cancelling analytics). Corrections from step 1 (against `02cefab`) are marked *(step 1)*; findings from the `a14149e` bump are marked *(a14149e)*. The `3b15149` bump is summarized in [its own section](#findings-from-the-3b15149-bump); the findings below that it fixed are marked *(fixed in `3b15149`)*.
 
@@ -170,6 +170,14 @@ Bumped from `d15a7ec` to `ca308f0` (2026-10-03, step 11b): upstream PR #56 moves
 - **Seeded results change.** For a given seed, random walks, node2vec walks and Leiden give different results than with `rand` 0.8, still the same on every run and with any number of cores (FastRP and sampled betweenness don't change). These are read results and never stored; no test of ours pins them, and the conformance suite passes unchanged. Clients that compare seeded walks across versions see the change (CHANGELOG).
 - **Dependencies.** `rand` 0.8, `rand_chacha` 0.3, `rand_core` 0.6 and `getrandom` 0.2 leave the tree: one copy of `rand` remains (0.9, shared with `proptest`). `cargo deny check` passes.
 - The compatibility fixtures, the crash run and the cross-version check of step 11b pass unchanged.
+
+## Findings from the `9cec233` bump
+
+Bumped from `c69ef51` to `9cec233` (2026-10-09, an upstream check before step 16h): upstream PRs #67 (induced subgraph copies), #68 and #69 (the Python LGF parser) and #70 (Python `NodeView.type`). Only #67 touches `crates/ironweaver-core` (`graph.rs`); the rest is Python, benchmarks and measurement data.
+
+- **An edge index bug that reached us (fixed in `4670e49`).** The edge index keeps ids below `max(4 × edges, 1024)` in a dense table and larger ones in a hash map. When the dense table later grew over an id that had gone to the map, `get` found an empty dense slot and didn't look in the map, so the edge could no longer be found by id (and `remove` cleared the wrong place). `reserve_edge_ids` raises only the counter, not the table, so a durable store hit this after recovering from a checkpoint whose surviving edges had high ids (most edges deleted), once commits added enough edges: `edge`, `DeleteEdge` and edge updates answered "not found" for an edge that existed. Nothing was lost on disk, the edge was only unreachable by id. `edges_with_high_ids_survive_recovery_and_later_commits` (`crates/iwdb/tests/recovery.rs`) fails at `c69ef51` and passes at `9cec233`. Not one of our issues: the upstream fix came first, so nothing was filed.
+- **Not ours:** an edgeless induced subgraph no longer allocates a dense id table the size of the source's id range (`0429d40`), and large induced copies use a dense remap (`61ded55`). Projections and checkpoints copy with `induced_subgraph`; their results are unchanged in our tests.
+- **Checks:** the workspace builds and its tests pass, `cargo deny check` passes, and the crash harness passes at 150 cycles × 3 fsync policies. The core's `rust-version` is still 1.99. No format or fixture changed.
 
 ## Findings from the `c69ef51` bump
 

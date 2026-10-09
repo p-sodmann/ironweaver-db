@@ -81,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Job progress (upstream check, core `c69ef51`): `JobInfo.progress` gives the core's report while a job runs (phase, units done, total) and keeps the last one once it ends. It is in the proto (`JobProgress`, field 19), REST, both Rust clients, `iwctl jobs` and the console's jobs table. `Ns::analyze_reporting` runs an analysis under `cancel::run_with_progress`.
 
 ### Changed
+- `ironweaver-core` bumped from `c69ef51` to `9cec233`: a fix in the edge index (see Fixed), and edgeless and large induced subgraph copies no longer allocate an id table the size of the source's id range. No API or format change.
 - `ironweaver-core` bumped from `7e7b7fa` to `c69ef51`. It fixes our upstream issues #60, #61 and #62, all adopted:
   - The schema read lists every label and edge type with exact counts. Only keys are sampled, and `max_edges` no longer applies to it.
   - Memory accounting takes payloads, index builds and raw projections from the core.
@@ -121,6 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TLS is on by default (step 15b): a server without `[tls] cert` and `key` doesn't start. Give it a certificate, or set `[tls] enabled = false` (and, on a non-loopback address, keep `[server] plaintext_public = true`). The Docker image expects the certificate at `/etc/iwdb/tls/server.pem` and `server.key`; its `HEALTHCHECK` is `iwdb-server --probe --config /etc/iwdb/iwdb.toml`, and `--probe <host:port>` became `--probe https://<host:port>` (or `http://`). Rust clients report a connection that fails before the server answers (a refused TLS handshake, a broken HTTP/2 connection) as `unavailable` rather than `internal`.
 
 ### Fixed
+- After recovery from a checkpoint whose surviving edges had high ids (most edges deleted), commits that added enough edges made those edges unreachable by id: `edge`, `DeleteEdge` and updates answered "not found" for an edge that existed. The cause was in `ironweaver-core`'s edge index; fixed upstream in `4670e49` and taken with the bump to `9cec233` (`edges_with_high_ids_survive_recovery_and_later_commits`).
 - A long poll of the change stream that saw no commit answered `timeout` instead of an empty batch when no worker started within the last tenth of its timeout (a loaded machine); it now answers the empty batch without a worker (step 15c, CI on macOS).
 - A gRPC client whose connection closed under a call (a client certificate the server refused, which TLS 1.3 reports after the client's side of the handshake) got `cancelled`; it is `unavailable`, like other connections that fail (step 15c, CI on Linux).
 - CI's Python job built a gRPC-only server, against which the account tests' REST setup got 404; it builds the server with REST, and those tests skip with a message against a server without it (step 15c).

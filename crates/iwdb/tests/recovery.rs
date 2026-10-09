@@ -18,7 +18,7 @@ use std::io::Write;
 
 use common::{Call, Fault, TestFs};
 use iwdb::{Error, Store};
-use iwdb_engine::{Change, CommitRecord};
+use iwdb_engine::{Change, CommitRecord, Mutation};
 use iwdb_storage::format::Damage;
 use iwdb_storage::{Wal, WalOptions};
 use support::{
@@ -332,4 +332,49 @@ fn a_wal_that_ends_before_the_checkpoint_is_refused() {
     let before = snapshot(dir.path());
     assert_matches!(Store::open(dir.path(), options(2)), Err(Error::LogEndsBefore { .. }));
     assert_eq!(snapshot(dir.path()), before);
+}
+
+/// After recovery from a checkpoint whose surviving edges have high ids
+/// (most edges deleted), those edges must stay findable by id while new
+/// commits add edges. Core `c69ef51` lost them: the loaded ids went to the
+/// edge index's sparse map, and a later commit grew its dense table over
+/// them (fixed upstream in `4670e49`).
+#[test]
+fn edges_with_high_ids_survive_recovery_and_later_commits() {
+    let edge = || Mutation::AddEdge {
+        from: "a".into(),
+        to: "b".into(),
+        ty: None,
+        attr: Default::default(),
+        meta: Default::default(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), options(2)).unwrap();
+    let mut m: Vec<Mutation> = ["a", "b"]
+        .iter()
+        .map(|id| Mutation::UpsertNode {
+            id: (*id).into(),
+            labels: vec![],
+            attr: Default::default(),
+            meta: Default::default(),
+            expected_version: None,
+        })
+        .collect();
+    m.extend((0..3000).map(|_| edge()));
+    let ids = store.commit(&m).unwrap().edge_ids;
+    let (kept, deleted) = ids.split_last().unwrap();
+    let deletes: Vec<Mutation> =
+        deleted.iter().map(|&id| Mutation::DeleteEdge { id, expected_version: None }).collect();
+    store.commit(&deletes).unwrap();
+    store.close().unwrap();
+
+    let store = Store::open(dir.path(), options(2)).unwrap();
+    assert_eq!(store.recovery().replayed, 0, "loaded from the checkpoint");
+    let added = store.commit(&vec![edge(); 1500]).unwrap().edge_ids;
+    for &id in std::iter::once(kept).chain(&added) {
+        assert!(store.edge(id).is_some(), "edge {:?} is gone", id);
+    }
+    store.commit(&[Mutation::DeleteEdge { id: *kept, expected_version: None }]).unwrap();
+    assert!(store.edge(*kept).is_none());
+    store.close().unwrap();
 }
