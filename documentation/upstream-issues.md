@@ -1,8 +1,8 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`. Drafts 19–21 are findings from step 10, fixed upstream in `ace9a0d`. Draft 22 is a finding from step 11, fixed upstream in `7e7b7fa`.
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`. Drafts 19–21 are findings from step 10, fixed upstream in `ace9a0d`. Draft 22 is a finding from step 11, fixed upstream in `7e7b7fa`. Draft 27 is a finding from step 16h, open ([#71](https://github.com/p-sodmann/Ironweaver/issues/71)).
 
-Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`, drafts 19–21 against `cd09ea0`, draft 22 against `d15a7ec`. Titles are ready to paste; the text below each title is the issue body.
+Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`, drafts 19–21 against `cd09ea0`, draft 22 against `d15a7ec`, draft 27 against `9cec233`. Titles are ready to paste; the text below each title is the issue body.
 
 | # | Title | Status |
 |---|---|---|
@@ -32,6 +32,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 24 | [List a graph's labels, and count its edges by type](#24-list-a-graphs-labels-and-count-its-edges-by-type) | fixed upstream (`c69ef51`): [#60](https://github.com/p-sodmann/Ironweaver/issues/60) |
 | 25 | [`memory_usage` can't count payloads, and an index build reports no memory](#25-memory_usage-cant-count-payloads-and-an-index-build-reports-no-memory) | fixed upstream (`c69ef51`): [#61](https://github.com/p-sodmann/Ironweaver/issues/61) |
 | 26 | [Algorithms report no progress while they run](#26-algorithms-report-no-progress-while-they-run) | fixed upstream (`c69ef51`): [#62](https://github.com/p-sodmann/Ironweaver/issues/62) |
+| 27 | [`write_atomic` doesn't sync the directory on Windows](#27-write_atomic-doesnt-sync-the-directory-on-windows) | open: [#71](https://github.com/p-sodmann/Ironweaver/issues/71) |
 
 ---
 
@@ -665,3 +666,38 @@ This fits draft 23's `Budget` progress counter (a search's visited nodes and edg
 **Why the database needs it**
 
 Ironweaver DB runs analytics jobs in the background (step 16f, ADR 0056): started, listed, cancelled and fetched by id, for jobs longer than any request's timeout. An operator watching a job, or deciding whether to cancel it, wants to know how far it has got. Until the core reports progress, a job reports only its phase (queued, collecting the projection, running, done), and a running PageRank looks the same at its first iteration as at its last.
+
+## 27. `write_atomic` doesn't sync the directory on Windows
+
+Found in step 16h (filed as [#71](https://github.com/p-sodmann/Ironweaver/issues/71)), checked against `9cec233`.
+
+**Problem**
+
+`format::write_atomic` fsyncs the directory after the rename on Unix only (`#[cfg(unix)]`), and its doc comment says "Windows has no way to sync a directory; there the rename is done but not explicitly made durable". Windows can: a directory opened with `FILE_FLAG_BACKUP_SEMANTICS` and write access can be flushed with `FlushFileBuffers` (`File::sync_all`), which on NTFS makes its entries (created, renamed and removed files) durable. No unsafe code is needed, std has the flag through `OpenOptionsExt::custom_flags`:
+
+```rust
+use std::os::windows::fs::OpenOptionsExt;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+std::fs::OpenOptions::new()
+    .write(true)
+    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+    .open(dir)?
+    .sync_all()?;
+```
+
+So on Windows `Ok` from `write_atomic` doesn't mean that the rename is durable, and a directory that can't be synced isn't reported. Reproduction on Windows: deny the current user writing the directory's extended attributes (`icacls sub /deny "%USERDOMAIN%\%USERNAME%:(WEA)"`). Files can still be created and renamed in it, but it can't be opened for writing, so the sync above fails, while `write_atomic` returns `Ok`:
+
+```rust
+std::fs::create_dir("sub").unwrap();
+// icacls sub /deny <user>:(WEA)
+let result = ironweaver_core::format::write_atomic("sub/file", |out| out.write_all(b"data"));
+assert!(result.is_ok()); // the directory was never synced
+```
+
+**Proposal**
+
+Sync the directory on Windows too, as above, and return its error as on Unix (#32). Then the doc comment can say for every platform what `Ok` means: contents fsynced, rename done, rename durable. FAT/exFAT and network shares make no such promise; the docs could say that durability is what the file system gives.
+
+**Why the database needs it**
+
+Ironweaver DB supports Windows from step 16h on, with the same durability guarantees as on Unix. It writes checkpoints, the namespace log, backup manifests and markers with `write_atomic`, and deletes WAL segments and old checkpoints once a new checkpoint's rename is durable. Until this is fixed, our `StdFs::write_atomic` syncs the directory itself on Windows after `write_atomic` succeeds. That works, but it's a workaround for something `write_atomic` already promises on Unix. A pin test (`write_atomic_does_not_sync_the_directory_on_windows`) fails once it is fixed.

@@ -1,7 +1,7 @@
 # Upstream check (recurring gate)
 
 Status: recurring
-Runs: before starting [step 10](step_10.md), [step 11](step_11.md), [step 12](step_12.md), [step 13](step_13.md), [step 16f](step_16f.md) and [step 17](step_17.md), and as part of every `ironweaver-core` bump ([ADR 0002](../adr/0002-ironweaver-core-dependency.md)).
+Runs: before starting [step 10](step_10.md), [step 11](step_11.md), [step 12](step_12.md), [step 13](step_13.md), [step 16f](step_16f.md), [step 16h](step_16h.md) and [step 17](step_17.md), and as part of every `ironweaver-core` bump ([ADR 0002](../adr/0002-ironweaver-core-dependency.md)).
 
 ## Goal
 
@@ -16,12 +16,11 @@ Find out which of our upstream issues have been fixed, adopt the fixes, and remo
 
 ## Open issues
 
-Last checked: 2026-10-09 at core `9cec233` (bumped from `c69ef51` before step 16h, commit `core: bump ironweaver-core c69ef51 -> 9cec233`; it also fixes an edge index bug that reached us, see the core review). No issue of ours is open. Before that on 2026-10-07 at `c69ef51` (bumped from `7e7b7fa`: #60, #61 and #62 fixed and adopted), on 2026-10-06 at `7e7b7fa` (start of step 16f: #60, #61 and the new #62 open, no bump), on 2026-10-03 at `7e7b7fa` (start of step 12: #57 fixed and adopted), and at `ca308f0` (step 11b bump: edition 2024, Rust 1.99, `rand` 0.9) and `d15a7ec`, at the start of step 11. #26–#35 were fixed in `3b15149`, #46 in `cd09ea0`, #48–#50 in `ace9a0d`, #57 in `7e7b7fa`, #60–#62 in `c69ef51` (see Closed issues). `d15a7ec` (upstream #54, not one of ours) removed the format-1 binary reader and the `format-v1` feature; see the #30 row.
-
-None open.
+Last checked: 2026-10-09 at core `9cec233` (bumped from `c69ef51` before step 16h, commit `core: bump ironweaver-core c69ef51 -> 9cec233`; it also fixes an edge index bug that reached us, see the core review). No issue of ours was open then; step 16h filed #71 (open). Before that on 2026-10-07 at `c69ef51` (bumped from `7e7b7fa`: #60, #61 and #62 fixed and adopted), on 2026-10-06 at `7e7b7fa` (start of step 16f: #60, #61 and the new #62 open, no bump), on 2026-10-03 at `7e7b7fa` (start of step 12: #57 fixed and adopted), and at `ca308f0` (step 11b bump: edition 2024, Rust 1.99, `rand` 0.9) and `d15a7ec`, at the start of step 11. #26–#35 were fixed in `3b15149`, #46 in `cd09ea0`, #48–#50 in `ace9a0d`, #57 in `7e7b7fa`, #60–#62 in `c69ef51` (see Closed issues). `d15a7ec` (upstream #54, not one of ours) removed the format-1 binary reader and the `format-v1` feature; see the #30 row.
 
 | Issue | Finding | Needed before | Until fixed | When fixed |
 |---|---|---|---|---|
+| [#71](https://github.com/p-sodmann/Ironweaver/issues/71) | `write_atomic` doesn't sync the directory on Windows (filed in step 16h, [draft 27](../upstream-issues.md#27-write_atomic-doesnt-sync-the-directory-on-windows)) | step 16h (Windows) | `StdFs::write_atomic` syncs the parent directory itself on Windows after the core's call (ADR 0058) | Remove that `#[cfg(windows)]` sync in `crates/iwdb-storage/src/io.rs`; `write_atomic_does_not_sync_the_directory_on_windows` (`core_smoke.rs`) fails by design: turn it into a check that the core reports a failed directory sync on Windows, like `write_atomic_reports_a_failed_directory_sync` on Unix |
 
 ## Closed issues
 
