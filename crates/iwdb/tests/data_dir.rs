@@ -256,3 +256,54 @@ fn reopening_while_another_thread_spawns_processes() {
     assert!(spawner.join().unwrap() > if cfg!(windows) { 10 } else { 100 });
     assert_eq!(locked, 0);
 }
+
+/// A data directory, its backup and a restore at paths with spaces, longer
+/// than Windows' 260 characters, and on Windows a verbatim (`\\?\`) and a
+/// UNC path (`\\localhost\C$\...`, if the machine shares its drives): the
+/// store opens, commits, checkpoints, backs up, verifies, reopens and
+/// restores the same state (ADR 0058).
+#[test]
+fn data_directories_at_unusual_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(tmp.path()).unwrap();
+    // Six directories of 50 characters
+    let long = (0..6).fold(base.join("long"), |path, i| path.join(format!("{}{}", i, "d".repeat(49))));
+    let mut roots = vec![base.join("with spaces").join("and more"), long];
+    assert!(roots[1].as_os_str().len() > 300);
+    #[cfg(windows)]
+    {
+        // `canonicalize` gives the verbatim form on Windows
+        assert!(base.to_string_lossy().starts_with(r"\\?\"), "{}", base.display());
+        roots.push(base.join("verbatim"));
+        let plain = base.to_string_lossy().trim_start_matches(r"\\?\").to_owned();
+        let unc = format!(r"\\localhost\{}${}", &plain[..1], &plain[2..]);
+        if fs::metadata(&unc).is_ok() {
+            roots.push(std::path::PathBuf::from(unc).join("unc"));
+        } else {
+            eprintln!("{} isn't reachable: no UNC path checked", unc);
+        }
+    }
+    for root in roots {
+        fs::create_dir_all(&root).unwrap();
+        let (data, backup, restored) = (root.join("data"), root.join("backup"), root.join("restored"));
+        let mut reference = reference();
+        let store = Store::open(&data, options(2)).unwrap();
+        run(&store, &mut reference, &support::workload(40, 32));
+        store.checkpoint().unwrap();
+        run(&store, &mut reference, &[pad(1)]);
+        store.backup(&backup).unwrap();
+        store.close().unwrap();
+        for dir in [&data, &backup] {
+            let verified = iwdb::verify(dir).unwrap();
+            assert!(verified.is_ok(), "{}: {:#?}", dir.display(), verified.problems);
+        }
+        let store = Store::open(&data, options(2)).unwrap();
+        assert_eq!(store_state(&store), state(&reference), "{}", data.display());
+        store.close().unwrap();
+        let sources = iwdb::RestoreSources { backup: Some(backup), archive: None };
+        iwdb::restore(&restored, &sources, iwdb::RestoreTarget::Latest).unwrap();
+        let store = Store::open(&restored, options(2)).unwrap();
+        assert_eq!(store_state(&store), state(&reference), "{}", restored.display());
+        store.close().unwrap();
+    }
+}

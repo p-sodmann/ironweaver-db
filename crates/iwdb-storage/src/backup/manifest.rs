@@ -222,7 +222,9 @@ pub fn check_files(root: &Path, manifest: &Manifest) -> Vec<Finding> {
     let mut problems = Vec::new();
     let problem = |path: &Path, message: String| Finding { path: Some(path.to_path_buf()), message };
     for file in &manifest.files {
-        let path = root.join(&file.path);
+        // One component at a time: a verbatim Windows root (`\\?\D:\...`)
+        // doesn't read `/` as a separator (ADR 0058)
+        let path = file.path.split('/').fold(root.to_path_buf(), |path, part| path.join(part));
         match crc_of(&path) {
             Ok((len, _)) if len != file.len => problems.push(problem(
                 &path,
