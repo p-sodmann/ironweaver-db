@@ -13,7 +13,7 @@ repository = "https://github.com/p-sodmann/ironweaver-db"
 
 [workspace.dependencies]
 # Pinned git revision until 0.2.0 is on crates.io; see documentation/adr/0002-ironweaver-core-dependency.md.
-ironweaver-core = { git = "https://github.com/p-sodmann/Ironweaver", rev = "c69ef5146c5865f2fd160a2df0a13b968d0255a3" }
+ironweaver-core = { git = "https://github.com/p-sodmann/Ironweaver", rev = "9cec233619dbb34263f02c3275cec2beb207c732" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 proptest = "1"
