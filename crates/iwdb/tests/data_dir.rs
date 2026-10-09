@@ -268,6 +268,7 @@ fn data_directories_at_unusual_paths() {
     let base = fs::canonicalize(tmp.path()).unwrap();
     // Six directories of 50 characters
     let long = (0..6).fold(base.join("long"), |path, i| path.join(format!("{}{}", i, "d".repeat(49))));
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut roots = vec![base.join("with spaces").join("and more"), long];
     assert!(roots[1].as_os_str().len() > 300);
     #[cfg(windows)]
