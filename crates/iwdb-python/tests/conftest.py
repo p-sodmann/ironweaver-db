@@ -21,6 +21,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -44,7 +45,8 @@ def server_binary():
     """The iwdb-server to start, or None."""
     if os.environ.get("IWDB_SERVER"):
         return Path(os.environ["IWDB_SERVER"])
-    found = [REPO / "target" / kind / "iwdb-server" for kind in ("debug", "release")]
+    name = "iwdb-server.exe" if sys.platform == "win32" else "iwdb-server"
+    found = [REPO / "target" / kind / name for kind in ("debug", "release")]
     found = [p for p in found if p.exists()]
     return max(found, key=lambda p: p.stat().st_mtime) if found else None
 
@@ -84,8 +86,10 @@ class Server:
         )
         self.stderr = []
         env = dict(os.environ, IWDB_AUTH_BOOTSTRAP_PASSWORD=ADMIN[1])
+        # On Windows a process group of its own, for Ctrl-Break (`stop`)
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
         self.process = subprocess.Popen(
-            [str(binary), "--config", str(config)], stderr=subprocess.PIPE, text=True, env=env
+            [str(binary), "--config", str(config)], stderr=subprocess.PIPE, text=True, env=env, creationflags=flags
         )
         # The "serving <dir> on <address>" event: the server is ready (a JSON
         # line, since stderr is a pipe; a text line with IWDB_LOG_FORMAT=text)
@@ -117,9 +121,10 @@ class Server:
             self.stderr.append(line)
 
     def stop(self):
-        """Shut down gracefully (SIGTERM); returns the exit code."""
+        """Shut down gracefully (SIGTERM; Ctrl-Break on Windows, ADR 0058);
+        returns the exit code."""
         if self.process.poll() is None:
-            self.process.send_signal(signal.SIGTERM)
+            self.process.send_signal(signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGTERM)
         try:
             return self.process.wait(timeout=30)
         except subprocess.TimeoutExpired:
