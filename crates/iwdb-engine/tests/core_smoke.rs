@@ -184,6 +184,49 @@ fn write_atomic_reports_a_failed_directory_sync() {
     assert_eq!(std::fs::read(sub.join("file")).expect("read"), b"data");
 }
 
+/// Deny or allow (`icacls`) the current user writing a directory's
+/// extended attributes. Denied, files can still be created and renamed in
+/// it, but the directory can't be opened for writing, which its fsync
+/// needs (ADR 0058). Whether the directory can still be opened so (an
+/// account whose privileges override the ACL: nothing to show then).
+#[cfg(windows)]
+fn deny_directory_write(dir: &Path, deny: bool) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    let user = std::process::Command::new("whoami").output().expect("whoami");
+    let user = String::from_utf8_lossy(&user.stdout).trim().to_owned();
+    let mut icacls = std::process::Command::new("icacls");
+    icacls.arg(dir);
+    if deny {
+        icacls.arg("/deny").arg(format!("{}:(WEA)", user));
+    } else {
+        icacls.arg("/remove:d").arg(&user);
+    }
+    let out = icacls.output().expect("icacls");
+    assert!(out.status.success(), "icacls: {}", String::from_utf8_lossy(&out.stdout));
+    std::fs::OpenOptions::new().write(true).custom_flags(0x0200_0000).open(dir).is_ok()
+}
+
+/// Pin of upstream #71: on Windows, `write_atomic` doesn't sync the
+/// directory after the rename ("not possible on Windows"), so a directory
+/// that can't be synced still gives `Ok`. `StdFs::write_atomic` syncs it
+/// itself (ADR 0058). This fails once upstream syncs the directory; then
+/// remove the workaround (upstream check).
+#[cfg(windows)]
+#[test]
+fn write_atomic_does_not_sync_the_directory_on_windows() {
+    let dir = TempDir::new("smoke-dirsync");
+    let sub = dir.0.join("sub");
+    std::fs::create_dir(&sub).expect("mkdir");
+    if deny_directory_write(&sub, true) {
+        deny_directory_write(&sub, false);
+        return;
+    }
+    let result = format::write_atomic(sub.join("file"), |out| out.write_all(b"data"));
+    deny_directory_write(&sub, false);
+    assert!(result.is_ok(), "upstream #71 is fixed: remove the workaround in StdFs::write_atomic ({:?})", result);
+    assert_eq!(std::fs::read(sub.join("file")).expect("read"), b"data");
+}
+
 /// Fixed upstream (#33): the binary header's `flags` (u16, bytes 10..12)
 /// and `reserved` (u32, bytes 12..16) are written as 0 and checked by both
 /// loaders (the CRC32 still covers only the payload): an unknown flag is

@@ -635,11 +635,20 @@ mod tests {
             let start = Instant::now();
             spans(&tracing, 1000);
             assert!(start.elapsed() < Duration::from_secs(5), "{:?}: {:?}", protocol, start.elapsed());
+            // The shutdown's deadline holds (with room for a stalled
+            // runner): on Windows a connection to a closed port takes about
+            // 2 s to fail, so the exports run until the deadline
             let start = Instant::now();
-            tracing.shutdown(Duration::from_secs(10));
+            tracing.shutdown(Duration::from_secs(5));
             assert!(start.elapsed() < Duration::from_secs(10), "{:?}", start.elapsed());
             // Every span is dropped and counted: by a failed export, or at
-            // the queue while a slow failing export holds it up
+            // the queue while a slow failing export holds it up. A batch in
+            // an export when the deadline passed is counted when that export
+            // fails, by the detached thread, at most EXPORT_TIMEOUT later
+            let until = Instant::now() + EXPORT_TIMEOUT + Duration::from_secs(10);
+            while counters.read().1 + counters.read().2 < 3000 && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
             let (exported, queue_full, failed) = counters.read();
             assert_eq!((exported, queue_full + failed), (0, 3000), "{:?}", protocol);
             assert!(failed > 0, "{:?}: {:?}", protocol, counters.read());

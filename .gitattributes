@@ -1,3 +1,8 @@
+# Text files are LF in every checkout, Windows included (ADR 0058): fixtures
+# and generated documents (openapi.json, bundle.js) are compared byte for byte.
+# First, so that the lines below override it
+* text=auto eol=lf
+
 # Fixtures of the on-disk formats are binary
 *.wal binary
 *.ckpt binary

@@ -194,7 +194,7 @@ fn inside_a_checkpoint_write() {
                 .recovery()
                 .removed_temp_files
                 .iter()
-                .filter(|p| p.to_string_lossy().contains("/checkpoints/"))
+                .filter(|p| p.parent().is_some_and(|dir| dir.ends_with("checkpoints")))
                 .collect();
             assert_eq!(removed.len(), 1, "{} {:?}: {:?}", policy, when, store.recovery().removed_temp_files);
             assert_eq!(store.recovery().checkpoint, before, "{} {:?}", policy, when);

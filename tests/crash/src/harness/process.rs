@@ -88,7 +88,8 @@ impl ChildProcess {
         }
         let killed = self.child.try_wait()?.is_none();
         if killed {
-            // SIGKILL on Unix: no destructor, no flush, no unwinding
+            // SIGKILL on Unix, TerminateProcess on Windows: no destructor, no
+            // flush, no unwinding (ADR 0058)
             self.child.kill()?;
         }
         let status = self.child.wait()?;
@@ -96,6 +97,11 @@ impl ChildProcess {
         Ok(Outcome { lines: self.seen, status, killed })
     }
 }
+
+/// The exit code of a process that `std::process::abort` ended on
+/// Windows: `__fastfail` reports `STATUS_STACK_BUFFER_OVERRUN`.
+#[cfg(windows)]
+pub const ABORT_EXIT_CODE: i32 = 0xC000_0409_u32 as i32;
 
 impl Outcome {
     /// No child ran.
@@ -165,16 +171,18 @@ impl Outcome {
         self.lines.iter().find_map(|l| l.strip_prefix("error "))
     }
 
-    /// Killed by SIGABRT (`std::process::abort`).
+    /// Ended by `std::process::abort`: SIGABRT on Unix, the exit code
+    /// `STATUS_STACK_BUFFER_OVERRUN` of `__fastfail` on Windows (ADR 0058;
+    /// a kill gives 1 there, a panic 101).
     pub fn aborted(&self) -> bool {
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
             self.status.signal() == Some(6)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            !self.status.success()
+            self.status.code() == Some(ABORT_EXIT_CODE)
         }
     }
 }

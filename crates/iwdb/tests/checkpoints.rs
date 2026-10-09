@@ -111,6 +111,58 @@ fn a_failed_directory_sync_disables_checkpoints_until_reopened() {
     assert_eq!(checkpoints(dir.path()), vec![reference.seq()]);
 }
 
+/// The checkpointer removes a WAL segment and a checkpoint that readers
+/// have open (a change-stream reader in the middle of a segment, a loader).
+/// On every platform the removals succeed and the readers read their files
+/// to the end; a reader that opens the segment afterwards finds it gone,
+/// and the change stream says so (ADR 0058: on Windows every file is
+/// opened with `FILE_SHARE_DELETE`, and NTFS deletes with POSIX semantics).
+#[test]
+fn files_that_readers_hold_open_are_removed_and_the_readers_finish() {
+    use std::io::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let mut reference = reference();
+    let steps = workload(100, 23);
+    let store = Store::open(dir.path(), options(1)).unwrap();
+    run(&store, &mut reference, &steps[..50]);
+    let first = store.checkpoint().unwrap().seq;
+    run(&store, &mut reference, &steps[50..]);
+    let segment = iwdb_storage::list_segments(&dir.path().join("ns/00000000000000000001/wal")).unwrap()[0].1.clone();
+    let segment_bytes = fs::read(&segment).unwrap();
+    let checkpoint_bytes = fs::read(checkpoint_path(dir.path(), first)).unwrap();
+    // Halfway through each
+    let mut readers = [
+        (fs::File::open(&segment).unwrap(), &segment_bytes),
+        (fs::File::open(checkpoint_path(dir.path(), first)).unwrap(), &checkpoint_bytes),
+    ];
+    let mut read: Vec<Vec<u8>> = readers
+        .iter_mut()
+        .map(|(file, bytes)| {
+            let mut half = vec![0; bytes.len() / 2];
+            file.read_exact(&mut half).unwrap();
+            half
+        })
+        .collect();
+
+    let outcome = store.checkpoint().unwrap();
+    assert_eq!(outcome.removed_checkpoints, vec![first]);
+    assert!(!segment.exists() && !checkpoint_path(dir.path(), first).exists(), "both removed");
+    for ((file, bytes), read) in readers.iter_mut().zip(&mut read) {
+        file.read_to_end(read).unwrap();
+        assert_eq!(read, *bytes, "the reader read its file to the end");
+    }
+    assert_eq!(fs::File::open(&segment).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    let ns = store.default_namespace();
+    assert_matches!(
+        ns.changes(1, iwdb::BatchLimits { max_records: 10, max_bytes: usize::MAX }, false, &Default::default()),
+        Err(Error::NotRetained { from: 1, .. })
+    );
+    drop(readers);
+    store.close().unwrap();
+    let store = Store::open(dir.path(), options(1)).unwrap();
+    assert_eq!(store_state(&store), state(&reference));
+}
+
 /// Each checkpoint removes the checkpoints beyond `keep` and every WAL
 /// segment whose records are all covered by the oldest kept checkpoint,
 /// and nothing that recovery from that checkpoint needs.

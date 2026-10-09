@@ -108,7 +108,7 @@ fn the_lock_is_released_when_the_process_dies() {
     assert!(locked, "the child opened the store");
     assert_matches!(Store::open(dir.path(), options(2)), Err(Error::Locked { .. }));
 
-    // SIGKILL on Unix: no destructor runs
+    // SIGKILL on Unix, TerminateProcess on Windows: no destructor runs
     child.kill().unwrap();
     child.wait().unwrap();
     let store = Store::open(dir.path(), options(2)).unwrap();
@@ -214,8 +214,9 @@ fn backups_and_interrupted_restores_are_refused() {
 /// open files until it execs, the lock file included, so the lock of a
 /// store that was just closed can look held for that moment. Opening must
 /// not fail then (a step 5 bug, found in step 7: about 3.5% of reopens
-/// failed with `Locked` while another thread spawned processes).
-#[cfg(unix)]
+/// failed with `Locked` while another thread spawned processes). Windows
+/// doesn't hand our handles to child processes, so there it shows that
+/// nothing like it happens (ADR 0058).
 #[test]
 fn reopening_while_another_thread_spawns_processes() {
     use std::sync::Arc;
@@ -230,7 +231,10 @@ fn reopening_while_another_thread_spawns_processes() {
         std::thread::spawn(move || {
             let mut spawned = 0;
             while !stop.load(Ordering::Relaxed) {
+                #[cfg(unix)]
                 Command::new("true").status().unwrap();
+                #[cfg(windows)]
+                Command::new("cmd").args(["/C", "rem"]).status().unwrap();
                 spawned += 1;
             }
             spawned
@@ -248,6 +252,64 @@ fn reopening_while_another_thread_spawns_processes() {
         }
     }
     stop.store(true, Ordering::Relaxed);
-    assert!(spawner.join().unwrap() > 100);
+    // (Windows starts processes more slowly)
+    assert!(spawner.join().unwrap() > if cfg!(windows) { 10 } else { 100 });
     assert_eq!(locked, 0);
+}
+
+/// A data directory, its backup and a restore at paths with spaces, longer
+/// than Windows' 260 characters, and on Windows a verbatim (`\\?\`) path:
+/// the store opens, commits, checkpoints, backs up, verifies, reopens and
+/// restores the same state. On a share (`\\localhost\C$\...`, if the
+/// machine shares its drives) the directory can't be flushed, and the store
+/// refuses to open (ADR 0058).
+#[test]
+fn data_directories_at_unusual_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(tmp.path()).unwrap();
+    // Six directories of 50 characters
+    let long = (0..6).fold(base.join("long"), |path, i| path.join(format!("{}{}", i, "d".repeat(49))));
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut roots = vec![base.join("with spaces").join("and more"), long];
+    assert!(roots[1].as_os_str().len() > 300);
+    #[cfg(windows)]
+    {
+        // `canonicalize` gives the verbatim form on Windows
+        assert!(base.to_string_lossy().starts_with(r"\\?\"), "{}", base.display());
+        roots.push(base.join("verbatim"));
+        let plain = base.to_string_lossy().trim_start_matches(r"\\?\").to_owned();
+        let unc = format!(r"\\localhost\{}${}", &plain[..1], &plain[2..]);
+        // A share: the directory flush fails there (`ERROR_INVALID_FUNCTION`
+        // over SMB), and a store refuses to open rather than ignore it
+        if fs::metadata(&unc).is_ok() {
+            let data = std::path::PathBuf::from(unc).join("unc").join("data");
+            fs::create_dir_all(data.parent().unwrap()).unwrap();
+            assert_matches!(Store::open(&data, options(2)), Err(Error::Io { op: "sync directory", .. }));
+        } else {
+            eprintln!("{} isn't reachable: no UNC path checked", unc);
+        }
+    }
+    for root in roots {
+        fs::create_dir_all(&root).unwrap();
+        let (data, backup, restored) = (root.join("data"), root.join("backup"), root.join("restored"));
+        let mut reference = reference();
+        let store = Store::open(&data, options(2)).unwrap();
+        run(&store, &mut reference, &support::workload(40, 32));
+        store.checkpoint().unwrap();
+        run(&store, &mut reference, &[pad(1)]);
+        store.backup(&backup).unwrap();
+        store.close().unwrap();
+        for dir in [&data, &backup] {
+            let verified = iwdb::verify(dir).unwrap();
+            assert!(verified.is_ok(), "{}: {:#?}", dir.display(), verified.problems);
+        }
+        let store = Store::open(&data, options(2)).unwrap();
+        assert_eq!(store_state(&store), state(&reference), "{}", data.display());
+        store.close().unwrap();
+        let sources = iwdb::RestoreSources { backup: Some(backup), archive: None };
+        iwdb::restore(&restored, &sources, iwdb::RestoreTarget::Latest).unwrap();
+        let store = Store::open(&restored, options(2)).unwrap();
+        assert_eq!(store_state(&store), state(&reference), "{}", restored.display());
+        store.close().unwrap();
+    }
 }
