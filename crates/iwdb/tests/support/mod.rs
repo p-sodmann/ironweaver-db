@@ -91,7 +91,9 @@ where
     }
 }
 
-/// Every file under `dir` with its bytes, sorted by path.
+/// Every file under `dir` with its bytes, sorted by path. `LOCK` by its
+/// length: on Windows a store's lock on it is mandatory, so it can't be
+/// read while a store has the directory open (ADR 0058).
 pub fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut files = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -100,6 +102,8 @@ pub fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 stack.push(path);
+            } else if path.file_name().is_some_and(|name| name == "LOCK") {
+                files.push((path.clone(), fs::metadata(&path).unwrap().len().to_le_bytes().to_vec()));
             } else {
                 files.push((path.clone(), fs::read(&path).unwrap()));
             }

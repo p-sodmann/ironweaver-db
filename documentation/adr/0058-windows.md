@@ -53,7 +53,7 @@ std's `try_lock` / `try_lock_shared`, as on Unix (ADR 0006's step 11b update): `
 
 - A second store, in this process or another, is refused with `Locked`; `verify` and restore take the shared lock. Tested across processes on every platform.
 - Locks belong to the handle and die with the process, however it ends (`TerminateProcess` included). Microsoft documents that the release after a process's end can take "time depending on available system resources". The store's retries (about 80 ms, step 7) stay as they are: the handle is closed before the process counts as ended, and a reopen right after `Child::wait` of a killed child, the crash harness's every cycle, finds the lock free (tested). A longer wait would also make every real `Locked` slower.
-- `LockFileEx` locks are mandatory: no other handle may read or write the locked range. `LOCK` is empty and nothing reads it, so this changes nothing.
+- `LockFileEx` locks are mandatory: no other handle may read or write the locked range. `LOCK` is empty and the store never reads it; a tool that reads every file of a live data directory (a file-level copy, our tests' snapshots) gets `ERROR_LOCK_VIOLATION` for it on Windows. Such a copy isn't a backup anyway (use `backup`, ADR 0009).
 - Handles aren't inherited, so the Unix race of step 7 (a process spawned by another thread holds the lock file until its exec) doesn't exist; the test of it runs on Windows too.
 
 ### Process death in the crash harness and the failpoints

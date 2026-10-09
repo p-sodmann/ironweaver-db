@@ -57,7 +57,8 @@ jobs:
           echo "IWDB_TEST_POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:55432/postgres?sslmode=disable" >> "$GITHUB_ENV"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked
-      - run: cargo test --workspace --all-features --locked
+      # Every failing test binary at once (Windows runners are slow to iterate on)
+      - run: cargo test --workspace --all-features --locked --no-fail-fast
       - name: No Python in the dependency graph
         # Design rule 1: pyo3 only in crates/iwdb-python, which is in the
         # workspace since step 7; every other crate must stay free of it
