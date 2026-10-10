@@ -84,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `iwdb_storage::failpoint::Rule::path` matches with `/` as the separator on every platform (a `\` in a path counts as `/`); `failpoint::no_space` is `ERROR_DISK_FULL` on Windows. `Ns::export_file` writes through `StdFs::write_atomic`. `crates/iwdb-server/build.rs` reads the workspace's `proto/` when the `proto` symlink isn't a directory. `.gitattributes` keeps text files LF in every checkout (step 16h).
+- `ironweaver-core` bumped from `73d8fab` to `5dc6f5d`: the pattern matcher no longer sorts the candidates of a label that every node has, so a match from such a label (with a property filter, say) costs the same at any graph size when matches come early (about twice as fast at 1M nodes in [benchmarks.md](documentation/benchmarks.md)'s pattern). No API, result or format change.
 - `ironweaver-core` bumped from `9cec233` to `73d8fab`. It fixes our upstream issue #71: the core's `write_atomic` syncs the directory on Windows too, so `StdFs::write_atomic` no longer does it itself. Faster PageRank and pairwise similarity; no API, result or format change.
 - `ironweaver-core` bumped from `c69ef51` to `9cec233`: a fix in the edge index (see Fixed), and edgeless and large induced subgraph copies no longer allocate an id table the size of the source's id range. No API or format change.
 - `ironweaver-core` bumped from `7e7b7fa` to `c69ef51`. It fixes our upstream issues #60, #61 and #62, all adopted:
