@@ -159,8 +159,15 @@ fn too_many_jobs_are_refused_with_unavailable() {
     let db = server.client();
     let start = |iterations| block_on(db.start_job(NS.into(), pagerank(iterations), limits(), None));
     let first = start(1 << 40).unwrap();
+    // Running, so the queue (2) holds only the second: the refusal below is
+    // the caller's limit, not a full queue, which is checked first
+    let begun = std::time::Instant::now();
+    while block_on(db.job(first.id, None)).unwrap().state != JobState::Running {
+        assert!(begun.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(2));
+    }
     let second = start(1 << 40).unwrap();
-    // The caller has two: refused, whatever the queue
+    // The caller has two: refused
     let e = start(10).unwrap_err();
     assert!(e.code() == Code::Unavailable && e.message().contains("per_user"), "{}", e);
     block_on(db.cancel_job(first.id, None)).unwrap();
