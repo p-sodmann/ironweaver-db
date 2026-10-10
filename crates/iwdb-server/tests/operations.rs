@@ -105,14 +105,25 @@ fn every_toml_block_is_a_valid_configuration() {
         tls.entry("cert").or_insert("tls/server.pem".into());
         tls.entry("key").or_insert("tls/server.key".into());
         let whole = toml::to_string(&table).unwrap();
-        let config = Config::parse(&whole).unwrap_or_else(|e| panic!("operations.md: {}\n{}", e, text));
+        checked += 1;
+        let config = match Config::parse(&whole) {
+            Ok(config) => config,
+            // A block for a feature this build lacks (`[tracing]` needs
+            // `otel`): refused for that reason alone
+            Err(e) if !cfg!(feature = "otel") && e == without("otel", "can't export traces") => continue,
+            Err(e) => panic!("operations.md: {}\n{}", e, text),
+        };
         if info == "toml file=iwdb.toml" {
             assert_eq!(whole, toml::to_string(&toml::from_str::<toml::Table>(&text).unwrap()).unwrap());
             assert!(config.tls.enabled && config.store.archive.is_some());
         }
-        checked += 1;
     }
     assert!(checked >= 4, "{}", checked);
+}
+
+/// The refusal of `[tracing] enabled` by a build without `feature`.
+fn without(feature: &str, what: &str) -> String {
+    format!("[tracing] enabled: this iwdb-server was built without the {} feature, so it {}", feature, what)
 }
 
 /// The workspace's crates, which a log filter names (`iwdb_storage=debug`).
@@ -183,15 +194,14 @@ mod run {
 
     const ADMIN_PASSWORD: &str = "a-password-for-the-first-admin";
 
-    /// Where `cargo test` put `iwdb-server`, and `iwctl` next to it. `iwctl`
-    /// is built by `cargo test --workspace` (CI); a run of this crate alone
-    /// may lack it.
+    /// Where `cargo test` put `iwdb-server`, and `iwctl` next to it.
+    /// `cargo test --workspace` (CI's test job) always builds `iwctl`; a run
+    /// of this crate alone (CI's feature-set jobs) may not, and skips.
     fn binaries() -> Option<PathBuf> {
         let dir = Path::new(env!("CARGO_BIN_EXE_iwdb-server")).parent().unwrap().to_owned();
         if dir.join("iwctl").exists() {
             return Some(dir);
         }
-        assert!(std::env::var_os("CI").is_none(), "no iwctl next to iwdb-server in {}", dir.display());
         eprintln!("skipped: no iwctl in {} (cargo build -p iwctl, or cargo test --workspace)", dir.display());
         None
     }
