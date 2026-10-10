@@ -101,6 +101,9 @@ fn an_internal_apply_error_aborts_and_recovery_restores_the_log() {
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(status.signal(), Some(6), "the child aborted (SIGABRT), {:?}", status);
     }
+    // `std::process::abort` on Windows: `__fastfail`'s exit code (ADR 0058)
+    #[cfg(windows)]
+    assert_eq!(status.code(), Some(0xC000_0409_u32 as i32), "the child aborted (__fastfail), {:?}", status);
     assert!(stderr.contains("failed inside the core (injected)") && stderr.contains("aborting"), "{}", stderr);
     let store = Store::open(dir.path(), options(2)).unwrap();
     assert!(acked > 0);

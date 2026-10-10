@@ -27,7 +27,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Windows since step 16h (ADR 0058)
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        # Git Bash on Windows: the same scripts everywhere
+        shell: bash
     steps:
       - uses: actions/checkout@v5
       # Installs the toolchain named in rust-toolchain.toml (stable, rustfmt, clippy)
@@ -40,7 +45,10 @@ jobs:
           node-version: 22
       - name: Start PGlite for the Postgres tests (step 13, ADR 0032)
         # Postgres in WebAssembly over the wire protocol: no service
-        # container, the same on Linux and macOS
+        # container, the same on Linux and macOS. Not on Windows, where the
+        # Postgres tests skip (the source is a network client, nothing in
+        # it is platform-specific)
+        if: runner.os != 'Windows'
         run: |
           scripts/pglite.sh > "$RUNNER_TEMP/pglite.log" 2>&1 &
           for i in $(seq 1 120); do grep -q listening "$RUNNER_TEMP/pglite.log" && break; sleep 1; done
@@ -49,7 +57,8 @@ jobs:
           echo "IWDB_TEST_POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:55432/postgres?sslmode=disable" >> "$GITHUB_ENV"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked
-      - run: cargo test --workspace --all-features --locked
+      # Every failing test binary at once (Windows runners are slow to iterate on)
+      - run: cargo test --workspace --all-features --locked --no-fail-fast
       - name: No Python in the dependency graph
         # Design rule 1: pyo3 only in crates/iwdb-python, which is in the
         # workspace since step 7; every other crate must stay free of it
@@ -201,20 +210,24 @@ jobs:
   python:
     # Step 7: the wheel (abi3, CPython 3.9 and later) built by maturin on
     # every platform we ship, and the Python tests run against it on the
-    # oldest and the newest Python. Windows isn't shipped yet (ADR 0013).
+    # oldest and the newest Python.
     # Step 14: the tests that use the `store` fixture run a second time
     # against an iwdb-server over gRPC (ADR 0035); IWDB_REQUIRE_REMOTE makes
     # a missing server a failure, not a skip. The server has REST (not
     # Postgres) only so the account tests can set users up: the Python
-    # client has no account API and speaks only gRPC.
+    # client has no account API and speaks only gRPC. Windows since step
+    # 16h (ADR 0058), with a Windows-built server.
     name: wheel and pytest (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest]
         python: ["3.9", "3.13"]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -242,11 +255,15 @@ jobs:
     # nightly workflow runs thousands of cycles.
     name: crash harness, short (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Windows since step 16h: TerminateProcess for the kill (ADR 0058)
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable

@@ -1,7 +1,7 @@
 name: Release
 
 # Builds the Python package (abi3 wheels for Linux and macOS, x86_64 and
-# arm64, and the sdist), tests every wheel, and publishes them to PyPI when
+# arm64, and Windows x86_64 since step 16h; and the sdist), tests every wheel, and publishes them to PyPI when
 # a version tag (v*) is pushed. Publishing uses PyPI's trusted publishing
 # (OpenID Connect, no token in the repository) and the "pypi" environment,
 # which can require a manual approval. workflow_dispatch builds and tests
@@ -36,6 +36,7 @@ jobs:
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
           - { os: macos-15-intel, target: x86_64-apple-darwin }
           - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -52,8 +53,11 @@ jobs:
         run: |
           for version in 3.9 3.13; do
             uv venv --python "$version" "venv-$version"
-            uv pip install --python "venv-$version/bin/python" dist/*.whl pytest hypothesis
-            "venv-$version/bin/python" -m pytest crates/iwdb-python/tests -q
+            python="venv-$version/bin/python"
+            # Windows venvs keep it in Scripts
+            [ -e "$python" ] || python="venv-$version/Scripts/python.exe"
+            uv pip install --python "$python" dist/*.whl pytest hypothesis
+            "$python" -m pytest crates/iwdb-python/tests -q
           done
         shell: bash
         env:

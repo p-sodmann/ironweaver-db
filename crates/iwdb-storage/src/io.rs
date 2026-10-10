@@ -34,10 +34,12 @@ pub trait LogFs {
     /// `format::write_atomic`: into a temporary file next to it (named
     /// `.<name>.<pid>.<n>.tmp`), fsynced, then renamed over `path`. On
     /// error the temporary file is removed when possible and a previous
-    /// file at `path` is untouched. On Unix the core then fsyncs the
-    /// directory and returns its error, so `Ok` means the rename is durable
-    /// (since `3b15149`, upstream #32). An error can still come after the
-    /// rename: the new file may then be in place but not durable.
+    /// file at `path` is untouched. Then the directory is fsynced and its
+    /// error returned, so `Ok` means the rename is durable: by the core, on
+    /// Unix since `3b15149` (upstream #32) and on Windows since `73d8fab`
+    /// (upstream #71; ADR 0058).
+    /// An error can still come after the rename: the new file may then be
+    /// in place but not durable.
     fn write_atomic(&self, path: &Path, write: &mut dyn FnMut(&mut dyn Write) -> io::Result<()>) -> io::Result<()>;
     /// Remove a file.
     fn remove_file(&self, path: &Path) -> io::Result<()>;
@@ -119,16 +121,22 @@ impl LogFile for File {
 }
 
 /// Sync a directory: open it and `sync_all` it (on macOS, `F_FULLFSYNC` on
-/// the directory). Windows can't open directories this way; there it does
-/// nothing (Windows is not a supported platform yet).
-#[cfg(unix)]
+/// the directory). On Windows, `FlushFileBuffers` on a handle opened with
+/// `FILE_FLAG_BACKUP_SEMANTICS` (the only way to open a directory) and
+/// write access (which the flush needs); on NTFS that makes the
+/// directory's entries durable (ADR 0058). An error is returned, never
+/// ignored, on every platform (ADR 0005).
+#[cfg(not(windows))]
 fn fsync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
-#[cfg(not(unix))]
-fn fsync_dir(_dir: &Path) -> io::Result<()> {
-    Ok(())
+#[cfg(windows)]
+fn fsync_dir(dir: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    /// `FILE_FLAG_BACKUP_SEMANTICS` (winbase.h), part of the Win32 ABI.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    OpenOptions::new().write(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(dir)?.sync_all()
 }
 
 /// The size of the chunks files are written, copied and compared in.
@@ -148,6 +156,36 @@ pub(crate) fn create_dir<F: LogFs>(fs: &F, dir: &Path) -> Result<(), Error> {
 
 pub(crate) fn sync_dir<F: LogFs>(fs: &F, dir: &Path) -> Result<(), Error> {
     fs.sync_dir(dir).map_err(|e| Error::io("sync directory", dir, e))
+}
+
+/// How long [`open_unless_removed`] waits for a "delete pending" name to go.
+const DELETE_PENDING_WAIT: Duration = Duration::from_millis(500);
+
+/// Open `path` through `open`, for a file that the checkpointer may remove
+/// after it was listed: `Ok(None)` if it was. On Unix, and on Windows when
+/// the removal had POSIX semantics, the name goes at once (`NotFound`). On
+/// Windows a removal can also leave the name "delete pending" until the
+/// last handle closes (another process's too, such as a virus scanner's:
+/// ADR 0058), and opening it fails with `PermissionDenied`; that is
+/// retried for up to [`DELETE_PENDING_WAIT`]. A file still refused then is
+/// an error, as a real permission error is everywhere.
+pub(crate) fn open_unless_removed<T>(
+    path: &Path,
+    mut open: impl FnMut(&Path) -> io::Result<T>,
+) -> io::Result<Option<T>> {
+    let deadline = Instant::now() + DELETE_PENDING_WAIT;
+    let mut pause = Duration::from_millis(1);
+    loop {
+        match open(path) {
+            Ok(file) => return Ok(Some(file)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied && Instant::now() < deadline => {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_millis(50));
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 pub(crate) fn write_atomic<F: LogFs>(fs: &F, path: &Path, bytes: &[u8]) -> Result<(), Error> {
@@ -256,6 +294,84 @@ pub(crate) fn copy_file_throttled<F: LogFs>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file removed meanwhile is `None`; on Windows a "delete pending"
+    /// refusal is waited out, a lasting one (and any elsewhere) is an error.
+    #[test]
+    fn a_file_removed_meanwhile_is_none() {
+        let path = Path::new("segment");
+        let refused = || io::Error::from(io::ErrorKind::PermissionDenied);
+        assert_eq!(open_unless_removed(path, |_| Ok(1)).unwrap(), Some(1));
+        assert_eq!(open_unless_removed(path, |_| Err::<(), _>(io::ErrorKind::NotFound.into())).unwrap(), None);
+        let mut calls = 0;
+        let pending = open_unless_removed(path, |_| {
+            calls += 1;
+            if calls < 3 { Err::<(), _>(refused()) } else { Err(io::ErrorKind::NotFound.into()) }
+        });
+        if cfg!(windows) {
+            assert_eq!((pending.unwrap(), calls), (None, 3));
+        } else {
+            assert_eq!((pending.unwrap_err().kind(), calls), (io::ErrorKind::PermissionDenied, 1));
+        }
+        let start = Instant::now();
+        let lasting = open_unless_removed(path, |_| Err::<(), _>(refused()));
+        assert_eq!(lasting.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        if cfg!(windows) {
+            assert!(start.elapsed() >= DELETE_PENDING_WAIT);
+        }
+    }
+
+    /// The real directory sync works on the file system tests run on (NTFS
+    /// on the Windows runner, ADR 0058), and so does `write_atomic` with
+    /// it, over a file that a reader has open.
+    #[test]
+    fn directories_are_synced_for_real() {
+        let dir = tempfile::tempdir().unwrap();
+        StdFs.sync_dir(dir.path()).unwrap();
+        let sub = dir.path().join("a b");
+        StdFs.create_dir(&sub).unwrap();
+        StdFs.sync_dir(&sub).unwrap();
+        let path = sub.join("file");
+        StdFs.write_atomic(&path, &mut |out| out.write_all(b"one")).unwrap();
+        let mut reader = File::open(&path).unwrap();
+        StdFs.write_atomic(&path, &mut |out| out.write_all(b"two")).unwrap();
+        let mut old = String::new();
+        reader.read_to_string(&mut old).unwrap();
+        assert_eq!((old.as_str(), fs::read(&path).unwrap()), ("one", b"two".to_vec()));
+        // A directory that isn't there is an error, not a silent success
+        assert_eq!(StdFs.sync_dir(&dir.path().join("missing")).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    /// On Windows a failed directory sync after the rename is reported too
+    /// (by the core since `73d8fab`, upstream #71; `StdFs` did it before). The directory denies the current user writing its
+    /// extended attributes (`icacls`): files can be created and renamed in
+    /// it, but it can't be opened for writing, which `FlushFileBuffers`
+    /// needs.
+    #[cfg(windows)]
+    #[test]
+    fn write_atomic_reports_a_failed_directory_sync_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        let user = std::process::Command::new("whoami").output().unwrap();
+        let user = String::from_utf8_lossy(&user.stdout).trim().to_owned();
+        let icacls = |args: &[&str]| {
+            let out = std::process::Command::new("icacls").arg(&sub).args(args).output().unwrap();
+            assert!(out.status.success(), "icacls: {}", String::from_utf8_lossy(&out.stdout));
+        };
+        icacls(&["/deny", &format!("{}:(WEA)", user)]);
+        let synced = StdFs.sync_dir(&sub);
+        let result = StdFs.write_atomic(&sub.join("file"), &mut |out| out.write_all(b"data"));
+        icacls(&["/remove:d", &user]);
+        if synced.is_ok() {
+            // An account whose privileges override the ACL: nothing to show
+            return;
+        }
+        let e = result.unwrap_err();
+        assert!(e.to_string().contains("syncing the directory"), "{}", e);
+        // The rename happened: the new file is in place, just not known durable
+        assert_eq!(fs::read(sub.join("file")).unwrap(), b"data");
+    }
 
     #[test]
     fn a_throttle_holds_a_copy_to_its_rate_and_counts() {

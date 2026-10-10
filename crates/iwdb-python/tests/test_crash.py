@@ -1,8 +1,6 @@
-"""kill -9 a Python process that commits: every acknowledged commit is
-recovered (fsync "always")."""
+"""kill -9 (TerminateProcess on Windows) a Python process that commits: every
+acknowledged commit is recovered (fsync "always")."""
 
-import os
-import signal
 import subprocess
 import sys
 import textwrap
@@ -27,7 +25,6 @@ CHILD = textwrap.dedent(
 )
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL")
 @pytest.mark.parametrize("round", range(3))
 def test_kill_9_loses_no_acknowledged_commit(path, round):
     acked = {}
@@ -42,7 +39,8 @@ def test_kill_9_loses_no_acknowledged_commit(path, round):
                 seen += 1
                 if seen >= 40:
                     break
-        os.kill(child.pid, signal.SIGKILL)
+        # SIGKILL on Unix, TerminateProcess on Windows: no cleanup runs
+        child.kill()
         child.wait()
         child.stdout.close()
     last = max(acked)

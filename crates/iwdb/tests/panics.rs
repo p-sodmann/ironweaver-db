@@ -95,6 +95,9 @@ fn run_child(dir: &std::path::Path, group: bool, rule: &Rule) -> (u64, String) {
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(status.signal(), Some(6), "{}: the child aborted (SIGABRT), {:?}", rule, status);
     }
+    // `std::process::abort` on Windows: `__fastfail`'s exit code (ADR 0058)
+    #[cfg(windows)]
+    assert_eq!(status.code(), Some(0xC000_0409_u32 as i32), "{}: the child aborted (__fastfail), {:?}", rule, status);
     (acked, stderr.join().unwrap())
 }
 

@@ -406,15 +406,21 @@ where
     }
 
     /// Bytes free for an unprivileged process on the data directory's file
-    /// system (`statvfs`: available blocks times the fragment size); `None`
-    /// where that can't be read (or on a platform without it).
+    /// system (`statvfs`: available blocks times the fragment size; on
+    /// Windows `GetDiskFreeSpaceExW`'s bytes available to the caller, which
+    /// honours quotas); `None` where that can't be read (or on a platform
+    /// without either).
     pub fn disk_free(&self) -> Option<u64> {
         #[cfg(unix)]
         {
             let stat = rustix::fs::statvfs(&self.shared.root).ok()?;
             Some(stat.f_bavail.saturating_mul(stat.f_frsize))
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            fs4::available_space(&self.shared.root).ok()
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             None
         }

@@ -14,8 +14,8 @@ Every commit is appended to the write-ahead log ([format](formats/wal.md)) befor
 
 Conditions:
 
-- The storage honours flushes. On macOS, `fsync` alone doesn't flush the drive's cache; we use `File::sync_all`, which issues `F_FULLFSYNC` there. On Linux it is `fsync`. A drive or virtual disk that acknowledges flushes without persisting them voids every durability guarantee.
-- New segment files and renames are made durable with a directory fsync (Unix only).
+- The storage honours flushes. On macOS, `fsync` alone doesn't flush the drive's cache; we use `File::sync_all`, which issues `F_FULLFSYNC` there. On Linux it is `fsync`, on Windows `FlushFileBuffers`. A drive or virtual disk that acknowledges flushes without persisting them voids every durability guarantee.
+- New segment files and renames are made durable with a directory fsync (on Windows `FlushFileBuffers` on the directory, NTFS or ReFS; [ADR 0058](adr/0058-windows.md)).
 - Commits are applied in `seq` order, and any lost commits are a suffix: if commit `n` survives, so do all commits before it.
 - `Store::open` recovers every commit in the log (step 5, below). The kill -9 harness checks this across thousands of crashes per policy (step 6, below).
 - **Group commit timer (step 5).** The store calls `sync_due` every `max_delay` in a background thread, so `P = max_delay`: after an OS crash, no acknowledged commit older than about `2 × max_delay` is lost (plus the time the fsync itself takes, and scheduling delays). `Store::close` syncs everything; dropping a store without `close` doesn't.
@@ -142,7 +142,7 @@ The Python bindings ([python-api.md](python-api.md), [ADR 0013](adr/0013-python-
 
 The server ([api/grpc.md](api/grpc.md)) gives the guarantees of the store it serves, through the `Database` trait, and adds:
 
-- **Shutdown loses nothing acknowledged.** On SIGINT/SIGTERM the server drains running calls (up to its drain timeout), cancels the rest, lets accepted commits finish, then fsyncs every WAL and checkpoints (if configured) before it exits. Every commit acknowledged before shutdown survives an OS crash after it, under every fsync policy ([ADR 0027](adr/0027-graceful-shutdown.md); `crates/iwdb-server/tests/shutdown.rs` simulates the crash under `off` and `group`).
+- **Shutdown loses nothing acknowledged.** On SIGINT/SIGTERM (on Windows Ctrl-C, Ctrl-Break, closing the console or a system shutdown) the server drains running calls (up to its drain timeout), cancels the rest, lets accepted commits finish, then fsyncs every WAL and checkpoints (if configured) before it exits. Every commit acknowledged before shutdown survives an OS crash after it, under every fsync policy ([ADR 0027](adr/0027-graceful-shutdown.md); `crates/iwdb-server/tests/shutdown.rs` simulates the crash under `off` and `group`).
 - **Every read ends at its deadline**: the smaller of `grpc-timeout` and the request's `timeout_ms`, capped by the server's maximum, including the time it waits for a worker or for `min_seq` ([ADR 0026](adr/0026-deadlines-over-grpc.md)). A read whose client goes away is cancelled.
 - **A commit has no deadline on the server.** Once accepted it runs to the end, even if its client's deadline passes or the client disconnects; that client doesn't learn the outcome and retries with the same idempotency key, which applies the commit at most once.
 - **Errors carry their code** (`iwdb-code`) next to the gRPC status of [errors.md](api/errors.md).
@@ -183,7 +183,7 @@ What it guarantees:
 - **With `[tls] client_auth = "required"`, every request without a client certificate is refused** (`unauthenticated`), login and tokens included; only health and the console's pages are answered.
 - **A REST write authenticated by a client certificate alone needs the CSRF header**, as one authenticated by the console's cookie does.
 - **The console's session cookie is `Secure` over TLS** (and `HttpOnly`, `SameSite=Strict`); the console keeps nothing in `localStorage`.
-- **SIGHUP reloads the certificate, key and client CA** for new connections; a reload that fails keeps the ones in use, and the server goes on serving (`sighup_reloads_the_certificate`).
+- **SIGHUP reloads the certificate, key and client CA** (Unix; Windows has no reload, restart the server) for new connections; a reload that fails keeps the ones in use, and the server goes on serving (`sighup_reloads_the_certificate`).
 - **No private key is logged, printed or put in an error message**: `--check-config` prints its path; errors name the file and what is wrong with it. Tested by grepping the server's logs at `debug` through reloads of a mismatched and a cut-off key (`no_secret_reaches_the_logs`), and the errors of mangled keys (`errors_never_quote_a_private_key`).
 - **No certificate or key is in the Docker image**; CI's docker job checks it.
 
@@ -339,9 +339,21 @@ An import ([api/import-export.md](api/import-export.md), [ADR 0033](adr/0033-bul
 - **Round trip**: an export imports back to the same graph; re-exported, to the same bytes (`an_import_creates_its_namespace_from_one_checkpoint_and_an_export_imports_back`). Versions restart at 1; constraints, idempotency keys and marks are not exported.
 - An export reads the namespace at one seq; commits to the namespace wait while it writes.
 
-## Platforms (step 7)
+## Platforms (step 7, step 16h)
 
-Linux and macOS. **Windows is not supported yet**: there the directory fsync is a no-op, so after an OS crash a rotation, a checkpoint, a backup or a restore can lose a directory entry, and none of this is tested on Windows. No Windows wheel is shipped (ADR 0013).
+Linux, macOS and, since step 16h, Windows ([ADR 0058](adr/0058-windows.md)), with the guarantees of this document on each. CI runs the workspace tests, the short crash run (150 kill/recover cycles per fsync policy) and the Python suite on all three on every push, and the long crash run nightly; wheels are shipped for each.
+
+What differs on Windows:
+
+- **File systems.** NTFS (and ReFS). The directory fsync is `FlushFileBuffers` on a directory handle, which these journal; FAT32, exFAT and network shares (SMB, a UNC path) make no such promise and aren't supported, as network file systems aren't on Unix; on a share the directory flush fails, so a store there refuses to open (`data_directories_at_unusual_paths`). A failed directory fsync fails the operation, as on Unix.
+- **The kill** in the crash harness is `TerminateProcess`; an abort ends a process with exit code `0xC0000409` (`__fastfail`), not `SIGABRT`. The same scenarios and checks run.
+- **Files open elsewhere.** Every file is opened with `FILE_SHARE_DELETE`, so the checkpointer removes a WAL segment or checkpoint that a change-stream reader has open, and a reader reads its open file to the end, as on Unix (`files_that_readers_hold_open_are_removed_and_the_readers_finish`).
+- **The lock** is `LockFileEx` (std's `File::try_lock`): a second store is refused; a killed process releases it (`the_lock_is_released_when_the_process_dies`).
+- **Shutdown.** Ctrl-C, Ctrl-Break, closing the console and a system shutdown start the graceful drain (SIGINT/SIGTERM on Unix). After a close or a shutdown Windows ends the process within a few seconds: a drain or final checkpoint cut short there is a kill, which recovery handles without losing anything acknowledged.
+- **No certificate reload.** Windows has no SIGHUP: replacing the certificate means restarting the server.
+- **File permissions.** The audit files and their directory get the inherited ACL of where they are created, not `0600` / `0700`; so do the data directory's files on every platform. Put the data directory and `[audit] dir` where only the server's account and administrators can read.
+- **Disk free space** (status views, `iwdb_disk_free_bytes`) is `GetDiskFreeSpaceExW`'s bytes available to the caller (quotas included), like `statvfs`'s available blocks on Unix.
+- **No Docker image** for Windows (Linux only), no Windows service or installer.
 
 ## Recovery (step 5)
 

@@ -44,18 +44,19 @@ pub struct OsCrash {
     pub cut: Option<u64>,
 }
 
-/// The largest length the sync log recorded for `path`.
+/// The largest length the sync log recorded for `path`. Paths compare as
+/// paths, not strings: the store and the harness build them with
+/// different separators on Windows (`ns/…` joined to `D:\…`).
 pub fn synced_len(sync_log: &Path, path: &Path) -> io::Result<u64> {
     let text = match fs::read_to_string(sync_log) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
         Err(e) => return Err(e),
     };
-    let wanted = path.display().to_string();
     Ok(text
         .lines()
         .filter_map(|line| line.rsplit_once(' '))
-        .filter(|(p, _)| *p == wanted)
+        .filter(|(p, _)| Path::new(p) == path)
         .filter_map(|(_, len)| len.parse::<u64>().ok())
         .max()
         .unwrap_or(0))
@@ -134,6 +135,12 @@ mod tests {
         fs::write(&log, "/a b/x.wal 24\n/a b/x.wal 90\n/a b/y.wal 500\n/a b/x.wal 60\n").unwrap();
         assert_eq!(synced_len(&log, Path::new("/a b/x.wal")).unwrap(), 90);
         assert_eq!(synced_len(&log, Path::new("/a b/z.wal")).unwrap(), 0);
+        // The same file, written with other separators (Windows)
+        #[cfg(windows)]
+        {
+            fs::write(&log, "D:\\w\\ns/1/wal\\x.wal 90\n").unwrap();
+            assert_eq!(synced_len(&log, Path::new(r"D:\w/ns\1\wal/x.wal")).unwrap(), 90);
+        }
     }
 
     #[test]

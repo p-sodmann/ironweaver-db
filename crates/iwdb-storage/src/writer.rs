@@ -421,11 +421,11 @@ impl<F: LogFs> Wal<F> {
         let segments = reader::list_segments(&self.dir)?;
         for [(_, path), (next_first, _)] in segments.array_windows() {
             if *next_first > self.synced_seq + 1 && *path != self.segment_path {
-                let mut file = match self.fs.open_append(path) {
-                    Ok(file) => file,
+                let mut file = match crate::io::open_unless_removed(path, |p| self.fs.open_append(p)) {
+                    Ok(Some(file)) => file,
                     // The checkpointer removed it meanwhile: a checkpoint,
                     // fsynced by `write_atomic`, holds its records
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Ok(None) => continue,
                     Err(e) => return Err(Error::io("open", path, e)),
                 };
                 file.sync().map_err(|e| Error::io("fsync", path, e))?;

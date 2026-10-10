@@ -147,10 +147,10 @@ impl OffsetIndex {
             {
                 return Err(Error::SeqMismatch { path: path.clone(), offset: 0, expected, found: *segment_seq });
             }
-            let mut file = match File::open(path) {
-                Ok(file) => file,
+            let mut file = match crate::io::open_unless_removed(path, |p| File::open(p)) {
+                Ok(Some(file)) => file,
                 // The checkpointer deleted it after the listing
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(self.gone(dir, batch.next_seq)),
+                Ok(None) => return Err(self.gone(dir, batch.next_seq)),
                 Err(e) => return Err(Error::io("open", path, e)),
             };
             let version = segment_version(&mut file, path, *segment_seq)?;

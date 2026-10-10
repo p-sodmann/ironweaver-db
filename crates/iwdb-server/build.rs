@@ -11,8 +11,14 @@ use prost::Message;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `proto` in this crate is a symlink to the workspace's `proto/`, so that
-    // a package of the crate (the Python sdist, ADR 0035) carries the protos
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("proto");
+    // a package of the crate (the Python sdist, ADR 0035) carries the protos.
+    // A Windows checkout without symlinks makes it a text file: then the
+    // workspace's directory itself (ADR 0058)
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = [manifest.join("proto"), manifest.join("../../proto")]
+        .into_iter()
+        .find(|root| root.is_dir())
+        .ok_or("no proto directory: neither proto/ nor ../../proto/")?;
     let dir = root.join("ironweaver_db/v1");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", dir.display());

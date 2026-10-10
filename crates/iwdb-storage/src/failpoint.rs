@@ -136,8 +136,9 @@ pub struct Rule {
     pub action: Action,
     /// Matching calls to let through first.
     pub skip: u64,
-    /// Only calls on a path containing this ("" matches every path).
-    /// Writes and fsyncs have the path of their file.
+    /// Only calls on a path containing this ("" matches every path), with
+    /// `/` as the separator on every platform (a `\\` in the path counts
+    /// as `/`, ADR 0058). Writes and fsyncs have the path of their file.
     pub path: String,
 }
 
@@ -157,7 +158,9 @@ impl Rule {
     }
 
     fn matches(&self, call: Call, when: When, path: &Path) -> bool {
-        self.call == call && self.when == when && (self.path.is_empty() || path.to_string_lossy().contains(&self.path))
+        self.call == call
+            && self.when == when
+            && (self.path.is_empty() || path.to_string_lossy().replace('\\', "/").contains(&self.path))
     }
 }
 
@@ -393,14 +396,20 @@ impl<F: LogFs> FailFs<F> {
     }
 }
 
-/// `ENOSPC`, as the OS reports it.
+/// A full disk, as the OS reports it: `ENOSPC` on Unix,
+/// `ERROR_DISK_FULL` on Windows.
 pub fn no_space() -> io::Error {
     #[cfg(unix)]
     {
         // ENOSPC is 28 on Linux, macOS and the BSDs
         io::Error::from_raw_os_error(28)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // ERROR_DISK_FULL (winerror.h)
+        io::Error::from_raw_os_error(112)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         io::Error::new(io::ErrorKind::StorageFull, "no space left on device")
     }
@@ -575,6 +584,11 @@ mod tests {
         assert!(state.take(Call::Sync, When::Before, wal).is_some());
         assert!(state.take(Call::Sync, When::Before, wal).is_none(), "fires once");
         assert_eq!(state.fired.len(), 1);
+        // Paths match with `/` on every platform (Windows separators, ADR 0058)
+        let rule = Rule::new(Call::Sync, When::Before, Action::Fail).path("/wal/");
+        assert!(rule.matches(Call::Sync, When::Before, Path::new(r"C:\d\wal\1.wal")));
+        assert!(rule.matches(Call::Sync, When::Before, Path::new("/d/wal/1.wal")));
+        assert!(!rule.matches(Call::Sync, When::Before, Path::new(r"C:\d\walx\1.wal")));
     }
 
     #[test]
@@ -617,7 +631,9 @@ mod tests {
             for entry in std::fs::read_dir(&tmp_dir).unwrap() {
                 let entry = entry.unwrap();
                 if entry.file_name().to_string_lossy().ends_with(".tmp") {
-                    seen.lock().unwrap().push(entry.metadata().unwrap().len());
+                    // The file's own size: on Windows a directory entry's
+                    // lags behind an open file
+                    seen.lock().unwrap().push(std::fs::metadata(entry.path()).unwrap().len());
                 }
             }
         })));

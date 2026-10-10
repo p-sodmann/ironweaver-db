@@ -417,12 +417,9 @@ fn create_backup_dir(dest: &std::path::Path) -> Result<(), Error> {
         Err(e) => return Err(Error::new(Code::Io, format!("can't create '{}': {}", dest.display(), e))),
     }
     if let Some(parent) = dest.parent() {
-        #[cfg(unix)]
-        std::fs::File::open(parent)
-            .and_then(|d| d.sync_all())
+        iwdb_storage::io::StdFs
+            .sync_dir(parent)
             .map_err(|e| Error::new(Code::Io, format!("can't sync '{}': {}", parent.display(), e)))?;
-        #[cfg(not(unix))]
-        let _ = parent;
     }
     Ok(())
 }
