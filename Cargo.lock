@@ -889,14 +889,14 @@ dependencies = [
 [[package]]
 name = "ironweaver-core"
 version = "0.2.0"
-source = "git+https://github.com/p-sodmann/Ironweaver?rev=5dc6f5dd26db03dfd46df0f48984774d7010939a#5dc6f5dd26db03dfd46df0f48984774d7010939a"
+source = "git+https://github.com/p-sodmann/Ironweaver?rev=c385ec7aad65f5ebfc94b6a69174497e36b0b512#c385ec7aad65f5ebfc94b6a69174497e36b0b512"
 dependencies = [
  "chrono",
  "crc32fast",
  "foldhash 0.2.0",
  "half",
  "postcard",
- "rand 0.9.5",
+ "rand 0.10.3",
  "rayon",
  "serde",
  "serde_json",
