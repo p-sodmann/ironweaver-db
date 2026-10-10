@@ -43,6 +43,7 @@ About 22,000 of the Rust lines are integration tests in `tests/` directories, an
 - [Upstream issue drafts](documentation/upstream-issues.md): the proposed changes to `ironweaver-core`
 - [Guarantees](documentation/guarantees.md): what is durable when, and what each failure does
 - [On-disk formats](documentation/formats/): the WAL, the data directory, backups and archives
+- [Operations guide](documentation/operations.md): install, configure, monitor, back up and upgrade a server
 - [Python API](documentation/python-api.md), [iwctl](documentation/iwctl.md), [releasing](documentation/releasing.md)
 - [Operator console](console/README.md): explore a graph and see the server's status in a browser (on mock data for now)
 - [Architecture decision records](documentation/adr/)
