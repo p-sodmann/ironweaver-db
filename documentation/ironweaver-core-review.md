@@ -1,6 +1,6 @@
 # Review: `ironweaver-core` 0.2 as a database foundation
 
-Reviewed: Ironweaver `origin/main` at `5dc6f5d` (2026-10-10, "0.2.0 — unreleased", merge of PR #75), crate `crates/ironweaver-core`. Previous reviews: `73d8fab`, `9cec233`, `c69ef51`, `7e7b7fa`, `ca308f0`, `d15a7ec`, `ace9a0d`, `cd09ea0`, `3b15149`, `a14149e`, `02cefab`.
+Reviewed: Ironweaver `origin/main` at `c385ec7` (2026-10-10, "0.2.0 — unreleased", merge of PR #76), crate `crates/ironweaver-core`. Previous reviews: `5dc6f5d`, `73d8fab`, `9cec233`, `c69ef51`, `7e7b7fa`, `ca308f0`, `d15a7ec`, `ace9a0d`, `cd09ea0`, `3b15149`, `a14149e`, `02cefab`.
 Question: which changes does Ironweaver need so that a production-grade database can sit on top of it?
 Verified: the claims below are checked against the pinned revision by `crates/iwdb-engine/tests/core_smoke.rs`, or, where the database relies on them through its own types, by `db_graph.rs` (saves, loads, indexes), `commit_model.rs` (op replay with explicit edge ids) and `crates/iwdb/tests/concurrency.rs` (cancelling analytics). Corrections from step 1 (against `02cefab`) are marked *(step 1)*; findings from the `a14149e` bump are marked *(a14149e)*. The `3b15149` bump is summarized in [its own section](#findings-from-the-3b15149-bump); the findings below that it fixed are marked *(fixed in `3b15149`)*.
 
@@ -177,6 +177,14 @@ Checked at `9cec233` while adding Windows ([ADR 0058](adr/0058-windows.md)).
 
 - **`write_atomic` doesn't sync the directory on Windows.** The directory fsync after the rename is `#[cfg(unix)]`, and the doc comment says Windows can't sync a directory. It can: a handle opened with `FILE_FLAG_BACKUP_SEMANTICS` and write access, then `FlushFileBuffers` (`File::sync_all`), without unsafe code. So on Windows `Ok` doesn't mean the rename is durable, and a directory that can't be synced isn't reported. Upstream issue: [#71](https://github.com/p-sodmann/Ironweaver/issues/71) ([draft 27](upstream-issues.md#27-write_atomic-doesnt-sync-the-directory-on-windows)). Until it is fixed, `StdFs::write_atomic` syncs the parent directory itself on Windows, and `Ns::export_file` writes through it. Pinned in `write_atomic_does_not_sync_the_directory_on_windows` (`core_smoke.rs`, Windows only: a directory that denies writing its extended attributes can't be synced, and the core still returned `Ok`). *Fixed in `73d8fab`; see [the `73d8fab` bump](#findings-from-the-73d8fab-bump).*
 - **What works as documented.** The core opens every file through std (share mode with `FILE_SHARE_DELETE`), so a checkpoint or WAL segment that a reader has open can be renamed over and removed on Windows as on Unix. Paths are std's: drive letters, UNC and long paths work. The temporary file's name (`.<name>.<pid>.<n>.tmp`) has no character Windows refuses.
+
+## Findings from the `c385ec7` bump
+
+Bumped from `5dc6f5d` to `c385ec7` (2026-10-10, before step 16i): upstream PR #76. In the core it moves `rand` from 0.9 to 0.10 (the `Rng` → `RngExt` trait rename in `algo/embedding.rs`, `algo/leiden.rs`, `algo/node2vec.rs`, `random_walks.rs`, `graph.rs`, `index.rs`, `query/pattern.rs`) and shares four dependency versions in upstream's workspace `Cargo.toml`. The rest refactors the Python bindings' index selection (`src/vertex/`), which we don't use. No API, format or `rust-version` change (still 1.99).
+
+- **Seeded results.** `StdRng` is still ChaCha12 in `rand` 0.10, and upstream checked that six seeded workloads (sampled betweenness, Leiden, FastRP, node2vec, random walks with and without strata) give byte-identical results before and after, with one and three threads. Unlike the 0.8 → 0.9 move in `ca308f0`, seeded walks and Leiden don't change for clients.
+- **Dependencies.** `rand` 0.10.3 (with `chacha20`, `rand_core` 0.10, `getrandom` 0.4) enters the tree for the core. `rand` 0.9 stays, now only for `proptest` (dev) and `opentelemetry_sdk` (feature `otel`), so the tree has two copies until those move; `multiple-versions` is a warning in `deny.toml`. `cargo deny check` passes.
+- **Checks:** the workspace builds and its 825 tests pass unchanged; also passing: `cargo deny check`, and the crash harness at 150 cycles × 3 fsync policies. No format or fixture changed.
 
 ## Findings from the `5dc6f5d` bump
 
