@@ -1,6 +1,6 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`. Drafts 19–21 are findings from step 10, fixed upstream in `ace9a0d`. Draft 22 is a finding from step 11, fixed upstream in `7e7b7fa`. Draft 27 is a finding from step 16h, open ([#71](https://github.com/p-sodmann/Ironweaver/issues/71)).
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`. Drafts 19–21 are findings from step 10, fixed upstream in `ace9a0d`. Draft 22 is a finding from step 11, fixed upstream in `7e7b7fa`. Draft 27 is a finding from step 16h, fixed upstream in `73d8fab` ([#71](https://github.com/p-sodmann/Ironweaver/issues/71)).
 
 Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`, drafts 19–21 against `cd09ea0`, draft 22 against `d15a7ec`, draft 27 against `9cec233`. Titles are ready to paste; the text below each title is the issue body.
 
@@ -32,7 +32,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 24 | [List a graph's labels, and count its edges by type](#24-list-a-graphs-labels-and-count-its-edges-by-type) | fixed upstream (`c69ef51`): [#60](https://github.com/p-sodmann/Ironweaver/issues/60) |
 | 25 | [`memory_usage` can't count payloads, and an index build reports no memory](#25-memory_usage-cant-count-payloads-and-an-index-build-reports-no-memory) | fixed upstream (`c69ef51`): [#61](https://github.com/p-sodmann/Ironweaver/issues/61) |
 | 26 | [Algorithms report no progress while they run](#26-algorithms-report-no-progress-while-they-run) | fixed upstream (`c69ef51`): [#62](https://github.com/p-sodmann/Ironweaver/issues/62) |
-| 27 | [`write_atomic` doesn't sync the directory on Windows](#27-write_atomic-doesnt-sync-the-directory-on-windows) | open: [#71](https://github.com/p-sodmann/Ironweaver/issues/71) |
+| 27 | [`write_atomic` doesn't sync the directory on Windows](#27-write_atomic-doesnt-sync-the-directory-on-windows) | fixed upstream (`73d8fab`): [#71](https://github.com/p-sodmann/Ironweaver/issues/71) |
 
 ---
 

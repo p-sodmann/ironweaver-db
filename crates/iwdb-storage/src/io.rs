@@ -35,9 +35,9 @@ pub trait LogFs {
     /// `.<name>.<pid>.<n>.tmp`), fsynced, then renamed over `path`. On
     /// error the temporary file is removed when possible and a previous
     /// file at `path` is untouched. Then the directory is fsynced and its
-    /// error returned, so `Ok` means the rename is durable: on Unix by the
-    /// core (since `3b15149`, upstream #32), on Windows by [`StdFs`] after
-    /// the core's call (ADR 0058; the core skips it there, upstream #71).
+    /// error returned, so `Ok` means the rename is durable: by the core, on
+    /// Unix since `3b15149` (upstream #32) and on Windows since `73d8fab`
+    /// (upstream #71; ADR 0058).
     /// An error can still come after the rename: the new file may then be
     /// in place but not durable.
     fn write_atomic(&self, path: &Path, write: &mut dyn FnMut(&mut dyn Write) -> io::Result<()>) -> io::Result<()>;
@@ -87,17 +87,7 @@ impl LogFs for StdFs {
     }
 
     fn write_atomic(&self, path: &Path, write: &mut dyn FnMut(&mut dyn Write) -> io::Result<()>) -> io::Result<()> {
-        ironweaver_core::format::write_atomic(path, |out| write(out))?;
-        // Workaround for upstream #71: the core syncs the directory on Unix
-        // only. Remove once it does on Windows too (upstream check)
-        #[cfg(windows)]
-        if let Some(dir) = path.parent() {
-            let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
-            fsync_dir(dir).map_err(|e| {
-                io::Error::new(e.kind(), format!("saved, but syncing the directory {} failed: {}", dir.display(), e))
-            })?;
-        }
-        Ok(())
+        ironweaver_core::format::write_atomic(path, |out| write(out))
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -352,9 +342,8 @@ mod tests {
         assert_eq!(StdFs.sync_dir(&dir.path().join("missing")).unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 
-    /// The workaround for upstream #71: on Windows the core's
-    /// `write_atomic` doesn't sync the directory, `StdFs` does, and reports
-    /// a failure. The directory denies the current user writing its
+    /// On Windows a failed directory sync after the rename is reported too
+    /// (by the core since `73d8fab`, upstream #71; `StdFs` did it before). The directory denies the current user writing its
     /// extended attributes (`icacls`): files can be created and renamed in
     /// it, but it can't be opened for writing, which `FlushFileBuffers`
     /// needs.
