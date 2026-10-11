@@ -2,7 +2,7 @@
 
 Status: in progress (split into 17a to 17f)
 Milestone: M4 Production 1.0
-Depends on: steps 14, 15, 16 (15d is still to do; only 17f, the release itself, waits for it)
+Depends on: steps 14, 15, 16 (15d was the last of them to finish; only 17f, the release itself, waited for it)
 
 ## Goal
 

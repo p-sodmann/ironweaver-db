@@ -35,6 +35,7 @@ use crate::admin::{
     VerifyReport, VerifyTarget,
 };
 use crate::audit::{Audit, AuditEntry};
+use crate::limits::{ClientLimits, LimitsReport, NamespaceLimits, NamespaceLimitsInfo};
 use crate::log::LogTail;
 use crate::metrics::Metrics;
 use crate::read::Explain;
@@ -160,7 +161,7 @@ impl fmt::Display for Via {
 
 /// Who makes a request: a user, whether it is a server-wide admin, its
 /// roles per namespace (by name, as of when the request was
-/// authenticated), and how it authenticated.
+/// authenticated), how it authenticated, and its effective limits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Principal {
     pub user: String,
@@ -169,14 +170,24 @@ pub struct Principal {
     pub admin: bool,
     pub grants: BTreeMap<String, Role>,
     pub via: Via,
+    /// Its effective limits (step 15d, ADR 0059): its own values over the
+    /// server's defaults (which apply only to users who aren't server
+    /// admins), as of when the request was authenticated.
+    pub limits: ClientLimits,
 }
 
 impl Principal {
     /// The principal of every request when authentication is off (and of
-    /// in-process callers): a server-wide admin. Its user name can't be a
-    /// user's (user names start with a letter or digit).
+    /// in-process callers): a server-wide admin, without limits. Its user
+    /// name can't be a user's (user names start with a letter or digit).
     pub fn unauthenticated() -> Self {
-        Principal { user: "(authentication off)".into(), admin: true, grants: BTreeMap::new(), via: Via::Off }
+        Principal {
+            user: "(authentication off)".into(),
+            admin: true,
+            grants: BTreeMap::new(),
+            via: Via::Off,
+            limits: ClientLimits::default(),
+        }
     }
 
     /// The principal's role on `namespace`: `admin` for a server-wide
@@ -187,12 +198,15 @@ impl Principal {
 }
 
 /// A user, as [`Accounts`] reports it (never with its password hash).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UserInfo {
     pub name: String,
     pub admin: bool,
     /// Roles by namespace name (grants of dropped namespaces are gone).
     pub grants: BTreeMap<String, Role>,
+    /// Its own limits (step 15d; unset: the server's default); for
+    /// `whoami`, the caller's effective limits.
+    pub limits: ClientLimits,
 }
 
 /// An API token, as [`Accounts`] reports it (never with its secret).
@@ -285,6 +299,24 @@ pub trait Accounts: Send + Sync {
 
     /// `user`'s API tokens, by name (expired ones included).
     fn tokens(&self, user: &str) -> impl Future<Output = Result<Vec<TokenInfo>, Error>> + Send;
+
+    /// Set a user's limits (step 15d, ADR 0059), replacing all of them: a
+    /// field left unset is unset (the default applies), 0 is no limit.
+    /// Takes effect at the user's next request.
+    fn set_user_limits(&self, name: &str, limits: ClientLimits)
+    -> impl Future<Output = Result<UserInfo, Error>> + Send;
+
+    /// Set a namespace's limits, replacing all of them (as
+    /// [`set_user_limits`](Self::set_user_limits)). The namespace must
+    /// exist; its limits end when it is dropped.
+    fn set_namespace_limits(
+        &self,
+        namespace: &str,
+        limits: NamespaceLimits,
+    ) -> impl Future<Output = Result<NamespaceLimitsInfo, Error>> + Send;
+
+    /// The server's default limits and every namespace's own.
+    fn limits(&self) -> impl Future<Output = Result<LimitsReport, Error>> + Send;
 }
 
 /// Logging in, and turning a bearer token into a [`Principal`]: the
@@ -407,6 +439,9 @@ operations! {
     CreateToken => "CreateToken", SelfOrAdmin, Always;
     RevokeToken => "RevokeToken", SelfOrAdmin, Always;
     Tokens => "ListTokens", SelfOrAdmin, Refusals;
+    SetUserLimits => "SetUserLimits", ServerAdmin, Always;
+    SetNamespaceLimits => "SetNamespaceLimits", ServerAdmin, Always;
+    Limits => "GetLimits", Authenticated, Refusals;
     Login => "Login", Open, Always;
     WhoAmI => "WhoAmI", Authenticated, Refusals;
     Logout => "Logout", Authenticated, Always;
@@ -451,6 +486,8 @@ impl Operation {
                 | Revoke
                 | CreateToken
                 | RevokeToken
+                | SetUserLimits
+                | SetNamespaceLimits
                 | Login
                 | Logout
                 | CancelRequest
@@ -461,6 +498,16 @@ impl Operation {
                 | StartJob
                 | CancelJob
         )
+    }
+
+    /// Whether a call counts against its user's and namespace's limits
+    /// (step 15d, ADR 0059): every operation but those that end work or
+    /// only identify (`CancelRequest`, `CancelJob`, `Logout`, `WhoAmI`), so
+    /// that a client over its limits can still cancel its own requests and
+    /// log out. `Login` has its own slowdown (ADR 0044).
+    pub fn limited(self) -> bool {
+        use Operation::*;
+        !matches!(self, CancelRequest | CancelJob | Logout | WhoAmI | Login)
     }
 
     /// The operation an RPC of the protos runs (`Watch` is `GetChanges`'s
@@ -510,11 +557,19 @@ impl Operation {
 /// `namespaces()` lists only the namespaces the caller has a role on (all
 /// for an admin). A non-admin changing its own password must give its
 /// current one.
+///
+/// It is also where the caller's limits are enforced (step 15d, ADR
+/// 0059): every call is admitted by the registry's limiter when it is
+/// checked, before its future exists, or refused with
+/// `resource_exhausted`; and every read gets the caller's query budget.
 pub struct Authorized<D> {
     inner: Arc<D>,
     principal: Arc<Principal>,
     audit: Audit,
     requests: Option<Arc<Requests>>,
+    /// The later rounds of a followed change stream: they take no token
+    /// from the caller's bucket ([`following`](Self::following)).
+    following: bool,
 }
 
 impl<D> Clone for Authorized<D> {
@@ -524,6 +579,7 @@ impl<D> Clone for Authorized<D> {
             principal: self.principal.clone(),
             audit: self.audit.clone(),
             requests: self.requests.clone(),
+            following: self.following,
         }
     }
 }
@@ -545,7 +601,7 @@ impl<D: Admin> Authorized<D> {
     /// ([`Admin::registry`]), so it can be listed and cancelled.
     pub fn new(inner: Arc<D>, principal: Arc<Principal>, audit: Audit) -> Self {
         let requests = inner.registry();
-        Authorized { inner, principal, audit, requests }
+        Authorized { inner, principal, audit, requests, following: false }
     }
 }
 
@@ -558,10 +614,36 @@ impl<D> Authorized<D> {
         &self.inner
     }
 
-    /// The caller as a [`UserInfo`] (`whoami`).
+    /// The same caller, for the rounds of a followed change stream after
+    /// the first (`Watch`): they count as running but take no token from
+    /// the caller's bucket, since the stream is one request (ADR 0059).
+    pub fn following(&self) -> Self {
+        Authorized { following: true, ..self.clone() }
+    }
+
+    /// The caller as a [`UserInfo`] (`whoami`), with its effective limits.
     pub fn whoami(&self) -> UserInfo {
         let p = &self.principal;
-        UserInfo { name: p.user.clone(), admin: p.admin, grants: p.grants.clone() }
+        UserInfo { name: p.user.clone(), admin: p.admin, grants: p.grants.clone(), limits: p.limits }
+    }
+
+    /// `options` with the caller's query budget (ADR 0059).
+    fn budgeted(&self, options: QueryOptions) -> QueryOptions {
+        QueryOptions { budget: self.principal.limits.budget(), ..options }
+    }
+
+    /// `result`, whose read ran under the caller's budget: a limit or
+    /// timeout reached says the budget applies, so that the caller knows
+    /// asking for more won't help.
+    async fn noted<T>(&self, result: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
+        let budget = self.principal.limits.budget();
+        match result.await {
+            Err(e) if matches!(e.code(), Code::BudgetExceeded | Code::Timeout) && !budget.is_none() => Err(Error::new(
+                e.code(),
+                format!("{} (user '{}' has a query budget: {})", e.message(), self.principal.user, budget.describe()),
+            )),
+            other => other,
+        }
     }
 
     /// Check `op` on `subject`; a refusal is recorded at once. `entry`
@@ -576,10 +658,31 @@ impl<D> Authorized<D> {
         let span = trace::request(op, entry.namespace.as_deref());
         match op.check(&self.principal, subject) {
             Ok(()) => {
-                let call = self
-                    .requests
-                    .as_ref()
-                    .map(|r| r.begin(op, entry.namespace.as_deref(), &self.principal.user, self.audit.client));
+                let p = &self.principal;
+                let begun = self.requests.as_ref().map(|r| {
+                    r.begin_limited(
+                        op,
+                        entry.namespace.as_deref(),
+                        &p.user,
+                        self.audit.client,
+                        &p.limits,
+                        !self.following,
+                    )
+                });
+                let call = match begun.transpose() {
+                    Ok(call) => call,
+                    // Over a limit: refused before the call starts. Audited
+                    // only for operations audited always (a flood of reads
+                    // mustn't flood the audit log)
+                    Err(e) => {
+                        trace::outcome(&span, Some(e.code()));
+                        if op.audited() == Audited::Always {
+                            entry.code = Some(e.code());
+                            self.audit.record(entry);
+                        }
+                        return Err(e);
+                    }
+                };
                 if let Some(call) = &call {
                     span.record("iwdb.request_id", call.id());
                 }
@@ -697,7 +800,8 @@ macro_rules! read {
             options: QueryOptions,
         ) -> impl Future<Output = Result<$answer, Error>> + Send {
             let checked = self.check(Operation::$op, namespace, on(namespace));
-            run!(self, checked, self.inner.$method(namespace, request, options), no_seq, trace::answer)
+            let options = self.budgeted(options);
+            run!(self, checked, self.noted(self.inner.$method(namespace, request, options)), no_seq, trace::answer)
         }
     };
 }
@@ -731,7 +835,8 @@ impl<D: Database + Accounts> Database for Authorized<D> {
         options: QueryOptions,
     ) -> impl Future<Output = Result<u64, Error>> + Send {
         let checked = self.check(Operation::WaitForSeq, namespace, on(namespace));
-        run!(self, checked, self.inner.wait_for_seq(namespace, seq, options), no_seq)
+        let options = self.budgeted(options);
+        run!(self, checked, self.noted(self.inner.wait_for_seq(namespace, seq, options)), no_seq)
     }
 
     read!(get_nodes, GetNodes, Vec<String>, Answer<Vec<Option<Node>>>);
@@ -753,8 +858,9 @@ impl<D: Database + Accounts> Database for Authorized<D> {
         options: QueryOptions,
     ) -> impl Future<Output = Result<Answer<Changes>, Error>> + Send {
         let checked = self.check(Operation::Changes, namespace, on(namespace));
+        let options = self.budgeted(options);
         let read = async move {
-            let answer = self.inner.changes(namespace, request, options).await?;
+            let answer = self.noted(self.inner.changes(namespace, request, options)).await?;
             // A change-stream reader, as of this poll (`ListConsumers`)
             if let Some(requests) = &self.requests {
                 requests.polled(namespace, &self.principal.user, self.audit.client, answer.value.next_seq);
@@ -770,7 +876,8 @@ impl<D: Database + Accounts> Database for Authorized<D> {
         options: QueryOptions,
     ) -> impl Future<Output = Result<Answer<NamespaceCatalog>, Error>> + Send {
         let checked = self.check(Operation::Catalog, namespace, on(namespace));
-        run!(self, checked, self.inner.catalog(namespace, options), no_seq)
+        let options = self.budgeted(options);
+        run!(self, checked, self.noted(self.inner.catalog(namespace, options)), no_seq)
     }
 
     fn schema(
@@ -779,7 +886,8 @@ impl<D: Database + Accounts> Database for Authorized<D> {
         options: QueryOptions,
     ) -> impl Future<Output = Result<Answer<Schema>, Error>> + Send {
         let checked = self.check(Operation::Schema, namespace, on(namespace));
-        run!(self, checked, self.inner.schema(namespace, options), no_seq)
+        let options = self.budgeted(options);
+        run!(self, checked, self.noted(self.inner.schema(namespace, options)), no_seq)
     }
 
     fn namespace_status(&self, namespace: &str) -> impl Future<Output = Result<NamespaceStatus, Error>> + Send {
@@ -900,6 +1008,35 @@ impl<D: Database + Accounts> Accounts for Authorized<D> {
         let checked = self.check(Operation::Tokens, user, about(user));
         run!(self, checked, self.inner.tokens(user), no_seq)
     }
+
+    fn set_user_limits(
+        &self,
+        name: &str,
+        limits: ClientLimits,
+    ) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let checked = self.check(Operation::SetUserLimits, name, about(name));
+        run!(self, checked, self.inner.set_user_limits(name, limits), no_seq)
+    }
+
+    fn set_namespace_limits(
+        &self,
+        namespace: &str,
+        limits: NamespaceLimits,
+    ) -> impl Future<Output = Result<NamespaceLimitsInfo, Error>> + Send {
+        let checked = self.check(Operation::SetNamespaceLimits, "", on(namespace));
+        run!(self, checked, self.inner.set_namespace_limits(namespace, limits), no_seq)
+    }
+
+    /// Only the namespaces the caller has a role on.
+    fn limits(&self) -> impl Future<Output = Result<LimitsReport, Error>> + Send {
+        let checked = self.check(Operation::Limits, "", AuditEntry::default());
+        let report = async move {
+            let mut report = self.inner.limits().await?;
+            report.namespaces.retain(|n| self.principal.role(&n.namespace).is_some());
+            Ok(report)
+        };
+        run!(self, checked, report, no_seq::<LimitsReport>)
+    }
 }
 
 impl<D: Database + Accounts + Admin> Admin for Authorized<D> {
@@ -950,12 +1087,16 @@ impl<D: Database + Accounts + Admin> Admin for Authorized<D> {
     }
 
     /// Only the series of namespaces the caller has a role on, and those
-    /// of no namespace.
+    /// of no namespace; for a caller who isn't a server admin, only its own
+    /// series of those per user.
     fn metrics(&self) -> impl Future<Output = Result<Metrics, Error>> + Send {
         let checked = self.check(Operation::Metrics, "", AuditEntry::default());
         let metrics = async move {
             let mut metrics = self.inner.metrics().await?;
             metrics.retain_namespaces(|n| self.principal.role(n).is_some());
+            if !self.principal.admin {
+                metrics.retain_user(&self.principal.user);
+            }
             Ok(metrics)
         };
         run!(self, checked, metrics, no_seq::<Metrics>)
@@ -1008,6 +1149,7 @@ impl<D: Database + Accounts + Admin> Admin for Authorized<D> {
         _owner: Option<JobOwner>,
     ) -> impl Future<Output = Result<JobInfo, Error>> + Send {
         let checked = self.check(Operation::StartJob, &namespace, on(&namespace));
+        let options = self.budgeted(options);
         let owner = JobOwner { user: self.principal.user.clone(), client: self.audit.client };
         run!(self, checked, self.inner.start_job(namespace, request, options, Some(owner)), |r: &JobInfo, e| {
             e.request = Some(r.id)
@@ -1105,6 +1247,7 @@ mod tests {
             admin,
             grants: grants.iter().map(|(n, r)| ((*n).to_owned(), *r)).collect(),
             via: Via::Session,
+            limits: ClientLimits::default(),
         }
     }
 
@@ -1137,6 +1280,12 @@ mod tests {
         assert!(Operation::CreateUser.check(&ann, "ann").is_err());
         assert!(Operation::WhoAmI.check(&ann, "").is_ok());
         assert!(Principal::unauthenticated().admin);
+    }
+
+    #[test]
+    fn cancelling_and_logging_out_are_not_limited() {
+        let unlimited: Vec<&str> = Operation::ALL.iter().filter(|o| !o.limited()).map(|o| o.name()).collect();
+        assert_eq!(unlimited, ["Login", "WhoAmI", "Logout", "CancelRequest", "CancelJob"]);
     }
 
     #[test]

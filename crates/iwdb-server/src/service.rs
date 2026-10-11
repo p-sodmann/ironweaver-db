@@ -372,8 +372,9 @@ impl<D: Served> DatabaseService for Adapter<D> {
     /// shutdown (ADR 0031).
     async fn watch(&self, request: Request<pb::WatchRequest>) -> Res<Self::WatchStream> {
         let deadline = grpc_timeout(request.metadata());
-        let db = Arc::new(self.db(&request)?);
-        let batches = ops::follow(db, request.into_inner(), deadline, self.stopping.clone());
+        let db = self.db(&request)?;
+        let rounds = Arc::new(db.following());
+        let batches = ops::follow(Arc::new(db), rounds, request.into_inner(), deadline, self.stopping.clone());
         let stream = ReceiverStream::new(batches).map(|batch| batch.map(watch_response).map_err(fail));
         Ok(Response::new(Box::pin(stream)))
     }
@@ -476,6 +477,21 @@ impl<D: Served> AuthService for Adapter<D> {
 
     async fn list_tokens(&self, request: Request<pb::ListTokensRequest>) -> Res<pb::ListTokensResponse> {
         Ok(Response::new(ops::list_tokens(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
+
+    async fn set_user_limits(&self, request: Request<pb::SetUserLimitsRequest>) -> Res<pb::SetUserLimitsResponse> {
+        Ok(Response::new(ops::set_user_limits(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
+
+    async fn set_namespace_limits(
+        &self,
+        request: Request<pb::SetNamespaceLimitsRequest>,
+    ) -> Res<pb::SetNamespaceLimitsResponse> {
+        Ok(Response::new(ops::set_namespace_limits(&self.db(&request)?, request.into_inner()).await.map_err(fail)?))
+    }
+
+    async fn get_limits(&self, request: Request<pb::GetLimitsRequest>) -> Res<pb::GetLimitsResponse> {
+        Ok(Response::new(ops::get_limits(&self.db(&request)?).await.map_err(fail)?))
     }
 }
 

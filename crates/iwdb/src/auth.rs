@@ -13,12 +13,18 @@
 //!   and its slowdown of failed logins. Sessions end when the process does.
 //!
 //! **Records** (`documentation/formats/auth.md`), nodes of the system
-//! namespace: `auth` (`{format: 1}`, written with the first user; a store
+//! namespace: `auth` (`{format: 2}`, written with the first user; a store
 //! with a format this version doesn't know refuses every auth operation),
 //! `user:<name>` (`name`, `password` as a PHC string, `admin`, `epoch`,
-//! `grants` by namespace id, `created`), `token:<sha256 hex>` (`user`,
-//! `name`, `created`, `expires`). Grants name namespaces by id, so a
-//! namespace dropped and created again under its name has no grants.
+//! `grants` by namespace id, `created`, and since format 2 `limits`),
+//! `token:<sha256 hex>` (`user`, `name`, `created`, `expires`), and since
+//! format 2 `limits:<namespace id>` (a namespace's limits, step 15d).
+//! Grants and limits name namespaces by id, so a namespace dropped and
+//! created again under its name has neither.
+//!
+//! **Format 1** (before step 15d, ADR 0059) is still read: it has no
+//! limits. Every change to a store in format 1 rewrites its `auth` node to
+//! format 2 in the same commit.
 //!
 //! **Secrets.** Neither a password nor a token is stored, logged or put in
 //! an error message: a password only as its argon2id hash, a token only as
@@ -35,14 +41,20 @@ use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVe
 use ironweaver_core::{Attrs, Value};
 use iwdb_engine::Mutation;
 use iwdb_engine::catalog::NamespaceName;
-use iwdb_query::{Code, CommitOptions, Error, NewToken, Role, Secret, TokenInfo, UserInfo};
+use iwdb_query::{
+    ClientLimits, Code, CommitOptions, Error, NamespaceLimits, NamespaceLimitsInfo, NewToken, Role, Secret, TokenInfo,
+    UserInfo,
+};
 use iwdb_storage::io::LogFs;
 use sha2::{Digest, Sha256};
 
 use crate::{Ns, Store};
 
-/// The version of the records in the system namespace (`auth.md`).
-pub const AUTH_FORMAT: i64 = 1;
+/// The version of the records in the system namespace (`auth.md`) this
+/// version writes.
+pub const AUTH_FORMAT: i64 = 2;
+/// The oldest version it reads: format 1, without limits.
+pub const AUTH_FORMAT_OLDEST: i64 = 1;
 /// Shortest password accepted.
 pub const MIN_PASSWORD_BYTES: usize = 8;
 /// Longest password accepted (argon2 takes any length; this bounds work).
@@ -54,6 +66,7 @@ pub const TOKEN_PREFIX: &str = "iwdb_";
 const FORMAT_NODE: &str = "auth";
 const USER_NODE: &str = "user:";
 const TOKEN_NODE: &str = "token:";
+const LIMITS_NODE: &str = "limits:";
 
 /// The argon2id cost parameters new hashes get. A hash records its own,
 /// so raising them later affects new hashes only; a hash with other
@@ -211,6 +224,59 @@ fn corrupt(what: &str) -> Error {
     Error::new(Code::Corrupt, format!("the system namespace holds an invalid {}", what))
 }
 
+/// A limit's stored value: an `Int` of at least 0.
+fn limit_value(value: &Value, what: &str) -> Result<u64, Error> {
+    match value {
+        Value::Int(n) => u64::try_from(*n).map_err(|_| corrupt(what)),
+        _ => Err(corrupt(what)),
+    }
+}
+
+/// A user's limits from its `limits` dict (absent: none). Every key must be
+/// a known limit: an unknown one is a newer format's, and ignoring it would
+/// enforce less than was set.
+fn client_limits_from(value: Option<&Value>) -> Result<ClientLimits, Error> {
+    let map = match value {
+        None => return Ok(ClientLimits::default()),
+        Some(Value::Dict(map)) => map,
+        Some(_) => return Err(corrupt("user's limits")),
+    };
+    let mut values = [None; ClientLimits::KEYS.len()];
+    for (key, value) in map {
+        let i = ClientLimits::KEYS.iter().position(|k| k == key).ok_or_else(|| corrupt("user's limits"))?;
+        values[i] = Some(limit_value(value, "user's limits")?);
+    }
+    let [requests_per_second, burst, max_running, max_results, max_visited, timeout_ms] = values;
+    Ok(ClientLimits { requests_per_second, burst, max_running, max_results, max_visited, timeout_ms })
+}
+
+fn int_of(n: u64) -> Value {
+    Value::Int(i64::try_from(n).unwrap_or(i64::MAX))
+}
+
+fn client_limits_value(limits: &ClientLimits) -> Value {
+    Value::Dict(limits.named().into_iter().map(|(k, v)| (k.to_owned(), int_of(v))).collect())
+}
+
+/// Check limits given to be stored: values must fit an `Int`.
+fn check_limits(named: &[(&'static str, u64)]) -> Result<(), Error> {
+    match named.iter().find(|(_, v)| i64::try_from(*v).is_err()) {
+        Some((name, v)) => Err(Error::invalid(format!("{} = {} is too large", name, v))),
+        None => Ok(()),
+    }
+}
+
+/// A namespace's limits node's attributes.
+fn namespace_limits_from(attr: &Attrs) -> Result<NamespaceLimits, Error> {
+    let mut values = [None; NamespaceLimits::KEYS.len()];
+    for (key, value) in attr {
+        let i = NamespaceLimits::KEYS.iter().position(|k| k == key).ok_or_else(|| corrupt("namespace's limits"))?;
+        values[i] = Some(limit_value(value, "namespace's limits")?);
+    }
+    let [max_running, max_memory_bytes] = values;
+    Ok(NamespaceLimits { max_running, max_memory_bytes })
+}
+
 /// A user record as stored.
 #[derive(Clone, Debug)]
 pub(crate) struct UserRecord {
@@ -222,6 +288,8 @@ pub(crate) struct UserRecord {
     /// Roles by namespace id.
     grants: BTreeMap<u64, Role>,
     created: i64,
+    /// Its own limits (format 2; none in format 1).
+    pub limits: ClientLimits,
 }
 
 impl UserRecord {
@@ -259,19 +327,24 @@ impl UserRecord {
             epoch: int("epoch")?,
             grants,
             created: int("created")?,
+            limits: client_limits_from(attr.get("limits"))?,
         })
     }
 
     fn attrs(&self) -> Attrs {
         let grants = self.grants.iter().map(|(id, r)| (id.to_string(), Value::String(r.as_str().into()))).collect();
-        Attrs::from([
+        let mut attrs = Attrs::from([
             ("name".to_owned(), Value::String(self.name.clone())),
             ("password".to_owned(), Value::String(self.phc.clone())),
             ("admin".to_owned(), Value::Bool(self.admin)),
             ("epoch".to_owned(), Value::Int(self.epoch)),
             ("grants".to_owned(), Value::Dict(grants)),
             ("created".to_owned(), Value::Int(self.created)),
-        ])
+        ]);
+        if !self.limits.is_unset() {
+            attrs.insert("limits".to_owned(), client_limits_value(&self.limits));
+        }
+        attrs
     }
 
     fn upsert(&self) -> Mutation {
@@ -288,7 +361,7 @@ impl UserRecord {
     /// `names` (id to name).
     pub(crate) fn info(&self, names: &HashMap<u64, String>) -> UserInfo {
         let grants = self.grants.iter().filter_map(|(id, r)| Some((names.get(id)?.clone(), *r))).collect();
-        UserInfo { name: self.name.clone(), admin: self.admin, grants }
+        UserInfo { name: self.name.clone(), admin: self.admin, grants, limits: self.limits }
     }
 }
 
@@ -395,22 +468,37 @@ where
     /// The system namespace, if the store has one, with its format
     /// checked.
     fn ns(&self) -> Result<Option<Ns<'a, F>>, Error> {
+        Ok(self.ns_and_format()?.map(|(ns, _)| ns))
+    }
+
+    /// The system namespace and its records' format, if the store has one;
+    /// a format this version doesn't read is `corrupt`.
+    fn ns_and_format(&self) -> Result<Option<(Ns<'a, F>, i64)>, Error> {
         let Some(ns) = self.store.system_namespace(false)? else { return Ok(None) };
         let format = ns.node(FORMAT_NODE).and_then(|n| match n.attr.get("format") {
             Some(Value::Int(f)) => Some(*f),
             _ => None,
         });
         match format {
-            Some(AUTH_FORMAT) => Ok(Some(ns)),
+            Some(f) if (AUTH_FORMAT_OLDEST..=AUTH_FORMAT).contains(&f) => Ok(Some((ns, f))),
             // Created, but the first user's commit didn't happen (a crash
             // in between): no users yet
             None if ns.seq() == 0 => Ok(None),
             Some(f) => Err(Error::new(
                 Code::Corrupt,
-                format!("the store's users are in format {}, this version reads format {}", f, AUTH_FORMAT),
+                format!(
+                    "the store's users are in format {}, this version reads formats {} to {}",
+                    f, AUTH_FORMAT_OLDEST, AUTH_FORMAT
+                ),
             )),
             None => Err(corrupt("format record")),
         }
+    }
+
+    /// The records' format: [`AUTH_FORMAT`] for a store without users
+    /// (its first user writes it).
+    pub fn format(&self) -> Result<i64, Error> {
+        Ok(self.ns_and_format()?.map_or(AUTH_FORMAT, |(_, f)| f))
     }
 
     fn names(&self) -> HashMap<u64, String> {
@@ -449,25 +537,28 @@ where
     }
 
     /// Commit `mutations` to the system namespace (creating it, and the
-    /// format record, with the first user).
+    /// format record, with the first user). A store in an older format is
+    /// moved to [`AUTH_FORMAT`] in the same commit.
     fn commit(&self, mut mutations: Vec<Mutation>) -> Result<(), Error> {
-        let ns = match self.ns()? {
-            Some(ns) => ns,
+        let format_record = || Mutation::UpsertNode {
+            id: FORMAT_NODE.into(),
+            labels: vec!["AuthFormat".into()],
+            attr: Attrs::from([("format".to_owned(), Value::Int(AUTH_FORMAT))]),
+            meta: Attrs::new(),
+            expected_version: None,
+        };
+        let ns = match self.ns_and_format()? {
+            Some((ns, AUTH_FORMAT)) => ns,
+            Some((ns, _older)) => {
+                mutations.insert(0, format_record());
+                ns
+            }
             None => {
                 let ns = self
                     .store
                     .system_namespace(true)?
                     .ok_or_else(|| Error::internal("the system namespace wasn't created"))?;
-                mutations.insert(
-                    0,
-                    Mutation::UpsertNode {
-                        id: FORMAT_NODE.into(),
-                        labels: vec!["AuthFormat".into()],
-                        attr: Attrs::from([("format".to_owned(), Value::Int(AUTH_FORMAT))]),
-                        meta: Attrs::new(),
-                        expected_version: None,
-                    },
-                );
+                mutations.insert(0, format_record());
                 ns
             }
         };
@@ -518,6 +609,7 @@ where
             epoch: 1,
             grants: BTreeMap::new(),
             created: i64::try_from(now_ms()).unwrap_or(i64::MAX),
+            limits: ClientLimits::default(),
         };
         self.commit(vec![user.upsert()])?;
         Ok(user.info(&self.names()))
@@ -711,6 +803,78 @@ where
     /// The user's grants by namespace name, for a principal.
     pub(crate) fn info_of(&self, user: &UserRecord) -> UserInfo {
         user.info(&self.names())
+    }
+
+    /// Set `name`'s limits (step 15d, ADR 0059), replacing all of them:
+    /// unset is unset (the default applies), 0 is no limit. Takes effect at
+    /// its next request. Errors: `not_found`, `invalid_argument` (a value
+    /// above `i64::MAX`).
+    pub fn set_limits(&self, name: &str, limits: ClientLimits) -> Result<UserInfo, Error> {
+        check_limits(&limits.named())?;
+        let _guard = self.lock();
+        let mut user = self.existing(name)?;
+        user.limits = limits;
+        self.commit(vec![user.upsert()])?;
+        Ok(user.info(&self.names()))
+    }
+
+    /// Every namespace's own limits, by namespace id; namespaces that
+    /// aren't live are included (they are left out of what is reported).
+    pub(crate) fn namespace_limit_records(&self) -> Result<BTreeMap<u64, NamespaceLimits>, Error> {
+        let records = self.nodes(LIMITS_NODE, |id, attr| {
+            let id: u64 = id.parse().map_err(|_| corrupt("namespace's limits"))?;
+            Ok((id, namespace_limits_from(attr)?))
+        })?;
+        Ok(records.into_iter().collect())
+    }
+
+    /// Every live namespace's own limits, by name; those without any are
+    /// left out.
+    pub fn namespace_limits(&self) -> Result<Vec<NamespaceLimitsInfo>, Error> {
+        let names = self.names();
+        let mut list: Vec<NamespaceLimitsInfo> = self
+            .namespace_limit_records()?
+            .into_iter()
+            .filter_map(|(id, limits)| Some(NamespaceLimitsInfo { namespace: names.get(&id)?.clone(), limits }))
+            .filter(|n| !n.limits.is_unset())
+            .collect();
+        list.sort_by(|a, b| a.namespace.cmp(&b.namespace));
+        Ok(list)
+    }
+
+    /// Set `namespace`'s limits, replacing all of them (as
+    /// [`set_limits`](Self::set_limits)); they take effect at its next
+    /// request or commit. Limits of namespaces that were dropped are
+    /// removed in the same commit. Errors: `not_found`, `invalid_argument`.
+    pub fn set_namespace_limits(&self, namespace: &str, limits: NamespaceLimits) -> Result<NamespaceLimitsInfo, Error> {
+        check_limits(&limits.named())?;
+        let ns =
+            self.store.namespace(namespace).map_err(|_| Error::not_found(format!("no namespace '{}'", namespace)))?;
+        let id = ns.id();
+        let _guard = self.lock();
+        let live = self.names();
+        let node = |id: u64| format!("{}{}", LIMITS_NODE, id);
+        let mut mutations: Vec<Mutation> = self
+            .namespace_limit_records()?
+            .into_keys()
+            .filter(|old| !live.contains_key(old) || (*old == id && limits.is_unset()))
+            .map(|old| Mutation::DeleteNode { id: node(old), expected_version: None })
+            .collect();
+        if !limits.is_unset() {
+            let attr = limits.named().into_iter().map(|(k, v)| (k.to_owned(), int_of(v))).collect();
+            mutations.push(Mutation::UpsertNode {
+                id: node(id),
+                labels: vec!["NamespaceLimits".into()],
+                attr,
+                meta: Attrs::new(),
+                expected_version: None,
+            });
+        }
+        if !mutations.is_empty() {
+            self.commit(mutations)?;
+        }
+        ns.set_own_limits(limits);
+        Ok(NamespaceLimitsInfo { namespace: namespace.to_owned(), limits })
     }
 }
 

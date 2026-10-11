@@ -1,5 +1,6 @@
 //! `iwctl user ...` and `iwctl token ...` (step 15a): users, grants and API
-//! tokens, on a data directory (offline: the server must be stopped; the
+//! tokens; and `iwctl limits ...` (step 15d): users' and namespaces' resource
+//! limits. On a data directory (offline: the server must be stopped; the
 //! directory's file permissions are the boundary) or on a server
 //! (`--server`, through its `AuthService` with the caller's credentials).
 //! Both run through the `Accounts` trait (design rule 8): the embedded
@@ -15,7 +16,7 @@ use std::time::Duration;
 
 use iwdb::{Embedded, QueryConfig, Role, Secret, Store, StoreOptions};
 use iwdb_query::exec::block_on;
-use iwdb_query::{Accounts, Error, TokenInfo, UserInfo};
+use iwdb_query::{Accounts, ClientLimits, Error, NamespaceLimits, TokenInfo, UserInfo};
 use iwdb_server::client::{ClientTls, Remote};
 use serde_json::{Value, json};
 
@@ -56,10 +57,19 @@ pub enum Target {
     },
 }
 
+/// What a `limits` command does (step 15d).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LimitsAction {
+    Show,
+    User { name: String, limits: ClientLimits },
+    Namespace { namespace: String, limits: NamespaceLimits },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     User(UserAction),
     Token(TokenAction),
+    Limits(LimitsAction),
 }
 
 /// Read a secret: without echo from a terminal (after `prompt` on stderr),
@@ -200,18 +210,34 @@ fn finish(out: &Out, result: Result<Value, Error>) -> u8 {
     }
 }
 
+/// Limits as a JSON object of the set ones.
+fn limits_json(named: &[(&'static str, u64)]) -> Value {
+    Value::Object(named.iter().map(|(k, v)| ((*k).to_owned(), json!(v))).collect())
+}
+
+/// Limits as `name=value ...`, or `what` if none is set.
+fn limits_text(named: &[(&'static str, u64)], what: &str) -> String {
+    if named.is_empty() {
+        what.to_owned()
+    } else {
+        named.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(" ")
+    }
+}
+
 fn user_json(u: &UserInfo) -> Value {
     let grants: serde_json::Map<String, Value> = u.grants.iter().map(|(n, r)| (n.clone(), json!(r.as_str()))).collect();
-    json!({"name": u.name, "admin": u.admin, "grants": grants})
+    json!({"name": u.name, "admin": u.admin, "grants": grants, "limits": limits_json(&u.limits.named())})
 }
 
 fn user_text(u: &UserInfo) -> String {
     let grants: Vec<String> = u.grants.iter().map(|(n, r)| format!("{}={}", n, r)).collect();
+    let limits = u.limits.named();
     format!(
-        "{}{}: {}",
+        "{}{}: {}{}",
         u.name,
         if u.admin { " (admin)" } else { "" },
-        if grants.is_empty() { "no grants".to_owned() } else { grants.join(", ") }
+        if grants.is_empty() { "no grants".to_owned() } else { grants.join(", ") },
+        if limits.is_empty() { String::new() } else { format!("; limits {}", limits_text(&limits, "")) }
     )
 }
 
@@ -301,6 +327,45 @@ fn execute<A: Accounts>(db: &A, action: &Action) -> Result<Value, Error> {
                     .join("\n")
             };
             json!({"tokens": tokens.iter().map(token_json).collect::<Vec<_>>(), "text": text})
+        }
+        Action::Limits(LimitsAction::Show) => {
+            let report = block_on(db.limits())?;
+            let client = report.client_defaults.named();
+            let namespace = report.namespace_defaults.named();
+            let mut text = vec![
+                format!("user defaults (users who aren't admins): {}", limits_text(&client, "none")),
+                format!("namespace defaults: {}", limits_text(&namespace, "none")),
+            ];
+            text.extend(
+                report
+                    .namespaces
+                    .iter()
+                    .map(|n| format!("namespace {}: {}", n.namespace, limits_text(&n.limits.named(), "defaults"))),
+            );
+            let namespaces: serde_json::Map<String, Value> =
+                report.namespaces.iter().map(|n| (n.namespace.clone(), limits_json(&n.limits.named()))).collect();
+            json!({
+                "client_defaults": limits_json(&client),
+                "namespace_defaults": limits_json(&namespace),
+                "namespaces": namespaces,
+                "text": text.join("\n"),
+            })
+        }
+        Action::Limits(LimitsAction::User { name, limits }) => {
+            let user = block_on(db.set_user_limits(name, *limits))?;
+            let mut v = user_json(&user);
+            v["text"] =
+                json!(format!("limits of user {}: {}", user.name, limits_text(&user.limits.named(), "the defaults")));
+            v
+        }
+        Action::Limits(LimitsAction::Namespace { namespace, limits }) => {
+            let info = block_on(db.set_namespace_limits(namespace, *limits))?;
+            let named = info.limits.named();
+            json!({
+                "namespace": info.namespace,
+                "limits": limits_json(&named),
+                "text": format!("limits of namespace {}: {}", info.namespace, limits_text(&named, "the defaults")),
+            })
         }
     })
 }
