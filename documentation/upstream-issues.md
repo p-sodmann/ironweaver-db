@@ -1,8 +1,8 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`. Drafts 19–21 are findings from step 10, fixed upstream in `ace9a0d`. Draft 22 is a finding from step 11, fixed upstream in `7e7b7fa`. Draft 27 is a finding from step 16h, fixed upstream in `73d8fab` ([#71](https://github.com/p-sodmann/Ironweaver/issues/71)).
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`. Drafts 19–21 are findings from step 10, fixed upstream in `ace9a0d`. Draft 22 is a finding from step 11, fixed upstream in `7e7b7fa`. Draft 27 is a finding from step 16h, fixed upstream in `73d8fab` ([#71](https://github.com/p-sodmann/Ironweaver/issues/71)). Draft 28 was found by the WAL reader's fuzz target during the `37849b7` bump ([#101](https://github.com/p-sodmann/Ironweaver/issues/101), open).
 
-Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`, drafts 19–21 against `cd09ea0`, draft 22 against `d15a7ec`, draft 27 against `9cec233`. Titles are ready to paste; the text below each title is the issue body.
+Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`, drafts 19–21 against `cd09ea0`, draft 22 against `d15a7ec`, draft 27 against `9cec233`, draft 28 against `37849b7`. Titles are ready to paste; the text below each title is the issue body.
 
 | # | Title | Status |
 |---|---|---|
@@ -33,6 +33,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 25 | [`memory_usage` can't count payloads, and an index build reports no memory](#25-memory_usage-cant-count-payloads-and-an-index-build-reports-no-memory) | fixed upstream (`c69ef51`): [#61](https://github.com/p-sodmann/Ironweaver/issues/61) |
 | 26 | [Algorithms report no progress while they run](#26-algorithms-report-no-progress-while-they-run) | fixed upstream (`c69ef51`): [#62](https://github.com/p-sodmann/Ironweaver/issues/62) |
 | 27 | [`write_atomic` doesn't sync the directory on Windows](#27-write_atomic-doesnt-sync-the-directory-on-windows) | fixed upstream (`73d8fab`): [#71](https://github.com/p-sodmann/Ironweaver/issues/71) |
+| 28 | [`DateTime`'s binary serde: an offset of `i32::MIN` overflows the range check, and micros aren't bounded](#28-datetimes-binary-serde-an-offset-of-i32min-overflows-the-range-check-and-micros-arent-bounded) | filed: [#101](https://github.com/p-sodmann/Ironweaver/issues/101) (open) |
 
 ---
 
@@ -701,3 +702,41 @@ Sync the directory on Windows too, as above, and return its error as on Unix (#3
 **Why the database needs it**
 
 Ironweaver DB supports Windows from step 16h on, with the same durability guarantees as on Unix. It writes checkpoints, the namespace log, backup manifests and markers with `write_atomic`, and deletes WAL segments and old checkpoints once a new checkpoint's rename is durable. Until this is fixed, our `StdFs::write_atomic` syncs the directory itself on Windows after `write_atomic` succeeds. That works, but it's a workaround for something `write_atomic` already promises on Unix. A pin test (`write_atomic_does_not_sync_the_directory_on_windows`) fails once it is fixed.
+
+## 28. `DateTime`'s binary serde: an offset of `i32::MIN` overflows the range check, and micros aren't bounded
+
+Found by the WAL reader's fuzz target during the `37849b7` bump (filed as [#101](https://github.com/p-sodmann/Ironweaver/issues/101)), checked against `37849b7` (and unchanged since `e088ae6`).
+
+**Problem**
+
+`DateTime`'s binary `Deserialize` (`temporal.rs`, the non-human-readable branch, used by postcard) checks the UTC offset with `o.abs() >= 86_400`. For `o = i32::MIN`, `abs()` overflows:
+
+- with overflow checks (debug builds, tests, fuzzing) it panics: "attempt to negate with overflow";
+- without (release), it wraps to `i32::MIN`, which passes the check, so the offset is accepted.
+
+Separately, `micros` isn't bounded, so a value with an offset in range can still overflow later: `DateTime::local()` (behind `parts()` and `Display`) computes `self.micros + offset as i64 * 1_000_000` unchecked, which panics with overflow checks for `micros = i64::MAX, offset = Some(3600)`, and gives a wrong time without. `Display` also negates the offset (`-o`), which overflows for `i32::MIN`.
+
+The fields are public, so the same values can also be built directly; but serde is where untrusted bytes come in (files, a database's log, values sent by remote clients).
+
+Reproduction:
+
+```rust
+use ironweaver_core::DateTime;
+
+let bytes = postcard::to_allocvec(&(0i64, Some(i32::MIN))).unwrap();
+let _ = postcard::from_bytes::<DateTime>(&bytes); // panics with overflow checks; Ok without
+
+let bytes = postcard::to_allocvec(&(i64::MAX, Some(3600))).unwrap();
+let dt: DateTime = postcard::from_bytes(&bytes).unwrap(); // accepted
+let _ = dt.to_string(); // panics with overflow checks
+```
+
+**Proposal**
+
+- In `Deserialize`, check the offset without overflow, as `from_parts` does: `FixedOffset::east_opt(o).is_none()` (or `!(-86_399..=86_399).contains(&o)`), and refuse `micros` for which `micros + offset * 1_000_000` overflows (or, stricter, which chrono can't represent), with `de::Error::custom`.
+- Make `local()` use `checked_add` (mapping overflow like an out-of-range timestamp), and `Display` use `unsigned_abs()`, so a value built directly can't panic either.
+- Optionally, a `DateTime::new(micros, offset) -> Result<..>` that checks both, for callers who build values from raw parts.
+
+**Why the database needs it**
+
+Ironweaver DB decodes values with postcard from its WAL (frames are checksummed, but the reader must never panic on any input: AGENTS.md, and the fuzz target checks it) and from gRPC clients. Until this is fixed, the commit pipeline refuses date-times with an offset of a day or more, or whose micros overflow with the offset (`Error::InvalidDateTime`), so none can be logged. But a debug build still panics while decoding such a value, and the fuzz target finds it from time to time. A pin test (`datetime_binary_serde_does_not_bound_its_offset_or_micros` in `core_smoke.rs`) fails once it is fixed.

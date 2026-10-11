@@ -19,7 +19,7 @@ use ironweaver_core::pathfinding::EdgeCost;
 use ironweaver_core::query::Pattern;
 use ironweaver_core::traversal::bfs_limited;
 use ironweaver_core::{
-    Attrs, Budget, CmpOp, Date, Direction, EdgeId, Expr, Graph, GraphError, Op, Projection, Record, Value,
+    Attrs, Budget, CmpOp, Date, DateTime, Direction, EdgeId, Expr, Graph, GraphError, Op, Projection, Record, Value,
 };
 use iwdb_engine::testutil::canonical;
 
@@ -658,4 +658,21 @@ fn algorithms_report_progress() {
     let before = watched.snapshot();
     cancel::run(&token, || algo::pagerank(&p, &ranks)).expect("run").expect("pagerank");
     assert_eq!(watched.snapshot(), before);
+}
+
+/// Pin (upstream #101, draft 28): `DateTime`'s binary serde doesn't bound
+/// what it reads. An offset of `i32::MIN` overflows the range check's
+/// `abs()` (a panic with overflow checks, as here and in the WAL reader's
+/// fuzz target; accepted, wrapped, without), and micros at the end of the
+/// range are accepted with any offset, so showing the value overflows.
+/// Fails once upstream refuses both.
+#[test]
+fn datetime_binary_serde_does_not_bound_its_offset_or_micros() {
+    let bytes = postcard::to_allocvec(&(0i64, Some(i32::MIN))).unwrap();
+    let decoded = std::panic::catch_unwind(|| postcard::from_bytes::<DateTime>(&bytes).is_ok());
+    let bytes = postcard::to_allocvec(&(i64::MAX, Some(3600))).unwrap();
+    let edge = postcard::from_bytes::<DateTime>(&bytes);
+    let shown = edge.as_ref().ok().map(|dt| std::panic::catch_unwind(|| dt.to_string()).is_err());
+    assert!(decoded.is_err(), "an offset of i32::MIN no longer overflows the range check");
+    assert_eq!(shown, Some(true), "micros at the end of the range are refused or shown");
 }

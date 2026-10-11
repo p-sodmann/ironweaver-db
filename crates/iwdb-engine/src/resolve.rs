@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use ironweaver_core::{Attributes, Attrs, EdgeId, GraphError, Key, Op, Value};
+use ironweaver_core::{Attributes, Attrs, DateTime, EdgeId, GraphError, Key, Op, Value};
 
 use crate::catalog::{Constraint, ConstraintKind, NamespaceCatalog};
 use crate::mutation::{EdgeKey, MAX_VALUE_DEPTH, Mutation, Target};
@@ -103,7 +103,30 @@ fn check_value(target: &Target, key: &str, value: &Value) -> Result<(), Error> {
     if too_deep(value, 1) {
         return Err(Error::ValueTooDeep { target: target.clone(), key: key.to_owned() });
     }
+    if bad_datetime(value) {
+        return Err(Error::InvalidDateTime { target: target.clone(), key: key.to_owned() });
+    }
     Ok(())
+}
+
+/// Whether `value` (not too deep) holds a date-time the core can't show.
+///
+/// Workaround for upstream #101: `DateTime`'s binary serde accepts an
+/// offset of a day or more (`i32::MIN` overflows its check) and micros
+/// that overflow once the offset is added, so a gRPC client could store
+/// one. Remove once the core refuses them when decoding.
+fn bad_datetime(value: &Value) -> bool {
+    match value {
+        Value::DateTime(dt) => !valid_datetime(dt),
+        Value::List(items) => items.iter().any(bad_datetime),
+        Value::Dict(map) => map.values().any(bad_datetime),
+        _ => false,
+    }
+}
+
+fn valid_datetime(dt: &DateTime) -> bool {
+    let offset = dt.offset.unwrap_or(0);
+    (-86_399..=86_399).contains(&offset) && dt.micros.checked_add(i64::from(offset) * 1_000_000).is_some()
 }
 
 /// Check a whole record from user input: reserved keys, then depths (the
@@ -607,6 +630,25 @@ mod tests {
         assert!(!too_deep(&nest(99, Value::Dict(Attrs::new())), 1));
         assert!(too_deep(&nest(100, Value::List(vec![])), 1));
         assert!(too_deep(&nest(100, Value::Dict(Attrs::new())), 1));
+    }
+
+    #[test]
+    fn date_times_out_of_range_are_found_at_any_depth() {
+        let dt = |micros, offset| Value::DateTime(DateTime { micros, offset });
+        for ok in [
+            dt(0, None),
+            dt(0, Some(86_399)),
+            dt(0, Some(-86_399)),
+            dt(i64::MAX, None),
+            dt(i64::MAX - 3_600_000_000, Some(3600)),
+        ] {
+            assert!(!bad_datetime(&ok), "{:?}", ok);
+        }
+        for bad in [dt(0, Some(86_400)), dt(0, Some(i32::MIN)), dt(i64::MAX, Some(1)), dt(i64::MIN, Some(-1))] {
+            assert!(bad_datetime(&bad), "{:?}", bad);
+            assert!(bad_datetime(&nest(50, bad.clone())));
+            assert!(bad_datetime(&Value::Dict(Attrs::from_iter([("at".to_owned(), bad)]))));
+        }
         let dict = |v: Value| Value::Dict([("k".to_owned(), v)].into());
         assert!(!too_deep(&(0..99).fold(Value::Int(1), |v, _| dict(v)), 1));
         assert!(too_deep(&(0..100).fold(Value::Int(1), |v, _| dict(v)), 1));

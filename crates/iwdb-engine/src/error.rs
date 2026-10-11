@@ -70,6 +70,12 @@ pub enum Error {
     /// again (see [`MAX_VALUE_DEPTH`](crate::mutation::MAX_VALUE_DEPTH)).
     #[error("attribute '{key}' of {target} is nested more than {} levels deep", ironweaver_core::format::MAX_DEPTH)]
     ValueTooDeep { target: Target, key: String },
+    /// An attribute value holding a date-time with a UTC offset of a day or
+    /// more, or whose wall-clock time is out of range. Only binary input
+    /// (postcard over gRPC) can carry one: text is parsed and checked by
+    /// the core, which doesn't check binary input yet (upstream #101).
+    #[error("attribute '{key}' of {target} holds a date-time out of range")]
+    InvalidDateTime { target: Target, key: String },
     /// The entity's version would exceed `i64::MAX`, the largest version a
     /// file can hold. Versions never wrap.
     #[error("the version of {target} would exceed {}", i64::MAX)]
