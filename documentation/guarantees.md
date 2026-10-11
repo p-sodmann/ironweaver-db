@@ -339,6 +339,11 @@ An import ([api/import-export.md](api/import-export.md), [ADR 0033](adr/0033-bul
 - **Round trip**: an export imports back to the same graph; re-exported, to the same bytes (`an_import_creates_its_namespace_from_one_checkpoint_and_an_export_imports_back`). Versions restart at 1; constraints, idempotency keys and marks are not exported.
 - An export reads the namespace at one seq; commits to the namespace wait while it writes.
 
+## Compatibility between versions (step 17a)
+
+- **Every format is versioned** (magic bytes, a version, checksums; design rule 4), and a version reads the formats of the version before it. Each format version has a fixture that every later version must read: `wal-v*` (iwdb-storage), `data-dir-v*`, `backup-v*`, `archive-v*` and `auth-v*` (iwdb).
+- **What a release wrote, a later version opens.** Every release leaves a fixture, `crates/iwdb/tests/fixtures/releases/<version>/`: a data directory with a WAL tail in every namespace, its backup and its WAL archive. Every later version must open the store with the same namespaces, keys, marks and users, go on writing, and restore the backup and the archive to the states recorded with it (`release_fixture.rs`). 1.0 writes the first one.
+
 ## Platforms (step 7, step 16h)
 
 Linux, macOS and, since step 16h, Windows ([ADR 0058](adr/0058-windows.md)), with the guarantees of this document on each. CI runs the workspace tests, the short crash run (150 kill/recover cycles per fsync policy) and the Python suite on all three on every push, and the long crash run nightly; wheels are shipped for each.

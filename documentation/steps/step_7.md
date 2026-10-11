@@ -1,6 +1,6 @@
 # Step 7: Backup, PITR, `verify` and Python embedded bindings
 
-Status: done (the PyPI publish of 0.1.0 is prepared and left to the owner; see Tasks)
+Status: done (the PyPI publish of 0.1.0 was withdrawn on 2026-10-11; see Tasks)
 Milestone: M1 Embedded durable
 Depends on: step 6
 
@@ -16,7 +16,7 @@ Complete M1: online backup and point-in-time restore, integrity checks, a local 
 - [x] Create `crates/iwctl` with `status`, `checkpoint`, `backup`, `restore`, `verify` for local data directories ([iwctl.md](../iwctl.md), [ADR 0012](../adr/0012-iwctl.md)).
 - [x] Create `crates/iwdb-python` (PyO3, maturin): `Store`, transactions as context managers, reads returning plain Python values. Keep the API shape identical to the future remote client (step 14): the contract is [python-api.md](../python-api.md) ([ADR 0013](../adr/0013-python-bindings.md)).
 - [x] Wheels via maturin for Linux and macOS, x86_64 and arm64 (abi3, CPython 3.9 and later), built and tested in CI on every push. Windows wheels moved to step 16 (Changes to the plan).
-- [ ] Publish a `0.1.0` pre-release on PyPI. Prepared: the version is 0.1.0, `.github/workflows/release.yml` publishes on a `v0.1.0` tag with trusted publishing, and [releasing.md](../releasing.md) has the steps. The owner publishes; this box (and M1's PyPI part) stays open until then.
+- [ ] Publish a `0.1.0` pre-release on PyPI. Prepared: the version is 0.1.0, `.github/workflows/release.yml` publishes on a `v0.1.0` tag with trusted publishing, and [releasing.md](../releasing.md) has the steps. The owner publishes; this box (and M1's PyPI part) stays open until then. *Withdrawn on 2026-10-11: releases are published on GitHub only ([step 17](step_17.md)'s Plan change), so the wheels go to a GitHub Release (step 17e) instead of PyPI.*
 
 ## Notes from step 6
 

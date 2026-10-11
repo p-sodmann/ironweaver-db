@@ -10,7 +10,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [4](step_4.md) | Write-ahead log | M1 | done |
 | [5](step_5.md) | Checkpoints, recovery and `Store::open` | M1 | done |
 | [6](step_6.md) | Crash and fault-injection suite | M1 | done |
-| [7](step_7.md) | Backup, PITR, `verify` and Python embedded bindings | M1 | done (PyPI publish of 0.1.0 pending: [releasing.md](../releasing.md)) |
+| [7](step_7.md) | Backup, PITR, `verify` and Python embedded bindings | M1 | done (PyPI publish withdrawn: releases are GitHub only, step 17) |
 | [8](step_8.md) | Concurrency, idempotency and read-your-writes | M2 | done |
 | [9](step_9.md) | Catalog operations and namespaces | M2 | done |
 | [10](step_10.md) | Query layer and the `Database` service trait | M2 | done |
@@ -38,7 +38,13 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [16g](step_16g.md) | OpenTelemetry traces | M4 | done |
 | [16h](step_16h.md) | Windows | M4 | done |
 | [16i](step_16i.md) | Operations guide | M4 | done |
-| [17](step_17.md) | Release 1.0 | M4 | todo |
+| [17](step_17.md) | Release 1.0 | M4 | in progress (split into 17a to 17f) |
+| [17a](step_17a.md) | Upstream check and release fixtures | M4 | done |
+| [17b](step_17b.md) | Continuous fuzzing | M4 | todo |
+| [17c](step_17c.md) | Soak test | M4 | todo |
+| [17d](step_17d.md) | Documentation for 1.0 | M4 | todo |
+| [17e](step_17e.md) | Release pipeline on GitHub | M4 | todo |
+| [17f](step_17f.md) | 1.0 | M4 | todo |
 | [18](step_18.md) | Replication and high availability | M5 | todo |
 
 ## Recurring gate: upstream check
@@ -50,8 +56,8 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | Milestone | Steps | Status |
 |---|---|---|
 | M0 Foundation | 1–3 | done |
-| M1 Embedded durable | 4–7 | done, except the PyPI publish of 0.1.0 (prepared; the owner publishes) |
+| M1 Embedded durable | 4–7 | done (the PyPI publish of 0.1.0 was withdrawn: releases are GitHub only) |
 | M2 Service | 8–10 | done |
 | M3 Network access | 11–14b | done |
-| M4 Production 1.0 | 15–17 | in progress (15a, 15b, 15c and 16 done; 15d and 17 to do) |
+| M4 Production 1.0 | 15–17 | in progress (15a, 15b, 15c, 16 and 17a done; 15d and 17b to 17f to do) |
 | M5 HA | 18 | todo |

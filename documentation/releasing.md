@@ -2,6 +2,8 @@
 
 How a version of the Python package `ironweaver-db` is published to PyPI. The Rust crates are not published (`publish = false`) until 1.0 (step 17).
 
+> **Superseded (2026-10-11).** Releases are published on GitHub only: no PyPI, crates.io or Docker registry ([step 17](steps/step_17.md)'s Plan change). Step 17e rewrites this page and the workflow for GitHub Releases; until then, don't publish with the steps below.
+
 The workflow is `.github/workflows/release.yml`. A pushed tag `vX.Y.Z` builds abi3 wheels for Linux (manylinux x86_64, aarch64), macOS (x86_64, arm64) and Windows (x86_64) plus the sdist, installs each wheel and runs the Python tests against it on Python 3.9 and 3.13, checks that the tag matches the package version, and publishes to PyPI with trusted publishing (no API token in the repository). Started by hand (`workflow_dispatch`), it builds and tests without publishing, or publishes to TestPyPI if `testpypi` is ticked.
 
 ## Once: set up trusted publishing
