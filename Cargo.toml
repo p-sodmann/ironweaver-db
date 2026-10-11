@@ -13,7 +13,7 @@ repository = "https://github.com/p-sodmann/ironweaver-db"
 
 [workspace.dependencies]
 # Pinned git revision until 0.2.0 is on crates.io; see documentation/adr/0002-ironweaver-core-dependency.md.
-ironweaver-core = { git = "https://github.com/p-sodmann/Ironweaver", rev = "5dc6f5dd26db03dfd46df0f48984774d7010939a" }
+ironweaver-core = { git = "https://github.com/p-sodmann/Ironweaver", rev = "e088ae6350304aab9b4b5491a9a028e008f57186" }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 proptest = "1"
@@ -71,7 +71,7 @@ tokio-stream = { version = "0.1", default-features = false }
 toml = { version = "1", default-features = false, features = ["parse", "display", "serde"] }
 # Build: generated code from the protos, compiled by protox (pure Rust: no protoc)
 tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }
-protox = "0.9"
+protox = "0.10"
 # REST (step 12, iwdb-server only): axum routes the JSON API next to tonic
 # (axum is tonic's own router); pbjson generates the proto3 JSON serde of
 # the messages, so REST and gRPC share one schema (ADR 0030)
