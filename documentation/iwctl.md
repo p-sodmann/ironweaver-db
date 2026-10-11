@@ -130,6 +130,28 @@ $ sh docker/dev-cert.sh --client root      # a client certificate for root: no t
 $ iwctl user list $S --tls-cert docker/tls/client-root.pem --tls-key docker/tls/client-root.key
 ```
 
+## Resource limits
+
+```
+iwctl limits show <dir>                                   # the defaults and the namespaces' own limits
+iwctl limits user <dir> <name> [<limit>=<n> ...]          # requests_per_second, burst, max_running,
+                                                          # max_results, max_visited, timeout_ms
+iwctl limits namespace <dir> <namespace> [<limit>=<n> ...]  # max_running, max_memory_bytes
+```
+
+Step 15d ([ADR 0059](adr/0059-resource-limits-per-client-and-namespace.md), [config.md](api/config.md#resource-limits)). Like `user` and `token`, on a data directory or with `--server` (a server-wide admin sets them; anyone may `show` the namespaces they have a role on). A set replaces all of a user's or namespace's limits: a limit left out takes the server's default (`[limits.client]`, `[limits.namespace]`), and 0 means no limit. `user list` shows each user's own limits.
+
+```
+$ iwctl limits user $S ann requests_per_second=50 max_running=4 max_visited=1000000
+limits of user ann: requests_per_second=50 max_running=4 max_visited=1000000
+$ iwctl limits namespace $S social max_memory_bytes=1073741824
+limits of namespace social: max_memory_bytes=1073741824
+$ iwctl limits show $S
+user defaults (users who aren't admins): max_running=16
+namespace defaults: none
+namespace social: max_memory_bytes=1073741824
+```
+
 ## Query shell
 
 ```

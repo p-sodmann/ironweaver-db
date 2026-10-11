@@ -50,6 +50,9 @@
 | GET | `/v1/users/{user}/tokens` | – | `ListTokensResponse` | `Accounts::tokens` |
 | POST | `/v1/users/{user}/tokens` | `CreateTokenRequest` | `CreateTokenResponse` (the secret, once) | `Accounts::create_token` |
 | DELETE | `/v1/users/{user}/tokens/{token}` | – | `RevokeTokenResponse` | `Accounts::revoke_token` |
+| PUT | `/v1/users/{user}/limits` | `SetUserLimitsRequest` | `SetUserLimitsResponse` | `Accounts::set_user_limits` (step 15d) |
+| PUT | `/v1/namespaces/{ns}/limits` | `SetNamespaceLimitsRequest` | `SetNamespaceLimitsResponse` | `Accounts::set_namespace_limits` |
+| GET | `/v1/limits` | – | `GetLimitsResponse` | `Accounts::limits` |
 | GET | `/v1/status` | – | `GetServerStatusResponse` | `Admin::server_status` |
 | GET | `/v1/requests` | `user`, `limit` as query parameters | `ListRequestsResponse` | `Admin::active_requests` |
 | POST | `/v1/requests/{request}/cancel` | `CancelRequestRequest` (optional) | `CancelRequestResponse` | `Admin::cancel_request` |
