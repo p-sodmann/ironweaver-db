@@ -109,12 +109,10 @@ fn check_value(target: &Target, key: &str, value: &Value) -> Result<(), Error> {
     Ok(())
 }
 
-/// Whether `value` (not too deep) holds a date-time the core can't show.
-///
-/// Workaround for upstream #101: `DateTime`'s binary serde accepts an
-/// offset of a day or more (`i32::MIN` overflows its check) and micros
-/// that overflow once the offset is added, so a gRPC client could store
-/// one. Remove once the core refuses them when decoding.
+/// Whether `value` (not too deep) holds a date-time that the core's binary
+/// decoder refuses: an offset of a day or more, or a local time chrono
+/// can't represent (#101). Such a value can be built directly, and the
+/// core doesn't refuse it then; logged, it would make the WAL unreadable.
 fn bad_datetime(value: &Value) -> bool {
     match value {
         Value::DateTime(dt) => !valid_datetime(dt),
@@ -124,9 +122,12 @@ fn bad_datetime(value: &Value) -> bool {
     }
 }
 
+/// Whether the core decodes `dt` again: the decoder's own rule, so the
+/// two can't drift apart. Its encoding takes at most 16 bytes (two
+/// varints and a tag), so nothing is allocated.
 fn valid_datetime(dt: &DateTime) -> bool {
-    let offset = dt.offset.unwrap_or(0);
-    (-86_399..=86_399).contains(&offset) && dt.micros.checked_add(i64::from(offset) * 1_000_000).is_some()
+    let mut buf = [0u8; 16];
+    postcard::to_slice(dt, &mut buf).is_ok_and(|bytes| postcard::from_bytes::<DateTime>(bytes).is_ok())
 }
 
 /// Check a whole record from user input: reserved keys, then depths (the
@@ -630,27 +631,22 @@ mod tests {
         assert!(!too_deep(&nest(99, Value::Dict(Attrs::new())), 1));
         assert!(too_deep(&nest(100, Value::List(vec![])), 1));
         assert!(too_deep(&nest(100, Value::Dict(Attrs::new())), 1));
+        let dict = |v: Value| Value::Dict([("k".to_owned(), v)].into());
+        assert!(!too_deep(&(0..99).fold(Value::Int(1), |v, _| dict(v)), 1));
+        assert!(too_deep(&(0..100).fold(Value::Int(1), |v, _| dict(v)), 1));
     }
 
     #[test]
-    fn date_times_out_of_range_are_found_at_any_depth() {
+    fn date_times_the_core_cant_decode_are_found_at_any_depth() {
         let dt = |micros, offset| Value::DateTime(DateTime { micros, offset });
-        for ok in [
-            dt(0, None),
-            dt(0, Some(86_399)),
-            dt(0, Some(-86_399)),
-            dt(i64::MAX, None),
-            dt(i64::MAX - 3_600_000_000, Some(3600)),
-        ] {
+        for ok in [dt(0, None), dt(0, Some(86_399)), dt(0, Some(-86_399)), dt(-1, Some(3600))] {
             assert!(!bad_datetime(&ok), "{:?}", ok);
         }
-        for bad in [dt(0, Some(86_400)), dt(0, Some(i32::MIN)), dt(i64::MAX, Some(1)), dt(i64::MIN, Some(-1))] {
+        let bad = [dt(0, Some(86_400)), dt(0, Some(i32::MIN)), dt(i64::MAX, Some(1)), dt(i64::MIN, None)];
+        for bad in bad {
             assert!(bad_datetime(&bad), "{:?}", bad);
             assert!(bad_datetime(&nest(50, bad.clone())));
             assert!(bad_datetime(&Value::Dict(Attrs::from_iter([("at".to_owned(), bad)]))));
         }
-        let dict = |v: Value| Value::Dict([("k".to_owned(), v)].into());
-        assert!(!too_deep(&(0..99).fold(Value::Int(1), |v, _| dict(v)), 1));
-        assert!(too_deep(&(0..100).fold(Value::Int(1), |v, _| dict(v)), 1));
     }
 }

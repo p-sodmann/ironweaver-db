@@ -71,9 +71,10 @@ pub enum Error {
     #[error("attribute '{key}' of {target} is nested more than {} levels deep", ironweaver_core::format::MAX_DEPTH)]
     ValueTooDeep { target: Target, key: String },
     /// An attribute value holding a date-time with a UTC offset of a day or
-    /// more, or whose wall-clock time is out of range. Only binary input
-    /// (postcard over gRPC) can carry one: text is parsed and checked by
-    /// the core, which doesn't check binary input yet (upstream #101).
+    /// more, or whose wall-clock time chrono can't represent: the core
+    /// can't decode it again, so it is never logged. Only a `DateTime` built
+    /// directly can be one; parsed text and binary input are checked by the
+    /// core.
     #[error("attribute '{key}' of {target} holds a date-time out of range")]
     InvalidDateTime { target: Target, key: String },
     /// The entity's version would exceed `i64::MAX`, the largest version a

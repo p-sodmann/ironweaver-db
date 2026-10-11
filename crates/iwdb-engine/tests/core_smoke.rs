@@ -660,19 +660,20 @@ fn algorithms_report_progress() {
     assert_eq!(watched.snapshot(), before);
 }
 
-/// Pin (upstream #101, draft 28): `DateTime`'s binary serde doesn't bound
-/// what it reads. An offset of `i32::MIN` overflows the range check's
-/// `abs()` (a panic with overflow checks, as here and in the WAL reader's
-/// fuzz target; accepted, wrapped, without), and micros at the end of the
-/// range are accepted with any offset, so showing the value overflows.
-/// Fails once upstream refuses both.
+/// `DateTime`'s binary serde refuses an offset of a day or more and a
+/// local time chrono can't represent (#101, fixed in `af3c441`), without
+/// overflowing; values built directly still show without panicking. The
+/// commit pipeline checks values with this decoder (`resolve::valid_datetime`).
 #[test]
-fn datetime_binary_serde_does_not_bound_its_offset_or_micros() {
-    let bytes = postcard::to_allocvec(&(0i64, Some(i32::MIN))).unwrap();
-    let decoded = std::panic::catch_unwind(|| postcard::from_bytes::<DateTime>(&bytes).is_ok());
-    let bytes = postcard::to_allocvec(&(i64::MAX, Some(3600))).unwrap();
-    let edge = postcard::from_bytes::<DateTime>(&bytes);
-    let shown = edge.as_ref().ok().map(|dt| std::panic::catch_unwind(|| dt.to_string()).is_err());
-    assert!(decoded.is_err(), "an offset of i32::MIN no longer overflows the range check");
-    assert_eq!(shown, Some(true), "micros at the end of the range are refused or shown");
+fn datetime_binary_serde_refuses_offsets_and_times_out_of_range() {
+    let decode = |micros: i64, offset: Option<i32>| {
+        postcard::from_bytes::<DateTime>(&postcard::to_allocvec(&(micros, offset)).unwrap())
+    };
+    for (micros, offset) in [(0, Some(i32::MIN)), (0, Some(86_400)), (i64::MAX, Some(3600)), (i64::MAX, None)] {
+        assert!(decode(micros, offset).is_err(), "{} {:?}", micros, offset);
+    }
+    assert!(decode(0, Some(-86_399)).is_ok());
+    for dt in [DateTime { micros: 0, offset: Some(i32::MIN) }, DateTime { micros: i64::MAX, offset: Some(3600) }] {
+        assert!(!dt.to_string().is_empty());
+    }
 }

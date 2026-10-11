@@ -595,8 +595,8 @@ fn values_nested_too_deep_for_the_log_are_rejected() {
     rejects(&mut ns, &[append(node("a"), "other", nest(99, Value::Int(1)))], too_deep("other"));
 }
 
-/// Workaround for upstream #101: the core's binary serde accepts
-/// date-times it can't show, so the pipeline refuses them.
+/// A date-time built directly that the core couldn't decode again (#101)
+/// is refused, so it never makes the log unreadable.
 #[test]
 fn date_times_out_of_range_are_rejected() {
     let mut ns = ns();
@@ -606,6 +606,7 @@ fn date_times_out_of_range_are_rejected() {
     ns.commit(&[set(node("a"), "ok", dt(0, Some(-86_399)))]).unwrap();
     rejects(&mut ns, &[set(node("a"), "at", dt(0, Some(i32::MIN)))], invalid("at"));
     rejects(&mut ns, &[set(node("a"), "at", dt(i64::MAX, Some(3600)))], invalid("at"));
+    rejects(&mut ns, &[set(node("a"), "at", dt(i64::MAX, None))], invalid("at"));
     rejects(&mut ns, &[upsert("a", &[], &[("at", nest(3, dt(0, Some(86_400))))])], invalid("at"));
     rejects(&mut ns, &[append(node("a"), "list", dt(0, Some(86_400)))], invalid("list"));
 }
