@@ -30,7 +30,7 @@ Lines of code, not counting blank lines or vendored code (as of October 2026):
 
 | Language | Files | Lines |
 |---|---:|---:|
-| Rust | 229 | 74,317 |
+| Rust | 229 | 74,347 |
 | Python | 19 | 2,422 |
 | JavaScript | 9 | 2,188 |
 
