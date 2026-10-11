@@ -12,7 +12,7 @@
 use std::assert_matches;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -87,12 +87,12 @@ fn node(id: &str) -> Mutation {
     }
 }
 
-/// Clients commit until the server goes away; returns the ids of the
-/// commits acknowledged.
-fn commit_until_shutdown(endpoint: &str, stopping: &Arc<AtomicBool>) -> Vec<String> {
+/// Clients commit until the server goes away, counting acknowledgements in
+/// `count`; returns the ids of the commits acknowledged.
+fn commit_until_shutdown(endpoint: &str, stopping: &Arc<AtomicBool>, count: &Arc<AtomicUsize>) -> Vec<String> {
     let threads: Vec<_> = (0..4)
         .map(|t| {
-            let (endpoint, stopping) = (endpoint.to_owned(), stopping.clone());
+            let (endpoint, stopping, count) = (endpoint.to_owned(), stopping.clone(), count.clone());
             thread::spawn(move || {
                 let client = Remote::connect(&endpoint).unwrap();
                 let mut acked = Vec::new();
@@ -100,7 +100,10 @@ fn commit_until_shutdown(endpoint: &str, stopping: &Arc<AtomicBool>) -> Vec<Stri
                     let id = format!("t{}-{:05}", t, i);
                     let key = Some(IdempotencyKey::new(format!("k-{}", id)).unwrap());
                     match block_on(client.commit(NS, vec![node(&id)], CommitOptions { idempotency_key: key })) {
-                        Ok(_) => acked.push(id),
+                        Ok(_) => {
+                            acked.push(id);
+                            count.fetch_add(1, Ordering::SeqCst);
+                        }
                         Err(e) => {
                             assert!(stopping.load(Ordering::SeqCst), "a commit failed before shutdown: {}", e);
                             break;
@@ -123,9 +126,17 @@ fn acknowledged_commits_survive_shutdown_and_an_os_crash(policy: FsyncPolicy, ch
     let server = Running::start(embedded(fs, dir.path(), opts));
     let endpoint = server.endpoint();
     let stopping = Arc::new(AtomicBool::new(false));
+    let count = Arc::new(AtomicUsize::new(0));
     let acked = thread::scope(|s| {
-        let clients = s.spawn(|| commit_until_shutdown(&endpoint, &stopping));
-        thread::sleep(Duration::from_millis(400));
+        let clients = s.spawn(|| commit_until_shutdown(&endpoint, &stopping, &count));
+        // At least 400 ms of commits, and enough of them however slow the
+        // machine (a loaded Windows runner managed 10 in 400 ms)
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(400)
+            || (count.load(Ordering::SeqCst) <= 20 && started.elapsed() < Duration::from_secs(60))
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
         stopping.store(true, Ordering::SeqCst);
         let (report, db) = server.shutdown(Duration::from_secs(10));
         assert!(report.complete, "{:?}", report);
