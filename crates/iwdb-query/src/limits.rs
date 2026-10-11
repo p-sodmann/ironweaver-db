@@ -304,8 +304,19 @@ impl Limiter {
         namespace: Option<&str>,
         take_token: bool,
     ) -> Result<Admitted, Error> {
+        self.admit_at(user, limits, namespace, take_token, Instant::now())
+    }
+
+    /// [`Limiter::admit`] at `now`, so tests control the bucket's clock.
+    fn admit_at(
+        &self,
+        user: &str,
+        limits: &ClientLimits,
+        namespace: Option<&str>,
+        take_token: bool,
+        now: Instant,
+    ) -> Result<Admitted, Error> {
         let ns_running = namespace.and_then(|ns| self.namespace_limits(ns).running());
-        let now = Instant::now();
         let mut state = lock(&self.state);
         let refused = |which: Refused, message: String| (which, Error::new(Code::ResourceExhausted, message));
         let check = (|| {
@@ -474,21 +485,24 @@ mod tests {
     fn the_bucket_admits_its_burst_then_its_rate() {
         let limiter = Limiter::default();
         let limits = rate(20, 3);
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
         let mut held = Vec::new();
         for _ in 0..3 {
-            held.push(limiter.admit("ann", &limits, None, true).unwrap());
+            held.push(limiter.admit_at("ann", &limits, None, true, t0).unwrap());
         }
-        let e = limiter.admit("ann", &limits, None, true).unwrap_err();
+        let e = limiter.admit_at("ann", &limits, None, true, t0).unwrap_err();
         assert_eq!(e.code(), Code::ResourceExhausted);
-        assert!(e.message().contains("rate limit of 20 requests per second (burst 3): retry in"), "{}", e);
+        assert!(e.message().contains("rate limit of 20 requests per second (burst 3): retry in 50 ms"), "{}", e);
         // Others aren't affected, nor are calls that take no token
-        limiter.admit("bob", &limits, None, true).unwrap();
-        held.push(limiter.admit("ann", &limits, None, false).unwrap());
+        limiter.admit_at("bob", &limits, None, true, t0).unwrap();
+        held.push(limiter.admit_at("ann", &limits, None, false, t0).unwrap());
         // A token every 50 ms
-        std::thread::sleep(Duration::from_millis(60));
-        held.push(limiter.admit("ann", &limits, None, true).unwrap());
-        assert!(limiter.admit("ann", &limits, None, true).is_err());
-        assert_eq!(limiter.running("ann"), 5);
+        assert!(limiter.admit_at("ann", &limits, None, true, at(40)).is_err());
+        held.push(limiter.admit_at("ann", &limits, None, true, at(60)).unwrap());
+        assert!(limiter.admit_at("ann", &limits, None, true, at(60)).is_err());
+        held.push(limiter.admit_at("ann", &limits, None, true, at(110)).unwrap());
+        assert_eq!(limiter.running("ann"), 6);
         for a in &held {
             limiter.release(a);
         }
