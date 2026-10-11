@@ -113,3 +113,7 @@ Its mappings: gRPC `RESOURCE_EXHAUSTED` (which `budget_exceeded` also uses; `iwd
 - Memory freed by a checkpointer is counted when its copy is dropped. A checkpointer's copy is kept between runs (step 5), so it stays in `checkpoint` until the namespace is dropped or the store closes.
 - Per-namespace and per-client limits (step 15d) can build on the per-namespace estimate, `Namespace::memory_bytes` (the core's figure, payloads included).
 - ~~When the core counts payloads (draft 25), `payload` becomes part of `graph` and `DbRecord::heap_bytes` goes.~~ Done in the upstream check of 2026-10-07 (core `c69ef51`).
+
+## Update (2026-10-11, ADR 0059)
+
+Step 15d adds a namespace's own memory limit on `Namespace::memory_bytes`, checked at the same two points with the same exceptions, refused with the same code (`NamespaceMemoryLimit`, `resource_exhausted`), without thresholds or hysteresis.
