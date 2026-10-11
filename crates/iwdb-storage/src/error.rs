@@ -42,6 +42,14 @@ pub enum Error {
         "memory limit: writes are refused above {refuse_at} bytes ({used} of {limit} bytes in use); deletes and drops are accepted"
     )]
     MemoryLimit { used: u64, refuse_at: u64, limit: u64 },
+    /// The namespace's graph memory is at or above its own limit (step
+    /// 15d, ADR 0059): the commit or catalog change was refused before it
+    /// was logged, and nothing changed. Deletes, drops and reads are still
+    /// accepted.
+    #[error(
+        "namespace '{namespace}' is at its memory limit: writes are refused at {limit} bytes ({used} in use); deletes and drops are accepted"
+    )]
+    NamespaceMemoryLimit { namespace: String, used: u64, limit: u64 },
     /// The commit's record is larger than [`MAX_RECORD_LEN`](crate::format::MAX_RECORD_LEN).
     /// Nothing was written or applied, and the log stays usable.
     #[error("commit {seq} needs a WAL record of {len} bytes, more than the limit of {max}")]

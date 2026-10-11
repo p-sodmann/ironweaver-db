@@ -62,6 +62,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// ([`Prepared::only_removes`](iwdb_engine::Prepared::only_removes)),
 /// duplicates of keyed commits and the system namespace's commits go
 /// through.
+///
+/// **The namespace's own memory limit** (step 15d, ADR 0059,
+/// [`set_memory_limit`](Self::set_memory_limit)) is checked at the same
+/// points with the same exceptions: while the graph's memory is at or above
+/// it, a commit that adds anything, or a catalog change that builds an
+/// index, fails with [`Error::NamespaceMemoryLimit`] before it is logged.
 #[derive(Debug)]
 pub struct LoggedNamespace<F: LogFs = StdFs> {
     namespace: RwLock<Namespace>,
@@ -103,6 +109,10 @@ pub struct LoggedNamespace<F: LogFs = StdFs> {
     /// namespace (users, grants, session tokens), so that an operator can
     /// still log in and act.
     limited: bool,
+    /// The namespace's own memory limit in bytes; 0: none.
+    memory_limit: AtomicU64,
+    /// Writes refused for it.
+    memory_refusals: AtomicU64,
 }
 
 /// A namespace's size as of its last apply ([`LoggedNamespace::sizes`]).
@@ -216,6 +226,8 @@ impl<F: LogFs> LoggedNamespace<F> {
         graph_charge.set(memory as u64);
         Ok(LoggedNamespace {
             limited: !namespace.name().is_reserved(),
+            memory_limit: AtomicU64::new(0),
+            memory_refusals: AtomicU64::new(0),
             graph_charge,
             fsyncs,
             nodes: AtomicUsize::new(nodes),
@@ -248,6 +260,41 @@ impl<F: LogFs> LoggedNamespace<F> {
     /// The memory this namespace charges to.
     pub fn memory(&self) -> &Arc<Memory> {
         self.graph_charge.memory()
+    }
+
+    /// Refuse writes that add while the graph's memory is at or above
+    /// `limit` bytes (`None` or 0: no limit of its own). Takes effect at
+    /// the next commit. The system namespace has none.
+    pub fn set_memory_limit(&self, limit: Option<u64>) {
+        let limit = if self.limited { limit.unwrap_or(0) } else { 0 };
+        self.memory_limit.store(limit, Ordering::Relaxed);
+    }
+
+    /// The namespace's own memory limit, if it has one.
+    pub fn memory_limit(&self) -> Option<u64> {
+        Some(self.memory_limit.load(Ordering::Relaxed)).filter(|&l| l > 0)
+    }
+
+    /// Writes refused for the namespace's own memory limit so far.
+    pub fn memory_refusals(&self) -> u64 {
+        self.memory_refusals.load(Ordering::Relaxed)
+    }
+
+    /// The memory limits, before a write that adds is logged: the store's
+    /// (ADR 0054) and the namespace's own (ADR 0059).
+    fn check_memory(&self) -> Result<(), Error> {
+        if !self.limited {
+            return Ok(());
+        }
+        self.memory().check_write()?;
+        let used = self.memory.load(Ordering::Relaxed) as u64;
+        match self.memory_limit() {
+            Some(limit) if used >= limit => {
+                self.memory_refusals.fetch_add(1, Ordering::Relaxed);
+                Err(Error::NamespaceMemoryLimit { namespace: self.namespace().name().to_string(), used, limit })
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Commit a data transaction: all mutations or none. Returns once the
@@ -328,6 +375,12 @@ impl<F: LogFs> LoggedNamespace<F> {
             let Some(path) = ns.index_needed(change) else { return Ok(None) };
             if self.limited {
                 self.memory().check_write()?;
+                let used = self.memory.load(Ordering::Relaxed) as u64;
+                if let Some(limit) = self.memory_limit().filter(|&l| used >= l) {
+                    self.memory_refusals.fetch_add(1, Ordering::Relaxed);
+                    let namespace = ns.name().to_string();
+                    return Err(Error::NamespaceMemoryLimit { namespace, used, limit });
+                }
             }
             // O(1). A path the core refuses is left to the commit, whose
             // validation reports it
@@ -620,10 +673,10 @@ impl<F: LogFs> LoggedNamespace<F> {
             (Ok(Prepare::New(prepared)), None) => prepared,
             (Err(e), None) => return Err(e.into()),
         };
-        // The memory limit (ADR 0054): refused before the log, so a refused
-        // commit is never in the WAL
-        if self.limited && !prepared.only_removes() {
-            self.memory().check_write()?;
+        // The memory limits (ADRs 0054, 0059): refused before the log, so a
+        // refused commit is never in the WAL
+        if !prepared.only_removes() {
+            self.check_memory()?;
         }
         if let Change::Data(ops) = &prepared.record().change {
             span.record("iwdb.ops", ops.len());

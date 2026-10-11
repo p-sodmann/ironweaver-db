@@ -131,7 +131,7 @@ pub fn to_py(error: Error) -> PyErr {
         Error::Engine(engine) => engine_error(engine, message),
         Error::ReadOnly { .. } => ReadOnlyError::new_err(message),
         Error::Locked { .. } => LockedError::new_err(message),
-        Error::MemoryLimit { .. } => ResourceExhaustedError::new_err(message),
+        Error::MemoryLimit { .. } | Error::NamespaceMemoryLimit { .. } => ResourceExhaustedError::new_err(message),
         Error::Io { .. } | Error::CheckpointsDisabled { .. } => IoError::new_err(message),
         Error::InvalidOptions(_) => InvalidError::new_err(message),
         Error::NoSuchNamespace { .. } | Error::NamespaceDropped { .. } => NotFoundError::new_err(message),
