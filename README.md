@@ -30,11 +30,11 @@ Lines of code, not counting blank lines or vendored code (as of October 2026):
 
 | Language | Files | Lines |
 |---|---:|---:|
-| Rust | 227 | 72,196 |
+| Rust | 229 | 74,317 |
 | Python | 19 | 2,422 |
 | JavaScript | 9 | 2,188 |
 
-About 22,000 of the Rust lines are integration tests in `tests/` directories, and the inline `#[cfg(test)]` modules add more.
+About 24,000 of the Rust lines are integration tests in `tests/` directories, and the inline `#[cfg(test)]` modules add more.
 
 ## Documentation
 
