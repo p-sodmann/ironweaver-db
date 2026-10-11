@@ -152,8 +152,10 @@ impl Pool {
         let run: Job = Box::new(move || {
             drop(queue);
             let execute = iwdb_storage::trace_span!(parent: &parent, "iwdb.execute");
-            let _entered = execute.enter();
-            let result = catch(|| job(&job_token));
+            let result = execute.in_scope(|| catch(|| job(&job_token)));
+            // Closed before the result is handed over: an open child keeps
+            // the request's span open, so it could end after the answer
+            drop((execute, parent));
             if let Some(key) = timer {
                 lock(&shared.timers).due.remove(&key);
             }
@@ -270,8 +272,12 @@ pub fn spawn<T: Send + 'static>(
     let slot = Arc::new(Slot::default());
     let filled = slot.clone();
     let execute = iwdb_storage::trace_span!("iwdb.execute");
-    let started =
-        std::thread::Builder::new().name(name.to_owned()).spawn(move || filled.fill(execute.in_scope(|| catch(job))));
+    let started = std::thread::Builder::new().name(name.to_owned()).spawn(move || {
+        let result = execute.in_scope(|| catch(job));
+        // Closed before the result is handed over, as in `Pool::submit_until`
+        drop(execute);
+        filled.fill(result);
+    });
     match started {
         Ok(_) => Pending { slot, token: None },
         Err(e) => Pending::ready(Err(Error::internal(format!("can't start a thread: {}", e)))),

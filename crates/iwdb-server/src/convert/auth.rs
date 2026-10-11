@@ -2,7 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use iwdb_query::{Error, NewToken, Role, Secret, TokenInfo, UserInfo};
+use iwdb_query::{
+    ClientLimits, Error, LimitsReport, NamespaceLimits, NamespaceLimitsInfo, NewToken, Role, Secret, TokenInfo,
+    UserInfo,
+};
 
 use crate::proto as pb;
 
@@ -28,6 +31,7 @@ pub(crate) fn user_to_pb(user: &UserInfo) -> pb::User {
         name: user.name.clone(),
         admin: user.admin,
         grants: user.grants.iter().map(|(ns, r)| (ns.clone(), role_to_pb(*r) as i32)).collect(),
+        limits: Some(client_limits_to_pb(&user.limits)),
     }
 }
 
@@ -35,7 +39,75 @@ pub(crate) fn user_from_pb(user: Option<pb::User>) -> Result<UserInfo, Error> {
     let user = user.ok_or_else(|| Error::invalid("the answer has no user"))?;
     let grants =
         user.grants.into_iter().map(|(ns, r)| Ok((ns, role_from_pb(r)?))).collect::<Result<BTreeMap<_, _>, Error>>()?;
-    Ok(UserInfo { name: user.name, admin: user.admin, grants })
+    Ok(UserInfo { name: user.name, admin: user.admin, grants, limits: client_limits_from_pb(user.limits) })
+}
+
+pub(crate) fn client_limits_to_pb(l: &ClientLimits) -> pb::ClientLimits {
+    pb::ClientLimits {
+        requests_per_second: l.requests_per_second,
+        burst: l.burst,
+        max_running: l.max_running,
+        max_results: l.max_results,
+        max_visited: l.max_visited,
+        timeout_ms: l.timeout_ms,
+    }
+}
+
+/// Limits from the wire; a missing message is no limits set.
+pub(crate) fn client_limits_from_pb(l: Option<pb::ClientLimits>) -> ClientLimits {
+    let l = l.unwrap_or_default();
+    ClientLimits {
+        requests_per_second: l.requests_per_second,
+        burst: l.burst,
+        max_running: l.max_running,
+        max_results: l.max_results,
+        max_visited: l.max_visited,
+        timeout_ms: l.timeout_ms,
+    }
+}
+
+pub(crate) fn namespace_limits_to_pb(l: &NamespaceLimits) -> pb::NamespaceLimits {
+    pb::NamespaceLimits { max_running: l.max_running, max_memory_bytes: l.max_memory_bytes }
+}
+
+pub(crate) fn namespace_limits_from_pb(l: Option<pb::NamespaceLimits>) -> NamespaceLimits {
+    let l = l.unwrap_or_default();
+    NamespaceLimits { max_running: l.max_running, max_memory_bytes: l.max_memory_bytes }
+}
+
+pub(crate) fn namespace_limits_info_to_pb(n: &NamespaceLimitsInfo) -> pb::SetNamespaceLimitsResponse {
+    pb::SetNamespaceLimitsResponse { namespace: n.namespace.clone(), limits: Some(namespace_limits_to_pb(&n.limits)) }
+}
+
+pub(crate) fn namespace_limits_info_from_pb(r: pb::SetNamespaceLimitsResponse) -> NamespaceLimitsInfo {
+    NamespaceLimitsInfo { namespace: r.namespace, limits: namespace_limits_from_pb(r.limits) }
+}
+
+pub(crate) fn limits_report_to_pb(r: &LimitsReport) -> pb::GetLimitsResponse {
+    pb::GetLimitsResponse {
+        client_defaults: Some(client_limits_to_pb(&r.client_defaults)),
+        namespace_defaults: Some(namespace_limits_to_pb(&r.namespace_defaults)),
+        namespaces: r
+            .namespaces
+            .iter()
+            .map(|n| pb::NamespaceLimitsEntry {
+                namespace: n.namespace.clone(),
+                limits: Some(namespace_limits_to_pb(&n.limits)),
+            })
+            .collect(),
+    }
+}
+
+pub(crate) fn limits_report_from_pb(r: pb::GetLimitsResponse) -> LimitsReport {
+    LimitsReport {
+        client_defaults: client_limits_from_pb(r.client_defaults),
+        namespace_defaults: namespace_limits_from_pb(r.namespace_defaults),
+        namespaces: r
+            .namespaces
+            .into_iter()
+            .map(|n| NamespaceLimitsInfo { namespace: n.namespace, limits: namespace_limits_from_pb(n.limits) })
+            .collect(),
+    }
 }
 
 pub(crate) fn token_info_to_pb(info: &TokenInfo) -> pb::TokenInfo {

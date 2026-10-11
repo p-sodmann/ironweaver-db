@@ -16,6 +16,8 @@
 //! - [`Admin`]: the operator's reads and cancel (step 16c): the server's
 //!   status, the [`requests`] registry, the [`metrics`] and the [`log`]
 //!   tail.
+//! - [`limits`]: resource limits per client and namespace, admitted at the
+//!   authorisation point (step 15d, ADR 0059).
 //! - [`jobs`]: managed analytics jobs, the registry behind `Admin`'s job
 //!   methods (step 16f, ADR 0056).
 //! - `conformance` (feature): the conformance suite for implementations.
@@ -29,6 +31,7 @@ mod cursor;
 mod error;
 pub mod exec;
 pub mod jobs;
+pub mod limits;
 pub mod log;
 pub mod metrics;
 mod model;
@@ -53,11 +56,12 @@ pub use auth::{
 };
 pub use cursor::Cursor;
 pub use error::{Code, Error};
+pub use limits::{ClientLimits, LimitsReport, NamespaceLimits, NamespaceLimitsInfo};
 pub use model::{
     Answer, ChangeEvent, Changes, CommitOptions, Edge, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus,
     Node, Work,
 };
-pub use options::{Bounds, LimitConfig, Limits, QueryOptions};
+pub use options::{Bounds, Budget, LimitConfig, Limits, QueryOptions};
 pub use read::{Explain, KeyInfo, LabelInfo, Lookup, Plan, ReadContext, Schema, TypeInfo};
 pub use request::{
     AnalyticsRequest, CHANGES_BATCH_BYTES, ChangesRequest, ExplainRequest, FindRequest, Job, JobResult, MatchRequest,

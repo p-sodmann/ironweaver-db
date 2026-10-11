@@ -50,3 +50,7 @@ Metrics are only pulled, never pushed.
 - Percentiles come from bucket counts (`histogram_quantile`), with the precision of the buckets.
 - The request metrics count calls that pass the authorisation point and the gate. A caller of the embedded store in-process (Python's `Store.open`) isn't counted. Its commits still are, in the namespace histograms.
 - Memory per namespace is the core's estimate (`Graph::memory_usage`, payloads not counted) as of the last commit. Step 16d's memory limit builds on it.
+
+## Update (2026-10-11, ADR 0059)
+
+Step 15d adds one metric with a `user` label, `iwdb_limit_refusals_total{user, limit}`. It stays bounded by a fixed table (the first 64 users refused get a series each, later ones `(other)`), and a caller who isn't a server admin sees only its own series. Every other metric keeps this ADR's rule.

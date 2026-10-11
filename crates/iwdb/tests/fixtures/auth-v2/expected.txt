@@ -1,0 +1,9 @@
+user ann admin=false grants={"social": Write} limits=[("requests_per_second", 50), ("max_running", 4)]
+token ann ci expires=false
+user cy admin=false grants={} limits=[("burst", 0), ("max_visited", 1000), ("timeout_ms", 5000)]
+user root admin=true grants={}
+limits social [("max_running", 16), ("max_memory_bytes", 1073741824)]
+password root root-password
+password ann ann-password
+password cy cy-password-2
+token-secret iwdb_1ae4b75250891dbf3b982ced6460d2b8e1aed2cd13a8dbcb63768d346328259e

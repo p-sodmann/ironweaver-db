@@ -45,6 +45,48 @@ pub struct QueryOptions {
     /// Continue a paginated read: the [`Answer::next`](crate::Answer::next)
     /// of the previous page, with the same request.
     pub cursor: Option<Cursor>,
+    /// The caller's query budget (step 15d, ADR 0059): caps below the
+    /// server's, set by the authorisation point from the caller's limits,
+    /// never by the caller (it isn't on the wire).
+    pub budget: Budget,
+}
+
+/// A caller's query budget (ADR 0059): the most a read may ask for, below
+/// the server's caps. `None`: no budget for that limit. A read asking for
+/// more is lowered to it, as to a server cap; a read asking for nothing
+/// gets the server's default or the budget, whichever is lower.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Budget {
+    pub max_results: Option<usize>,
+    pub max_visited: Option<usize>,
+    pub timeout: Option<Duration>,
+}
+
+impl Budget {
+    /// Whether it caps nothing.
+    pub fn is_none(&self) -> bool {
+        *self == Budget::default()
+    }
+
+    /// What it caps, for messages: `max_visited 1000, timeout 5s`.
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(n) = self.max_results {
+            parts.push(format!("max_results {}", n));
+        }
+        if let Some(n) = self.max_visited {
+            parts.push(format!("max_visited {}", n));
+        }
+        if let Some(t) = self.timeout {
+            parts.push(format!("timeout {:?}", t));
+        }
+        parts.join(", ")
+    }
+
+    /// `timeout` capped by the budget.
+    pub fn cap_timeout(&self, timeout: Duration) -> Duration {
+        self.timeout.map_or(timeout, |b| timeout.min(b))
+    }
 }
 
 impl QueryOptions {
@@ -106,22 +148,26 @@ impl LimitConfig {
         Ok(())
     }
 
-    /// The limits and the timeout a read with `options` runs under; they
-    /// are recorded on the request's trace span, if one is current (ADR
-    /// 0057). Errors: `invalid_argument` for a limit of 0.
+    /// The limits and the timeout a read with `options` runs under, the
+    /// caller's budget applied; they are recorded on the request's trace
+    /// span, if one is current (ADR 0057). Errors: `invalid_argument` for a
+    /// limit of 0.
     pub fn resolve(&self, options: &QueryOptions) -> Result<(Bounds, Duration), Error> {
-        let one = |name: &str, asked: Option<usize>, default: usize, max: usize| match asked {
-            Some(0) => Err(Error::invalid(format!("{} must be at least 1", name))),
-            Some(n) => Ok(n.min(max)),
-            None => Ok(default),
+        let one = |name: &str, asked: Option<usize>, default: usize, max: usize, budget: Option<usize>| {
+            let resolved = match asked {
+                Some(0) => return Err(Error::invalid(format!("{} must be at least 1", name))),
+                Some(n) => n.min(max),
+                None => default,
+            };
+            Ok(budget.map_or(resolved, |b| resolved.min(b)))
         };
-        let (d, m, l) = (&self.default_limits, &self.max_limits, &options.limits);
+        let (d, m, l, b) = (&self.default_limits, &self.max_limits, &options.limits, &options.budget);
         let bounds = Bounds {
-            max_results: one("max_results", l.max_results, d.max_results, m.max_results)?,
-            max_visited: one("max_visited", l.max_visited, d.max_visited, m.max_visited)?,
-            max_edges: one("max_edges", l.max_edges, d.max_edges, m.max_edges)?,
+            max_results: one("max_results", l.max_results, d.max_results, m.max_results, b.max_results)?,
+            max_visited: one("max_visited", l.max_visited, d.max_visited, m.max_visited, b.max_visited)?,
+            max_edges: one("max_edges", l.max_edges, d.max_edges, m.max_edges, None)?,
         };
-        let timeout = options.timeout.unwrap_or(self.default_timeout).min(self.max_timeout);
+        let timeout = b.cap_timeout(options.timeout.unwrap_or(self.default_timeout).min(self.max_timeout));
         crate::trace::bounds(&bounds, timeout);
         Ok((bounds, timeout))
     }
@@ -161,6 +207,26 @@ mod tests {
         assert_eq!(timeout, Duration::from_secs(300));
         let zero = QueryOptions::default().with_limits(None, None, Some(0));
         assert_eq!(config.resolve(&zero).map_err(|e| e.code()), Err(Code::InvalidArgument));
+    }
+
+    #[test]
+    fn a_budget_lowers_what_is_asked_and_the_defaults() {
+        let config = LimitConfig::default();
+        let budget = Budget { max_results: Some(10), max_visited: None, timeout: Some(Duration::from_secs(2)) };
+        let asked = QueryOptions { budget, ..QueryOptions::default() }.with_limits(Some(500), Some(7), None);
+        let (bounds, timeout) = config.resolve(&asked).expect("resolve");
+        assert_eq!((bounds.max_results, bounds.max_visited), (10, 7));
+        assert_eq!(timeout, Duration::from_secs(2));
+        // Nothing asked: the lower of the default and the budget
+        let (bounds, _) = config.resolve(&QueryOptions { budget, ..QueryOptions::default() }).expect("resolve");
+        assert_eq!(bounds.max_results, 10);
+        let high = Budget { max_results: Some(1_000_000), ..Budget::default() };
+        let (bounds, _) = config.resolve(&QueryOptions { budget: high, ..QueryOptions::default() }).expect("resolve");
+        assert_eq!(bounds.max_results, LimitConfig::DEFAULT_LIMITS.max_results);
+        // 0 is still invalid
+        let zero = QueryOptions { budget, ..QueryOptions::default() }.with_limits(Some(0), None, None);
+        assert_eq!(config.resolve(&zero).map_err(|e| e.code()), Err(Code::InvalidArgument));
+        assert_eq!(budget.describe(), "max_results 10, timeout 2s");
     }
 
     #[test]

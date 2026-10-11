@@ -245,7 +245,7 @@ impl From<iwdb_storage::Error> for Error {
             E::Io { .. } | E::CheckpointsDisabled { .. } => Code::Io,
             E::ReadOnly { .. } => Code::ReadOnly,
             E::Locked { .. } => Code::Unavailable,
-            E::MemoryLimit { .. } => Code::ResourceExhausted,
+            E::MemoryLimit { .. } | E::NamespaceMemoryLimit { .. } => Code::ResourceExhausted,
             E::Timeout { .. } => Code::Timeout,
             E::Cancelled => Code::Cancelled,
             E::NoSuchNamespace { .. } | E::NamespaceDropped { .. } => Code::NotFound,

@@ -198,10 +198,12 @@ On SIGINT or SIGTERM the server stops accepting connections and sends every HTTP
 | `read` | `WaitForSeq`, `GetNodes`, `GetEdges`, `Find`, `Explain`, `Neighbourhood`, `Traverse`, `ShortestPath`, `RandomWalks`, `Subgraph`, `MatchPattern`, `Analyze`, `GetChanges`, `Watch`, `GetCatalog`, `GetSchema`, `GetNamespaceStatus`, `StartJob` (and fetching that job's result) |
 | `write` | `read`, and `Commit` |
 | `admin` | `write`, and `CommitCatalog`, `DropNamespace` |
-| server-wide admin | every role on every namespace, `CreateNamespace`, the user, grant and token RPCs for anyone, `GetLog`, `ListRequests` and `CancelRequest` for anyone's requests, `ListJobs`, `GetJob`, `CancelJob` and `GetJobResult` for anyone's jobs, and the admin writes (`Checkpoint`, `Backup`, `Verify`, `PruneArchive`) |
-| any user | `ListNamespaces` (the ones it has a role on), `WhoAmI`, `Logout`, and `SetPassword` (with its current password), `CreateToken`, `RevokeToken`, `ListTokens` for itself; `GetServerStatus`, `ListConsumers` and `GetMetrics` (narrowed to the namespaces it has a role on), and `ListRequests` and `CancelRequest` for its own requests; `ListJobs`, `GetJob`, `CancelJob` and `GetJobResult` for its own jobs (others' are `NOT_FOUND`) |
+| server-wide admin | every role on every namespace, `CreateNamespace`, the user, grant and token RPCs for anyone, `SetUserLimits` and `SetNamespaceLimits`, `GetLog`, `ListRequests` and `CancelRequest` for anyone's requests, `ListJobs`, `GetJob`, `CancelJob` and `GetJobResult` for anyone's jobs, and the admin writes (`Checkpoint`, `Backup`, `Verify`, `PruneArchive`) |
+| any user | `ListNamespaces` (the ones it has a role on), `GetLimits` (the defaults, and the limits of the namespaces it has a role on), `WhoAmI`, `Logout`, and `SetPassword` (with its current password), `CreateToken`, `RevokeToken`, `ListTokens` for itself; `GetServerStatus`, `ListConsumers` and `GetMetrics` (narrowed to the namespaces it has a role on), and `ListRequests` and `CancelRequest` for its own requests; `ListJobs`, `GetJob`, `CancelJob` and `GetJobResult` for its own jobs (others' are `NOT_FOUND`) |
 
 The Rust clients take a token (`Remote::with_token`) or log in (`Remote::login`, which keeps the session's token), and implement `iwdb_query::Accounts` for the user RPCs.
+
+**Resource limits** (step 15d, [ADR 0059](../adr/0059-resource-limits-per-client-and-namespace.md)): `SetUserLimits`, `SetNamespaceLimits` and `GetLimits` set and read per-user limits (a rate as a token bucket, running calls, query budgets) and per-namespace limits (running calls, memory). A call over one of them fails at once with `RESOURCE_EXHAUSTED` (`iwdb-code: resource_exhausted`), before it starts; a read asking for more than its user's budget is lowered to it. `User.limits` holds a user's own limits, and in `WhoAmI` the caller's effective ones. See [config.md](config.md#resource-limits).
 
 ## The operator's reads
 

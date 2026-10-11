@@ -31,6 +31,7 @@ fn options(fsync: FsyncPolicy, retention: WalRetention) -> StoreOptions {
         retention,
         memory: Default::default(),
         backup: Default::default(),
+        namespace_limits: Default::default(),
     }
 }
 

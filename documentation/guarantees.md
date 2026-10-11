@@ -310,7 +310,24 @@ What it doesn't guarantee:
 - **One commit can cross the line.** A commit is admitted on the state before it, so `used` can pass the line by one commit (a WAL record is at most 64 MiB). The next one is refused.
 - **Reads aren't limited by memory.** An `analyze` is counted, and can push the store into refusing writes, but it isn't refused.
 - **An embedded store has no limit** unless `StoreOptions::memory` sets one: it can't see the memory of the application it runs in. Without a limit nothing is refused.
-- **Per-namespace and per-client limits** are step 15d's, and nothing is evicted to disk.
+- **Nothing is evicted to disk.** Per-namespace and per-client limits are in [Resource limits](#resource-limits-step-15d).
+
+## Resource limits (step 15d)
+
+Limits per user and per namespace ([ADR 0059](adr/0059-resource-limits-per-client-and-namespace.md), [api/config.md](api/config.md#resource-limits)) keep one client or namespace from starving the others:
+
+- **One client over its limits can't starve another.** A call over its user's rate (a token bucket) or count of running calls, or its namespace's count of running calls, is refused with `resource_exhausted` when the authorisation point checks it, before its future exists: it holds no worker, queue slot or namespace lock. The stress test (`one_client_over_its_limits_cannot_starve_another`, `crates/iwdb-server/tests/limits.rs`) floods a server of two workers with one user's PageRanks from four connections, retrying every refusal at once, while another user reads within its limits every 20 ms: none of the second user's calls fails, and each answers within 150 ms (about 1 ms measured; without limits the same reads waited 0.4 to 0.8 s).
+- **Admission is all or nothing.** The counts and the bucket are checked under one lock; a refused call takes no token and counts nowhere, so a flooding client still gets exactly its rate.
+- **A namespace above its memory limit refuses writes and keeps serving reads; a refused write leaves nothing in the WAL.** The check is the memory limit's (ADR 0054), before the WAL append, with its exceptions: commits that only remove, repeats of keyed commits, drops and reads go on. `a_namespace_at_its_memory_limit_refuses_writes_and_serves_reads` (`crates/iwdb/tests/memory.rs`) fails every write from the refusal on, finds none attempted, crashes and recovers exactly the accepted commits; the limit holds after the restart.
+- **Query budgets** lower what a read asks for, as the server's caps do, and a read that reaches a budget says so in its error.
+- **Durable with the users.** Limits are records of the system namespace, changed with one commit each (design rule 2), recovered, backed up and restored with the users (auth format 2, [formats/auth.md](formats/auth.md)).
+
+What it doesn't guarantee:
+
+- **Refused, never queued.** An over-limit call fails; the client retries with backoff. There is no structured retry field yet: the message says when.
+- **CPU and network aren't limited.** A refused call still costs its round trip and the check; the stress test's refused flood is cheap next to its work, not free.
+- **Only remote calls.** Calls on an embedded store in-process (Rust, Python) aren't limited, and with authentication off only namespace limits apply. Server admins get the defaults of no one: only the limits set on them.
+- **Per server.** Limits are counted in one process; limits across a cluster are step 18's.
 
 ## The change stream (step 13)
 

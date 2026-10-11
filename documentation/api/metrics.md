@@ -4,7 +4,7 @@
 
 - **Pulled, never pushed.** The server opens no connection to send them anywhere ([SECURITY.md](../../SECURITY.md)). `/metrics` is served in every build, also without the REST API.
 - **Credentials.** `/metrics` needs a token like any route: give Prometheus an API token (`authorization: { credentials_file: ... }` in the scrape config), over TLS (`scheme: https`, `tls_config: { ca_file: ... }`). A caller sees the series of the namespaces it has a role on, and those of no namespace: a monitoring user without grants sees the server-wide ones; grant it `read` on a namespace for that namespace's.
-- **Labels are bounded**: `operation` (an RPC's name), `code` (`ok` or an error code of [errors.md](errors.md)), `lock` (`read`, `write`), `namespace` (a live namespace; its series go when it is dropped), `part` (`graph`, `checkpoint`, `working`), `outcome` (`ok`, `failed`), `version`. Never an id, a user, a client or a value of the data.
+- **Labels are bounded**: `operation` (an RPC's name), `code` (`ok` or an error code of [errors.md](errors.md)), `lock` (`read`, `write`), `namespace` (a live namespace; its series go when it is dropped), `part` (`graph`, `checkpoint`, `working`), `outcome` (`ok`, `failed`), `version`, `limit` (`rate`, `running`, `memory`). Never an id, a client or a value of the data. A `user` only in `iwdb_limit_refusals_total`, bounded by a fixed table: the first 64 users refused get a series each for as long as the server runs, and later ones are counted as `(other)`, so every series stays monotonic ([ADR 0059](../adr/0059-resource-limits-per-client-and-namespace.md)). A caller who isn't a server admin sees only its own user series.
 - **Histograms** have the same buckets, in seconds: 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 and `+Inf`.
 - **Since when.** Counters and histograms count from when the database started serving (`iwdb_start_time_seconds`); gauges are read when scraped. The per-namespace values are read without any lock of the namespace, so a scrape answers while commits wait for an fsync and while every worker is busy.
 
@@ -57,6 +57,9 @@ A test keeps this table equal to the metrics the server exports (`METRICS` in `c
 | `iwdb_jobs_running` | gauge | – | – | Managed analytics jobs collecting their projection or running. |
 | `iwdb_jobs_total` | counter | `outcome` | – | Managed analytics jobs that ended, by outcome: `done`, `failed` or `cancelled`. |
 | `iwdb_job_result_bytes` | gauge | – | bytes | The stored job results' estimated size (counted in the `working` memory part). |
+| `iwdb_limit_refusals_total` | counter | `user`, `limit` | – | Calls refused for a user's limits (`resource_exhausted`, ADR 0059), by user and limit: `rate` or `running`. The first 64 users refused get a series each; later ones are counted as `(other)`. A caller who isn't a server admin sees only its own. |
+| `iwdb_namespace_limit_refusals_total` | counter | `namespace`, `limit` | – | Calls refused for a namespace's limits, by limit: `running` (calls running on it) or `memory` (writes above its memory limit). |
+| `iwdb_namespace_memory_limit_bytes` | gauge | `namespace` | bytes | The namespace's memory limit (its own or `[limits.namespace] max_memory_bytes`); no sample without one. |
 | `iwdb_trace_spans_exported_total` | counter | – | – | Trace spans the collector accepted (`[tracing]`, ADR 0057); 0 with tracing off. |
 | `iwdb_trace_spans_dropped_total` | counter | `reason` | – | Trace spans dropped, by reason: `queue_full` (the export queue was full) or `export_failed` (the collector didn't take their batch). |
 

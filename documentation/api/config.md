@@ -49,6 +49,14 @@ iwdb-server --check-config --config server.toml       # validate; print the effe
 | `limits.max.max_visited` | `IWDB_LIMITS_MAX_MAX_VISITED` | `built in` | (built in: 10000000) |
 | `limits.max.max_edges` | `IWDB_LIMITS_MAX_MAX_EDGES` | `built in` | (built in: 100000000) |
 | `limits.max.timeout_ms` | `IWDB_LIMITS_MAX_TIMEOUT_MS` | `built in` | (built in: 300000) |
+| `limits.client.requests_per_second` | `IWDB_LIMITS_CLIENT_REQUESTS_PER_SECOND` | `none` | The default limits of users who aren't server admins and have none of their own ([resource limits](#resource-limits)): calls admitted per second, a token bucket. Unset or 0: none. |
+| `limits.client.burst` | `IWDB_LIMITS_CLIENT_BURST` | `none` | The bucket's size: calls admitted at once after a quiet time (unset: `requests_per_second`). |
+| `limits.client.max_running` | `IWDB_LIMITS_CLIENT_MAX_RUNNING` | `none` | Calls of a user running at once. |
+| `limits.client.max_results` | `IWDB_LIMITS_CLIENT_MAX_RESULTS` | `none` | Query budget: reads asking for more `max_results` are lowered to this. |
+| `limits.client.max_visited` | `IWDB_LIMITS_CLIENT_MAX_VISITED` | `none` | Query budget: likewise for `max_visited`. |
+| `limits.client.timeout_ms` | `IWDB_LIMITS_CLIENT_TIMEOUT_MS` | `none` | Query budget: likewise for the timeout. |
+| `limits.namespace.max_running` | `IWDB_LIMITS_NAMESPACE_MAX_RUNNING` | `none` | The default limits of namespaces without their own: calls on a namespace running at once, of every user together. |
+| `limits.namespace.max_memory_bytes` | `IWDB_LIMITS_NAMESPACE_MAX_MEMORY_BYTES` | `none` | Writes that add to a namespace are refused while its graph memory is at or above this; deletes, drops and reads go on. |
 | `log.format` | `IWDB_LOG_FORMAT` | `"auto"` | `json`, `text`, or `auto`: JSON unless stderr is a terminal ([ADR 0042](../adr/0042-structured-logs.md)). |
 | `log.level` | `IWDB_LOG_LEVEL` | `"info"` | A filter: a level, or directives such as `warn,iwdb_storage=debug`. |
 | `log.tail_events` | `IWDB_LOG_TAIL_EVENTS` | `1000` | The last log events the server keeps for `GetLog` (`GET /v1/log`) and the console, at most 100 000; 0 keeps none ([ADR 0051](../adr/0051-the-status-views.md)). The same events as stderr, after `log.level`. |
@@ -147,6 +155,17 @@ An analytics job that may take longer than a request's timeout (`limits.max.time
 - **Where they run.** On `jobs.running` threads of their own, not the query workers. A queued or running job is also listed by `ListRequests` (as `StartJob`, with the job's id), and `CancelRequest` cancels it.
 - **Memory.** A running job's projection and every stored result count in the memory limit's `working` part, so jobs add at most `jobs.running` projections plus `jobs.result_bytes`. Jobs still start while writes are refused, as reads do.
 - **Shutdown.** When the server drains, every queued and running job is cancelled ("the server is shutting down") and new ones are refused. Nothing is kept across a restart: a job's id then answers `not_found`.
+
+## Resource limits
+
+One client or namespace over its limits can't starve the others ([ADR 0059](../adr/0059-resource-limits-per-client-and-namespace.md)). Limits are set per user and per namespace with `iwctl limits` (or `SetUserLimits`, `SetNamespaceLimits`), stored with the users in the data directory; `[limits.client]` and `[limits.namespace]` are the defaults for those without their own. Nothing is limited until you set something.
+
+- **Values.** Unset: the default applies. 0: no limit, whatever the default. A user's or namespace's own value replaces the default, so a trusted service can be given more than the default as well as less.
+- **Who.** The `[limits.client]` defaults apply to users who aren't server admins; admins get only the limits set on them. With `[auth] enabled = false` there are no users, so only namespace limits apply. Calls on an embedded store in-process aren't limited.
+- **Refused, never queued.** A call over a limit is refused at once with `resource_exhausted` (503 over REST), before it takes a worker, a queue slot or a lock; the message names the limit and when to retry. `CancelRequest`, `CancelJob` and `Logout` are never limited, so a client over its limits can still cancel its own requests. A `Watch` takes a token for its first round only, but counts as running while it is open.
+- **Query budgets** (`max_results`, `max_visited`, `timeout_ms`) lower what a read asks for, below `[limits.max]`; a read asking for nothing gets the lower of `[limits.default]` and the budget. Reaching a budget is reaching any limit: `budget_exceeded`, a `truncated` answer with `partial`, or `timeout`, and the message says that the user's budget applies.
+- **Memory per namespace** (`max_memory_bytes`) is the namespace's graph memory (`iwdb_namespace_memory_bytes`). At or above it, writes that add are refused before they are logged; deletes, drops and reads go on. It works with the server-wide `[memory]` limit, not instead of it.
+- **Watch them** with `iwdb_limit_refusals_total{user, limit}`, `iwdb_namespace_limit_refusals_total{namespace, limit}` and `iwdb_namespace_memory_limit_bytes` ([metrics.md](metrics.md)), and `iwctl limits show`.
 
 ## Audit log
 

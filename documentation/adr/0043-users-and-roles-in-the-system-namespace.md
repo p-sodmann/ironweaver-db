@@ -36,3 +36,7 @@ Three places were considered:
 - Namespace ids now skip the one `_system` took: a store with users gives its next namespace id 3, not 2. Ids only ever promised to grow and never be reused.
 - A store with users can't be opened by a binary from before step 15a (above). The fixture `crates/iwdb/tests/fixtures/auth-v1/` holds auth format 1 in a checkpoint and in WAL records; every later version must read it.
 - Users are few; listing them reads every node of `_system` (O(users + tokens)). Authenticating a request reads two nodes under the namespace's read lock.
+
+## Update (2026-10-11, ADR 0059)
+
+The system namespace also holds the limits of step 15d: a user's in its node, a namespace's in a node `limits:<namespace id>`. That is auth format 2; format 1 is still read, and the first change moves a store to format 2. The fixture `auth-v2/` joins `auth-v1/`.

@@ -36,9 +36,9 @@ use iwdb_engine::{CatalogChange, Mutation};
 use iwdb_query::audit::AuditEntry;
 use iwdb_query::exec::block_on;
 use iwdb_query::{
-    Accounts, AnalyticsRequest, ChangesRequest, Code, CommitOptions, Database, Error, ExplainRequest, FindRequest, Job,
-    JobState, MatchRequest, NeighbourhoodRequest, Order, PathRequest, ProjectionSpec, QueryOptions, Role, Secret,
-    SubgraphRequest, TraverseRequest, UserInfo, WalkRequest,
+    Accounts, AnalyticsRequest, ChangesRequest, ClientLimits, Code, CommitOptions, Database, Error, ExplainRequest,
+    FindRequest, Job, JobState, MatchRequest, NamespaceLimits, NeighbourhoodRequest, Order, PathRequest,
+    ProjectionSpec, QueryOptions, Role, Secret, SubgraphRequest, TraverseRequest, UserInfo, WalkRequest,
 };
 use iwdb_query::{Admin, Audited, Operation, Via};
 use iwdb_server::auth::AuthMode;
@@ -165,6 +165,9 @@ enum Op {
     CancelOthersJob,
     OwnJobResult,
     OthersJobResult,
+    SetUserLimits,
+    SetNamespaceLimits,
+    GetLimits,
 }
 
 impl Op {
@@ -220,6 +223,9 @@ impl Op {
             Op::GetOwnJob | Op::GetOthersJob => Operation::GetJob,
             Op::CancelOwnJob | Op::CancelOthersJob => Operation::CancelJob,
             Op::OwnJobResult | Op::OthersJobResult => Operation::GetJobResult,
+            Op::SetUserLimits => Operation::SetUserLimits,
+            Op::SetNamespaceLimits => Operation::SetNamespaceLimits,
+            Op::GetLimits => Operation::Limits,
         }
     }
 }
@@ -291,6 +297,10 @@ const TABLE: &[(Op, [Outcome; 6])] = &[
     (Op::CancelOthersJob, [U, N, N, N, N, A]),
     (Op::OwnJobResult, [U, N, A, A, A, A]),
     (Op::OthersJobResult, [U, N, N, N, N, A]),
+    // Limits (step 15d): set by a server admin; read by anyone, narrowed
+    (Op::SetUserLimits, [U, D, D, D, D, A]),
+    (Op::SetNamespaceLimits, [U, D, D, D, D, A]),
+    (Op::GetLimits, [U, A, A, A, A, A]),
 ];
 
 /// The backup the server's backup directory starts with (`PruneArchive`).
@@ -609,6 +619,28 @@ impl World {
             }
             Op::Verify => block_on(c.verify(iwdb_query::VerifyTarget::Store)).map(drop),
             Op::PruneArchive => block_on(c.prune_archive(SEED_BACKUP.into(), true)).map(drop),
+            Op::SetUserLimits => {
+                let limits = ClientLimits { max_running: Some(100), ..ClientLimits::default() };
+                let user = block_on(c.set_user_limits(&self.victim(), limits))?;
+                assert_eq!(user.limits, limits);
+                Ok(())
+            }
+            Op::SetNamespaceLimits => {
+                // High enough not to refuse any other cell
+                let limits = NamespaceLimits { max_running: Some(1000), ..NamespaceLimits::default() };
+                block_on(c.set_namespace_limits(NS, limits)).map(drop)
+            }
+            Op::GetLimits => {
+                self.audit.paused(|| {
+                    let limits = NamespaceLimits { max_running: Some(1000), ..NamespaceLimits::default() };
+                    block_on(self.admin.set_namespace_limits(NS, limits)).unwrap()
+                });
+                let report = block_on(c.limits())?;
+                let names: Vec<&str> = report.namespaces.iter().map(|n| n.namespace.as_str()).collect();
+                let expected: &[&str] = if who == Who::NoGrant { &[] } else { &[NS] };
+                assert_eq!(names, expected, "{:?}", who);
+                Ok(())
+            }
             Op::StartJob => {
                 let job = block_on(c.start_job(NS.into(), degree(), o(), None))?;
                 assert_eq!((job.user.as_str(), job.namespace.as_str()), (me, NS), "the job is the caller's");
@@ -794,6 +826,7 @@ const NOT_AUDITED: &[Operation] = &[
     Operation::ListJobs,
     Operation::GetJob,
     Operation::GetJobResult,
+    Operation::Limits,
 ];
 
 /// A quick job.
@@ -875,6 +908,8 @@ fn audit_problems(op: Op, who: Who, got: Outcome, entries: &[AuditEntry]) -> Vec
             Op::Backup => expect("backup", e.backup.as_deref().is_some_and(|b| b.starts_with(BACKUP_PREFIX))),
             Op::PruneArchive => expect("backup", e.backup.as_deref() == Some(SEED_BACKUP)),
             Op::StartJob => expect("job", e.namespace.as_deref() == Some(NS) && e.request.is_some()),
+            Op::SetUserLimits => expect("subject", e.subject.as_deref().is_some_and(|s| s.starts_with("victim"))),
+            Op::SetNamespaceLimits => expect("namespace", e.namespace.as_deref() == Some(NS)),
             Op::CancelOwnJob | Op::CancelOthersJob => {
                 let owner = job_owner(op == Op::CancelOwnJob, who);
                 expect(

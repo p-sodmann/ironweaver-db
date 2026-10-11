@@ -90,6 +90,7 @@ where
             out.add(m::REQUEST_DURATION, &[op.operation.name()], Value::Histogram(op.durations));
         }
     }
+    let refusals = monitor.requests.limiter().refusals();
     let (mut commits, mut fsyncs, mut checkpoints) = Default::default();
     let (mut reads, mut writes): (HistogramSnapshot, HistogramSnapshot) = Default::default();
     let merge = |into: &mut HistogramSnapshot, h: &HistogramSnapshot| into.merge(h);
@@ -119,6 +120,19 @@ where
         let flag = |on: bool| Value::Gauge(if on { 1.0 } else { 0.0 });
         out.add(m::READ_ONLY, &[name], flag(ns.read_only().is_some()));
         out.add(m::CHECKPOINT_FAILED, &[name], flag(ns.checkpoint_failure().is_some()));
+        // Limits (step 15d, ADR 0059)
+        if let Some(limit) = ns.limits().memory() {
+            out.add(m::NAMESPACE_MEMORY_LIMIT, &[name], Value::Gauge(limit as f64));
+        }
+        let running = refusals.namespaces.iter().find(|(n, _)| n == name).map_or(0, |(_, c)| *c);
+        for (limit, n) in [("running", running), ("memory", ns.memory_refusals())] {
+            if n > 0 {
+                out.add(m::NAMESPACE_LIMIT_REFUSALS, &[name, limit], Value::Counter(n));
+            }
+        }
+    }
+    for (user, limit, n) in &refusals.users {
+        out.add(m::LIMIT_REFUSALS, &[user, limit], Value::Counter(*n));
     }
     out.add(m::COMMIT_DURATION, &[], Value::Histogram(commits));
     out.add(m::WAL_FSYNC_DURATION, &[], Value::Histogram(fsyncs));

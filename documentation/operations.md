@@ -27,11 +27,12 @@ How to install, configure, run, watch, back up and upgrade an `iwdb-server`, wit
 9. [The status views and iwctl](#the-status-views-and-iwctl)
 10. [Backups and restore](#backups-and-restore)
 11. [The memory limit](#the-memory-limit)
-12. [Managed jobs](#managed-jobs)
-13. [Traces](#traces)
-14. [Upgrades](#upgrades)
-15. [Windows](#windows)
-16. [Troubleshooting](#troubleshooting)
+12. [Resource limits per user and namespace](#resource-limits-per-user-and-namespace)
+13. [Managed jobs](#managed-jobs)
+14. [Traces](#traces)
+15. [Upgrades](#upgrades)
+16. [Windows](#windows)
+17. [Troubleshooting](#troubleshooting)
 
 ## Install
 
@@ -400,6 +401,15 @@ groups:
         expr: increase(iwdb_backups_total{outcome="failed"}[1d]) > 0
         labels: { severity: ticket }
 
+      - alert: IwdbNamespaceAtMemoryLimit
+        expr: increase(iwdb_namespace_limit_refusals_total{limit="memory"}[10m]) > 0
+        labels: { severity: ticket }
+
+      - alert: IwdbUserThrottled
+        expr: sum by (instance, user) (rate(iwdb_limit_refusals_total[10m])) > 1
+        for: 30m
+        labels: { severity: info }
+
       - alert: IwdbTraceExportFailing
         expr: rate(iwdb_trace_spans_dropped_total{reason="export_failed"}[10m]) > 0
         for: 30m
@@ -421,6 +431,8 @@ groups:
 | `IwdbRejectingRequests` | more than 1 % refused: the queue (`server.queue`) is full, or the server drains | Add `server.workers` or capacity, or find slow requests (`iwctl requests $S`). |
 | `IwdbTimeouts` | more than 5 % of requests reach their timeout | Find the slow reads (`iwctl requests $S`, `iwdb_request_duration_seconds` by operation); cancel runaway ones; check limits. |
 | `IwdbBackupFailed` | any failed backup | Read the `iwctl backup` output or the log; a failed backup is removed. Also alert on `time() - iwdb_last_backup_timestamp_seconds` above your backup interval (no sample until the first backup since the server started). |
+| `IwdbNamespaceAtMemoryLimit` | the namespace's writes are refused | [Resource limits](#resource-limits-per-user-and-namespace): delete or raise its `max_memory_bytes`. |
+| `IwdbUserThrottled` | more than a refusal a second for half an hour is more than bursts | Ask the user's owner: raise its limits if its work needs them, or leave them if it misbehaves. |
 | `IwdbTraceExportFailing` | spans are dropped, never waited for; requests are unaffected | Check the collector. `queue_full` drops instead mean too many spans: lower `tracing.sample_ratio`. |
 
 ## The status views and iwctl
@@ -531,6 +543,46 @@ Each state is left 5 % of the limit below its line, so a store at the line doesn
 5. Writes resume on their own once memory is 5 % below the line; there is nothing to reset. Clients retry `resource_exhausted` with backoff.
 
 An embedded store has no limit unless its `StoreOptions` set one.
+
+## Resource limits per user and namespace
+
+Limits keep one user or namespace from starving the others ([ADR 0059](adr/0059-resource-limits-per-client-and-namespace.md), [guarantees.md](guarantees.md#resource-limits-step-15d)). Nothing is limited until you set something. A call over a limit is refused at once with `resource_exhausted`, before it takes a worker or a lock, and the message names the limit; clients retry with backoff.
+
+| Limit | Per | What it bounds |
+|---|---|---|
+| `requests_per_second`, `burst` | user | calls admitted, as a token bucket (`burst`: how many at once after a quiet time) |
+| `max_running` | user | the user's calls running at once |
+| `max_results`, `max_visited`, `timeout_ms` | user | query budgets: what a read may ask for, below `[limits.max]` |
+| `max_running` | namespace | calls on the namespace running at once, every user's together |
+| `max_memory_bytes` | namespace | writes that add are refused while its graph memory (`iwdb_namespace_memory_bytes`) is at or above this; deletes, drops and reads go on |
+
+Defaults for users who aren't server admins and namespaces without their own go in the configuration; a value set with `iwctl limits` replaces the default (0: no limit). Admins get only the limits set on them, so you can still act on a loaded server:
+
+```toml
+[limits.client]
+requests_per_second = 100
+burst = 200
+max_running = 16
+max_visited = 1000000
+
+[limits.namespace]
+max_running = 64
+```
+
+Set and read them per user and namespace (stored with the users, so they survive restarts and travel with backups):
+
+```sh run
+iwctl limits user $S prometheus requests_per_second=5 max_running=2
+iwctl limits namespace $S social max_running=32 max_memory_bytes=1073741824
+iwctl limits show $S
+iwctl user list $S
+```
+
+A set replaces all of that user's or namespace's limits; `iwctl limits user $S <name>` with none clears them. Changes apply to the next request.
+
+**Watching them.** `iwdb_limit_refusals_total{user, limit}` counts a user's refusals (`rate`, `running`; the first 64 users get their own series, later ones `(other)`), `iwdb_namespace_limit_refusals_total{namespace, limit}` a namespace's (`running`, `memory`), and `iwdb_namespace_memory_limit_bytes` shows each namespace's memory limit. `iwdb_requests_total{code="resource_exhausted"}` counts them all.
+
+**When a user is refused:** a well-behaved client sees a few refusals under bursts; many mean its limits are too low for its work (raise them) or it misbehaves (leave them: the others are protected). Its own requests: `iwctl requests $S <user>`; cancelling is never limited. **When a namespace is at its memory limit:** delete data or drop an index in it, or raise `max_memory_bytes`; writes resume as soon as it is below, with nothing to reset.
 
 ## Managed jobs
 
@@ -649,7 +701,7 @@ A change-stream reader asked for commits older than the WAL still holds ([ADR 00
 
 ### `resource_exhausted`
 
-The server refuses writes because its memory is above `memory.refuse_writes_at`. See [The memory limit](#the-memory-limit). (Over gRPC, `budget_exceeded` also uses `RESOURCE_EXHAUSTED`; the `iwdb-code` trailer tells them apart.)
+The server refuses writes because its memory is above `memory.refuse_writes_at` ([The memory limit](#the-memory-limit)), or the call is over a limit of its user or namespace: a rate, a count of running calls, or a namespace's memory limit ([Resource limits](#resource-limits-per-user-and-namespace)). The message says which. (Over gRPC, `budget_exceeded` also uses `RESOURCE_EXHAUSTED`; the `iwdb-code` trailer tells them apart.)
 
 ### `unavailable`
 

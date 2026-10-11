@@ -3,6 +3,10 @@
 //! recovers exactly the accepted commits; namespace creation and imports
 //! are refused too, drops and reads go on; the checkpointers' copies and
 //! analytics projections are counted; the error is `resource_exhausted`.
+//!
+//! A namespace's own memory limit (step 15d, ADR 0059) likewise: a
+//! namespace at its limit refuses writes before they are logged and keeps
+//! serving reads, while other namespaces write on.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -18,7 +22,7 @@ use iwdb::import::ImportFormat;
 use iwdb::{
     AttrPath, CatalogChange, IndexDef, MemoryOptions, MemoryState, Mutation, ReadOptions, Store, StoreOptions, Value,
 };
-use iwdb_query::{Code, ProjectionSpec};
+use iwdb_query::{Code, NamespaceLimits, ProjectionSpec};
 use support::{options, reference, state, store_state};
 
 /// Room between what a store holds when it opens and its refusal line.
@@ -241,4 +245,103 @@ fn a_job_is_counted_while_it_runs_and_starts_while_writes_are_refused() {
     assert_eq!(block_on(db.job(job.id, None)).unwrap_err().code(), Code::NotFound);
     assert_eq!(working(), 0);
     db.close().unwrap();
+}
+
+/// Step 15d's criterion: a namespace above its memory limit refuses writes
+/// and keeps serving reads, and a refused write leaves nothing in the WAL
+/// (any write from the moment of the refusal fails, so one that reached the
+/// log would show). Other namespaces write on; the limit is stored with the
+/// users, so it holds after a crash and a restart.
+#[test]
+fn a_namespace_at_its_memory_limit_refuses_writes_and_serves_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = TestFs::default();
+    let store = Store::open_with(fs.clone(), dir.path(), options(2)).unwrap();
+    store.create_namespace("other", None).unwrap();
+    let mut expected = reference();
+    store.commit_with(&node("keyed", 10), &key("k")).unwrap();
+    expected.commit(&node("keyed", 10)).unwrap();
+    let used = store.default_namespace().sizes().memory_bytes as u64;
+    let limit = used + HEADROOM;
+    let limits = NamespaceLimits { max_memory_bytes: Some(limit), ..NamespaceLimits::default() };
+    store.users().set_namespace_limits(iwdb::NAMESPACE, limits).unwrap();
+    assert_eq!(store.default_namespace().limits(), limits);
+
+    // Accepted below the limit; the second carries the namespace over it
+    for (id, bytes) in [("small", 1_000), ("crossing", HEADROOM as usize)] {
+        store.commit(&node(id, bytes)).unwrap();
+        expected.commit(&node(id, bytes)).unwrap();
+    }
+    assert!(store.default_namespace().sizes().memory_bytes as u64 >= limit);
+    assert_eq!(store.memory().state, MemoryState::Normal, "the store-wide limit isn't involved");
+
+    let writes = fs.count(Call::Write);
+    fs.add(Rule::new(Call::Write, When::Before, Action::Fail));
+    let refused = store.commit(&node("refused", 10));
+    assert_matches!(refused, Err(iwdb::Error::NamespaceMemoryLimit { .. }));
+    let e = iwdb_query::Error::from(refused.unwrap_err());
+    assert_eq!(e.code(), Code::ResourceExhausted);
+    assert!(e.message().contains("namespace 'default' is at its memory limit"), "{}", e);
+    let index = CatalogChange::CreateIndex(IndexDef { path: AttrPath::new(["text"]).unwrap() });
+    assert_matches!(store.commit_catalog(index.clone()), Err(iwdb::Error::NamespaceMemoryLimit { .. }));
+    // A repeated keyed commit answers its original result
+    assert!(store.commit_with(&node("keyed", 10), &key("k")).unwrap().deduplicated);
+    assert_eq!(fs.count(Call::Write), writes, "nothing was written");
+    assert_eq!(store.read_only(), None);
+    assert_eq!(store.default_namespace().memory_refusals(), 2);
+    fs.clear();
+
+    // Reads go on; other namespaces write on. (The reference has no key
+    // table: its graph, catalog and seq are compared.)
+    let same = |store: &Store<_>| {
+        let (got, want) = (store_state(store), state(&expected));
+        assert_eq!((got.0, got.1, got.2), (want.0, want.1, want.2));
+    };
+    same(&store);
+    assert!(store.node("crossing").is_some());
+    store.namespace("other").unwrap().commit(&node("elsewhere", HEADROOM as usize)).unwrap();
+
+    // A crash, and recovery: the accepted commits, nothing else; the limit
+    // is durable, so the namespace still refuses
+    let seq = store.seq();
+    drop(store);
+    let store = Store::open_with(fs.clone(), dir.path(), options(2)).unwrap();
+    assert_eq!(store.seq(), seq);
+    same(&store);
+    assert_eq!(store.default_namespace().limits(), limits);
+    assert_matches!(store.commit(&node("refused", 10)), Err(iwdb::Error::NamespaceMemoryLimit { .. }));
+
+    // Deleting brings it below its limit, and writes resume at once (no
+    // hysteresis: it is a quota, not pressure)
+    store.commit(&[Mutation::DeleteNode { id: "crossing".into(), expected_version: None }]).unwrap();
+    store.commit(&node("again", 10)).unwrap();
+    store.commit_catalog(index).unwrap();
+    // Lifted, it accepts anything
+    store.users().set_namespace_limits(iwdb::NAMESPACE, NamespaceLimits::default()).unwrap();
+    store.commit(&node("big", 2 * HEADROOM as usize)).unwrap();
+}
+
+/// `StoreOptions::namespace_limits` is the default of namespaces without
+/// their own, new ones included; a namespace's own value replaces it, and 0
+/// lifts it.
+#[test]
+fn the_default_namespace_limit_applies_where_none_is_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let defaults = NamespaceLimits { max_memory_bytes: Some(1), max_running: Some(3) };
+    let store = Store::open(dir.path(), StoreOptions { namespace_limits: defaults, ..options(2) }).unwrap();
+    store.create_namespace("new", None).unwrap();
+    for name in [iwdb::NAMESPACE, "new"] {
+        let ns = store.namespace(name).unwrap();
+        assert_eq!(ns.limits(), defaults);
+        assert_matches!(ns.commit(&node("n", 10)), Err(iwdb::Error::NamespaceMemoryLimit { .. }));
+    }
+    let own = NamespaceLimits { max_memory_bytes: Some(0), ..NamespaceLimits::default() };
+    store.users().set_namespace_limits("new", own).unwrap();
+    let new = store.namespace("new").unwrap();
+    assert_eq!(new.limits(), NamespaceLimits { max_memory_bytes: Some(0), max_running: Some(3) });
+    new.commit(&node("n", 10)).unwrap();
+}
+
+fn key(k: &str) -> iwdb::CommitOptions {
+    iwdb::CommitOptions { idempotency_key: Some(iwdb::IdempotencyKey::new(k).unwrap()) }
 }

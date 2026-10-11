@@ -96,6 +96,15 @@ stopped) or, with --server <endpoint> instead of <dir>, on a running server:
   token list <dir> <user>
   Passwords are read without echo from a terminal, or one line each from stdin.
 
+resource limits (step 15d), on a data directory <dir> or with --server <endpoint>:
+  limits show <dir>             the default limits and the namespaces' own
+  limits user <dir> <name> [<limit>=<n> ...]
+                                set a user's limits, replacing all of them: requests_per_second,
+                                burst, max_running, max_results, max_visited, timeout_ms
+                                (0: no limit; left out: the server's default)
+  limits namespace <dir> <namespace> [<limit>=<n> ...]
+                                set a namespace's limits: max_running, max_memory_bytes
+
 query shell (a server, over gRPC):
   shell <endpoint> [-n <ns>]    an interactive client of the iwdb-server at <endpoint>
                                 (https://host:port, or http:// without TLS): match patterns, lookups, commits and
@@ -337,7 +346,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
         }
         Ok(())
     };
-    if name == "user" || name == "token" {
+    if name == "user" || name == "token" || name == "limits" {
         let command = accounts(name, rest, server, Credentials { token, user, tls }, admin, expires)?;
         if format.is_some() || merge || backup.is_some() || seq.is_some() || time.is_some() || key.is_some() {
             return Err(format!("{} takes none of --format, --merge, --backup, --seq, --time, --key", name));
@@ -608,7 +617,7 @@ fn accounts(
     admin: bool,
     expires: Option<u64>,
 ) -> Result<Command, String> {
-    use crate::users::{Action, Target, TokenAction, UserAction};
+    use crate::users::{Action, LimitsAction, Target, TokenAction, UserAction};
     let Some((action, rest)) = rest.split_first() else {
         return Err(format!("{} needs an action (see --help)", name));
     };
@@ -672,9 +681,52 @@ fn accounts(
             usage(2, "<user> <name>").map(|()| Action::Token(TokenAction::Revoke { user: arg(0), name: arg(1) }))?
         }
         ("token", "list") => usage(1, "<user>").map(|()| Action::Token(TokenAction::List { user: arg(0) }))?,
+        ("limits", "show") => usage(0, "").map(|()| Action::Limits(LimitsAction::Show))?,
+        ("limits", "user") => {
+            let (name, pairs) = args.split_first().ok_or("usage: iwctl limits user <dir> <name> [<limit>=<n> ...]")?;
+            let values = limit_values(pairs, &iwdb_query::ClientLimits::KEYS)?;
+            let get = |k: &str| values.iter().find(|(n, _)| n == k).map(|(_, v)| *v);
+            let limits = iwdb_query::ClientLimits {
+                requests_per_second: get("requests_per_second"),
+                burst: get("burst"),
+                max_running: get("max_running"),
+                max_results: get("max_results"),
+                max_visited: get("max_visited"),
+                timeout_ms: get("timeout_ms"),
+            };
+            Action::Limits(LimitsAction::User { name: name.clone(), limits })
+        }
+        ("limits", "namespace") => {
+            let (namespace, pairs) =
+                args.split_first().ok_or("usage: iwctl limits namespace <dir> <namespace> [<limit>=<n> ...]")?;
+            let values = limit_values(pairs, &iwdb_query::NamespaceLimits::KEYS)?;
+            let get = |k: &str| values.iter().find(|(n, _)| n == k).map(|(_, v)| *v);
+            let limits = iwdb_query::NamespaceLimits {
+                max_running: get("max_running"),
+                max_memory_bytes: get("max_memory_bytes"),
+            };
+            Action::Limits(LimitsAction::Namespace { namespace: namespace.clone(), limits })
+        }
         (_, other) => return Err(format!("unknown action '{} {}' (see --help)", name, other)),
     };
     Ok(Command::Accounts { action, target })
+}
+
+/// `<limit>=<n>` words: each a limit of `keys`, at most once, with a number.
+fn limit_values(words: &[String], keys: &[&'static str]) -> Result<Vec<(String, u64)>, String> {
+    let mut values: Vec<(String, u64)> = Vec::new();
+    for word in words {
+        let (key, value) = word.split_once('=').ok_or_else(|| format!("expected <limit>=<n>, not '{}'", word))?;
+        if !keys.contains(&key) {
+            return Err(format!("unknown limit '{}': one of {}", key, keys.join(", ")));
+        }
+        if values.iter().any(|(k, _)| k == key) {
+            return Err(format!("limit '{}' is given twice", key));
+        }
+        let n = value.parse().map_err(|_| format!("{} must be a number of at least 0, not '{}'", key, value))?;
+        values.push((key.to_owned(), n));
+    }
+    Ok(values)
 }
 
 #[cfg(test)]

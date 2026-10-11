@@ -1,6 +1,6 @@
 # Step 15: Security
 
-Status: in progress (split into 15a to 15d)
+Status: done (split into 15a to 15d)
 Milestone: M4 Production 1.0
 Depends on: step 11 (can run in parallel with steps 12 to 14)
 
@@ -13,7 +13,7 @@ Safe to expose on a network: encrypted, authenticated, authorised and resource-l
 - [x] TLS on by default for gRPC and REST; plaintext only with an explicit flag (15b).
 - [x] Authentication: users with passwords, API tokens (15a) and mTLS (15b); hooks for OIDC/JWT later (a principal comes from `Authenticate`, ADRs 0045 and 0048).
 - [x] Authorisation: roles per namespace (read / write / admin), stored durably with one write path (like Postgres roles and GRANT) (15a).
-- [ ] Resource limits per client and namespace: query budgets, rate limits, max memory per namespace (reject writes above it; built on step 16d's memory accounting and process-wide limit) (15d).
+- [x] Resource limits per client and namespace: query budgets, rate limits, max memory per namespace (reject writes above it; built on step 16d's memory accounting and process-wide limit) (15d).
 - [x] Audit log of admin and catalog operations (15c).
 - [x] `SECURITY.md` with a disclosure process. No telemetry (15c).
 

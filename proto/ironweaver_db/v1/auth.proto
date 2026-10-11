@@ -53,6 +53,15 @@ service AuthService {
   rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse);
   // A user's API tokens, without their secrets.
   rpc ListTokens(ListTokensRequest) returns (ListTokensResponse);
+
+  // Set a user's limits, replacing all of them (server-wide admin; step
+  // 15d, ADR 0059). Takes effect at the user's next request.
+  rpc SetUserLimits(SetUserLimitsRequest) returns (SetUserLimitsResponse);
+  // Set a namespace's limits, replacing all of them (server-wide admin).
+  rpc SetNamespaceLimits(SetNamespaceLimitsRequest) returns (SetNamespaceLimitsResponse);
+  // The default limits, and the limits of the namespaces the caller has a
+  // role on.
+  rpc GetLimits(GetLimitsRequest) returns (GetLimitsResponse);
 }
 
 // A role on a namespace.
@@ -70,6 +79,37 @@ message User {
   bool admin = 2;
   // Roles by namespace name.
   map<string, Role> grants = 3;
+  // Its own limits (unset fields: the server's default); in `WhoAmI`, the
+  // caller's effective limits.
+  ClientLimits limits = 4;
+}
+
+// A user's limits (step 15d, ADR 0059). Each field is unset (the default
+// applies), 0 (no limit, whatever the default) or a limit. A call over a
+// limit is refused at once with `resource_exhausted`, before it starts.
+message ClientLimits {
+  // Calls admitted per second on average: a token bucket.
+  optional uint64 requests_per_second = 1;
+  // The bucket's size: calls admitted at once after a quiet time (unset
+  // or 0: `requests_per_second`).
+  optional uint64 burst = 2;
+  // Calls of the user running at once.
+  optional uint64 max_running = 3;
+  // Query budget: reads asking for more `max_results` are lowered to this.
+  optional uint64 max_results = 4;
+  // Query budget: likewise for `max_visited`.
+  optional uint64 max_visited = 5;
+  // Query budget: likewise for the timeout, in milliseconds.
+  optional uint64 timeout_ms = 6;
+}
+
+// A namespace's limits, like `ClientLimits`.
+message NamespaceLimits {
+  // Calls on the namespace running at once, of every user together.
+  optional uint64 max_running = 1;
+  // Writes that add are refused while the namespace's graph memory is at
+  // or above this; deletes, drops and reads go on.
+  optional uint64 max_memory_bytes = 2;
 }
 
 // An API token, never with its secret.
@@ -203,4 +243,41 @@ message ListTokensRequest {
 message ListTokensResponse {
   // By name.
   repeated TokenInfo tokens = 1;
+}
+
+message SetUserLimitsRequest {
+  string name = 1;
+  ClientLimits limits = 2;
+}
+
+message SetUserLimitsResponse {
+  User user = 1;
+}
+
+message SetNamespaceLimitsRequest {
+  string namespace = 1;
+  NamespaceLimits limits = 2;
+}
+
+message SetNamespaceLimitsResponse {
+  string namespace = 1;
+  NamespaceLimits limits = 2;
+}
+
+message GetLimitsRequest {}
+
+// A namespace's own limits.
+message NamespaceLimitsEntry {
+  string namespace = 1;
+  NamespaceLimits limits = 2;
+}
+
+message GetLimitsResponse {
+  // `[limits.client]`: for users who aren't server admins and have no
+  // value of their own.
+  ClientLimits client_defaults = 1;
+  // `[limits.namespace]`.
+  NamespaceLimits namespace_defaults = 2;
+  // By name; namespaces without limits of their own are left out.
+  repeated NamespaceLimitsEntry namespaces = 3;
 }

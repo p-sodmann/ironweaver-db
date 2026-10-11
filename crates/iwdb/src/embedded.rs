@@ -32,6 +32,7 @@ use iwdb_query::{
     NamespaceStatus, NeighbourhoodRequest, Node, Path, PathRequest, QueryOptions, Schema, Subgraph, SubgraphRequest,
     TraverseRequest, WalkRequest, Work,
 };
+use iwdb_query::{ClientLimits, LimitsReport, NamespaceLimits, NamespaceLimitsInfo};
 use iwdb_storage::io::{LogFs, StdFs};
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 use iwdb_storage::{BatchLimits, Wait};
@@ -52,12 +53,22 @@ pub struct QueryConfig {
     pub queue: usize,
     /// The managed jobs' threads and bounds (ADR 0056).
     pub jobs: JobsConfig,
+    /// The limits of users who aren't server admins and have none of their
+    /// own (step 15d, ADR 0059; default: none). Enforced by
+    /// [`Authorized`](iwdb_query::Authorized), so only for remote callers.
+    pub client_limits: ClientLimits,
 }
 
 impl Default for QueryConfig {
     fn default() -> Self {
         let cpus = std::thread::available_parallelism().map_or(2, |n| n.get());
-        QueryConfig { limits: LimitConfig::default(), workers: cpus.max(2), queue: 1024, jobs: JobsConfig::default() }
+        QueryConfig {
+            limits: LimitConfig::default(),
+            workers: cpus.max(2),
+            queue: 1024,
+            jobs: JobsConfig::default(),
+            client_limits: ClientLimits::default(),
+        }
     }
 }
 
@@ -128,6 +139,13 @@ where
         let pool = Pool::new("iwdb-query", config.workers, config.queue)?;
         let requests = Requests::new();
         let jobs = Jobs::new(config.jobs.clone(), requests.clone(), Some(store.memory_handle()))?;
+        let store = Arc::new(store);
+        // The limiter reads a namespace's limits from its open state; weakly,
+        // so that `close` gets the store back
+        let weak = Arc::downgrade(&store);
+        requests.limiter().set_namespace_limits(Box::new(move |name| {
+            weak.upgrade().and_then(|store| store.namespace(name).ok().map(|ns| ns.limits())).unwrap_or_default()
+        }));
         let monitor = Monitor {
             requests,
             log: Arc::new(LogRing::new(0)),
@@ -136,7 +154,7 @@ where
             ready: AtomicBool::new(true),
         };
         Ok(Embedded {
-            store: Arc::new(store),
+            store,
             pool,
             config: Arc::new(config),
             auth: Arc::default(),
@@ -244,7 +262,14 @@ where
             (users.record(&token.user)?.ok_or_else(unknown)?, Via::ApiToken)
         };
         let info = users.info_of(&user);
-        Ok(Principal { user: info.name, admin: info.admin, grants: info.grants, via })
+        let limits = self.effective_limits(&info);
+        Ok(Principal { user: info.name, admin: info.admin, grants: info.grants, via, limits })
+    }
+
+    /// A user's effective limits: its own over the defaults, which apply
+    /// only to users who aren't server admins (ADR 0059).
+    fn effective_limits(&self, user: &UserInfo) -> ClientLimits {
+        if user.admin { user.limits } else { user.limits.over(&self.config.client_limits) }
     }
 
     /// The principal of the user `name` (a client certificate's).
@@ -256,7 +281,8 @@ where
         let users = self.store.users();
         let user = users.record(name)?.ok_or_else(unknown)?;
         let info = users.info_of(&user);
-        Ok(Principal { user: info.name, admin: info.admin, grants: info.grants, via: Via::Certificate })
+        let limits = self.effective_limits(&info);
+        Ok(Principal { user: info.name, admin: info.admin, grants: info.grants, via: Via::Certificate, limits })
     }
 
     /// The store, for what the trait doesn't cover: backups, checkpoints,
@@ -444,7 +470,9 @@ where
             let (result, truncated) = analysis.value;
             Ok(Finished { result, truncated, seq: analysis.seq })
         });
-        self.jobs.start(&namespace, &owner.user, owner.client, kind, options.timeout, work)
+        // The caller's budget caps the job's timeout too (ADR 0059)
+        let timeout = options.timeout.map(|t| options.budget.cap_timeout(t)).or(options.budget.timeout);
+        self.jobs.start(&namespace, &owner.user, owner.client, kind, timeout, work)
     }
 }
 
@@ -780,6 +808,35 @@ where
     fn tokens(&self, user: &str) -> impl Future<Output = Result<Vec<TokenInfo>, Error>> + Send {
         let user = user.to_owned();
         self.run(move |store, _| store.users().tokens(&user))
+    }
+
+    fn set_user_limits(
+        &self,
+        name: &str,
+        limits: ClientLimits,
+    ) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let name = name.to_owned();
+        self.run(move |store, _| store.users().set_limits(&name, limits))
+    }
+
+    fn set_namespace_limits(
+        &self,
+        namespace: &str,
+        limits: NamespaceLimits,
+    ) -> impl Future<Output = Result<NamespaceLimitsInfo, Error>> + Send {
+        let namespace = namespace.to_owned();
+        self.run(move |store, _| store.users().set_namespace_limits(&namespace, limits))
+    }
+
+    fn limits(&self) -> impl Future<Output = Result<LimitsReport, Error>> + Send {
+        let client_defaults = self.config.client_limits;
+        self.run(move |store, _| {
+            Ok(LimitsReport {
+                client_defaults,
+                namespace_defaults: store.namespace_defaults(),
+                namespaces: store.users().namespace_limits()?,
+            })
+        })
     }
 }
 
