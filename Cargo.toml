@@ -71,7 +71,7 @@ tokio-stream = { version = "0.1", default-features = false }
 toml = { version = "1", default-features = false, features = ["parse", "display", "serde"] }
 # Build: generated code from the protos, compiled by protox (pure Rust: no protoc)
 tonic-prost-build = { version = "0.14", default-features = false, features = ["transport"] }
-protox = "0.9"
+protox = "0.10"
 # REST (step 12, iwdb-server only): axum routes the JSON API next to tonic
 # (axum is tonic's own router); pbjson generates the proto3 JSON serde of
 # the messages, so REST and gRPC share one schema (ADR 0030)
