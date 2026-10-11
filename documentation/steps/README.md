@@ -28,7 +28,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [15b](step_15b.md) | TLS and mTLS | M4 | done |
 | [15c](step_15c.md) | Audit log and `SECURITY.md` | M4 | done |
 | [15d](step_15d.md) | Resource limits per client and namespace | M4 | todo |
-| [16](step_16.md) | Operability | M4 | in progress (split into 16a to 16i) |
+| [16](step_16.md) | Operability | M4 | done (split into 16a to 16i) |
 | [16a](step_16a.md) | Operator console | M4 | done |
 | [16b](step_16b.md) | Configuration, health and logs | M4 | done |
 | [16c](step_16c.md) | Metrics, status views, cancel and the console | M4 | done |
@@ -37,7 +37,7 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [16f](step_16f.md) | Managed analytics jobs | M4 | done |
 | [16g](step_16g.md) | OpenTelemetry traces | M4 | done |
 | [16h](step_16h.md) | Windows | M4 | done |
-| [16i](step_16i.md) | Operations guide | M4 | todo |
+| [16i](step_16i.md) | Operations guide | M4 | done |
 | [17](step_17.md) | Release 1.0 | M4 | todo |
 | [18](step_18.md) | Replication and high availability | M5 | todo |
 
@@ -53,5 +53,5 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | M1 Embedded durable | 4–7 | done, except the PyPI publish of 0.1.0 (prepared; the owner publishes) |
 | M2 Service | 8–10 | done |
 | M3 Network access | 11–14b | done |
-| M4 Production 1.0 | 15–17 | todo (15a, 15b, 15c, 16a, 16b done) |
+| M4 Production 1.0 | 15–17 | in progress (15a, 15b, 15c and 16 done; 15d and 17 to do) |
 | M5 HA | 18 | todo |

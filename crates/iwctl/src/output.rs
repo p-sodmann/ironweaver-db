@@ -723,6 +723,9 @@ pub fn ns_status_text(n: &NamespaceStatus) -> String {
     if let Some(cause) = &n.read_only {
         text += &format!(" (read-only: {})", cause);
     }
+    if let Some(cause) = &n.checkpoint_failure {
+        text += &format!("\n  checkpoint failed: {}", cause);
+    }
     for m in &n.marks {
         text += &format!("\n  mark {:?} at {} (seq {})", m.name, m.position, m.seq);
     }
@@ -795,4 +798,51 @@ fn job_text(j: &JobInfo) -> String {
         size,
         rows
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A namespace's text line names why it is read-only and why its last
+    /// checkpoint failed, as `--json` does (step 16i: the operations guide
+    /// sends operators to `iwctl status` for both).
+    #[test]
+    fn a_namespace_shows_its_read_only_cause_and_failed_checkpoint() {
+        let mut n = NamespaceStatus {
+            id: 3,
+            name: "social".into(),
+            created: CommitTime(0),
+            seq: 7,
+            synced_seq: Some(7),
+            checkpoint: Some(5),
+            unsynced: Some(0),
+            since_checkpoint: 2,
+            last_checkpoint: None,
+            read_only: None,
+            checkpoint_failure: None,
+            nodes: 1,
+            edges: 0,
+            memory_bytes: 2048,
+            indexes: vec![],
+            constraints: 0,
+            marks: vec![],
+            recovery: RecoveryReport::default(),
+        };
+        let healthy = ns_status_text(&n);
+        assert!(!healthy.contains("read-only") && !healthy.contains("checkpoint failed"), "{}", healthy);
+        n.read_only = Some("fsync failed".into());
+        n.checkpoint_failure = Some("checkpoints are disabled until the store is reopened".into());
+        let text = ns_status_text(&n);
+        assert!(
+            text.starts_with("namespace social (id 3): seq 7,") && text.contains(" (read-only: fsync failed)"),
+            "{}",
+            text
+        );
+        assert!(
+            text.contains("\n  checkpoint failed: checkpoints are disabled until the store is reopened"),
+            "{}",
+            text
+        );
+    }
 }

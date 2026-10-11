@@ -93,6 +93,7 @@ Traces cut across the layers ([ADR 0057](adr/0057-traces.md)): the service, quer
 
 ### 9. Operability
 - Config file + environment, health/readiness, Prometheus metrics, OpenTelemetry traces, JSON logs, `status` views, defined memory-limit behaviour, graceful shutdown.
+- Built in step 16 (16a to 16i). How to run the server: the [operations guide](operations.md); the settings in [api/config.md](api/config.md), the metrics in [api/metrics.md](api/metrics.md).
 
 ### 10. Quality and release
 - Model-based property tests, crash and fault injection, fuzzing (WAL reader, checkpoint loader, protocol decoding), format compatibility fixtures, benchmarks with CI gates, 24h soak.

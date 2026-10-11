@@ -1,6 +1,6 @@
 # Step 16: Operability
 
-Status: in progress (split into 16b to 16i)
+Status: done (split into 16a to 16i)
 Milestone: M4 Production 1.0
 Depends on: step 11 (can run in parallel with steps 12 to 15)
 
@@ -21,8 +21,8 @@ Operators can configure, monitor and administer the server without reading the c
 - [x] A WAL archive pruning command (`iwctl archive prune --before <backup>`), and optionally recording the store's archive in the data directory so that `iwctl checkpoint` needn't be told ([ADR 0012](../adr/0012-iwctl.md)) (16e; the archive isn't recorded: `iwctl --server ... checkpoint` asks the store, ADR 0055).
 - [x] Throttling for online backups of large stores (checkpoints wait for a backup's copy, ADR 0009) (16e).
 - [x] Managed analytics jobs (moved here from step 10, [ADR 0022](../adr/0022-analytics-jobs.md)): jobs that outlive a request's timeout, with an id, progress, cancellation, results kept for a while (and limited), and `iwctl` to list and cancel them. Step 10's `Database::analyze` runs a job within one request (16f, [ADR 0056](../adr/0056-managed-analytics-jobs.md); progress is the phase until upstream #62).
-- [ ] Finish connecting the operator console (step 16a, [ADR 0037](../adr/0037-operator-console.md)). Its REST Source and Flask proxy exist; add the reads `console/src/source.js` marks "new" (`schema` with label and type counts, `server` from the status views and metrics, `cancel`, the server log) and use them in `console/src/rest.js`, and decide whether `iwdb-server` serves `console/` itself (behind step 15's authentication). Decided in 16b: it does, opt-in (ADR 0041).
-- [ ] Operations guide `documentation/operations.md`.
+- [x] Finish connecting the operator console (step 16a, [ADR 0037](../adr/0037-operator-console.md)). Its REST Source and Flask proxy exist; add the reads `console/src/source.js` marks "new" (`schema` with label and type counts, `server` from the status views and metrics, `cancel`, the server log) and use them in `console/src/rest.js`, and decide whether `iwdb-server` serves `console/` itself (behind step 15's authentication). Decided in 16b: it does, opt-in (ADR 0041). Done in 16c-2 ([step_16c.md](step_16c.md), "The console"; ADR 0053); this box was left unticked then.
+- [x] Operations guide [`documentation/operations.md`](../operations.md) (16i).
 
 ## Plan change
 
@@ -47,3 +47,11 @@ Step 15d's "max memory per namespace" builds on 16d's accounting; 16d only sets 
 
 - Every metric is exported and documented.
 - All admin tasks can be done with `iwctl`.
+
+## Outcome
+
+Done on 2026-10-10 with step 16i; sub-steps 16a to 16i are each described in their own file.
+
+- Every metric is exported and documented: metrics.md's table is compared with the exported `METRICS` (`every_metric_is_documented_and_every_documented_one_exported`), and the operations guide's metrics and alert rules with the same list (`crates/iwdb-server/tests/operations.rs`).
+- All admin tasks can be done with `iwctl`: the admin writes (checkpoint, backup, verify, archive pruning), restore (offline), namespaces, indexes and constraints, users, grants and tokens, the server status, running requests and cancel, and jobs (list, show, cancel, results), each tested in `crates/iwctl/tests/`. Three status reads have no `iwctl` command yet (change-stream readers, the log tail, the metrics); they are read over REST and in the console, and are a recorded follow-up of [step 16i](step_16i.md#follow-ups). Jobs are started through the API (ADR 0056).
+- The operator's procedures are in [operations.md](../operations.md), whose examples a test runs.

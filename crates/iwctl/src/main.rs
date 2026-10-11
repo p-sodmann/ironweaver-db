@@ -8,6 +8,8 @@
 //! `documentation/iwctl.md` describes the commands and the exit codes.
 
 mod args;
+#[cfg(test)]
+mod guide;
 mod output;
 mod remote;
 mod shell;
