@@ -472,6 +472,60 @@
         },
         "type": "object"
       },
+      "ClientLimits": {
+        "description": "A user's limits (step 15d, ADR 0059). Each field is unset (the default\napplies), 0 (no limit, whatever the default) or a limit. A call over a\nlimit is refused at once with `resource_exhausted`, before it starts.",
+        "properties": {
+          "burst": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "The bucket's size: calls admitted at once after a quiet time (unset\nor 0: `requests_per_second`)."
+          },
+          "maxResults": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Query budget: reads asking for more `max_results` are lowered to this."
+          },
+          "maxRunning": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Calls of the user running at once."
+          },
+          "maxVisited": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Query budget: likewise for `max_visited`."
+          },
+          "requestsPerSecond": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Calls admitted per second on average: a token bucket."
+          },
+          "timeoutMs": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Query budget: likewise for the timeout, in milliseconds."
+          }
+        },
+        "type": "object"
+      },
       "CommitCatalogRequest": {
         "properties": {
           "change": {
@@ -1470,6 +1524,34 @@
           "scores": {
             "items": {
               "$ref": "#/components/schemas/Score"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "GetLimitsResponse": {
+        "properties": {
+          "clientDefaults": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ClientLimits"
+              }
+            ],
+            "description": "`[limits.client]`: for users who aren't server admins and have no\nvalue of their own."
+          },
+          "namespaceDefaults": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/NamespaceLimits"
+              }
+            ],
+            "description": "`[limits.namespace]`."
+          },
+          "namespaces": {
+            "description": "By name; namespaces without limits of their own are left out.",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceLimitsEntry"
             },
             "type": "array"
           }
@@ -2824,6 +2906,40 @@
         },
         "type": "object"
       },
+      "NamespaceLimits": {
+        "description": "A namespace's limits, like `ClientLimits`.",
+        "properties": {
+          "maxMemoryBytes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Writes that add are refused while the namespace's graph memory is at\nor above this; deletes, drops and reads go on."
+          },
+          "maxRunning": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Uint64"
+              }
+            ],
+            "description": "Calls on the namespace running at once, of every user together."
+          }
+        },
+        "type": "object"
+      },
+      "NamespaceLimitsEntry": {
+        "description": "A namespace's own limits.",
+        "properties": {
+          "limits": {
+            "$ref": "#/components/schemas/NamespaceLimits"
+          },
+          "namespace": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "NamespacePrune": {
         "properties": {
           "backupCheckpoint": {
@@ -4023,6 +4139,28 @@
         },
         "type": "object"
       },
+      "SetNamespaceLimitsRequest": {
+        "properties": {
+          "limits": {
+            "$ref": "#/components/schemas/NamespaceLimits"
+          },
+          "namespace": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SetNamespaceLimitsResponse": {
+        "properties": {
+          "limits": {
+            "$ref": "#/components/schemas/NamespaceLimits"
+          },
+          "namespace": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "SetNodeAttrOp": {
         "properties": {
           "id": {
@@ -4081,6 +4219,25 @@
       },
       "SetPasswordResponse": {
         "properties": {},
+        "type": "object"
+      },
+      "SetUserLimitsRequest": {
+        "properties": {
+          "limits": {
+            "$ref": "#/components/schemas/ClientLimits"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SetUserLimitsResponse": {
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        },
         "type": "object"
       },
       "ShortestPathRequest": {
@@ -4448,6 +4605,14 @@
             },
             "description": "Roles by namespace name.",
             "type": "object"
+          },
+          "limits": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ClientLimits"
+              }
+            ],
+            "description": "Its own limits (unset fields: the server's default); in `WhoAmI`, the\ncaller's effective limits."
           },
           "name": {
             "type": "string"
@@ -5487,6 +5652,45 @@
           }
         },
         "summary": "A page of a done job's result"
+      }
+    },
+    "/v1/limits": {
+      "get": {
+        "description": "The default limits, and the limits of the namespaces the caller has a\nrole on.",
+        "operationId": "getLimits",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetLimitsResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "The default and namespace limits"
       }
     },
     "/v1/log": {
@@ -6720,6 +6924,66 @@
         "summary": "Queue an analytics job"
       }
     },
+    "/v1/namespaces/{ns}/limits": {
+      "put": {
+        "description": "Set a namespace's limits, replacing all of them (server-wide admin).",
+        "operationId": "setNamespaceLimits",
+        "parameters": [
+          {
+            "description": "The namespace.",
+            "in": "path",
+            "name": "ns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetNamespaceLimitsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetNamespaceLimitsResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Set a namespace's limits"
+      }
+    },
     "/v1/namespaces/{ns}/match": {
       "post": {
         "description": "Every match of a pattern; paginated by row.",
@@ -7938,6 +8202,66 @@
           }
         },
         "summary": "Give a user a role on a namespace"
+      }
+    },
+    "/v1/users/{user}/limits": {
+      "put": {
+        "description": "Set a user's limits, replacing all of them (server-wide admin; step\n15d, ADR 0059). Takes effect at the user's next request.",
+        "operationId": "setUserLimits",
+        "parameters": [
+          {
+            "description": "The user.",
+            "in": "path",
+            "name": "user",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetUserLimitsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetUserLimitsResponse"
+                }
+              }
+            },
+            "description": "The answer."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A request the server refuses: the HTTP status of its code (documentation/api/errors.md)."
+          },
+          "5XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A failure of the server: the HTTP status of its code (documentation/api/errors.md)."
+          }
+        },
+        "summary": "Set a user's limits"
       }
     },
     "/v1/users/{user}/password": {

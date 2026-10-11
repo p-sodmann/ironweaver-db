@@ -110,6 +110,9 @@ struct NsState<F: LogFs> {
     /// The checkpointer's newest checkpoint ([`NO_CHECKPOINT`]: none),
     /// readable while a checkpoint runs.
     checkpoint_seq: AtomicU64,
+    /// The namespace's own limits (step 15d), as stored in the system
+    /// namespace; the store's defaults fill what is unset.
+    own_limits: Mutex<iwdb_query::NamespaceLimits>,
 }
 
 /// [`NsState::checkpoint_seq`] without a checkpoint.
@@ -380,7 +383,27 @@ where
             }
             store.sync_archive_log(&catalog);
         }
+        store.load_namespace_limits();
         Ok(store)
+    }
+
+    /// Apply the namespaces' own limits from the system namespace (step
+    /// 15d). Records that can't be read leave the defaults, with an error
+    /// in the log: the store still opens, as it does for users it can't
+    /// read, and every auth operation reports the problem.
+    fn load_namespace_limits(&self) {
+        let records = match self.users().namespace_limit_records() {
+            Ok(records) => records,
+            Err(e) => {
+                log::error!("the namespaces' limits can't be read, so only the defaults apply: {}", e);
+                return;
+            }
+        };
+        for ns in self.open_namespaces() {
+            if let Some(limits) = records.get(&ns.id()) {
+                ns.set_own_limits(*limits);
+            }
+        }
     }
 
     // ---- namespaces ----
@@ -398,6 +421,12 @@ where
     /// namespaces (the managed jobs' stored results, ADR 0056).
     pub(crate) fn memory_handle(&self) -> Arc<Memory> {
         self.shared.memory.clone()
+    }
+
+    /// The limits of namespaces without their own
+    /// ([`StoreOptions::namespace_limits`]).
+    pub fn namespace_defaults(&self) -> iwdb_query::NamespaceLimits {
+        self.shared.options.namespace_limits
     }
 
     /// The WALs' fsync policy.
@@ -1106,6 +1135,7 @@ fn new_state<F: LogFs + Clone>(
     checkpointer.set_retention(options.retention);
     checkpointer.set_memory(memory);
     let live = live.with_memory(memory);
+    live.set_memory_limit(options.namespace_limits.memory());
     let last_checkpoint = recovery.checkpoint.and_then(|seq| checkpoint_time(&paths, seq));
     let checkpoint_seq = AtomicU64::new(checkpointer.newest().unwrap_or(NO_CHECKPOINT));
     NsState {
@@ -1120,6 +1150,7 @@ fn new_state<F: LogFs + Clone>(
         size_trigger: AtomicU64::new(size_trigger),
         checkpoint_error: Mutex::new(None),
         recovery,
+        own_limits: Mutex::new(iwdb_query::NamespaceLimits::default()),
     }
 }
 

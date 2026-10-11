@@ -102,6 +102,9 @@ metrics! {
     JOBS_RUNNING: "iwdb_jobs_running", Gauge, [], "", "Managed analytics jobs collecting their projection or running.";
     JOBS: "iwdb_jobs_total", Counter, ["outcome"], "", "Managed analytics jobs that ended, by outcome: `done`, `failed` or `cancelled`.";
     JOB_RESULT_BYTES: "iwdb_job_result_bytes", Gauge, [], "bytes", "The stored job results' estimated size (counted in the `working` memory part).";
+    LIMIT_REFUSALS: "iwdb_limit_refusals_total", Counter, ["user", "limit"], "", "Calls refused for a user's limits (`resource_exhausted`, ADR 0059), by user and limit: `rate` or `running`. The first 64 users refused get a series each; later ones are counted as `(other)`. A caller who isn't a server admin sees only its own.";
+    NAMESPACE_LIMIT_REFUSALS: "iwdb_namespace_limit_refusals_total", Counter, ["namespace", "limit"], "", "Calls refused for a namespace's limits, by limit: `running` (calls running on it) or `memory` (writes above its memory limit).";
+    NAMESPACE_MEMORY_LIMIT: "iwdb_namespace_memory_limit_bytes", Gauge, ["namespace"], "bytes", "The namespace's memory limit (its own or `[limits.namespace] max_memory_bytes`); no sample without one.";
     TRACE_SPANS_EXPORTED: "iwdb_trace_spans_exported_total", Counter, [], "", "Trace spans the collector accepted (`[tracing]`, ADR 0057); 0 with tracing off.";
     TRACE_SPANS_DROPPED: "iwdb_trace_spans_dropped_total", Counter, ["reason"], "", "Trace spans dropped, by reason: `queue_full` (the export queue was full) or `export_failed` (the collector didn't take their batch).";
 }
@@ -180,6 +183,14 @@ impl Metrics {
     pub fn retain_namespaces(&mut self, mut keep: impl FnMut(&str) -> bool) {
         for family in &mut self.families {
             family.samples.retain(|s| s.label("namespace").is_none_or(&mut keep));
+        }
+    }
+
+    /// Keep only the samples whose `user` label (if they have one) is
+    /// `user`: what a caller who isn't a server admin sees.
+    pub fn retain_user(&mut self, user: &str) {
+        for family in &mut self.families {
+            family.samples.retain(|s| s.label("user").is_none_or(|u| u == user));
         }
     }
 
@@ -273,7 +284,10 @@ mod tests {
                 assert!(base.ends_with(&format!("_{}", d.unit)), "{} in {}", d.name, d.unit);
             }
             for label in d.labels {
-                let bounded = ["operation", "code", "lock", "namespace", "part", "outcome", "version", "reason"];
+                // `user` is bounded by the limiter's table (ADR 0059): at most
+                // 64 users and `(other)`
+                let bounded =
+                    ["operation", "code", "lock", "namespace", "part", "outcome", "version", "reason", "user", "limit"];
                 assert!(bounded.contains(label), "{}", label);
             }
         }

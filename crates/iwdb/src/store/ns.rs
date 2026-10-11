@@ -11,7 +11,8 @@ use iwdb_engine::catalog::{AttrPath, NamespaceCatalog};
 use iwdb_engine::metrics::HistogramSnapshot;
 use iwdb_engine::{CatalogChange, CommitResult, CommitTime, MarkName, MarkUpdate, Mutation, Namespace};
 use iwdb_query::{
-    CommitOptions, Edge, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceStatus, Node, ProjectionSpec,
+    CommitOptions, Edge, IndexSize, IndexState, IndexStatus, MarkStatus, NamespaceLimits, NamespaceStatus, Node,
+    ProjectionSpec,
 };
 use iwdb_storage::io::LogFs;
 use iwdb_storage::memory::Part;
@@ -50,6 +51,31 @@ where
 
     fn live(&self) -> &LoggedNamespace<F> {
         &self.state.live
+    }
+
+    /// The namespace's own limits (step 15d, ADR 0059): unset ones take the
+    /// store's defaults ([`limits`](Self::limits)).
+    pub fn own_limits(&self) -> NamespaceLimits {
+        *lock(&self.state.own_limits)
+    }
+
+    /// The limits that apply: its own over the store's
+    /// [`StoreOptions::namespace_limits`](crate::StoreOptions::namespace_limits).
+    pub fn limits(&self) -> NamespaceLimits {
+        self.own_limits().over(&self.store.shared.options.namespace_limits)
+    }
+
+    /// Make `limits` its own (they are stored by
+    /// [`Users::set_namespace_limits`](crate::auth::Users::set_namespace_limits)),
+    /// and refuse writes from its memory limit on.
+    pub(crate) fn set_own_limits(&self, limits: NamespaceLimits) {
+        *lock(&self.state.own_limits) = limits;
+        self.live().set_memory_limit(self.limits().memory());
+    }
+
+    /// Writes refused for the namespace's memory limit so far.
+    pub fn memory_refusals(&self) -> u64 {
+        self.live().memory_refusals()
     }
 
     /// Commit a data transaction: all mutations or none, validated against

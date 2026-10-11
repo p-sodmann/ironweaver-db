@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use iwdb_query::NamespaceLimits;
 use iwdb_storage::memory::MemoryOptions;
 use iwdb_storage::{WalOptions, WalRetention};
 
@@ -37,6 +38,14 @@ pub struct StoreOptions {
     /// Online backups ([`Store::backup`](crate::Store::backup)): how fast
     /// they copy.
     pub backup: BackupOptions,
+    /// The limits of namespaces that have none of their own (step 15d, ADR
+    /// 0059; default: none). Each namespace's own are set through
+    /// [`Users::set_namespace_limits`](crate::auth::Users::set_namespace_limits);
+    /// a value of its own replaces the default here. `max_memory_bytes`
+    /// refuses writes that add to a namespace at or above it, before they
+    /// are logged; `max_running` is enforced by a server's authorisation
+    /// point.
+    pub namespace_limits: NamespaceLimits,
 }
 
 /// Options of online backups (ADR 0055).
@@ -59,6 +68,7 @@ impl Default for StoreOptions {
             retention: WalRetention::default(),
             memory: MemoryOptions::default(),
             backup: BackupOptions::default(),
+            namespace_limits: NamespaceLimits::default(),
         }
     }
 }

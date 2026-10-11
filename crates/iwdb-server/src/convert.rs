@@ -238,6 +238,8 @@ pub(crate) fn options_from_pb(
         },
         partial: o.partial,
         cursor: (!o.cursor.is_empty()).then(|| Cursor::new(o.cursor)),
+        // Set by the authorisation point, never from the wire
+        budget: Default::default(),
     })
 }
 

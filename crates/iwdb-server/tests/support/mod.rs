@@ -36,6 +36,7 @@ pub fn options() -> StoreOptions {
         retention: Default::default(),
         memory: Default::default(),
         backup: Default::default(),
+        namespace_limits: Default::default(),
     }
 }
 

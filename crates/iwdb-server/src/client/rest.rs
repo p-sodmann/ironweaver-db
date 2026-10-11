@@ -35,6 +35,7 @@ use iwdb_query::{
     QueryOptions, Schema, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
 use iwdb_query::{BackupDone, BackupRequest, Checkpointed, JobInfo, JobOwner, JobPage, VerifyTarget};
+use iwdb_query::{ClientLimits, LimitsReport, NamespaceLimits, NamespaceLimitsInfo};
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -967,6 +968,44 @@ impl Accounts for RestRemote {
         self.call(move |c| async move {
             let response: pb::ListTokensResponse = c.get(c.user_url(&user, "/tokens")).await?;
             Ok(response.tokens.into_iter().map(token_info_from_pb).collect())
+        })
+    }
+
+    fn set_user_limits(
+        &self,
+        name: &str,
+        limits: ClientLimits,
+    ) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let name = name.to_owned();
+        self.call(move |c| async move {
+            let request = pb::SetUserLimitsRequest { name: String::new(), limits: Some(client_limits_to_pb(&limits)) };
+            let response: pb::SetUserLimitsResponse =
+                c.json(Method::PUT, c.user_url(&name, "/limits"), &request).await?;
+            user_from_pb(response.user).map_err(bad_answer)
+        })
+    }
+
+    fn set_namespace_limits(
+        &self,
+        namespace: &str,
+        limits: NamespaceLimits,
+    ) -> impl Future<Output = Result<NamespaceLimitsInfo, Error>> + Send {
+        let namespace = namespace.to_owned();
+        self.call(move |c| async move {
+            let request = pb::SetNamespaceLimitsRequest {
+                namespace: String::new(),
+                limits: Some(namespace_limits_to_pb(&limits)),
+            };
+            let response: pb::SetNamespaceLimitsResponse =
+                c.json(Method::PUT, c.url(&namespace, "/limits"), &request).await?;
+            Ok(namespace_limits_info_from_pb(response))
+        })
+    }
+
+    fn limits(&self) -> impl Future<Output = Result<LimitsReport, Error>> + Send {
+        self.call(move |c| async move {
+            let response: pb::GetLimitsResponse = c.get(format!("{}/v1/limits", c.base)).await?;
+            Ok(limits_report_from_pb(response))
         })
     }
 }

@@ -45,6 +45,7 @@ use iwdb_query::{
     QueryOptions, Schema, Subgraph, SubgraphRequest, TraverseRequest, WalkRequest,
 };
 use iwdb_query::{BackupDone, BackupRequest, Checkpointed, JobInfo, JobOwner, JobPage, VerifyTarget};
+use iwdb_query::{ClientLimits, LimitsReport, NamespaceLimits, NamespaceLimitsInfo};
 use iwdb_storage::namespaces::{NamespaceInfo, NamespaceResult};
 use tokio::runtime::{Handle, Runtime};
 use tokio::task::JoinHandle;
@@ -992,6 +993,39 @@ impl Accounts for Remote {
         self.call_auth(move |mut client| async move {
             let response = client.list_tokens(pb::ListTokensRequest { user }).await.map_err(status)?.into_inner();
             Ok(response.tokens.into_iter().map(token_info_from_pb).collect())
+        })
+    }
+
+    fn set_user_limits(
+        &self,
+        name: &str,
+        limits: ClientLimits,
+    ) -> impl Future<Output = Result<UserInfo, Error>> + Send {
+        let name = name.to_owned();
+        self.call_auth(move |mut client| async move {
+            let request = pb::SetUserLimitsRequest { name, limits: Some(client_limits_to_pb(&limits)) };
+            let response = client.set_user_limits(request).await.map_err(status)?.into_inner();
+            user_from_pb(response.user).map_err(bad_answer)
+        })
+    }
+
+    fn set_namespace_limits(
+        &self,
+        namespace: &str,
+        limits: NamespaceLimits,
+    ) -> impl Future<Output = Result<NamespaceLimitsInfo, Error>> + Send {
+        let namespace = namespace.to_owned();
+        self.call_auth(move |mut client| async move {
+            let request = pb::SetNamespaceLimitsRequest { namespace, limits: Some(namespace_limits_to_pb(&limits)) };
+            let response = client.set_namespace_limits(request).await.map_err(status)?.into_inner();
+            Ok(namespace_limits_info_from_pb(response))
+        })
+    }
+
+    fn limits(&self) -> impl Future<Output = Result<LimitsReport, Error>> + Send {
+        self.call_auth(move |mut client| async move {
+            let response = client.get_limits(pb::GetLimitsRequest {}).await.map_err(status)?.into_inner();
+            Ok(limits_report_from_pb(response))
         })
     }
 }

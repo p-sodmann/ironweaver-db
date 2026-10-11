@@ -216,6 +216,8 @@ impl PyStore {
                 // No limit: an embedded store can't see the application's memory (ADR 0054)
                 memory: Default::default(),
                 backup: Default::default(),
+                // No namespace limits: they are a server's (ADR 0059)
+                namespace_limits: Default::default(),
             };
             let store = py.detach(|| Store::open(&path, options)).map_err(to_py)?;
             let db = Embedded::new(store, query_config()).map_err(query_to_py)?;

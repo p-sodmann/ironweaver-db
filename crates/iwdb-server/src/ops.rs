@@ -339,8 +339,14 @@ pub(crate) type Follow = mpsc::Receiver<Result<pb::GetChangesResponse, Error>>;
 /// Runs in a task of its own until the receiver is dropped (the client
 /// went away), an error (the last item), or `stopping` turns true (the
 /// server is shutting down: `unavailable`).
+///
+/// `db` serves the first round and `rounds` the later ones: through the
+/// authorisation point, `rounds` is `Authorized::following`, whose calls
+/// take no token from the caller's rate limit (a stream is one request,
+/// ADR 0059).
 pub(crate) fn follow<D: Database + 'static>(
     db: Arc<D>,
+    rounds: Arc<D>,
     r: pb::WatchRequest,
     deadline: Option<Duration>,
     mut stopping: watch::Receiver<bool>,
@@ -352,8 +358,9 @@ pub(crate) fn follow<D: Database + 'static>(
         loop {
             let request =
                 pb::GetChangesRequest { namespace: r.namespace.clone(), from_seq, wait, options: r.options.clone() };
+            let serving = if wait { &rounds } else { &db };
             let result = tokio::select! {
-                result = get_changes(&*db, request, deadline) => result,
+                result = get_changes(&**serving, request, deadline) => result,
                 _ = stopping.wait_for(|s| *s) => Err(Error::unavailable("the server is shutting down")),
                 () = tx.closed() => return,
             };
@@ -571,6 +578,28 @@ pub(crate) async fn list_tokens<D: Accounts>(
     r: pb::ListTokensRequest,
 ) -> Result<pb::ListTokensResponse, Error> {
     Ok(pb::ListTokensResponse { tokens: db.tokens(&r.user).await?.iter().map(token_info_to_pb).collect() })
+}
+
+// ---- limits (auth.proto, step 15d, ADR 0059) ----
+
+pub(crate) async fn set_user_limits<D: Accounts>(
+    db: &D,
+    r: pb::SetUserLimitsRequest,
+) -> Result<pb::SetUserLimitsResponse, Error> {
+    let user = db.set_user_limits(&r.name, client_limits_from_pb(r.limits)).await?;
+    Ok(pb::SetUserLimitsResponse { user: Some(user_to_pb(&user)) })
+}
+
+pub(crate) async fn set_namespace_limits<D: Accounts>(
+    db: &D,
+    r: pb::SetNamespaceLimitsRequest,
+) -> Result<pb::SetNamespaceLimitsResponse, Error> {
+    let info = db.set_namespace_limits(&r.namespace, namespace_limits_from_pb(r.limits)).await?;
+    Ok(namespace_limits_info_to_pb(&info))
+}
+
+pub(crate) async fn get_limits<D: Accounts>(db: &D) -> Result<pb::GetLimitsResponse, Error> {
+    Ok(limits_report_to_pb(&db.limits().await?))
 }
 
 #[cfg(test)]

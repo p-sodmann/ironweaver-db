@@ -252,6 +252,17 @@ pub const ROUTES: &[Route] = &[
         "revokeToken",
         "Revoke an API token",
     ),
+    // Limits (auth.proto, step 15d)
+    route(Method::PUT, "/v1/users/{user}/limits", "SetUserLimits", BODY, "setUserLimits", "Set a user's limits"),
+    route(
+        Method::PUT,
+        "/v1/namespaces/{ns}/limits",
+        "SetNamespaceLimits",
+        BODY,
+        "setNamespaceLimits",
+        "Set a namespace's limits",
+    ),
+    route(Method::GET, "/v1/limits", "GetLimits", Input::Nothing, "getLimits", "The default and namespace limits"),
     // The operator's reads (admin.proto, step 16c)
     route(Method::GET, "/v1/status", "GetServerStatus", Input::Nothing, "getServerStatus", "The server's status"),
     route(
@@ -483,6 +494,9 @@ fn handler<D: Served>(r: &Route) -> MethodRouter<Arc<Shared<D>>> {
         "listTokens" => get(list_tokens::<D>),
         "createToken" => post(create_token::<D>),
         "revokeToken" => delete(revoke_token::<D>),
+        "setUserLimits" => put(set_user_limits::<D>),
+        "setNamespaceLimits" => put(set_namespace_limits::<D>),
+        "getLimits" => get(get_limits::<D>),
         "getServerStatus" => get(get_server_status::<D>),
         "listRequests" => get(list_requests::<D>),
         "cancelRequest" => post(cancel_request::<D>),
@@ -801,6 +815,9 @@ body_handler!(subgraph, pb::SubgraphRequest, |db, r, h| streamed(&h, ops::subgra
 body_handler!(match_pattern, pb::MatchPatternRequest, |db, r, h| streamed(&h, ops::match_pattern(&db, r, None).await));
 body_handler!(analyze, pb::AnalyzeRequest, |db, r, h| streamed(&h, ops::analyze(&db, r, None).await));
 body_handler!(start_job, pb::StartJobRequest, |db, r, _h| unary(ops::start_job(&db, r).await));
+body_handler!(set_namespace_limits, pb::SetNamespaceLimitsRequest, |db, r, _h| unary(
+    ops::set_namespace_limits(&db, r).await
+));
 
 /// One node by id: its `GetNodesResponse`, or 404 if it doesn't exist.
 async fn get_node<D: Served>(
@@ -868,7 +885,9 @@ async fn watch_changes<D: Served>(
         from_seq = seq.saturating_add(1);
     }
     let r = pb::WatchRequest { namespace: path(p)?, from_seq, options };
-    let mut batches = ops::follow(Arc::new(s.db(&caller)?), r, None, s.stopping.clone());
+    let db = s.db(&caller)?;
+    let rounds = Arc::new(db.following());
+    let mut batches = ops::follow(Arc::new(db), rounds, r, None, s.stopping.clone());
     let first = match batches.recv().await {
         Some(first) => first?,
         None => return Err(Error::unavailable("the server is shutting down").into()),
@@ -1220,6 +1239,20 @@ user_handler!(
     },
     revoke_token
 );
+
+user_handler!(
+    set_user_limits,
+    pb::SetUserLimitsRequest,
+    String,
+    |r, user| {
+        same(&mut r.name, &user, "user")?;
+    },
+    set_user_limits
+);
+
+async fn get_limits<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
+    unary(ops::get_limits(&s.db(&caller)?).await)
+}
 
 async fn list_tokens<D: Served>(State(s): St<D>, caller: Caller_, p: Result<Path<String>, PathRejection>) -> Answer {
     let db = s.db(&caller)?;

@@ -60,6 +60,18 @@
 //! max_visited = 10000000
 //! max_edges = 100000000
 //! timeout_ms = 300000
+//!
+//! [limits.client]                   # step 15d: users without their own (not server admins); unset: none, 0: none
+//! # requests_per_second = 100       # a token bucket ...
+//! # burst = 100                     # ... of this size (unset: requests_per_second)
+//! # max_running = 16                # calls of a user running at once
+//! # max_results = 10000             # query budgets, below [limits.max]
+//! # max_visited = 1000000
+//! # timeout_ms = 60000
+//!
+//! [limits.namespace]                # namespaces without their own
+//! # max_running = 64                # calls on a namespace running at once
+//! # max_memory_bytes = 1073741824   # refuse writes that add from here on
 //! ```
 //!
 //! Projections (step 13, ADR 0032; `documentation/api/projections.md`):
@@ -130,7 +142,7 @@ use iwdb::{
     CheckpointOptions, FsyncPolicy, LimitSource, MarkName, MemoryOptions, QueryConfig, Store, StoreOptions,
     WalRetention,
 };
-use iwdb_query::{Bounds, LimitConfig, Secret};
+use iwdb_query::{Bounds, ClientLimits, LimitConfig, NamespaceLimits, Secret};
 use serde::{Deserialize, Serialize};
 
 use crate::DEFAULT_MAX_MESSAGE_BYTES;
@@ -577,6 +589,14 @@ keys! {
     "limits.max.max_visited" "IWDB_LIMITS_MAX_MAX_VISITED" => limits.max.max_visited;
     "limits.max.max_edges" "IWDB_LIMITS_MAX_MAX_EDGES" => limits.max.max_edges;
     "limits.max.timeout_ms" "IWDB_LIMITS_MAX_TIMEOUT_MS" => limits.max.timeout_ms;
+    "limits.client.requests_per_second" "IWDB_LIMITS_CLIENT_REQUESTS_PER_SECOND" => limits.client.requests_per_second;
+    "limits.client.burst" "IWDB_LIMITS_CLIENT_BURST" => limits.client.burst;
+    "limits.client.max_running" "IWDB_LIMITS_CLIENT_MAX_RUNNING" => limits.client.max_running;
+    "limits.client.max_results" "IWDB_LIMITS_CLIENT_MAX_RESULTS" => limits.client.max_results;
+    "limits.client.max_visited" "IWDB_LIMITS_CLIENT_MAX_VISITED" => limits.client.max_visited;
+    "limits.client.timeout_ms" "IWDB_LIMITS_CLIENT_TIMEOUT_MS" => limits.client.timeout_ms;
+    "limits.namespace.max_running" "IWDB_LIMITS_NAMESPACE_MAX_RUNNING" => limits.namespace.max_running;
+    "limits.namespace.max_memory_bytes" "IWDB_LIMITS_NAMESPACE_MAX_MEMORY_BYTES" => limits.namespace.max_memory_bytes;
     "log.format" "IWDB_LOG_FORMAT" => log.format;
     "log.level" "IWDB_LOG_LEVEL" => log.level;
     "log.tail_events" "IWDB_LOG_TAIL_EVENTS" => log.tail_events;
@@ -839,11 +859,36 @@ impl Default for MemorySection {
 
 /// Read limits: `default` for reads that ask for nothing, `max` that no read
 /// can exceed. A missing value is the built-in one (`LimitConfig::default`).
+/// `client` and `namespace` are the default resource limits of users and
+/// namespaces without their own (step 15d, ADR 0059): unset or 0 is none.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct LimitsSection {
     pub default: LimitValues,
     pub max: LimitValues,
+    pub client: ClientLimitValues,
+    pub namespace: NamespaceLimitValues,
+}
+
+/// `[limits.client]`: the limits of users who aren't server admins and
+/// have none of their own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ClientLimitValues {
+    pub requests_per_second: Option<u64>,
+    pub burst: Option<u64>,
+    pub max_running: Option<u64>,
+    pub max_results: Option<u64>,
+    pub max_visited: Option<u64>,
+    pub timeout_ms: Option<u64>,
+}
+
+/// `[limits.namespace]`: the limits of namespaces without their own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct NamespaceLimitValues {
+    pub max_running: Option<u64>,
+    pub max_memory_bytes: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -881,6 +926,7 @@ fn unset(key: &str) -> &'static str {
     match key {
         "memory.limit_bytes" => "the cgroup's, or none",
         "tracing.endpoint" => "the protocol's",
+        _ if key.starts_with("limits.client.") || key.starts_with("limits.namespace.") => "none",
         _ if key.starts_with("limits.") => "built in",
         _ => "unset",
     }
@@ -1046,7 +1092,7 @@ impl Config {
         if let Err(e) = self.limit_config().check() {
             let vars: Vec<&str> = KEYS
                 .iter()
-                .filter(|k| k.key.starts_with("limits."))
+                .filter(|k| k.key.starts_with("limits.default.") || k.key.starts_with("limits.max."))
                 .filter_map(|k| match self.source(k.key) {
                     Source::Env(var) => Some(var),
                     _ => None,
@@ -1352,7 +1398,22 @@ impl Config {
         options.memory = self.memory_options_with(iwdb::cgroup_limit());
         options.archive = self.store.archive.clone();
         options.backup.max_bytes_per_second = Some(self.backup.max_bytes_per_second).filter(|r| *r > 0);
+        let n = &self.limits.namespace;
+        options.namespace_limits = NamespaceLimits { max_running: n.max_running, max_memory_bytes: n.max_memory_bytes };
         options
+    }
+
+    /// `[limits.client]`: the default limits of users (step 15d).
+    pub fn client_limits(&self) -> ClientLimits {
+        let c = &self.limits.client;
+        ClientLimits {
+            requests_per_second: c.requests_per_second,
+            burst: c.burst,
+            max_running: c.max_running,
+            max_results: c.max_results,
+            max_visited: c.max_visited,
+            timeout_ms: c.timeout_ms,
+        }
     }
 
     /// The memory limit: `[memory] limit_bytes`, or else `cgroup` (the
@@ -1398,6 +1459,7 @@ impl Config {
             workers: if self.server.workers == 0 { defaults.workers } else { self.server.workers },
             queue: self.server.queue,
             jobs: self.jobs.config(),
+            client_limits: self.client_limits(),
         }
     }
 

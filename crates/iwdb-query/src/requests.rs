@@ -16,6 +16,11 @@
 //! too late. Commits and other changes can't be cancelled (their outcome
 //! would only become unknown); they are listed with `cancellable: false`.
 //!
+//! **Limits** (step 15d, ADR 0059): the registry holds the [`Limiter`],
+//! and a call registered with [`Requests::begin_limited`] is admitted by
+//! it first and counted against its user's and namespace's limits until it
+//! ends.
+//!
 //! **Managed jobs** (step 16f, ADR 0056) take their ids from the same
 //! counter ([`Requests::next_id`]) and are listed here while they are
 //! queued or running ([`Requests::register`]); cancelling one calls the job
@@ -33,6 +38,7 @@ use iwdb_engine::CommitTime;
 use iwdb_engine::metrics::{Histogram, HistogramSnapshot};
 
 use crate::auth::Operation;
+use crate::limits::{Admitted, ClientLimits, Limiter};
 use crate::{Code, Error};
 
 /// The message a cancelled call answers with.
@@ -177,6 +183,7 @@ pub struct Requests {
     next_id: AtomicU64,
     stats: Vec<OperationStats>,
     consumers: Mutex<BTreeMap<ConsumerKey, Consumer>>,
+    limiter: Limiter,
 }
 
 impl Default for Requests {
@@ -186,6 +193,7 @@ impl Default for Requests {
             next_id: AtomicU64::new(1),
             stats: Operation::ALL.iter().map(|_| OperationStats::default()).collect(),
             consumers: Mutex::new(BTreeMap::new()),
+            limiter: Limiter::default(),
         }
     }
 }
@@ -242,6 +250,11 @@ impl Requests {
         Registration { requests: self.clone(), id }
     }
 
+    /// The limiter that admits calls ([`begin_limited`](Self::begin_limited)).
+    pub fn limiter(&self) -> &Limiter {
+        &self.limiter
+    }
+
     /// Register a call of `operation` by `user` from `client`: running until
     /// the returned [`Call`] is dropped. O(log running).
     pub fn begin(
@@ -250,6 +263,44 @@ impl Requests {
         namespace: Option<&str>,
         user: &str,
         client: Option<IpAddr>,
+    ) -> Call {
+        self.register_call(operation, namespace, user, client, None)
+    }
+
+    /// [`begin`](Self::begin), once the [`Limiter`] admits the call by
+    /// `user`'s effective `limits` and its namespace's (taking a token from
+    /// the user's bucket if `take_token`); the call counts against them
+    /// until it ends. An operation that isn't [`limited`](Operation::limited)
+    /// is only registered. Errors: `resource_exhausted` (counted as a
+    /// refusal of the operation).
+    pub fn begin_limited(
+        self: &Arc<Self>,
+        operation: Operation,
+        namespace: Option<&str>,
+        user: &str,
+        client: Option<IpAddr>,
+        limits: &ClientLimits,
+        take_token: bool,
+    ) -> Result<Call, Error> {
+        if !operation.limited() {
+            return Ok(self.begin(operation, namespace, user, client));
+        }
+        match self.limiter.admit(user, limits, namespace, take_token) {
+            Ok(admitted) => Ok(self.register_call(operation, namespace, user, client, Some(admitted))),
+            Err(e) => {
+                self.refused(operation, e.code());
+                Err(e)
+            }
+        }
+    }
+
+    fn register_call(
+        self: &Arc<Self>,
+        operation: Operation,
+        namespace: Option<&str>,
+        user: &str,
+        client: Option<IpAddr>,
+        admitted: Option<Admitted>,
     ) -> Call {
         let id = self.next_id();
         let cancel = Arc::new(Cancel::default());
@@ -265,11 +316,12 @@ impl Requests {
         };
         let started = Instant::now();
         lock(&self.running).insert(id, Entry { info, started, cancel: cancel.clone() });
-        Call { requests: self.clone(), id, operation, started, cancel, outcome: None }
+        Call { requests: self.clone(), id, operation, started, cancel, outcome: None, admitted }
     }
 
     /// Count a call that was refused before it ran (it never was
-    /// registered): `unauthenticated` or `permission_denied`.
+    /// registered): `unauthenticated`, `permission_denied` or
+    /// `resource_exhausted`.
     pub fn refused(&self, operation: Operation, code: Code) {
         self.count(operation, Some(code), Duration::ZERO);
     }
@@ -398,6 +450,8 @@ pub struct Call {
     cancel: Arc<Cancel>,
     /// The outcome, once known: `Some(None)` succeeded.
     outcome: Option<Option<Code>>,
+    /// Its place in the limiter's counts, if it was admitted by it.
+    admitted: Option<Admitted>,
 }
 
 impl Call {
@@ -448,6 +502,9 @@ impl Drop for Registration {
 impl Drop for Call {
     fn drop(&mut self) {
         lock(&self.requests.running).remove(&self.id);
+        if let Some(admitted) = &self.admitted {
+            self.requests.limiter.release(admitted);
+        }
         let code = self.outcome.unwrap_or(Some(Code::Cancelled));
         self.requests.count(self.operation, code, self.started.elapsed());
     }
@@ -572,6 +629,26 @@ mod tests {
         // Registered work isn't counted when it ends
         let start = requests.stats().into_iter().find(|s| s.operation == Operation::StartJob).unwrap();
         assert!(start.outcomes.is_empty(), "{:?}", start.outcomes);
+    }
+
+    #[test]
+    fn limited_calls_count_until_they_end_and_refusals_are_counted() {
+        let requests = Requests::new();
+        let one = ClientLimits { max_running: Some(1), ..ClientLimits::default() };
+        let call = requests.begin_limited(Operation::Find, Some("social"), "ann", None, &one, true).unwrap();
+        let e = requests.begin_limited(Operation::Find, Some("social"), "ann", None, &one, true).err().unwrap();
+        assert_eq!(e.code(), Code::ResourceExhausted);
+        // Cancelling isn't limited: a client over its limits can still cancel
+        let cancel = requests.begin_limited(Operation::CancelRequest, None, "ann", None, &one, true).unwrap();
+        drop(cancel);
+        assert_eq!(requests.limiter().running("ann"), 1);
+        drop(call);
+        assert_eq!(requests.limiter().running("ann"), 0);
+        let again = requests.begin_limited(Operation::Find, Some("social"), "ann", None, &one, true).unwrap();
+        drop(again);
+        // Dropped without running: counted as cancelled
+        let find = requests.stats().into_iter().find(|s| s.operation == Operation::Find).unwrap();
+        assert_eq!(find.outcomes, vec![(Some(Code::Cancelled), 2), (Some(Code::ResourceExhausted), 1)]);
     }
 
     #[test]

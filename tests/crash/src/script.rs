@@ -72,6 +72,7 @@ pub fn child_options(policy: Policy, keep: usize, archive: Option<&Path>) -> Sto
         retention: Default::default(),
         memory: Default::default(),
         backup: Default::default(),
+        namespace_limits: Default::default(),
     }
 }
 
@@ -86,6 +87,7 @@ pub fn check_options(policy: Policy, keep: usize, archive: Option<&Path>) -> Sto
         retention: Default::default(),
         memory: Default::default(),
         backup: Default::default(),
+        namespace_limits: Default::default(),
     }
 }
 
