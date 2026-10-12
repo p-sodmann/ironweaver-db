@@ -1,32 +1,75 @@
 name: Release
 
-# Builds the Python package (abi3 wheels for Linux and macOS, x86_64 and
-# arm64, and Windows x86_64 since step 16h; and the sdist), tests every wheel, and publishes them to PyPI when
-# a version tag (v*) is pushed. Publishing uses PyPI's trusted publishing
-# (OpenID Connect, no token in the repository) and the "pypi" environment,
-# which can require a manual approval. workflow_dispatch builds and tests
-# without publishing (or publishes to TestPyPI if asked). See
-# documentation/releasing.md.
+# Step 17e (ADR 0060): a version tag v* publishes a GitHub Release, and
+# nothing else: no PyPI, crates.io or image registry (step 17's Plan
+# change). In order:
+#
+# 1. gate: before anything is built, the tag is the workspace version, its
+#    release fixture exists and the CHANGELOG has its section
+#    (scripts/release-gate.sh);
+# 2. build and test: the abi3 wheels for five targets and the sdist (the
+#    wheels' tests on Python 3.9 and 3.13), the iwdb-server and iwctl
+#    binaries for the same five targets (archives, smoke-tested from the
+#    archive), and the image for linux/amd64 and linux/arm64, each on its
+#    own architecture, smoke-tested as CI's docker job does and saved with
+#    docker save;
+# 3. assemble: every file is there for this version, SHA256SUMS over them,
+#    the notes from the CHANGELOG section;
+# 4. publish (tags only, the only job that can write): the GitHub Release,
+#    a pre-release for -alpha.N, -beta.N and -rc.N.
+#
+# Started by hand (workflow_dispatch) it is a rehearsal: everything but
+# publish runs, for the workspace version, the gate only warns, and the
+# notes are the [Unreleased] section; the files are the run's `release`
+# artifact. No job uses a cache: what is released is built from the
+# tagged tree alone. See documentation/releasing.md.
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      testpypi:
-        description: Publish to TestPyPI
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  # The server's features in the binaries, as in the image (Dockerfile)
+  FEATURES: rest postgres console otel
 
 jobs:
+  gate:
+    name: gate (version, fixture, changelog)
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.gate.outputs.version }}
+      python_version: ${{ steps.gate.outputs.python_version }}
+      prerelease: ${{ steps.gate.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: The gate's own tests
+        run: sh scripts/release-gate-test.sh
+      - name: Check the tag
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT" = push ]; then
+            case "$REF" in
+              refs/tags/v*) sh scripts/release-gate.sh "$REF_NAME" ;;
+              *) echo "::error::a release runs on a v* tag, not $REF"; exit 1 ;;
+            esac
+          else
+            version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+            echo "::notice::a rehearsal of v$version: nothing is published"
+            sh scripts/release-gate.sh --rehearsal "v$version"
+          fi
+
   wheels:
     name: wheel (${{ matrix.target }})
+    needs: gate
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
@@ -58,16 +101,23 @@ jobs:
             [ -e "$python" ] || python="venv-$version/Scripts/python.exe"
             uv pip install --python "$python" dist/*.whl pytest hypothesis
             "$python" -m pytest crates/iwdb-python/tests -q
+            # iwdb.__version__ is the semver version, the package's metadata its PEP 440 spelling (ADR 0060)
+            "$python" -c "import iwdb, sys; assert iwdb.__version__ == sys.argv[1], iwdb.__version__" "$VERSION"
+            "$python" -c "import importlib.metadata as m, sys; v = m.version('ironweaver-db'); assert v == sys.argv[1], v" "$PYTHON_VERSION"
           done
         shell: bash
         env:
           UV_PYTHON_DOWNLOADS: automatic
+          VERSION: ${{ needs.gate.outputs.version }}
+          PYTHON_VERSION: ${{ needs.gate.outputs.python_version }}
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.target }}
           path: dist/*.whl
+          if-no-files-found: error
 
   sdist:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -85,29 +135,217 @@ jobs:
         with:
           name: sdist
           path: dist/*.tar.gz
+          if-no-files-found: error
+
+  binaries:
+    name: binaries (${{ matrix.target }})
+    needs: gate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v5
+      # Installs the toolchain named in rust-toolchain.toml; every target is
+      # its runner's own, so nothing is cross-compiled
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        # Two builds, as in the Dockerfile: iwctl doesn't get the server's features
+        run: |
+          cargo build --release --locked -p iwctl
+          cargo build --release --locked -p iwdb-server --no-default-features --features "$FEATURES"
+      - name: Archive
+        run: |
+          exe=""; [ "$RUNNER_OS" = Windows ] && exe=".exe"
+          name="ironweaver-db-$VERSION-$TARGET"
+          mkdir -p "dist/$name"
+          cp "target/release/iwdb-server$exe" "target/release/iwctl$exe" LICENSE COMMERCIAL-LICENSE.md README.md CHANGELOG.md "dist/$name/"
+          cd dist
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+          else
+            tar -czf "$name.tar.gz" "$name"
+          fi
+          rm -r "$name"
+          ls -l
+      - name: Smoke test, from the archive
+        run: |
+          exe=""; [ "$RUNNER_OS" = Windows ] && exe=".exe"
+          name="ironweaver-db-$VERSION-$TARGET"
+          mkdir -p "$RUNNER_TEMP/unpacked"
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z x -o"$RUNNER_TEMP/unpacked" "dist/$name.zip" > /dev/null
+          else
+            tar -xzf "dist/$name.tar.gz" -C "$RUNNER_TEMP/unpacked"
+          fi
+          bin="$RUNNER_TEMP/unpacked/$name"
+          "$bin/iwdb-server$exe" --version | tee version.txt
+          grep -qx "iwdb-server $VERSION (grpc, rest, postgres, console, otel)" <(tr -d '\r' < version.txt)
+          "$bin/iwctl$exe" --version | tee version.txt
+          grep -qx "iwctl $VERSION" <(tr -d '\r' < version.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: dist/ironweaver-db-*
+          if-no-files-found: error
+
+  image:
+    name: image (linux/${{ matrix.arch }})
+    needs: gate
+    # Each architecture on its own: an arm64 Rust build under QEMU takes
+    # hours, and docker load takes one platform at a time anyway
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-latest, arch: amd64 }
+          - { os: ubuntu-24.04-arm, arch: arm64 }
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build (default features)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          push: false
+          tags: iwdb-server:${{ needs.gate.outputs.version }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.gate.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Serve, answer, stop (as CI's docker job)
+        run: EXPECT_VERSION="$VERSION" sh docker/smoke.sh "iwdb-server:$VERSION"
+      - name: Save, and load the file back
+        run: |
+          file="ironweaver-db-$VERSION-docker-linux-${{ matrix.arch }}.tar.gz"
+          mkdir -p dist
+          docker save "iwdb-server:$VERSION" | gzip -9 > "dist/$file"
+          ls -l dist
+          # What a user does with the file
+          docker ps -aq | xargs -r docker rm -f > /dev/null
+          docker image rm "iwdb-server:$VERSION"
+          docker load -i "dist/$file"
+          test "$(docker image inspect -f '{{.Architecture}}' "iwdb-server:$VERSION")" = "${{ matrix.arch }}"
+          docker run --rm "iwdb-server:$VERSION" --version | grep -q "^iwdb-server $VERSION ("
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          # Already compressed
+          compression-level: 0
+
+  assemble:
+    name: checksums and notes
+    needs: [gate, wheels, sdist, binaries, image]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
+      PYTHON_VERSION: ${{ needs.gate.outputs.python_version }}
+      EVENT: ${{ github.event_name }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: release/dist
+          merge-multiple: true
+      - name: Every file is there, for this version
+        working-directory: release/dist
+        run: |
+          ls -l
+          missing=0
+          for file in \
+            "ironweaver_db-$PYTHON_VERSION.tar.gz" \
+            "ironweaver-db-$VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            "ironweaver-db-$VERSION-aarch64-unknown-linux-gnu.tar.gz" \
+            "ironweaver-db-$VERSION-x86_64-apple-darwin.tar.gz" \
+            "ironweaver-db-$VERSION-aarch64-apple-darwin.tar.gz" \
+            "ironweaver-db-$VERSION-x86_64-pc-windows-msvc.zip" \
+            "ironweaver-db-$VERSION-docker-linux-amd64.tar.gz" \
+            "ironweaver-db-$VERSION-docker-linux-arm64.tar.gz"; do
+            [ -f "$file" ] || { echo "::error::missing $file"; missing=1; }
+          done
+          for platform in "manylinux*x86_64" "manylinux*aarch64" "macosx_*_x86_64" "macosx_*_arm64" win_amd64; do
+            # The platform part unquoted: it is a pattern
+            ls "ironweaver_db-$PYTHON_VERSION-cp39-abi3-"$platform.whl > /dev/null 2>&1 \
+              || { echo "::error::no wheel ironweaver_db-$PYTHON_VERSION-cp39-abi3-$platform.whl"; missing=1; }
+          done
+          test "$(ls | wc -l)" = 13 || { echo "::error::expected 13 files, found $(ls | wc -l)"; missing=1; }
+          exit $missing
+      - name: SHA256SUMS
+        working-directory: release/dist
+        run: |
+          sha256sum * > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          cat SHA256SUMS
+      - name: Notes, from the CHANGELOG
+        run: |
+          section="$VERSION"
+          [ "$EVENT" = push ] || section=Unreleased
+          sh scripts/release-notes.sh "$section" > release/notes.md
+          # GitHub keeps 125,000 characters of a release's body
+          if [ "$(wc -c < release/notes.md)" -gt 120000 ]; then
+            awk '{ n += length($0) + 1; if (n > 115000) exit; print }' release/notes.md > release/cut.md
+            printf '\n…\n\nThe full section is in [CHANGELOG.md](https://github.com/%s/blob/v%s/CHANGELOG.md).\n' \
+              "$GITHUB_REPOSITORY" "$VERSION" >> release/cut.md
+            mv release/cut.md release/notes.md
+          fi
+          cat >> release/notes.md <<EOF
+
+          ---
+
+          Install: the Python wheel (the embedded store and the remote client) with \`pip install <wheel's URL>\`, the server from its archive or with \`docker load -i\` on its image ([operations guide](https://github.com/$GITHUB_REPOSITORY/blob/v$VERSION/documentation/operations.md#install)). Check the files with \`sha256sum -c SHA256SUMS\`.
+          EOF
+          wc -c release/notes.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: release
+          if-no-files-found: error
+          compression-level: 0
 
   publish:
-    name: publish to ${{ inputs.testpypi && 'TestPyPI' || 'PyPI' }}
-    needs: [wheels, sdist]
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.testpypi
+    name: publish the GitHub Release
+    needs: [gate, assemble]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    environment:
-      name: ${{ inputs.testpypi && 'testpypi' || 'pypi' }}
-      url: ${{ inputs.testpypi && 'https://test.pypi.org/p/ironweaver-db' || 'https://pypi.org/p/ironweaver-db' }}
     permissions:
-      # Trusted publishing
-      id-token: write
+      # The release and its files; nothing else in this workflow can write
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: dist
-          merge-multiple: true
-      - name: The tag matches the package version
-        if: startsWith(github.ref, 'refs/tags/v')
+          name: release
+          path: release
+      - name: Create it as a draft, upload, then publish
+        # A draft first: if an upload fails, nobody sees a release with
+        # half its files (documentation/releasing.md says what to do then)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          PRERELEASE: ${{ needs.gate.outputs.prerelease }}
         run: |
-          ls dist
-          version="${GITHUB_REF_NAME#v}"
-          ls dist | grep -q -- "-${version}" || { echo "no file for version ${version} in dist/" >&2; exit 1; }
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: ${{ inputs.testpypi && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
+          flags=""
+          [ "$PRERELEASE" = true ] && flags="--prerelease"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "Ironweaver DB $VERSION" --notes-file release/notes.md $flags release/dist/*
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY"
