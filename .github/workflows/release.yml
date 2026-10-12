@@ -228,6 +228,9 @@ jobs:
           - { os: ubuntu-24.04-arm, arch: arm64 }
     env:
       VERSION: ${{ needs.gate.outputs.version }}
+      # build-push-action would upload a build record as an artifact of the
+      # run, which isn't a release file (and doesn't download as a zip)
+      DOCKER_BUILD_RECORD_UPLOAD: false
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
@@ -276,6 +279,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
+          # The release's files only
+          pattern: "{wheel-*,sdist,binaries-*,image-*}"
           path: release/dist
           merge-multiple: true
       - name: Every file is there, for this version
