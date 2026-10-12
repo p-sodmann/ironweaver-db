@@ -19,7 +19,7 @@ use ironweaver_core::pathfinding::EdgeCost;
 use ironweaver_core::query::Pattern;
 use ironweaver_core::traversal::bfs_limited;
 use ironweaver_core::{
-    Attrs, Budget, CmpOp, Date, Direction, EdgeId, Expr, Graph, GraphError, Op, Projection, Record, Value,
+    Attrs, Budget, CmpOp, Date, DateTime, Direction, EdgeId, Expr, Graph, GraphError, Op, Projection, Record, Value,
 };
 use iwdb_engine::testutil::canonical;
 
@@ -658,4 +658,22 @@ fn algorithms_report_progress() {
     let before = watched.snapshot();
     cancel::run(&token, || algo::pagerank(&p, &ranks)).expect("run").expect("pagerank");
     assert_eq!(watched.snapshot(), before);
+}
+
+/// `DateTime`'s binary serde refuses an offset of a day or more and a
+/// local time chrono can't represent (#101, fixed in `af3c441`), without
+/// overflowing; values built directly still show without panicking. The
+/// commit pipeline checks values with this decoder (`resolve::valid_datetime`).
+#[test]
+fn datetime_binary_serde_refuses_offsets_and_times_out_of_range() {
+    let decode = |micros: i64, offset: Option<i32>| {
+        postcard::from_bytes::<DateTime>(&postcard::to_allocvec(&(micros, offset)).unwrap())
+    };
+    for (micros, offset) in [(0, Some(i32::MIN)), (0, Some(86_400)), (i64::MAX, Some(3600)), (i64::MAX, None)] {
+        assert!(decode(micros, offset).is_err(), "{} {:?}", micros, offset);
+    }
+    assert!(decode(0, Some(-86_399)).is_ok());
+    for dt in [DateTime { micros: 0, offset: Some(i32::MIN) }, DateTime { micros: i64::MAX, offset: Some(3600) }] {
+        assert!(!dt.to_string().is_empty());
+    }
 }

@@ -213,6 +213,7 @@ impl From<iwdb_engine::Error> for Error {
             | E::AmbiguousEdge { .. }
             | E::NotAList { .. }
             | E::ValueTooDeep { .. }
+            | E::InvalidDateTime { .. }
             | E::VersionOverflow { .. }
             | E::EmptyTransaction
             | E::UnindexablePath { .. }
