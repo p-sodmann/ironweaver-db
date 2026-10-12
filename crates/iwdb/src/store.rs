@@ -2,24 +2,23 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use std::thread::JoinHandle;
 
 use ironweaver_core::{EdgeId, GraphError, Projection};
 use iwdb_engine::catalog::{NamespaceCatalog, NamespaceName};
 use iwdb_engine::metrics::Histogram;
-use iwdb_engine::{CatalogChange, CommitResult, CommitTime, IdempotencyKey, Mutation, Namespace};
+use iwdb_engine::{CatalogChange, CommitResult, CommitTime, Mutation, Namespace};
 use iwdb_query::{CommitOptions, Edge, NamespaceStatus, Node, ProjectionSpec};
 use iwdb_storage::archive::{Archive, ArchiveHandle};
-use iwdb_storage::backup::{self, NamespaceSource};
-use iwdb_storage::io::{LogFs, StdFs, Throttle};
-use iwdb_storage::layout::{DataDir, NsPaths, create_ns_dir, remove_ns_dir};
+use iwdb_storage::io::{LogFs, StdFs};
+use iwdb_storage::layout::{DataDir, NsPaths};
 use iwdb_storage::memory::{Memory, MemorySnapshot};
-use iwdb_storage::namespaces::{DEFAULT_NAME, EventKind, NamespaceInfo, NamespaceLog, NamespaceResult, Plan};
+use iwdb_storage::namespaces::{DEFAULT_NAME, NamespaceInfo, NamespaceLog};
 use iwdb_storage::{
-    BackupReport, CheckpointOutcome, Checkpointer, Error, FsyncPolicy, HistoryId, Kind, LockStats, LoggedNamespace,
-    OffsetIndex, Recovered, RecoveryReport, StoreRecovery, VerifyReport, read_namespace, recover, start_namespace,
+    CheckpointOutcome, Checkpointer, Error, FsyncPolicy, HistoryId, LockStats, LoggedNamespace, OffsetIndex, Recovered,
+    RecoveryReport, StoreRecovery, recover,
 };
 
 use crate::StoreOptions;
@@ -27,6 +26,8 @@ use crate::request::{ReadOptions, Timer};
 
 mod background;
 mod import;
+mod lifecycle;
+mod maintenance;
 mod ns;
 mod projections;
 mod wait;
@@ -455,252 +456,6 @@ where
         }
     }
 
-    /// Every namespace (but the reserved system namespace), by name, without
-    /// waiting for the namespace log (which creating, dropping and backups
-    /// hold): for the status views and the metrics.
-    pub fn open_namespaces(&self) -> Vec<Ns<'_, F>> {
-        let mut list: Vec<Ns<'_, F>> = self
-            .shared
-            .states()
-            .into_iter()
-            .filter(|s| !s.info.name.is_reserved())
-            .map(|state| Ns { store: self, state })
-            .collect();
-        list.sort_by(|a, b| a.name().cmp(b.name()));
-        list
-    }
-
-    pub fn namespace(&self, name: &str) -> Result<Ns<'_, F>, Error> {
-        match self.shared.find(name) {
-            Some(state) if !state.info.name.is_reserved() => Ok(Ns { store: self, state }),
-            _ => Err(Error::NoSuchNamespace { name: name.to_owned() }),
-        }
-    }
-
-    /// The reserved system namespace of users and grants (ADR 0043), made
-    /// with `create` if the store has none yet.
-    /// Serialize a change to users, grants or tokens (`crate::auth`).
-    pub(crate) fn auth_lock(&self) -> MutexGuard<'_, ()> {
-        lock(&self.shared.auth)
-    }
-
-    pub(crate) fn system_namespace(&self, create: bool) -> Result<Option<Ns<'_, F>>, Error> {
-        if let Some(state) = self.shared.find(NamespaceName::SYSTEM) {
-            return Ok(Some(Ns { store: self, state }));
-        }
-        if !create {
-            return Ok(None);
-        }
-        let mut catalog = lock(&self.shared.catalog);
-        if self.shared.find(NamespaceName::SYSTEM).is_none() {
-            or_abort("creating the system namespace", || {
-                self.create_locked(&mut catalog, &NamespaceName::system(), None)
-            })?;
-            self.sync_archive_log(&catalog);
-        }
-        drop(catalog);
-        Ok(self.shared.find(NamespaceName::SYSTEM).map(|state| Ns { store: self, state }))
-    }
-
-    /// The `default` namespace.
-    pub fn default_namespace(&self) -> Ns<'_, F> {
-        // Invariant: `default` exists (it can't be dropped, and open
-        // creates it if a restored store lacks it)
-        match self.shared.find(NAMESPACE) {
-            Some(state) => Ns { store: self, state },
-            None => unreachable_default(),
-        }
-    }
-
-    /// The live namespaces, by name (without the reserved system
-    /// namespace). Doesn't wait for any commit.
-    pub fn namespaces(&self) -> Vec<NamespaceInfo> {
-        let mut list: Vec<NamespaceInfo> =
-            lock(&self.shared.catalog).log.table().live().filter(|i| !i.name.is_reserved()).cloned().collect();
-        list.sort_by(|a, b| a.name.cmp(&b.name));
-        list
-    }
-
-    /// Create the namespace `name`: an empty graph with its own WAL, seq
-    /// space and catalog.
-    ///
-    /// **Crash safety** (ADR 0017): its directory is made and synced first,
-    /// then the create event is appended to the namespace log and fsynced;
-    /// that is the commit point. A crash before leaves a directory the log
-    /// doesn't list, which the next open removes; after, the namespace
-    /// exists (empty). With an idempotency key, a retry after an unknown
-    /// outcome returns the original event
-    /// ([`NamespaceResult::deduplicated`]); the key is remembered for good
-    /// (the log is never truncated).
-    ///
-    /// Errors: [`Error::NamespaceExists`]; an invalid name or key
-    /// ([`Error::Engine`]); [`IdempotencyKeyReused`](iwdb_engine::Error::IdempotencyKeyReused) (as
-    /// [`Error::Engine`]); [`Error::ReadOnly`] (the namespace log failed);
-    /// [`Error::Io`] (nothing is created, or the outcome is unknown: the
-    /// namespace log is failed until reopening).
-    pub fn create_namespace(&self, name: &str, key: Option<&IdempotencyKey>) -> Result<NamespaceResult, Error> {
-        let name = public_name(name)?;
-        let mut catalog = lock(&self.shared.catalog);
-        let result = or_abort("creating a namespace", || self.create_locked(&mut catalog, &name, key))?;
-        if !result.deduplicated {
-            self.sync_archive_log(&catalog);
-        }
-        Ok(result)
-    }
-
-    fn create_locked(
-        &self,
-        catalog: &mut CatalogState<F>,
-        name: &NamespaceName,
-        key: Option<&IdempotencyKey>,
-    ) -> Result<NamespaceResult, Error> {
-        if let Some(cause) = catalog.log.failure() {
-            return Err(Error::ReadOnly { cause: cause.to_owned() });
-        }
-        let id = match catalog.log.table().plan(EventKind::Create, name, key)? {
-            Plan::Duplicate(event) => return Ok(NamespaceResult { event, deduplicated: true }),
-            Plan::New { id } => id,
-        };
-        // The memory limit (ADR 0054), before the namespace is logged.
-        // `default` is only created when a store opens without one, the
-        // system namespace with the first user, which must work at any time
-        if name.as_str() != NAMESPACE && !name.is_reserved() {
-            self.shared.memory.check_write()?;
-        }
-        let paths = create_ns_dir(&self.shared.fs, &self.shared.root, id)?;
-        let event = catalog.log.append(EventKind::Create, id, name, key)?;
-        self.open_created(catalog, name, paths, event)
-    }
-
-    /// Open the namespace `name` whose create event was just logged (its
-    /// directory in `paths`), and add it to the open namespaces.
-    fn open_created(
-        &self,
-        catalog: &mut CatalogState<F>,
-        name: &NamespaceName,
-        paths: NsPaths,
-        event: iwdb_storage::namespaces::Event,
-    ) -> Result<NamespaceResult, Error> {
-        let shared = &self.shared;
-        // The namespace exists now. If opening it fails, the namespace log
-        // is failed: the next open sorts it out
-        let opened = (|| {
-            let read = read_namespace(&shared.fs, &paths, name)?;
-            start_namespace(shared.fs.clone(), &paths, read, shared.options.wal.clone())
-        })();
-        let (live, report) = match opened {
-            Ok(opened) => opened,
-            Err(e) => {
-                catalog.log.fail(format!("namespace '{}' was created but couldn't be opened: {}", name, e));
-                return Err(e);
-            }
-        };
-        let info =
-            catalog.log.table().get(name).cloned().ok_or_else(|| Error::NoSuchNamespace { name: name.to_string() })?;
-        let size_trigger = shared.options.checkpoint.wal_size.unwrap_or(u64::MAX);
-        let state = Arc::new(new_state(
-            &shared.fs,
-            &shared.options,
-            &shared.memory,
-            &catalog.archive,
-            info,
-            paths,
-            live,
-            report,
-            size_trigger,
-        ));
-        shared.namespaces.write().unwrap_or_else(PoisonError::into_inner).insert(name.to_string(), state);
-        Ok(NamespaceResult { event, deduplicated: false })
-    }
-
-    /// Drop the namespace `name` and everything in it. `default` can't be
-    /// dropped.
-    ///
-    /// **Crash safety** (ADR 0017): the namespace stops accepting commits,
-    /// its WAL is fsynced, and with an archive its remaining segments are
-    /// archived (so a restore to a time before the drop still has them);
-    /// then the drop event is appended to the namespace log and fsynced,
-    /// the commit point; then its directory is removed. A crash before the
-    /// event leaves the namespace; after it, it is gone, and the next open
-    /// removes what is left of the directory. With an idempotency key, a
-    /// retry returns the original event.
-    ///
-    /// **Who waits**: commits, and waits for a `min_seq`, on the namespace
-    /// fail with [`Error::NamespaceDropped`]; reads and analytics that
-    /// started finish on the state they read. Handles ([`Ns`]) of it fail
-    /// the same way.
-    ///
-    /// Errors: [`Error::NoSuchNamespace`]; [`Error::InvalidOptions`] for
-    /// `default`; the archive's errors (the namespace is left as it was);
-    /// [`Error::Io`] from the namespace log (outcome unknown: the namespace
-    /// is unavailable and the log failed until reopening).
-    pub fn drop_namespace(&self, name: &str, key: Option<&IdempotencyKey>) -> Result<NamespaceResult, Error> {
-        let name = public_name(name)?;
-        let mut catalog = lock(&self.shared.catalog);
-        let result = or_abort("dropping a namespace", || self.drop_locked(&mut catalog, &name, key))?;
-        if !result.deduplicated {
-            self.sync_archive_log(&catalog);
-        }
-        Ok(result)
-    }
-
-    fn drop_locked(
-        &self,
-        catalog: &mut CatalogState<F>,
-        name: &NamespaceName,
-        key: Option<&IdempotencyKey>,
-    ) -> Result<NamespaceResult, Error> {
-        if let Some(cause) = catalog.log.failure() {
-            return Err(Error::ReadOnly { cause: cause.to_owned() });
-        }
-        let id = match catalog.log.table().plan(EventKind::Drop, name, key)? {
-            Plan::Duplicate(event) => return Ok(NamespaceResult { event, deduplicated: true }),
-            Plan::New { id } => id,
-        };
-        if name.as_str() == NAMESPACE {
-            return Err(Error::InvalidOptions("the 'default' namespace can't be dropped".into()));
-        }
-        let shared = &self.shared;
-        let state = shared.find(name.as_str()).ok_or_else(|| Error::NoSuchNamespace { name: name.to_string() })?;
-        let checkpointer = lock(&state.checkpointer);
-        state.live.mark_dropped();
-        // Waits for a commit in progress; none starts after the flag
-        if state.live.read_only().is_none() {
-            state.live.sync()?;
-        }
-        if let Some(archive) = &catalog.archive {
-            let segments = iwdb_storage::list_segments(&state.paths.wal)?;
-            if !segments.is_empty() {
-                archive.copy(id, &segments)?;
-                archive.sync(id)?;
-            }
-        }
-        let event = catalog.log.append(EventKind::Drop, id, name, key)?;
-        shared.namespaces.write().unwrap_or_else(PoisonError::into_inner).remove(name.as_str());
-        drop(checkpointer);
-        // The drop is durable. The directory goes now, or at the next open
-        if let Err(e) = remove_ns_dir(&shared.fs, &shared.root, id) {
-            log::warn!(
-                "{}: namespace '{}' is dropped, but its directory wasn't removed: {}",
-                shared.root.display(),
-                name,
-                e
-            );
-        }
-        Ok(NamespaceResult { event, deduplicated: false })
-    }
-
-    /// Bring the archive's copy of the namespace log up to date. A failure
-    /// is logged, not returned: the next namespace operation or open
-    /// retries, and restores only reach as far as the copy.
-    fn sync_archive_log(&self, catalog: &CatalogState<F>) {
-        if let Some(archive) = &catalog.archive
-            && let Err(e) = archive.write_log(catalog.log.table().events())
-        {
-            log::warn!("{}: the archive's namespace log is stale: {}", self.shared.root.display(), e);
-        }
-    }
-
     // ---- store-level ----
 
     /// The history of the commits this store continues (data-dir layout 2,
@@ -741,140 +496,6 @@ where
         &self.report
     }
 
-    /// Back the store up into `dest`, a missing or empty directory, while
-    /// it runs: a consistent copy of its data directory up to the last
-    /// commit of every namespace, which `verify` checks and
-    /// [`restore`](crate::restore) turns into a store again
-    /// (`documentation/formats/backup.md`, ADR 0009, ADR 0017).
-    ///
-    /// - **What it reaches**: every namespace's WAL is fsynced first, and
-    ///   the backup holds each up to its synced seq then, which is its last
-    ///   commit (a read-only namespace: its synced seq). Commits after
-    ///   that are not in it. Namespaces are copied one after another, each
-    ///   consistent; there are no commits across namespaces to keep apart.
-    /// - **What it holds**: per namespace, every checkpoint at or below its
-    ///   seq and the WAL from the oldest of them up to the seq, so it
-    ///   restores to any seq in between; and the namespace log.
-    /// - **Waiting**: commits wait only for the fsync. Namespaces can't be
-    ///   created or dropped, and checkpoints (background, explicit and on
-    ///   close) wait, until the copy is done: the backup holds the catalog
-    ///   mutex and every checkpointer's lock, so that no file it copies is
-    ///   removed meanwhile, and the WALs grow until then.
-    /// - **Writing**: every file is fsynced, then the manifest, then the
-    ///   marker, last. A backup that fails or is interrupted leaves a
-    ///   directory without a marker, which a store, `verify` and `restore`
-    ///   refuse; remove it and try again.
-    ///
-    /// Errors: [`Error::DestinationNotEmpty`]; [`Error::InvalidOptions`] if
-    /// `dest` is inside the data directory; [`Error::Io`]; a WAL read error
-    /// if a segment it copies is damaged; a failed fsync of a WAL (then
-    /// that namespace is read-only, as after any failed fsync).
-    ///
-    /// The copy runs at most at [`BackupOptions::max_bytes_per_second`](crate::BackupOptions)
-    /// ([`backup_with`](Self::backup_with) sets another rate).
-    pub fn backup(&self, dest: &Path) -> Result<BackupReport, Error> {
-        self.backup_with(dest, self.shared.options.backup.max_bytes_per_second)
-    }
-
-    /// [`backup`](Self::backup), copying at most `max_bytes_per_second`
-    /// (`None` or 0: unthrottled). Checkpoints wait for the whole copy, so
-    /// a slower one holds them back longer (ADR 0055).
-    pub fn backup_with(&self, dest: &Path, max_bytes_per_second: Option<u64>) -> Result<BackupReport, Error> {
-        let _span = iwdb_storage::trace_span!("iwdb.backup").entered();
-        let stats = &self.shared.backups;
-        stats.running.fetch_add(1, Ordering::AcqRel);
-        let result = self.backup_now(dest, max_bytes_per_second);
-        stats.running.fetch_sub(1, Ordering::AcqRel);
-        match &result {
-            Ok(_) => {
-                stats.ok.fetch_add(1, Ordering::Relaxed);
-                *lock(&stats.last) = Some(CommitTime::now());
-            }
-            Err(_) => {
-                stats.failed.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        result
-    }
-
-    /// Backups since the store opened: running, bytes copied, outcomes.
-    pub fn backup_stats(&self) -> BackupStats {
-        let b = &self.shared.backups;
-        BackupStats {
-            running: b.running.load(Ordering::Acquire),
-            bytes: b.bytes.load(Ordering::Relaxed),
-            ok: b.ok.load(Ordering::Relaxed),
-            failed: b.failed.load(Ordering::Relaxed),
-            last: *lock(&b.last),
-        }
-    }
-
-    /// Verify the open store without stopping it (ADR 0055): per namespace,
-    /// [`verify`](crate::verify)'s checks of its checkpoints and WAL, with
-    /// the WAL read up to the namespace's synced seq (it is fsynced first,
-    /// as for a backup), then the live state's invariants, and the live
-    /// state against the replayed one if nothing was committed meanwhile.
-    /// Damage is reported in [`VerifyReport::problems`], not as an error.
-    /// The namespace log isn't read (the store holds it).
-    ///
-    /// - **Waiting**: each namespace's checkpoints wait while it is checked
-    ///   (its checkpointer's lock is held, so that no file vanishes), and
-    ///   its commits wait for the fsync and for the read lock at the end.
-    /// - **Memory**: a replayed copy of the namespace being checked plus
-    ///   one checkpoint, which the memory limit doesn't count.
-    ///
-    /// Errors: a failed fsync of a WAL (the namespace is then read-only, as
-    /// after any failed fsync); [`Error::Io`] for a directory that can't be
-    /// listed.
-    pub fn verify(&self) -> Result<VerifyReport, Error> {
-        let _span = iwdb_storage::trace_span!("iwdb.verify").entered();
-        let root = self.dir.root();
-        let mut report = VerifyReport::new(root, Kind::DataDir);
-        if let Ok(Some(marker)) = iwdb_storage::layout::read_marker(root) {
-            report.version = Some(marker.version);
-            report.history = marker.history;
-        }
-        let mut states = self.shared.states();
-        states.sort_by_key(|s| s.info.id);
-        for state in states {
-            let _namespace =
-                iwdb_storage::trace_span!("iwdb.verify.namespace", db.namespace = %state.info.name).entered();
-            let guard = lock(&state.checkpointer);
-            let live = &state.live;
-            // A read-only namespace appends nothing more: read it to its end
-            let until = if live.read_only().is_none() {
-                or_abort("an fsync of the WAL", || live.sync())?;
-                live.wal().synced_seq().min(live.seq())
-            } else {
-                u64::MAX
-            };
-            let (mut sub, replayed) =
-                iwdb_storage::verify::verify_open_namespace(root, &state.info.name, &state.paths, until)?;
-            drop(guard);
-            live.read(|ns| {
-                for violation in iwdb_engine::invariants::check(ns) {
-                    sub.problem(None, format!("the live state at seq {}: {}", ns.seq(), violation));
-                }
-                if let Some(replayed) = replayed.as_ref().filter(|r| r.seq() == ns.seq())
-                    && let Err(difference) = iwdb_engine::invariants::compare(replayed, ns)
-                {
-                    sub.problem(
-                        None,
-                        format!("the live state differs from the WAL replayed to seq {}: {}", ns.seq(), difference),
-                    );
-                }
-            });
-            report.merge(state.info.id, state.info.name.as_str(), true, sub);
-        }
-        report.summarize();
-        log::info!(
-            "{}: verified the open store: {}",
-            root.display(),
-            if report.is_ok() { "ok".to_owned() } else { format!("{} problems", report.problems.len()) }
-        );
-        Ok(report)
-    }
-
     /// The data directory.
     pub fn root(&self) -> &Path {
         self.dir.root()
@@ -884,53 +505,6 @@ where
     /// ([`StoreOptions::archive`]), if it has one.
     pub fn archive_dir(&self) -> Option<&Path> {
         self.shared.options.archive.as_deref()
-    }
-
-    fn backup_now(&self, dest: &Path, max_bytes_per_second: Option<u64>) -> Result<BackupReport, Error> {
-        let catalog = lock(&self.shared.catalog);
-        let mut states = self.shared.states();
-        states.sort_by_key(|s| s.info.id);
-        let guards: Vec<MutexGuard<'_, Checkpointer<F>>> = states.iter().map(|s| lock(&s.checkpointer)).collect();
-        let mut sources = Vec::new();
-        for (state, guard) in states.iter().zip(&guards) {
-            let live = &state.live;
-            if live.read_only().is_none() {
-                or_abort("an fsync of the WAL", || live.sync())?;
-            }
-            let seq = live.wal().synced_seq().min(live.seq());
-            sources.push((state.clone(), seq, guard.damaged().clone()));
-        }
-        let namespaces: Vec<NamespaceSource<'_>> = sources
-            .iter()
-            .map(|(state, seq, damaged)| NamespaceSource {
-                name: state.info.name.clone(),
-                paths: state.paths.clone(),
-                seq: *seq,
-                damaged,
-            })
-            .collect();
-        let log = std::fs::read(catalog.log.path()).map_err(|e| Error::Io {
-            op: "read",
-            path: catalog.log.path().to_path_buf(),
-            source: e,
-        })?;
-        let mut throttle = Throttle::new(max_bytes_per_second, Some(&self.shared.backups.bytes));
-        let report = backup::write_backup(
-            &self.shared.fs,
-            self.dir.root(),
-            self.history(),
-            &namespaces,
-            &log,
-            dest,
-            &mut throttle,
-        )?;
-        log::info!(
-            "{}: backed up {} namespaces into '{}'",
-            self.dir.root().display(),
-            report.namespaces.len(),
-            dest.display()
-        );
-        Ok(report)
     }
 
     /// Stop the background threads, fsync every WAL, write a checkpoint of
