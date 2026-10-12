@@ -49,7 +49,7 @@ postgres = ["dep:postgres", "dep:serde_json"]
 
 [dev-dependencies]
 iwdb-query = { path = "../iwdb-query", features = ["conformance"] }
-iwdb-storage = { path = "../iwdb-storage", features = ["failpoints"] }
+iwdb-storage = { path = "../iwdb-storage", features = ["testutil"] }
 iwdb-engine = { path = "../iwdb-engine", features = ["testutil", "failpoints"] }
 proptest.workspace = true
 tempfile.workspace = true

@@ -14,8 +14,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-#[path = "../../iwdb-storage/tests/common/mod.rs"]
-mod common;
+use iwdb_storage::testutil as common;
 mod support;
 
 use std::assert_matches;
