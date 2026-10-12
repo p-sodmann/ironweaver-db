@@ -30,18 +30,21 @@ Lines of code, not counting blank lines or vendored code (as of October 2026):
 
 | Language | Files | Lines |
 |---|---:|---:|
-| Rust | 229 | 74,422 |
-| Python | 19 | 2,422 |
+| Rust | 230 | 74,763 |
+| Python | 20 | 2,472 |
 | JavaScript | 9 | 2,188 |
 
 About 24,000 of the Rust lines are integration tests in `tests/` directories, and the inline `#[cfg(test)]` modules add more.
 
 ## Documentation
 
+Start at the [documentation index](documentation/README.md).
+
+- [Concepts](documentation/concepts.md): namespaces, commits, seqs and versions, idempotency keys, the change stream, projections, jobs
 - [Design proposal](documentation/ironweaver-db.md): goals, guiding decisions, workstreams and milestones
 - [ironweaver-core review](documentation/ironweaver-core-review.md): what the engine provides and which upstream changes would help
 - [Upstream issue drafts](documentation/upstream-issues.md): the proposed changes to `ironweaver-core`
-- [Guarantees](documentation/guarantees.md): what is durable when, and what each failure does
+- [Guarantees](documentation/guarantees.md): what is durable when, and what each failure does; every guarantee names its tests
 - [On-disk formats](documentation/formats/): the WAL, the data directory, backups and archives
 - [Operations guide](documentation/operations.md): install, configure, monitor, back up and upgrade a server
 - [Python API](documentation/python-api.md), [iwctl](documentation/iwctl.md), [releasing](documentation/releasing.md)
