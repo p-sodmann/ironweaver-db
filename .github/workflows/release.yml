@@ -201,7 +201,7 @@ jobs:
           "$bin/iwctl$exe" --version | tee version.txt
           grep -qx "iwctl $VERSION" <(tr -d '\r' < version.txt)
           if [ "$RUNNER_OS" = Linux ]; then
-            ldd --version | head -1
+            ldd --version | sed -n 1p                   # sed reads to the end: no SIGPIPE under pipefail
             # The newest glibc symbol version the binaries need
             if command -v objdump > /dev/null; then
               objdump -T "$bin/iwdb-server" "$bin/iwctl" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
