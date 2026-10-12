@@ -220,15 +220,18 @@ fn min_seq_waits_until_the_seq_is_applied_and_no_longer() {
     }
 
     // A reader waiting for the next seq returns once it is applied
+    let (started, saw_start) = std::sync::mpsc::channel();
     let waiter = {
         let store = store.clone();
         thread::spawn(move || {
             let options = ReadOptions { timeout: Some(Duration::from_secs(10)), ..ReadOptions::min_seq(first.seq + 1) };
             let t = Instant::now();
+            started.send(()).unwrap();
             let seen = store.read_with(&options, |ns| (ns.seq(), ns.graph().node_ix("b").is_some())).unwrap();
             (seen, Instant::now(), t.elapsed())
         })
     };
+    saw_start.recv_timeout(Duration::from_secs(10)).expect("the reader started");
     thread::sleep(Duration::from_millis(100));
     assert!(!waiter.is_finished(), "it waits");
     store.commit(&node("b")).unwrap();
