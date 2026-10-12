@@ -4,7 +4,7 @@ A durable, concurrent graph database built around [`ironweaver-core`](https://gi
 
 Ironweaver DB adds what an in-process graph library lacks for production use: a write-ahead log and crash recovery, atomic transactions with optimistic concurrency, snapshot reads, a catalog, a bounded query API and network access over gRPC and REST/JSON. It runs either embedded (a library opened on a directory) or as a server that many clients share.
 
-**Status:** early development. Milestone M1 (embedded durable) is done: a store in a directory with a write-ahead log, checkpoints and crash recovery (tested by a kill -9 harness), online backups, WAL archiving, point-in-time restore, `verify`, the `iwctl` admin CLI and Python bindings (`pip install ironweaver-db` once 0.1.0 is published). See the [implementation steps](documentation/steps/README.md).
+**Status:** early development. Milestone M1 (embedded durable) is done: a store in a directory with a write-ahead log, checkpoints and crash recovery (tested by a kill -9 harness), online backups, WAL archiving, point-in-time restore, `verify`, the `iwctl` admin CLI and Python bindings. Nothing is released yet; releases will be files on GitHub ([Install](#install)). See the [implementation steps](documentation/steps/README.md).
 
 ```python
 import iwdb
@@ -23,6 +23,17 @@ IWDB_ADMIN_PASSWORD=... docker compose up --build
 ```
 
 `docker build --build-arg FEATURES="" .` builds a gRPC-only image without REST or the Postgres projection source ([details](documentation/api/grpc.md#features-and-docker)).
+
+## Install
+
+Releases are published on GitHub only, as files on the [Releases page](https://github.com/p-sodmann/ironweaver-db/releases): there is no PyPI package, crate or image registry. Each release has the Python wheel (one package, `ironweaver-db`, for both the embedded store and the remote client `iwdb.connect`), the `iwdb-server` and `iwctl` binaries for Linux, macOS and Windows, the Docker image as a file per architecture, and `SHA256SUMS`.
+
+```
+pip install https://github.com/p-sodmann/ironweaver-db/releases/download/vX.Y.Z/<the wheel for your platform>
+docker load -i ironweaver-db-X.Y.Z-docker-linux-amd64.tar.gz      # iwdb-server:X.Y.Z
+```
+
+Or build from source (Rust 1.99 or later): `cargo build --release -p iwdb-server -p iwctl`, and `maturin develop -m crates/iwdb-python/Cargo.toml` for the Python package. The [operations guide](documentation/operations.md#install) has the details, [releasing.md](documentation/releasing.md) what a release holds and [ADR 0060](documentation/adr/0060-versioning-policy.md) what a version number promises.
 
 ## By the numbers
 

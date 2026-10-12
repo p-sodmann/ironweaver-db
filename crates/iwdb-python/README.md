@@ -21,7 +21,10 @@ iwdb.restore("restored", backup="backups/today")
 ```
 
 Wheels for Linux and macOS (x86_64 and arm64) and Windows (x86_64), CPython
-3.9 and later (abi3): `pip install ironweaver-db`. On Windows, keep the data
+3.9 and later (abi3), are files of each [GitHub Release](https://github.com/p-sodmann/ironweaver-db/releases)
+(the package isn't on PyPI): `pip install <the wheel's URL or file>`. One
+package holds both the embedded store and the remote client
+(`iwdb.connect`). On Windows, keep the data
 directory on a local NTFS volume (not FAT/exFAT or a network share).
 
 - [Python API](https://github.com/p-sodmann/ironweaver-db/blob/main/documentation/python-api.md)
