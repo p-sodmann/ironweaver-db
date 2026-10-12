@@ -1,11 +1,14 @@
 //! Step 16i: every `iwctl` command line that `documentation/operations.md`
 //! shows in a code block parses with [`args::parse`](crate::args::parse).
+//! Step 17d: so does every example of `documentation/iwctl.md` (its
+//! synopsis lines, with `<placeholders>`, are skipped).
 //! `crates/iwdb-server/tests/operations.rs` checks the guide's settings,
 //! metrics and TOML blocks, and runs its `sh run` blocks.
 
 use crate::args;
 
 const GUIDE: &str = include_str!("../../../documentation/operations.md");
+const REFERENCE: &str = include_str!("../../../documentation/iwctl.md");
 
 /// The code blocks of a Markdown document, as (info string, lines), with
 /// continuation lines (a trailing `\`) joined.
@@ -76,13 +79,22 @@ fn words(line: &str) -> Vec<String> {
     out
 }
 
-/// The value the guide gives `S` (`export S="--server ..."`).
+/// A line without its shell prompt (`$ `).
+fn unprompted(line: &str) -> &str {
+    line.trim().strip_prefix("$ ").unwrap_or(line)
+}
+
+/// The value the document gives `S` (`export S="--server ..."`, or
+/// `S="..."` after a prompt).
 fn server_flags(blocks: &[(String, Vec<String>)]) -> Vec<String> {
     let line = blocks
         .iter()
         .flat_map(|(_, lines)| lines)
-        .find_map(|l| l.trim().strip_prefix("export S="))
-        .expect("the guide sets S");
+        .find_map(|l| {
+            let l = unprompted(l);
+            l.strip_prefix("export S=").or_else(|| l.strip_prefix("S="))
+        })
+        .expect("the document sets S");
     words(line).concat().split_whitespace().map(str::to_owned).collect()
 }
 
@@ -96,8 +108,9 @@ fn commands(doc: &str) -> Vec<(String, Vec<String>)> {
         if info.starts_with("toml") || info.starts_with("yaml") {
             continue;
         }
-        for line in lines {
-            let words = words(line);
+        // A synopsis line names its arguments `<like this>`
+        for line in lines.iter().filter(|l| !l.contains('<')) {
+            let words = words(unprompted(line));
             let mut rest = words.iter();
             // In command position: at the start, after `|` (or `;`, ...),
             // after `NAME=value` prefixes, or in `$(...)`
@@ -125,7 +138,7 @@ fn commands(doc: &str) -> Vec<(String, Vec<String>)> {
                         a => args.push(a.to_owned()),
                     }
                 }
-                out.push((line.clone(), args));
+                out.push((line.to_owned(), args));
                 // `take_while` ate the `|` (or the line ended)
                 command = true;
             }
@@ -171,4 +184,18 @@ fn every_iwctl_command_in_the_operations_guide_parses() {
     for needed in ["status", "backup", "restore", "verify", "archive", "jobs", "user", "token", "requests"] {
         assert!(commands.iter().any(|(_, a)| a.iter().any(|w| w == needed)), "no `iwctl {}` in the guide", needed);
     }
+}
+
+#[test]
+fn every_iwctl_example_in_the_reference_parses() {
+    let commands = commands(REFERENCE);
+    // The examples of backups, pruning, requests, jobs, users, tokens and limits
+    assert!(commands.len() >= 12, "{} commands found", commands.len());
+    let mut problems = Vec::new();
+    for (line, args) in &commands {
+        if let Err(e) = args::parse(args) {
+            problems.push(format!("{}\n  {:?}: {}", line, args, e));
+        }
+    }
+    assert!(problems.is_empty(), "iwctl commands in iwctl.md that don't parse:\n{}", problems.join("\n"));
 }
