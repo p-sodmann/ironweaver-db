@@ -9,120 +9,95 @@ use std::fmt;
 
 use ironweaver_core::GraphError;
 
-/// What kind of failure an [`Error`] is. The codes and their strings
-/// ([`Code::as_str`]) are a contract: adapters map them to their own
-/// status codes (gRPC in step 11, HTTP in step 12), and clients branch on
-/// them. A new code is a minor version; renaming or removing one breaks
-/// clients.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Code {
+// Keep variant documentation, wire names, and ordered enumeration together.
+macro_rules! codes {
+    ($($(#[$doc:meta])* $variant:ident => $name:literal),+ $(,)?) => {
+        /// What kind of failure an [`Error`] is. The codes and their strings
+        /// ([`Code::as_str`]) are a contract: adapters map them to their own
+        /// status codes (gRPC in step 11, HTTP in step 12), and clients branch on
+        /// them. A new code is a minor version; renaming or removing one breaks
+        /// clients.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        #[non_exhaustive]
+        pub enum Code {
+            $($(#[$doc])* $variant),+
+        }
+
+        impl Code {
+            /// Every code, in the order of `documentation/api/errors.md`.
+            pub const ALL: [Code; [$(stringify!($variant)),+].len()] = [$(Code::$variant),+];
+
+            /// The code's stable name, in snake case (`"budget_exceeded"`).
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Code::$variant => $name),+
+                }
+            }
+
+            /// The code named `name` ([`as_str`](Self::as_str)), for adapters that
+            /// receive codes over the wire.
+            pub fn parse(name: &str) -> Option<Code> {
+                Code::ALL.into_iter().find(|c| c.as_str() == name)
+            }
+        }
+    };
+}
+
+codes! {
     /// The request is invalid: a bad argument, a limit of 0, a filter or
     /// pattern the core rejects, an invalid transaction. Retrying the same
     /// request fails the same way.
-    InvalidArgument,
+    InvalidArgument => "invalid_argument",
     /// The server needs credentials and the request had none, or they
     /// aren't valid: an unknown or expired token, a wrong password (step
     /// 15a, ADR 0045). Log in again.
-    Unauthenticated,
+    Unauthenticated => "unauthenticated",
     /// The caller is known but its roles don't allow the operation on this
     /// namespace (ADR 0045). Nothing changed.
-    PermissionDenied,
+    PermissionDenied => "permission_denied",
     /// A namespace (or, in a mutation, a node or edge, an index or a
     /// constraint) doesn't exist.
-    NotFound,
+    NotFound => "not_found",
     /// The request conflicts with the state: a version conflict, a
     /// namespace or index that exists already, an idempotency key reused
     /// for another request. Nothing changed.
-    Conflict,
+    Conflict => "conflict",
     /// A commit would violate a unique or required constraint. Nothing
     /// changed.
-    ConstraintViolation,
+    ConstraintViolation => "constraint_violation",
     /// A read reached one of its limits (results, nodes visited, edges
     /// examined) and the request didn't ask for a partial answer.
-    BudgetExceeded,
+    BudgetExceeded => "budget_exceeded",
     /// The request didn't finish within its timeout. Nothing changed.
-    Timeout,
+    Timeout => "timeout",
     /// The caller cancelled the request (dropped its future).
-    Cancelled,
+    Cancelled => "cancelled",
     /// A cursor whose namespace has changed since it was made: a paginated
     /// read is served only at the seq of its first page. Start again
     /// without the cursor.
-    CursorExpired,
+    CursorExpired => "cursor_expired",
     /// The change stream was asked for a seq that is no longer in the WAL
     /// (ADR 0031): start again from a snapshot. The message names the
     /// oldest retained seq.
-    NotRetained,
+    NotRetained => "not_retained",
     /// The namespace is read-only after a failed WAL write or fsync, or a
     /// failed apply, until the store is reopened.
-    ReadOnly,
+    ReadOnly => "read_only",
     /// The store can't take the request now: it is closed or shutting
     /// down, or too many requests are queued. Retry later.
-    Unavailable,
+    Unavailable => "unavailable",
     /// The server's memory is above the line where it refuses writes
     /// (ADR 0054): the write was refused before it was logged, and nothing
     /// changed. Deletes, drops and reads still work. Retry with backoff
     /// once memory has fallen.
-    ResourceExhausted,
+    ResourceExhausted => "resource_exhausted",
     /// A file operation failed. A commit's outcome is unknown: retry it
     /// with the same idempotency key.
-    Io,
+    Io => "io",
     /// Damaged data on disk: the WAL, a checkpoint, the namespace log.
-    Corrupt,
+    Corrupt => "corrupt",
     /// A bug in the database (a panic, a broken invariant).
-    Internal,
-}
-
-impl Code {
-    /// Every code, in the order of `documentation/api/errors.md`.
-    pub const ALL: [Code; 17] = [
-        Code::InvalidArgument,
-        Code::Unauthenticated,
-        Code::PermissionDenied,
-        Code::NotFound,
-        Code::Conflict,
-        Code::ConstraintViolation,
-        Code::BudgetExceeded,
-        Code::Timeout,
-        Code::Cancelled,
-        Code::CursorExpired,
-        Code::NotRetained,
-        Code::ReadOnly,
-        Code::Unavailable,
-        Code::ResourceExhausted,
-        Code::Io,
-        Code::Corrupt,
-        Code::Internal,
-    ];
-
-    /// The code's stable name, in snake case (`"budget_exceeded"`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Code::InvalidArgument => "invalid_argument",
-            Code::Unauthenticated => "unauthenticated",
-            Code::PermissionDenied => "permission_denied",
-            Code::NotFound => "not_found",
-            Code::Conflict => "conflict",
-            Code::ConstraintViolation => "constraint_violation",
-            Code::BudgetExceeded => "budget_exceeded",
-            Code::Timeout => "timeout",
-            Code::Cancelled => "cancelled",
-            Code::CursorExpired => "cursor_expired",
-            Code::NotRetained => "not_retained",
-            Code::ReadOnly => "read_only",
-            Code::Unavailable => "unavailable",
-            Code::ResourceExhausted => "resource_exhausted",
-            Code::Io => "io",
-            Code::Corrupt => "corrupt",
-            Code::Internal => "internal",
-        }
-    }
-
-    /// The code named `name` ([`as_str`](Self::as_str)), for adapters that
-    /// receive codes over the wire.
-    pub fn parse(name: &str) -> Option<Code> {
-        Code::ALL.into_iter().find(|c| c.as_str() == name)
-    }
+    Internal => "internal",
 }
 
 impl fmt::Display for Code {
@@ -285,7 +260,17 @@ mod tests {
 
     #[test]
     fn codes_have_unique_stable_names() {
-        let names: Vec<&str> = Code::ALL.iter().map(|c| c.as_str()).collect();
+        // Pin the externally visible array type and the documented wire order.
+        let codes: [Code; 17] = Code::ALL;
+        let names: Vec<&str> = codes.iter().map(|c| c.as_str()).collect();
+        let documented: Vec<&str> = include_str!("../../../documentation/api/errors.md")
+            .lines()
+            .skip_while(|line| !line.starts_with("| Code |"))
+            .skip(2)
+            .take_while(|line| line.starts_with('|'))
+            .filter_map(|line| line.strip_prefix("| `").and_then(|row| row.split_once('`').map(|(name, _)| name)))
+            .collect();
+        assert_eq!(names, documented);
         let mut sorted = names.clone();
         sorted.sort_unstable();
         sorted.dedup();

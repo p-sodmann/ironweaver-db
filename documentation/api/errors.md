@@ -31,3 +31,5 @@ Notes:
 - Errors of the operations outside the trait (opening a store, backup, restore, verify) are the storage layer's (`iwdb::Error`); `iwdb_query::Error::from` maps them to the codes above where an adapter needs one (a locked directory is `unavailable`).
 - `cancelled` is rarely seen: the caller that cancelled has usually gone away. Its HTTP status, 499, is nginx's "client closed request"; no standard status says "cancelled".
 - Over REST, requests the HTTP layer refuses before any operation runs (no such route, wrong method, wrong media type, body too large) are `invalid_argument` with 404, 405, 415 or 413 ([rest.md](rest.md#errors)).
+
+For maintainers, `codes!` in `iwdb-query/src/error.rs` is the single ordered registry of Rust variants, variant documentation, and wire names. It generates the enum, `Code::ALL`, and `as_str`; parsing uses that generated list. To add a code, append its documented registry entry, update this table and each adapter's exhaustive status/exception mapping, and verify the ordered-name contract test. Existing names and order must stay stable; unknown wire names continue to return `None`.
