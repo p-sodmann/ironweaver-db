@@ -64,22 +64,39 @@
     if (k === 'Float') return String(v.Float);
     return String(v[k]);
   }
-  /** What an edited value means: the kind it had if the text still fits it, else JSON, else a string. */
+  function numericValue(n, integer) {
+    if (!Number.isFinite(n)) throw new RangeError('Numeric values must be finite; enter a smaller number.');
+    // REST Int uses a JSON number, not a decimal string. JSON.stringify cannot carry a BigInt.
+    if (integer && !Number.isSafeInteger(n)) throw new RangeError('Integer edits must be between -9007199254740991 and 9007199254740991 to avoid rounding in the console.');
+    return integer ? { Int: n } : { Float: n };
+  }
+  /** Keep the previous kind when possible; reject numeric edits the console cannot transmit faithfully. */
   function parseValue(s, kind) {
     const t = s.trim();
-    if ((kind === 'Int' || !kind) && /^-?\d+$/.test(t)) return { Int: parseInt(t, 10) };
-    if ((kind === 'Float' || kind === 'Int' || !kind) && /^-?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(t)) return { Float: parseFloat(t) };
+    if ((kind === 'Int' || !kind) && /^-?\d+$/.test(t)) return numericValue(Number(t), true);
+    if ((kind === 'Float' || kind === 'Int' || !kind) && /^-?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(t)) return numericValue(Number(t), false);
+    if ((kind === 'Float' || kind === 'Int' || !kind) && /^[-+]?(Infinity|NaN)$/.test(t)) throw new RangeError('Numeric values must be finite; enter a finite number.');
     if ((kind === 'Bool' || !kind) && /^(true|false)$/.test(t)) return { Bool: t === 'true' };
     if (kind === 'Date' && /^\d{4}-\d{2}-\d{2}$/.test(t)) return { Date: t };
     if (kind === 'DateTime' && /^\d{4}-\d{2}-\d{2}T/.test(t)) return { DateTime: t };
     if (t === 'None') return 'None';
-    if (/^[[{]/.test(t)) { try { return plainToValue(JSON.parse(t)); } catch (_) { /* not JSON: a string */ } }
+    if (/^[[{]/.test(t)) {
+      let parsed;
+      try { parsed = JSON.parse(t); } catch (_) { return { String: s }; }
+      // Inspect original tokens before conversion: JSON.parse already rounds large integer literals.
+      // Consume strings as whole tokens so digits in keys or string values remain strings.
+      const tokens = t.match(/"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?/g) || [];
+      for (const token of tokens) {
+        if (token[0] !== '"') numericValue(Number(token), /^-?\d+$/.test(token));
+      }
+      return plainToValue(parsed);
+    }
     return { String: s };
   }
   function plainToValue(x) {
     if (x === null) return 'None';
     if (typeof x === 'boolean') return { Bool: x };
-    if (typeof x === 'number') return Number.isInteger(x) ? { Int: x } : { Float: x };
+    if (typeof x === 'number') return numericValue(x, Number.isInteger(x));
     if (Array.isArray(x)) return { List: x.map(plainToValue) };
     if (typeof x === 'object') return { Dict: Object.fromEntries(Object.keys(x).sort().map((k) => [k, plainToValue(x[k])])) };
     return { String: String(x) };

@@ -75,14 +75,23 @@
     }, []);
     const logKind = useRef(src.logKind());
     useEffect(() => {
-      const read = () => src.server().then((x) => {
-        setS(x); setNow(Date.now());
-        // The first poll that could read the server's log replaces this page's requests with it
-        if (src.logKind() !== logKind.current) { logKind.current = src.logKind(); setLog(src.log()); }
-      }, () => {});
-      read(); if (!live) return undefined;
-      const t = setInterval(() => { src.tick(); read(); }, src.kind === 'mock' ? 1000 : 3000);
-      return () => clearInterval(t);
+      let active = true, reading = false;
+      const read = async () => {
+        if (!active || reading) return;
+        reading = true;
+        try {
+          const x = await src.server();
+          if (!active) return;
+          setS(x); setNow(Date.now());
+          // The first poll that could read the server's log replaces this page's requests with it
+          if (src.logKind() !== logKind.current) { logKind.current = src.logKind(); setLog(src.log()); }
+        } catch (_) {
+          // A failed poll leaves the last successful snapshot visible; the next tick retries.
+        } finally { reading = false; }
+      };
+      read();
+      const t = live ? setInterval(() => { if (active && !reading) { src.tick(); read(); } }, src.kind === 'mock' ? 1000 : 3000) : null;
+      return () => { active = false; if (t != null) clearInterval(t); };
     }, [live]);
     useEffect(() => {
       const k = (e) => {

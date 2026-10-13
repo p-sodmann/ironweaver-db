@@ -6,7 +6,7 @@
   "scripts": {
     "build": "node tools/build.mjs",
     "check": "node tools/build.mjs --check",
-    "test": "node --test test/console.test.cjs"
+    "test": "node --test test/*.test.cjs"
   },
   "devDependencies": {
     "esbuild": "0.28.2"

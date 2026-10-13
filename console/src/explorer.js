@@ -85,6 +85,7 @@
   /* ------------------------------------------------------------------ the page */
   function Explorer() {
     const [nss, setNss] = useState([]); const [ns, setNs] = useState(null);
+    const [nssLoaded, setNssLoaded] = useState(false);
     const [schema, setSchema] = useState(null); const [status, setStatus] = useState(null); const [server, setServer] = useState(null);
     const [view, setView] = useState('graph'); const [morph, setMorph] = useState(false);
     const [result, setResult] = useState(null); const [error, setError] = useState(null);
@@ -106,15 +107,28 @@
 
     /* The server: a mock that keeps running (background commits, checkpoints) while the page is open */
     useEffect(() => {
+      let live = true; let polling = false;
       src.log().forEach((e) => setLog((l) => l.concat(e)));
-      const off = src.onLog((e) => setLog((l) => l.concat({ ...e, fresh: true }).slice(-200)));
-      const poll = () => src.server().then(setServer, (e) => setServer((s) => (s ? { ...s, ready: false, error: e } : null)));
+      const off = src.onLog((e) => { if (live) setLog((l) => l.concat({ ...e, fresh: true }).slice(-200)); });
+      const poll = () => {
+        if (!live || polling) return;
+        polling = true;
+        src.server().then((s) => { if (live) setServer(s); }, (e) => {
+          if (live) setServer((s) => (s ? { ...s, ready: false, error: e } : null));
+        }).finally(() => { polling = false; });
+      };
       poll(); const t1 = setInterval(() => src.tick(), 1000); const t2 = setInterval(poll, 5000);
-      src.namespaces().then((list) => { setNss(list); const want = U.params().get('ns'); setNs((list.find((x) => x.name === want) || list[0]).name); });
-      return () => { off(); clearInterval(t1); clearInterval(t2); };
+      src.namespaces().then((list) => {
+        if (!live) return;
+        setNss(list); setNssLoaded(true);
+        const want = U.params().get('ns'); const selected = list.find((x) => x.name === want) || list[0];
+        setNs(selected ? selected.name : null);
+      }, (e) => { if (live) { setError(e); addLog('ERROR', 'Cannot list namespaces · ' + errText(e)); } });
+      return () => { live = false; off(); clearInterval(t1); clearInterval(t2); };
     }, []);
 
-    const refresh = useCallback((name) => Promise.all([src.schema(name), src.namespaceStatus(name)]).then(([sc, st]) => {
+    const refresh = useCallback((name, isLive = () => true) => Promise.all([src.schema(name), src.namespaceStatus(name)]).then(([sc, st]) => {
+      if (!isLive()) return sc;
       counts.current = Object.fromEntries(sc.labels.map((l) => [l.name, l.count]));
       I.setLabels(U.labelStyles(sc.labels.map((l) => l.name))); setSchema(sc); setStatus(st); return sc;
     }), []);
@@ -140,14 +154,15 @@
       };
     };
 
-    const execute = async (c, name, cursor) => {
+    const execute = async (c, name, cursor, isLive = () => true) => {
+      const rememberResult = (nodes) => { if (isLive()) remember(nodes); };
       const t0 = performance.now();
       if (c.cmd === 'match') {
         const limit = c.opts.limit === undefined ? MATCH_LIMIT : c.opts.limit || 10000;
         const res = await src.matchPattern(name, c.pattern, { limit });
         const ids = [...new Set(res.rows.flatMap((r) => r.nodes))]; const eids = [...new Set(res.rows.flatMap((r) => r.edges.flat()))];
         const [nr, er] = await Promise.all([src.getNodes(name, ids), src.getEdges(name, eids)]);
-        const nodes = nr.nodes.filter(Boolean); remember(nodes); const byId = new Map(nodes.map((n) => [n.id, n]));
+        const nodes = nr.nodes.filter(Boolean); rememberResult(nodes); const byId = new Map(nodes.map((n) => [n.id, n]));
         const nodeCols = res.columns.filter((x) => x.kind === 'node');
         const w = res.meta.work;
         return {
@@ -161,7 +176,7 @@
       if (c.cmd === 'find' || c.cmd === 'explain') {
         const limit = c.opts.limit || PAGE;
         const [res, ex] = await Promise.all([src.find(name, c.filter, { limit, cursor }), src.explain(name, c.filter, { analyze: true })]);
-        remember(res.nodes);
+        rememberResult(res.nodes);
         const sub = await src.subgraph(name, res.nodes.map((n) => n.id));
         const elapsed = performance.now() - t0; const t = tableOfNodes(res.nodes);
         // No read counts the matches (an unbounded count, design rule 5): on a first page with no more, the page is it
@@ -176,13 +191,13 @@
         };
       }
       if (c.cmd === 'node') {
-        const res = await src.getNodes(name, c.ids); const nodes = res.nodes.filter(Boolean); remember(nodes);
+        const res = await src.getNodes(name, c.ids); const nodes = res.nodes.filter(Boolean); rememberResult(nodes);
         const missing = c.ids.filter((id, k) => !res.nodes[k]);
         const sub = await src.subgraph(name, nodes.map((n) => n.id));
         return { kind: 'node', graph: graphOf(nodes, sub.edges), ...tableOfNodes(nodes), plan: null, footer: `${nodes.length} found${missing.length ? ' · not found: ' + missing.join(', ') : ''} · seq ${U.num(res.meta.seq)}` };
       }
       const res = await src.neighbours(name, c.id, { limit: c.opts.limit || NEIGHBOURS * 4 });
-      const self = (await src.getNodes(name, [c.id])).nodes[0]; const nodes = [self].concat(res.nodes); remember(nodes);
+      const self = (await src.getNodes(name, [c.id])).nodes[0]; const nodes = [self].concat(res.nodes); rememberResult(nodes);
       return { kind: 'neighbours', graph: graphOf(nodes, res.edges), ...tableOfNodes(nodes), plan: null, footer: `${c.id} and ${res.nodes.length} neighbours${res.truncated ? ' (more beyond the limit)' : ''} · seq ${U.num(res.meta.seq)}` };
     };
 
@@ -192,19 +207,20 @@
     };
 
     const run = useCallback(async (text, o = {}) => {
-      const name = o.ns || ns; if (!name) return 0;
+      const name = o.ns || ns; const isLive = o.isLive || (() => true); if (!name || !isLive()) return 0;
       setQuery(text);
       let c;
       try { c = Q.parse(text); } catch (e) { setError(e); addLog('ERROR', errText(e)); throw e; }
       const t0 = performance.now();
       try {
-        const r = await execute(c, name, o.cursor);
+        const r = await execute(c, name, o.cursor, isLive);
+        if (!isLive()) return 0;
         if (o.page) Object.assign(r, { page: o.page, cursors: o.cursors }); else Object.assign(r, { page: 1, cursors: [''] });
         setResult(r); setError(null); setCanvasKey((k) => k + 1);
         if (o.view) setView(o.view); else if (c.cmd === 'explain') setView('plan'); else if (view === 'plan' && !r.plan) setView('table'); else if (view === 'structure') setView('graph');
         if (r.graph.clipped > 0) addLog('WARN', `the canvas shows the first ${GRAPH_MAX} of ${r.graph.nodes.length + r.graph.clipped} nodes; the table has them all`);
         return performance.now() - t0;
-      } catch (e) { setError(e); addLog('ERROR', errText(e)); throw e; }
+      } catch (e) { if (isLive()) { setError(e); addLog('ERROR', errText(e)); } throw e; }
     }, [ns, view]);
 
     /* A namespace: its schema, then the first look */
@@ -212,7 +228,11 @@
       if (!ns) return;
       setSelId(null); setResult(null); setPending([]); cache.current.clear(); setRels(null);
       try { const u = new URL(window.location.href); u.searchParams.set('ns', ns); window.history.replaceState(null, '', u); } catch (_) { /* file:// in some browsers */ }
-      refresh(ns).then(() => run(DEFAULT_QUERY, { ns, view: 'graph' }).catch(() => {}));
+      let live = true; const isLive = () => live;
+      refresh(ns, isLive).then(() => {
+        if (live) return run(DEFAULT_QUERY, { ns, view: 'graph', isLive }).catch(() => {});
+      }, (e) => { if (live) { setError(e); addLog('ERROR', errText(e)); } });
+      return () => { live = false; };
     }, [ns]);
 
     const switchNs = (name) => {
@@ -254,7 +274,9 @@
     });
     const onSave = (n, key, value) => {
       const node = cache.current.get(n.id); const old = node && node.attr[key];
-      const v = U.parseValue(value, old === undefined ? null : U.kindOf(old));
+      let v;
+      try { v = U.parseValue(value, old === undefined ? null : U.kindOf(old)); }
+      catch (e) { setError(e); addLog('ERROR', errText(e)); return; }
       stage({ m: { setAttr: { target: { node: n.id }, key, value: v } }, desc: `set ${n.id}.${key} = ${U.text(v)}` });
       addLog('INFO', `staged · set ${n.id}.${key} = ${U.text(v)} (${U.TYPE[U.kindOf(v)]})`);
     };
@@ -388,14 +410,14 @@
           h('span', { className: 'iw-mono-s cs-error__msg' }, error.message || String(error)),
           h(I.Button, { variant: 'ghost', iconOnly: true, title: 'Dismiss', 'aria-label': 'Dismiss', onClick: () => setError(null) }, '✕')),
         h('div', { className: 'iw-wb__view' },
-          h('div', { className: 'iw-wb__pane', hidden: view !== 'graph' && !morph },
+          h('div', { className: 'iw-wb__pane', hidden: ns && view !== 'graph' && !morph },
             result ? h(I.GraphCanvas, { key: ns + ':' + canvasKey, graph: result.graph, selected: selId, onSelect: (n) => setSelId(n ? n.id : null), onLog: addLog, onExpandRef: expandRef, neighbours, onConnect, onDetach, connectType, empty: result.graph.nodes.length === 0 })
-              : h(I.EmptyState, { kind: 'canvas', title: 'Reading the namespace.', body: 'The first look is any 40 edges.' })),
+              : h(I.EmptyState, { kind: 'canvas', title: nssLoaded && !ns ? 'No visible namespaces.' : 'Reading the namespace.', body: nssLoaded && !ns ? 'Create a namespace or ask an administrator for access.' : 'The first look is any 40 edges.' })),
           (view === 'table' || morph) && result && h(I.ResultTable, { key: 't' + canvasKey, columns: result.columns, rows: result.rows, morph, selected: rowSel, onSelect: (id) => { const r = result.rows.find((x) => x.id === id); r && r.node && setSelId(r.node); }, footer: result.footer, pager, onExport }),
-          view === 'plan' && (plan
+          ns && view === 'plan' && (plan
             ? h(I.PlanView, { plan, summary: result.summary, hint: result.scanPath && { label: `Create an index on [${result.scanPath.join('.')}]…`, onClick: () => { createIndex(result.scanPath).then(() => { addLog('INFO', `index [${result.scanPath.join('.')}] building; run the find again once it is ready`); go('structure'); }, () => {}); } } })
             : h(I.EmptyState, { kind: 'results', title: 'No plan for this one.', body: 'Plans are for filters: run find or explain. Patterns and lookups have none to show.' })),
-          view === 'structure' && h(StructureView, { ns, schema, status, onBrowse: browse, onCreateIndex: createIndex }))),
+          ns && view === 'structure' && h(StructureView, { ns, schema, status, onBrowse: browse, onCreateIndex: createIndex }))),
       h('div', { className: 'iw-wb__insp' }, selNode && h(I.Inspector, {
         node: inspNode, properties, relationships: rels && rels.id === selNode.id ? rels.list : [], storage, readOnly: !!(status && status.readOnly),
         onClose: () => setSelId(null), onSave, onExpand: (id) => { go('graph'); expandRef.current && expandRef.current(id); },
