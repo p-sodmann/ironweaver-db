@@ -236,6 +236,8 @@ Without `ca` the client trusts the operating system's store. `grpcurl -cacert ca
 
 ## The Rust client
 
+The Rust gRPC and REST clients preserve absent and explicit zero administrative pagination limits. For active requests, logs, job lists, and job-result pages, limits larger than the wire's `uint32` range saturate to `u32::MAX`; both transports use the same conversion.
+
 `iwdb_server::client::Remote` (feature `client`) implements the `Database` trait over gRPC, so code written against the trait runs embedded or remote:
 
 ```rust

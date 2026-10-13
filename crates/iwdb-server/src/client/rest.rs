@@ -42,7 +42,7 @@ use serde::de::DeserializeOwned;
 use tokio::runtime::{Handle, Runtime};
 
 use super::https::Connector;
-use super::{Call, ClientTls, TokenSlot, bad_answer, read_token, write_token};
+use super::{Call, ClientTls, TokenSlot, bad_answer, limit_to_pb, read_token, write_token};
 use crate::auth::CSRF_HEADER;
 use crate::convert::*;
 use crate::proto as pb;
@@ -723,7 +723,7 @@ impl Admin for RestRemote {
         limit: Option<usize>,
     ) -> impl Future<Output = Result<Listed<RequestInfo>, Error>> + Send {
         self.call(move |c| async move {
-            let q = parameters(&[("user", user), ("limit", limit.map(|n| n.min(u32::MAX as usize).to_string()))]);
+            let q = parameters(&[("user", user), ("limit", limit_to_pb(limit).map(|n| n.to_string()))]);
             let response: pb::ListRequestsResponse = c.get(format!("{}/v1/requests{}", c.base, q)).await?;
             requests_from_pb(response).map_err(bad_answer)
         })
@@ -753,10 +753,8 @@ impl Admin for RestRemote {
 
     fn log(&self, after: u64, limit: Option<usize>) -> impl Future<Output = Result<LogTail, Error>> + Send {
         self.call(move |c| async move {
-            let q = parameters(&[
-                ("after", Some(after.to_string())),
-                ("limit", limit.map(|n| n.min(u32::MAX as usize).to_string())),
-            ]);
+            let q =
+                parameters(&[("after", Some(after.to_string())), ("limit", limit_to_pb(limit).map(|n| n.to_string()))]);
             let response: pb::GetLogResponse = c.get(format!("{}/v1/log{}", c.base, q)).await?;
             log_from_pb(response).map_err(bad_answer)
         })
@@ -821,7 +819,7 @@ impl Admin for RestRemote {
         limit: Option<usize>,
     ) -> impl Future<Output = Result<Listed<JobInfo>, Error>> + Send {
         self.call(move |c| async move {
-            let q = parameters(&[("user", user), ("limit", limit.map(|n| n.min(u32::MAX as usize).to_string()))]);
+            let q = parameters(&[("user", user), ("limit", limit_to_pb(limit).map(|n| n.to_string()))]);
             let response: pb::ListJobsResponse = c.get(format!("{}/v1/jobs{}", c.base, q)).await?;
             jobs_from_pb(response).map_err(bad_answer)
         })
@@ -854,7 +852,7 @@ impl Admin for RestRemote {
             let q = parameters(&[
                 ("user", user),
                 ("offset", Some(offset.to_string())),
-                ("limit", limit.map(|n| n.min(u32::MAX as usize).to_string())),
+                ("limit", limit_to_pb(limit).map(|n| n.to_string())),
             ]);
             let response: pb::GetJobResultResponse = c.get(format!("{}/v1/jobs/{}/result{}", c.base, id, q)).await?;
             job_page_from_pb(response).map_err(bad_answer)
