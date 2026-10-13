@@ -28,25 +28,30 @@ use std::sync::Arc;
 
 use axum::Extension;
 use axum::Router;
-use axum::body::Body;
-use axum::extract::rejection::{PathRejection, QueryRejection};
-use axum::extract::{Path, Query, State};
-use axum::response::{IntoResponse, Response};
+use axum::extract::State;
+use axum::response::Response;
 use axum::routing::{MethodRouter, delete, get, post, put};
-use bytes::Bytes;
-use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use http::{Method, StatusCode};
+use iwdb_query::Authorized;
 use iwdb_query::audit::AuditSink;
-use iwdb_query::{Authorized, Code, Error};
-use serde::Deserialize;
-use serde::de::DeserializeOwned;
 use tokio::sync::watch;
-use tokio_stream::StreamExt;
-use tokio_stream::wrappers::ReceiverStream;
 
-use crate::auth::{AuthMode, Caller, SESSION_COOKIE, Served, audit_of, authorized};
-use crate::ops;
-use crate::proto as pb;
-use crate::status::http_status;
+use crate::auth::{AuthMode, Caller, Served, authorized};
+
+mod admin;
+mod changes;
+mod graph;
+mod sessions;
+mod transport;
+
+use admin::*;
+use changes::*;
+use graph::*;
+use sessions::*;
+pub(crate) use transport::Failure;
+use transport::json_response;
+#[cfg(test)]
+use transport::wants_ndjson;
 
 mod json;
 pub mod openapi;
@@ -74,6 +79,136 @@ pub enum Input {
     Query(&'static [(&'static str, &'static str, &'static str)]),
     /// Nothing.
     Nothing,
+}
+
+/// Internal route identity; dispatch is exhaustive and OpenAPI names stay stable.
+#[derive(Clone, Copy, Debug)]
+enum RouteId {
+    ListNamespaces,
+    CreateNamespace,
+    DropNamespace,
+    GetNamespaceStatus,
+    GetCatalog,
+    GetSchema,
+    CommitCatalog,
+    Commit,
+    WaitForSeq,
+    GetNode,
+    GetNodes,
+    GetEdge,
+    GetEdges,
+    Find,
+    Explain,
+    Neighbourhood,
+    Traverse,
+    ShortestPath,
+    RandomWalks,
+    Subgraph,
+    MatchPattern,
+    Analyze,
+    GetChanges,
+    WatchChanges,
+    Openapi,
+    Login,
+    Logout,
+    WhoAmI,
+    ListUsers,
+    CreateUser,
+    DeleteUser,
+    SetPassword,
+    SetAdmin,
+    Grant,
+    Revoke,
+    ListTokens,
+    CreateToken,
+    RevokeToken,
+    SetUserLimits,
+    SetNamespaceLimits,
+    GetLimits,
+    GetServerStatus,
+    ListRequests,
+    CancelRequest,
+    ListConsumers,
+    GetMetrics,
+    GetLog,
+    Checkpoint,
+    Backup,
+    Verify,
+    PruneArchive,
+    StartJob,
+    ListJobs,
+    GetJob,
+    CancelJob,
+    GetJobResult,
+    Live,
+    Ready,
+    PrometheusMetrics,
+}
+
+impl RouteId {
+    const fn operation(self) -> &'static str {
+        match self {
+            Self::ListNamespaces => "listNamespaces",
+            Self::CreateNamespace => "createNamespace",
+            Self::DropNamespace => "dropNamespace",
+            Self::GetNamespaceStatus => "getNamespaceStatus",
+            Self::GetCatalog => "getCatalog",
+            Self::GetSchema => "getSchema",
+            Self::CommitCatalog => "commitCatalog",
+            Self::Commit => "commit",
+            Self::WaitForSeq => "waitForSeq",
+            Self::GetNode => "getNode",
+            Self::GetNodes => "getNodes",
+            Self::GetEdge => "getEdge",
+            Self::GetEdges => "getEdges",
+            Self::Find => "find",
+            Self::Explain => "explain",
+            Self::Neighbourhood => "neighbourhood",
+            Self::Traverse => "traverse",
+            Self::ShortestPath => "shortestPath",
+            Self::RandomWalks => "randomWalks",
+            Self::Subgraph => "subgraph",
+            Self::MatchPattern => "matchPattern",
+            Self::Analyze => "analyze",
+            Self::GetChanges => "getChanges",
+            Self::WatchChanges => "watchChanges",
+            Self::Openapi => "openapi",
+            Self::Login => "login",
+            Self::Logout => "logout",
+            Self::WhoAmI => "whoAmI",
+            Self::ListUsers => "listUsers",
+            Self::CreateUser => "createUser",
+            Self::DeleteUser => "deleteUser",
+            Self::SetPassword => "setPassword",
+            Self::SetAdmin => "setAdmin",
+            Self::Grant => "grant",
+            Self::Revoke => "revoke",
+            Self::ListTokens => "listTokens",
+            Self::CreateToken => "createToken",
+            Self::RevokeToken => "revokeToken",
+            Self::SetUserLimits => "setUserLimits",
+            Self::SetNamespaceLimits => "setNamespaceLimits",
+            Self::GetLimits => "getLimits",
+            Self::GetServerStatus => "getServerStatus",
+            Self::ListRequests => "listRequests",
+            Self::CancelRequest => "cancelRequest",
+            Self::ListConsumers => "listConsumers",
+            Self::GetMetrics => "getMetrics",
+            Self::GetLog => "getLog",
+            Self::Checkpoint => "checkpoint",
+            Self::Backup => "backup",
+            Self::Verify => "verify",
+            Self::PruneArchive => "pruneArchive",
+            Self::StartJob => "startJob",
+            Self::ListJobs => "listJobs",
+            Self::GetJob => "getJob",
+            Self::CancelJob => "cancelJob",
+            Self::GetJobResult => "getJobResult",
+            Self::Live => "live",
+            Self::Ready => "ready",
+            Self::PrometheusMetrics => "prometheusMetrics",
+        }
+    }
 }
 
 /// A REST route: the table the router is built from and the OpenAPI
@@ -114,258 +249,326 @@ impl Route {
     }
 }
 
-const fn route(
-    method: Method,
-    path: &'static str,
-    rpc: &'static str,
-    input: Input,
-    operation: &'static str,
-    summary: &'static str,
-) -> Route {
-    Route { method, path, rpc: Some(rpc), input, operation, summary }
+// One table defines both public documentation descriptors and typed dispatch.
+macro_rules! routes {
+    ($($id:expr => ($method:expr, $path:expr, $rpc:expr, $input:expr, $summary:expr $(,)?)),* $(,)?) => {
+        /// Every REST route.
+        pub const ROUTES: &[Route] = &[$(Route {
+            method: $method,
+            path: $path,
+            rpc: $rpc,
+            input: $input,
+            operation: $id.operation(),
+            summary: $summary,
+        }),*];
+        const ROUTE_IDS: &[RouteId] = &[$($id),*];
+    };
 }
 
 const BODY: Input = Input::Body { required: true };
 const OPTIONAL_BODY: Input = Input::Body { required: false };
 
-/// Every REST route.
-pub const ROUTES: &[Route] = &[
-    route(Method::GET, "/v1/namespaces", "ListNamespaces", Input::Nothing, "listNamespaces", "List the namespaces"),
-    route(
+routes! {
+    RouteId::ListNamespaces => (
+        Method::GET,
+        "/v1/namespaces",
+        Some("ListNamespaces"),
+        Input::Nothing,
+        "List the namespaces",
+    ),
+    RouteId::CreateNamespace => (
         Method::PUT,
         "/v1/namespaces/{ns}",
-        "CreateNamespace",
+        Some("CreateNamespace"),
         OPTIONAL_BODY,
-        "createNamespace",
         "Create a namespace",
     ),
-    route(Method::DELETE, "/v1/namespaces/{ns}", "DropNamespace", OPTIONAL_BODY, "dropNamespace", "Drop a namespace"),
-    route(
+    RouteId::DropNamespace => (
+        Method::DELETE,
+        "/v1/namespaces/{ns}",
+        Some("DropNamespace"),
+        OPTIONAL_BODY,
+        "Drop a namespace",
+    ),
+    RouteId::GetNamespaceStatus => (
         Method::GET,
         "/v1/namespaces/{ns}",
-        "GetNamespaceStatus",
+        Some("GetNamespaceStatus"),
         Input::Nothing,
-        "getNamespaceStatus",
         "A namespace's status",
     ),
-    route(
+    RouteId::GetCatalog => (
         Method::GET,
         "/v1/namespaces/{ns}/catalog",
-        "GetCatalog",
+        Some("GetCatalog"),
         Input::Options,
-        "getCatalog",
         "A namespace's catalog",
     ),
-    route(
+    RouteId::GetSchema => (
         Method::GET,
         "/v1/namespaces/{ns}/schema",
-        "GetSchema",
+        Some("GetSchema"),
         Input::Options,
-        "getSchema",
         "A namespace's schema, sampled",
     ),
-    route(
+    RouteId::CommitCatalog => (
         Method::POST,
         "/v1/namespaces/{ns}/catalog",
-        "CommitCatalog",
+        Some("CommitCatalog"),
         BODY,
-        "commitCatalog",
         "Commit a catalog change",
     ),
-    route(Method::POST, "/v1/namespaces/{ns}/commit", "Commit", BODY, "commit", "Commit a transaction"),
-    route(Method::POST, "/v1/namespaces/{ns}/wait", "WaitForSeq", BODY, "waitForSeq", "Wait until a seq is applied"),
-    route(
+    RouteId::Commit => (Method::POST, "/v1/namespaces/{ns}/commit", Some("Commit"), BODY, "Commit a transaction"),
+    RouteId::WaitForSeq => (
+        Method::POST,
+        "/v1/namespaces/{ns}/wait",
+        Some("WaitForSeq"),
+        BODY,
+        "Wait until a seq is applied",
+    ),
+    RouteId::GetNode => (
         Method::GET,
         "/v1/namespaces/{ns}/nodes/{id}",
-        "GetNodes",
+        Some("GetNodes"),
         Input::Options,
-        "getNode",
         "One node (404 if missing)",
     ),
-    route(Method::POST, "/v1/namespaces/{ns}/get-nodes", "GetNodes", BODY, "getNodes", "Nodes by id"),
-    route(
+    RouteId::GetNodes => (Method::POST, "/v1/namespaces/{ns}/get-nodes", Some("GetNodes"), BODY, "Nodes by id"),
+    RouteId::GetEdge => (
         Method::GET,
         "/v1/namespaces/{ns}/edges/{id}",
-        "GetEdges",
+        Some("GetEdges"),
         Input::Options,
-        "getEdge",
         "One edge (404 if missing)",
     ),
-    route(Method::POST, "/v1/namespaces/{ns}/get-edges", "GetEdges", BODY, "getEdges", "Edges by id"),
-    route(Method::POST, "/v1/namespaces/{ns}/find", "Find", BODY, "find", "Nodes matching a filter"),
-    route(Method::POST, "/v1/namespaces/{ns}/explain", "Explain", BODY, "explain", "How find would read a filter"),
-    route(
+    RouteId::GetEdges => (Method::POST, "/v1/namespaces/{ns}/get-edges", Some("GetEdges"), BODY, "Edges by id"),
+    RouteId::Find => (Method::POST, "/v1/namespaces/{ns}/find", Some("Find"), BODY, "Nodes matching a filter"),
+    RouteId::Explain => (
+        Method::POST,
+        "/v1/namespaces/{ns}/explain",
+        Some("Explain"),
+        BODY,
+        "How find would read a filter",
+    ),
+    RouteId::Neighbourhood => (
         Method::POST,
         "/v1/namespaces/{ns}/neighbourhood",
-        "Neighbourhood",
+        Some("Neighbourhood"),
         BODY,
-        "neighbourhood",
         "Nodes near seeds",
     ),
-    route(Method::POST, "/v1/namespaces/{ns}/traverse", "Traverse", BODY, "traverse", "Breadth or depth first order"),
-    route(Method::POST, "/v1/namespaces/{ns}/shortest-path", "ShortestPath", BODY, "shortestPath", "A shortest path"),
-    route(Method::POST, "/v1/namespaces/{ns}/random-walks", "RandomWalks", BODY, "randomWalks", "Random walks"),
-    route(Method::POST, "/v1/namespaces/{ns}/subgraph", "Subgraph", BODY, "subgraph", "An induced subgraph"),
-    route(Method::POST, "/v1/namespaces/{ns}/match", "MatchPattern", BODY, "matchPattern", "Match a pattern"),
-    route(Method::POST, "/v1/namespaces/{ns}/analyze", "Analyze", BODY, "analyze", "Run an analytics job"),
-    route(
+    RouteId::Traverse => (
+        Method::POST,
+        "/v1/namespaces/{ns}/traverse",
+        Some("Traverse"),
+        BODY,
+        "Breadth or depth first order",
+    ),
+    RouteId::ShortestPath => (
+        Method::POST,
+        "/v1/namespaces/{ns}/shortest-path",
+        Some("ShortestPath"),
+        BODY,
+        "A shortest path",
+    ),
+    RouteId::RandomWalks => (
+        Method::POST,
+        "/v1/namespaces/{ns}/random-walks",
+        Some("RandomWalks"),
+        BODY,
+        "Random walks",
+    ),
+    RouteId::Subgraph => (Method::POST, "/v1/namespaces/{ns}/subgraph", Some("Subgraph"), BODY, "An induced subgraph"),
+    RouteId::MatchPattern => (Method::POST, "/v1/namespaces/{ns}/match", Some("MatchPattern"), BODY, "Match a pattern"),
+    RouteId::Analyze => (Method::POST, "/v1/namespaces/{ns}/analyze", Some("Analyze"), BODY, "Run an analytics job"),
+    RouteId::GetChanges => (
         Method::GET,
         "/v1/namespaces/{ns}/changes",
-        "GetChanges",
+        Some("GetChanges"),
         Input::Changes { stream: false },
-        "getChanges",
         "A batch of the change stream",
     ),
-    route(
+    RouteId::WatchChanges => (
         Method::GET,
         "/v1/namespaces/{ns}/changes/stream",
-        "Watch",
+        Some("Watch"),
         Input::Changes { stream: true },
-        "watchChanges",
         "Follow the change stream (Server-Sent Events)",
     ),
-    // Authentication, users, grants, tokens (auth.proto, step 15a)
-    route(Method::POST, crate::auth::LOGIN_PATH, "Login", BODY, "login", "Log in: start a session"),
-    route(Method::POST, "/v1/auth/logout", "Logout", OPTIONAL_BODY, "logout", "End the caller's session"),
-    route(Method::GET, "/v1/auth/whoami", "WhoAmI", Input::Nothing, "whoAmI", "The caller and its roles"),
-    route(Method::GET, "/v1/users", "ListUsers", Input::Nothing, "listUsers", "List the users"),
-    route(Method::POST, "/v1/users", "CreateUser", BODY, "createUser", "Create a user"),
-    route(Method::DELETE, "/v1/users/{user}", "DeleteUser", OPTIONAL_BODY, "deleteUser", "Delete a user"),
-    route(Method::PUT, "/v1/users/{user}/password", "SetPassword", BODY, "setPassword", "Set a user's password"),
-    route(Method::PUT, "/v1/users/{user}/admin", "SetAdmin", BODY, "setAdmin", "Make a user a server admin or not"),
-    route(Method::PUT, "/v1/users/{user}/grants/{ns}", "Grant", BODY, "grant", "Give a user a role on a namespace"),
-    route(
+    RouteId::Login => (Method::POST, crate::auth::LOGIN_PATH, Some("Login"), BODY, "Log in: start a session"),
+    RouteId::Logout => (Method::POST, "/v1/auth/logout", Some("Logout"), OPTIONAL_BODY, "End the caller's session"),
+    RouteId::WhoAmI => (Method::GET, "/v1/auth/whoami", Some("WhoAmI"), Input::Nothing, "The caller and its roles"),
+    RouteId::ListUsers => (Method::GET, "/v1/users", Some("ListUsers"), Input::Nothing, "List the users"),
+    RouteId::CreateUser => (Method::POST, "/v1/users", Some("CreateUser"), BODY, "Create a user"),
+    RouteId::DeleteUser => (Method::DELETE, "/v1/users/{user}", Some("DeleteUser"), OPTIONAL_BODY, "Delete a user"),
+    RouteId::SetPassword => (
+        Method::PUT,
+        "/v1/users/{user}/password",
+        Some("SetPassword"),
+        BODY,
+        "Set a user's password",
+    ),
+    RouteId::SetAdmin => (
+        Method::PUT,
+        "/v1/users/{user}/admin",
+        Some("SetAdmin"),
+        BODY,
+        "Make a user a server admin or not",
+    ),
+    RouteId::Grant => (
+        Method::PUT,
+        "/v1/users/{user}/grants/{ns}",
+        Some("Grant"),
+        BODY,
+        "Give a user a role on a namespace",
+    ),
+    RouteId::Revoke => (
         Method::DELETE,
         "/v1/users/{user}/grants/{ns}",
-        "Revoke",
+        Some("Revoke"),
         OPTIONAL_BODY,
-        "revoke",
         "Take a user's role on a namespace away",
     ),
-    route(Method::GET, "/v1/users/{user}/tokens", "ListTokens", Input::Nothing, "listTokens", "A user's API tokens"),
-    route(Method::POST, "/v1/users/{user}/tokens", "CreateToken", BODY, "createToken", "Make an API token"),
-    route(
+    RouteId::ListTokens => (
+        Method::GET,
+        "/v1/users/{user}/tokens",
+        Some("ListTokens"),
+        Input::Nothing,
+        "A user's API tokens",
+    ),
+    RouteId::CreateToken => (Method::POST, "/v1/users/{user}/tokens", Some("CreateToken"), BODY, "Make an API token"),
+    RouteId::RevokeToken => (
         Method::DELETE,
         "/v1/users/{user}/tokens/{token}",
-        "RevokeToken",
+        Some("RevokeToken"),
         OPTIONAL_BODY,
-        "revokeToken",
         "Revoke an API token",
     ),
-    // Limits (auth.proto, step 15d)
-    route(Method::PUT, "/v1/users/{user}/limits", "SetUserLimits", BODY, "setUserLimits", "Set a user's limits"),
-    route(
+    RouteId::SetUserLimits => (
+        Method::PUT,
+        "/v1/users/{user}/limits",
+        Some("SetUserLimits"),
+        BODY,
+        "Set a user's limits",
+    ),
+    RouteId::SetNamespaceLimits => (
         Method::PUT,
         "/v1/namespaces/{ns}/limits",
-        "SetNamespaceLimits",
+        Some("SetNamespaceLimits"),
         BODY,
-        "setNamespaceLimits",
         "Set a namespace's limits",
     ),
-    route(Method::GET, "/v1/limits", "GetLimits", Input::Nothing, "getLimits", "The default and namespace limits"),
-    // The operator's reads (admin.proto, step 16c)
-    route(Method::GET, "/v1/status", "GetServerStatus", Input::Nothing, "getServerStatus", "The server's status"),
-    route(
+    RouteId::GetLimits => (
+        Method::GET,
+        "/v1/limits",
+        Some("GetLimits"),
+        Input::Nothing,
+        "The default and namespace limits",
+    ),
+    RouteId::GetServerStatus => (
+        Method::GET,
+        "/v1/status",
+        Some("GetServerStatus"),
+        Input::Nothing,
+        "The server's status",
+    ),
+    RouteId::ListRequests => (
         Method::GET,
         "/v1/requests",
-        "ListRequests",
+        Some("ListRequests"),
         Input::Query(REQUESTS_PARAMETERS),
-        "listRequests",
         "The running requests",
     ),
-    route(
+    RouteId::CancelRequest => (
         Method::POST,
         "/v1/requests/{request}/cancel",
-        "CancelRequest",
+        Some("CancelRequest"),
         OPTIONAL_BODY,
-        "cancelRequest",
         "Cancel a running request",
     ),
-    route(Method::GET, "/v1/consumers", "ListConsumers", Input::Nothing, "listConsumers", "The change-stream readers"),
-    route(Method::GET, "/v1/metrics", "GetMetrics", Input::Nothing, "getMetrics", "The metrics"),
-    route(Method::GET, "/v1/log", "GetLog", Input::Query(LOG_PARAMETERS), "getLog", "The server's last log events"),
-    // The admin writes (admin.proto, step 16e)
-    route(
+    RouteId::ListConsumers => (
+        Method::GET,
+        "/v1/consumers",
+        Some("ListConsumers"),
+        Input::Nothing,
+        "The change-stream readers",
+    ),
+    RouteId::GetMetrics => (Method::GET, "/v1/metrics", Some("GetMetrics"), Input::Nothing, "The metrics"),
+    RouteId::GetLog => (
+        Method::GET,
+        "/v1/log",
+        Some("GetLog"),
+        Input::Query(LOG_PARAMETERS),
+        "The server's last log events",
+    ),
+    RouteId::Checkpoint => (
         Method::POST,
         "/v1/checkpoint",
-        "Checkpoint",
+        Some("Checkpoint"),
         OPTIONAL_BODY,
-        "checkpoint",
         "Checkpoint a namespace, or every namespace",
     ),
-    route(Method::POST, "/v1/backups", "Backup", BODY, "backup", "Back up the store into the backup directory"),
-    route(
+    RouteId::Backup => (
+        Method::POST,
+        "/v1/backups",
+        Some("Backup"),
+        BODY,
+        "Back up the store into the backup directory",
+    ),
+    RouteId::Verify => (
         Method::POST,
         "/v1/verify",
-        "Verify",
+        Some("Verify"),
         OPTIONAL_BODY,
-        "verify",
         "Verify the store, a backup or the WAL archive",
     ),
-    route(
+    RouteId::PruneArchive => (
         Method::POST,
         "/v1/archive/prune",
-        "PruneArchive",
+        Some("PruneArchive"),
         BODY,
-        "pruneArchive",
         "Prune the WAL archive before a backup",
     ),
-    // Managed analytics jobs (admin.proto, step 16f)
-    route(Method::POST, "/v1/namespaces/{ns}/jobs", "StartJob", BODY, "startJob", "Queue an analytics job"),
-    route(Method::GET, "/v1/jobs", "ListJobs", Input::Query(JOBS_PARAMETERS), "listJobs", "The jobs kept"),
-    route(
+    RouteId::StartJob => (Method::POST, "/v1/namespaces/{ns}/jobs", Some("StartJob"), BODY, "Queue an analytics job"),
+    RouteId::ListJobs => (Method::GET, "/v1/jobs", Some("ListJobs"), Input::Query(JOBS_PARAMETERS), "The jobs kept"),
+    RouteId::GetJob => (
         Method::GET,
         "/v1/jobs/{job}",
-        "GetJob",
+        Some("GetJob"),
         Input::Query(JOB_PARAMETERS),
-        "getJob",
         "A job's state and progress",
     ),
-    route(Method::POST, "/v1/jobs/{job}/cancel", "CancelJob", OPTIONAL_BODY, "cancelJob", "Cancel a job"),
-    route(
+    RouteId::CancelJob => (Method::POST, "/v1/jobs/{job}/cancel", Some("CancelJob"), OPTIONAL_BODY, "Cancel a job"),
+    RouteId::GetJobResult => (
         Method::GET,
         "/v1/jobs/{job}/result",
-        "GetJobResult",
+        Some("GetJobResult"),
         Input::Query(JOB_RESULT_PARAMETERS),
-        "getJobResult",
         "A page of a done job's result",
     ),
-    // Served by the gate in every build, also without `rest`
-    route(
+    RouteId::PrometheusMetrics => (
         Method::GET,
         crate::metrics::METRICS_PATH,
-        "GetMetrics",
+        Some("GetMetrics"),
         Input::Nothing,
-        "prometheusMetrics",
         "The metrics in Prometheus' text format",
     ),
-    // Served before the router, in every build and during recovery
-    // (crate::health); here for the OpenAPI document
-    Route {
-        method: Method::GET,
-        path: crate::health::LIVE_PATH,
-        rpc: None,
-        input: Input::Nothing,
-        operation: "live",
-        summary: "Liveness: 200 whenever the server answers",
-    },
-    Route {
-        method: Method::GET,
-        path: crate::health::READY_PATH,
-        rpc: None,
-        input: Input::Nothing,
-        operation: "ready",
-        summary: "Readiness: 200 once recovery has finished, 503 before and while shutting down",
-    },
-    Route {
-        method: Method::GET,
-        path: "/v1/openapi.json",
-        rpc: None,
-        input: Input::Nothing,
-        operation: "openapi",
-        summary: "This API's OpenAPI document",
-    },
-];
+    RouteId::Live => (
+        Method::GET,
+        crate::health::LIVE_PATH,
+        None,
+        Input::Nothing,
+        "Liveness: 200 whenever the server answers",
+    ),
+    RouteId::Ready => (
+        Method::GET,
+        crate::health::READY_PATH,
+        None,
+        Input::Nothing,
+        "Readiness: 200 once recovery has finished, 503 before and while shutting down",
+    ),
+    RouteId::Openapi => (Method::GET, "/v1/openapi.json", None, Input::Nothing, "This API's OpenAPI document"),
+}
 
 /// The query parameters of `GET /v1/requests`.
 pub(crate) const REQUESTS_PARAMETERS: &[(&str, &str, &str)] = &[
@@ -442,8 +645,8 @@ pub fn router<D: Served>(
     audit: Arc<dyn AuditSink>,
 ) -> Router {
     let mut router = Router::new();
-    for r in ROUTES.iter().filter(|r| !r.gate()) {
-        router = router.route(r.path, handler::<D>(r));
+    for (r, id) in ROUTES.iter().zip(ROUTE_IDS).filter(|(r, _)| !r.gate()) {
+        router = router.route(r.path, handler::<D>(*id));
     }
     router
         .fallback(|| async { Failure::http(StatusCode::NOT_FOUND, "no such route; see /v1/openapi.json") })
@@ -453,810 +656,69 @@ pub fn router<D: Served>(
         .with_state(Arc::new(Shared { db, mode, audit, max_body, stopping }))
 }
 
-/// The handler of `r`.
-fn handler<D: Served>(r: &Route) -> MethodRouter<Arc<Shared<D>>> {
-    match r.operation {
-        "listNamespaces" => get(list_namespaces::<D>),
-        "createNamespace" => put(create_namespace::<D>),
-        "dropNamespace" => delete(drop_namespace::<D>),
-        "getNamespaceStatus" => get(namespace_status::<D>),
-        "getCatalog" => get(catalog::<D>),
-        "getSchema" => get(schema::<D>),
-        "commitCatalog" => post(commit_catalog::<D>),
-        "commit" => post(commit::<D>),
-        "waitForSeq" => post(wait_for_seq::<D>),
-        "getNode" => get(get_node::<D>),
-        "getNodes" => post(get_nodes::<D>),
-        "getEdge" => get(get_edge::<D>),
-        "getEdges" => post(get_edges::<D>),
-        "find" => post(find::<D>),
-        "explain" => post(explain::<D>),
-        "neighbourhood" => post(neighbourhood::<D>),
-        "traverse" => post(traverse::<D>),
-        "shortestPath" => post(shortest_path::<D>),
-        "randomWalks" => post(random_walks::<D>),
-        "subgraph" => post(subgraph::<D>),
-        "matchPattern" => post(match_pattern::<D>),
-        "analyze" => post(analyze::<D>),
-        "getChanges" => get(get_changes::<D>),
-        "watchChanges" => get(watch_changes::<D>),
-        "openapi" => get(openapi_document),
-        "login" => post(login::<D>),
-        "logout" => post(logout::<D>),
-        "whoAmI" => get(who_am_i::<D>),
-        "listUsers" => get(list_users::<D>),
-        "createUser" => post(create_user::<D>),
-        "deleteUser" => delete(delete_user::<D>),
-        "setPassword" => put(set_password::<D>),
-        "setAdmin" => put(set_admin::<D>),
-        "grant" => put(grant::<D>),
-        "revoke" => delete(revoke::<D>),
-        "listTokens" => get(list_tokens::<D>),
-        "createToken" => post(create_token::<D>),
-        "revokeToken" => delete(revoke_token::<D>),
-        "setUserLimits" => put(set_user_limits::<D>),
-        "setNamespaceLimits" => put(set_namespace_limits::<D>),
-        "getLimits" => get(get_limits::<D>),
-        "getServerStatus" => get(get_server_status::<D>),
-        "listRequests" => get(list_requests::<D>),
-        "cancelRequest" => post(cancel_request::<D>),
-        "listConsumers" => get(list_consumers::<D>),
-        "getMetrics" => get(get_metrics::<D>),
-        "getLog" => get(get_log::<D>),
-        "checkpoint" => post(checkpoint::<D>),
-        "backup" => post(backup::<D>),
-        "verify" => post(verify::<D>),
-        "pruneArchive" => post(prune_archive::<D>),
-        "startJob" => post(start_job::<D>),
-        "listJobs" => get(list_jobs::<D>),
-        "getJob" => get(get_job::<D>),
-        "cancelJob" => post(cancel_job::<D>),
-        "getJobResult" => get(get_job_result::<D>),
-        other => get(move || async move { Failure::from(Error::internal(format!("route {} has no handler", other))) }),
-    }
-}
-
-// ---- errors ----
-
-/// A failed request: the error, and the HTTP status if it isn't the code's
-/// (HTTP-layer errors: 404, 405, 413, 415).
-#[derive(Debug)]
-pub(crate) struct Failure(Error, Option<StatusCode>);
-
-impl Failure {
-    fn http(status: StatusCode, message: impl Into<String>) -> Failure {
-        Failure(Error::new(Code::InvalidArgument, message), Some(status))
-    }
-}
-
-impl From<Error> for Failure {
-    fn from(e: Error) -> Self {
-        Failure(e, None)
-    }
-}
-
-impl IntoResponse for Failure {
-    fn into_response(self) -> Response {
-        let Failure(e, status) = self;
-        crate::status::log_server_error(&e);
-        let body = pb::Error { code: e.code().as_str().to_owned(), message: e.message().to_owned() };
-        // Two strings: writing them can't fail
-        let bytes = serde_json::to_vec(&body).unwrap_or_default();
-        (status.unwrap_or_else(|| http_status(e.code())), [(header::CONTENT_TYPE, JSON)], bytes).into_response()
-    }
-}
-
-type Answer = Result<Response, Failure>;
-
-// ---- requests ----
-
-/// The request message of a body (an empty body is the empty message).
-async fn read<T: DeserializeOwned + Default>(headers: &HeaderMap, body: Body, limit: usize) -> Result<T, Failure> {
-    let bytes = axum::body::to_bytes(body, limit).await.map_err(|e| {
-        let too_large = std::error::Error::source(&e).is_some_and(|s| s.is::<http_body_util::LengthLimitError>());
-        if too_large {
-            Failure::http(StatusCode::PAYLOAD_TOO_LARGE, format!("the request body is larger than {} bytes", limit))
-        } else {
-            Failure::from(Error::invalid(format!("can't read the request body: {}", e)))
-        }
-    })?;
-    if bytes.iter().all(u8::is_ascii_whitespace) {
-        return Ok(T::default());
-    }
-    let json = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(';').next())
-        .is_some_and(|t| t.trim().eq_ignore_ascii_case(JSON));
-    if !json {
-        return Err(Failure::http(StatusCode::UNSUPPORTED_MEDIA_TYPE, "a request body must be application/json"));
-    }
-    serde_json::from_slice(&bytes).map_err(|e| Failure::from(Error::invalid(format!("invalid request body: {}", e))))
-}
-
-/// The namespace of a request: the path's.
-fn namespace(field: &mut String, path: String) -> Result<(), Failure> {
-    if !field.is_empty() && *field != path {
-        return Err(Error::invalid(format!("the body names namespace '{}', the path '{}'", field, path)).into());
-    }
-    *field = path;
-    Ok(())
-}
-
-fn path<T>(p: Result<Path<T>, PathRejection>) -> Result<T, Failure> {
-    p.map(|Path(t)| t).map_err(|e| Error::invalid(format!("invalid path: {}", e)).into())
-}
-
-/// `QueryOptions` as query parameters (GET reads).
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OptionsQuery {
-    min_seq: Option<u64>,
-    history: Option<String>,
-    timeout_ms: Option<u32>,
-    max_results: Option<u64>,
-    max_visited: Option<u64>,
-    max_edges: Option<u64>,
-    partial: Option<bool>,
-    cursor: Option<String>,
-}
-
-/// The query parameters of [`Input::Options`] routes, for the OpenAPI
-/// document: name, type, description.
-pub(crate) const OPTION_PARAMETERS: &[(&str, &str, &str)] = &[
-    ("min_seq", "integer", "Read-your-writes: wait until the namespace has applied this seq."),
-    ("history", "string", "The history `min_seq` belongs to (32 hex digits)."),
-    ("timeout_ms", "integer", "How long the read may take, in milliseconds."),
-    ("max_results", "integer", "Most results in the answer."),
-    ("max_visited", "integer", "Most nodes the read may visit."),
-    ("max_edges", "integer", "Most edges the read may examine."),
-    ("partial", "boolean", "Answer with what was found when a limit is reached."),
-    ("cursor", "string", "Continue a paginated read: the `next` of the previous page."),
-];
-
-fn options(q: Result<Query<OptionsQuery>, QueryRejection>) -> Result<Option<pb::QueryOptions>, Failure> {
-    let Query(q) = q.map_err(|e| Failure::from(Error::invalid(format!("invalid query: {}", e))))?;
-    let limits = pb::Limits { max_results: q.max_results, max_visited: q.max_visited, max_edges: q.max_edges };
-    Ok(Some(pb::QueryOptions {
-        min_seq: q.min_seq,
-        history: q.history.unwrap_or_default(),
-        timeout_ms: q.timeout_ms,
-        limits: Some(limits),
-        partial: q.partial.unwrap_or_default(),
-        cursor: q.cursor.unwrap_or_default(),
-    }))
-}
-
-/// The query parameters of the change stream's routes.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ChangesQuery {
-    from_seq: Option<u64>,
-    wait: Option<bool>,
-    min_seq: Option<u64>,
-    history: Option<String>,
-    timeout_ms: Option<u32>,
-    max_results: Option<u64>,
-}
-
-/// The query parameters of [`Input::Changes`] routes, for the OpenAPI
-/// document: name, type, description (`wait` only without `stream`).
-pub(crate) const CHANGES_PARAMETERS: &[(&str, &str, &str)] = &[
-    ("from_seq", "integer", "The first seq to return; resume with the `nextSeq` of the last batch."),
-    ("wait", "boolean", "If there is no commit yet, wait for one for about the timeout (a long poll)."),
-    ("min_seq", "integer", "Wait until the namespace has applied this seq first."),
-    ("history", "string", "The history `from_seq` belongs to (32 hex digits); another one is refused."),
-    ("timeout_ms", "integer", "How long the request may take (for a stream: each round), in milliseconds."),
-    ("max_results", "integer", "Most commits in a batch."),
-];
-
-/// `from_seq`, `wait` and the options of a change stream route.
-fn changes_query(
-    q: Result<Query<ChangesQuery>, QueryRejection>,
-    stream: bool,
-) -> Result<(u64, bool, Option<pb::QueryOptions>), Failure> {
-    let Query(q) = q.map_err(|e| Failure::from(Error::invalid(format!("invalid query: {}", e))))?;
-    if stream && q.wait.is_some() {
-        return Err(Error::invalid("the change stream always waits: leave `wait` out").into());
-    }
-    let options = pb::QueryOptions {
-        min_seq: q.min_seq,
-        history: q.history.unwrap_or_default(),
-        timeout_ms: q.timeout_ms,
-        limits: Some(pb::Limits { max_results: q.max_results, ..pb::Limits::default() }),
-        ..pb::QueryOptions::default()
-    };
-    Ok((q.from_seq.unwrap_or_default(), q.wait.unwrap_or_default(), Some(options)))
-}
-
-// ---- answers ----
-
-fn json_response(bytes: Vec<u8>, media: &'static str) -> Response {
-    ([(header::CONTENT_TYPE, HeaderValue::from_static(media))], bytes).into_response()
-}
-
-fn to_json<T: serde::Serialize>(message: &T) -> Result<Vec<u8>, Failure> {
-    serde_json::to_vec(message).map_err(|e| Error::internal(format!("can't write the answer: {}", e)).into())
-}
-
-fn unary<T: serde::Serialize>(message: Result<T, Error>) -> Answer {
-    Ok(json_response(to_json(&message?)?, JSON))
-}
-
-fn wants_ndjson(headers: &HeaderMap) -> bool {
-    headers
-        .get_all(header::ACCEPT)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .any(|v| v.split(',').any(|t| t.split(';').next().is_some_and(|t| t.trim().eq_ignore_ascii_case(NDJSON))))
-}
-
-/// A streamed answer: NDJSON if asked for, otherwise its chunks merged into
-/// one message (protobuf merge: repeated fields concatenate, `meta` is the
-/// last chunk's).
-fn streamed<T>(headers: &HeaderMap, chunks: Result<Vec<T>, Error>) -> Answer
-where
-    T: prost::Message + serde::Serialize + Default,
-{
-    let mut chunks = chunks?;
-    if wants_ndjson(headers) {
-        let mut lines = Vec::with_capacity(chunks.len());
-        for chunk in &chunks {
-            let mut line = to_json(chunk)?;
-            line.push(b'\n');
-            lines.push(Ok::<_, std::convert::Infallible>(Bytes::from(line)));
-        }
-        let body = Body::from_stream(tokio_stream::iter(lines));
-        return Ok(([(header::CONTENT_TYPE, HeaderValue::from_static(NDJSON))], body).into_response());
-    }
-    let one = if chunks.len() == 1 {
-        chunks.pop().unwrap_or_default()
-    } else {
-        let mut all = T::default();
-        for chunk in chunks {
-            all.merge(chunk.encode_to_vec().as_slice())
-                .map_err(|e| Error::internal(format!("can't merge the answer: {}", e)))?;
-        }
-        all
-    };
-    unary(Ok(one))
-}
-
-// ---- handlers ----
-
-async fn list_namespaces<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
-    unary(ops::list_namespaces(&s.db(&caller)?).await)
-}
-
-async fn create_namespace<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    p: Result<Path<String>, PathRejection>,
-    headers: HeaderMap,
-    body: Body,
-) -> Answer {
-    let mut r: pb::CreateNamespaceRequest = read(&headers, body, s.max_body).await?;
-    namespace(&mut r.name, path(p)?)?;
-    unary(ops::create_namespace(&s.db(&caller)?, r).await)
-}
-
-async fn drop_namespace<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    p: Result<Path<String>, PathRejection>,
-    headers: HeaderMap,
-    body: Body,
-) -> Answer {
-    let mut r: pb::DropNamespaceRequest = read(&headers, body, s.max_body).await?;
-    namespace(&mut r.name, path(p)?)?;
-    unary(ops::drop_namespace(&s.db(&caller)?, r).await)
-}
-
-async fn namespace_status<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    p: Result<Path<String>, PathRejection>,
-) -> Answer {
-    let r = pb::GetNamespaceStatusRequest { namespace: path(p)? };
-    unary(ops::get_namespace_status(&s.db(&caller)?, r).await)
-}
-
-async fn catalog<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    p: Result<Path<String>, PathRejection>,
-    q: Result<Query<OptionsQuery>, QueryRejection>,
-) -> Answer {
-    let r = pb::GetCatalogRequest { namespace: path(p)?, options: options(q)? };
-    unary(ops::get_catalog(&s.db(&caller)?, r, None).await)
-}
-
-async fn schema<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    p: Result<Path<String>, PathRejection>,
-    q: Result<Query<OptionsQuery>, QueryRejection>,
-) -> Answer {
-    let r = pb::GetSchemaRequest { namespace: path(p)?, options: options(q)? };
-    unary(ops::get_schema(&s.db(&caller)?, r, None).await)
-}
-
-/// A handler that reads its body, takes the namespace from the path, and
-/// runs its operation.
-macro_rules! body_handler {
-    ($name:ident, $request:ty, |$db:ident, $r:ident, $headers:ident| $run:expr) => {
-        async fn $name<D: Served>(
-            State(s): St<D>,
-            caller: Caller_,
-            p: Result<Path<String>, PathRejection>,
-            $headers: HeaderMap,
-            body: Body,
-        ) -> Answer {
-            let $db = s.db(&caller)?;
-            let mut $r: $request = read(&$headers, body, s.max_body).await?;
-            namespace(&mut $r.namespace, path(p)?)?;
-            $run
-        }
-    };
-}
-
-body_handler!(commit_catalog, pb::CommitCatalogRequest, |db, r, _h| unary(ops::commit_catalog(&db, r).await));
-body_handler!(commit, pb::CommitRequest, |db, r, _h| unary(ops::commit(&db, r).await));
-body_handler!(wait_for_seq, pb::WaitForSeqRequest, |db, r, _h| unary(ops::wait_for_seq(&db, r, None).await));
-body_handler!(get_nodes, pb::GetNodesRequest, |db, r, h| streamed(&h, ops::get_nodes(&db, r, None).await));
-body_handler!(get_edges, pb::GetEdgesRequest, |db, r, h| streamed(&h, ops::get_edges(&db, r, None).await));
-body_handler!(find, pb::FindRequest, |db, r, h| streamed(&h, ops::find(&db, r, None).await));
-body_handler!(explain, pb::ExplainRequest, |db, r, _h| unary(ops::explain(&db, r, None).await));
-body_handler!(neighbourhood, pb::NeighbourhoodRequest, |db, r, h| streamed(&h, ops::neighbourhood(&db, r, None).await));
-body_handler!(traverse, pb::TraverseRequest, |db, r, h| streamed(&h, ops::traverse(&db, r, None).await));
-body_handler!(shortest_path, pb::ShortestPathRequest, |db, r, _h| unary(ops::shortest_path(&db, r, None).await));
-body_handler!(random_walks, pb::RandomWalksRequest, |db, r, h| streamed(&h, ops::random_walks(&db, r, None).await));
-body_handler!(subgraph, pb::SubgraphRequest, |db, r, h| streamed(&h, ops::subgraph(&db, r, None).await));
-body_handler!(match_pattern, pb::MatchPatternRequest, |db, r, h| streamed(&h, ops::match_pattern(&db, r, None).await));
-body_handler!(analyze, pb::AnalyzeRequest, |db, r, h| streamed(&h, ops::analyze(&db, r, None).await));
-body_handler!(start_job, pb::StartJobRequest, |db, r, _h| unary(ops::start_job(&db, r).await));
-body_handler!(set_namespace_limits, pb::SetNamespaceLimitsRequest, |db, r, _h| unary(
-    ops::set_namespace_limits(&db, r).await
-));
-
-/// One node by id: its `GetNodesResponse`, or 404 if it doesn't exist.
-async fn get_node<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    p: Result<Path<(String, String)>, PathRejection>,
-    q: Result<Query<OptionsQuery>, QueryRejection>,
-) -> Answer {
-    let (ns, id) = path(p)?;
-    let r = pb::GetNodesRequest { namespace: ns.clone(), ids: vec![id.clone()], options: options(q)? };
-    let answer = merged(ops::get_nodes(&s.db(&caller)?, r, None).await?)?;
-    if answer.nodes.iter().all(|n| n.node.is_none()) {
-        return Err(Error::new(Code::NotFound, format!("no node '{}' in namespace '{}'", id, ns)).into());
-    }
-    unary(Ok(answer))
-}
-
-/// One edge by id: its `GetEdgesResponse`, or 404 if it doesn't exist.
-async fn get_edge<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    p: Result<Path<(String, String)>, PathRejection>,
-    q: Result<Query<OptionsQuery>, QueryRejection>,
-) -> Answer {
-    let (ns, id) = path(p)?;
-    let edge: u64 = id.parse().map_err(|_| Error::invalid(format!("invalid edge id '{}'", id)))?;
-    let r = pb::GetEdgesRequest { namespace: ns.clone(), ids: vec![edge], options: options(q)? };
-    let answer = merged(ops::get_edges(&s.db(&caller)?, r, None).await?)?;
-    if answer.edges.iter().all(|e| e.edge.is_none()) {
-        return Err(Error::new(Code::NotFound, format!("no edge {} in namespace '{}'", edge, ns)).into());
-    }
-    unary(Ok(answer))
-}
-
-async fn get_changes<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    p: Result<Path<String>, PathRejection>,
-    q: Result<Query<ChangesQuery>, QueryRejection>,
-) -> Answer {
-    let (from_seq, wait, options) = changes_query(q, false)?;
-    let r = pb::GetChangesRequest { namespace: path(p)?, from_seq, wait, options };
-    unary(ops::get_changes(&s.db(&caller)?, r, None).await)
-}
-
-/// The change stream as Server-Sent Events (ADR 0031): a `change` event per
-/// commit, with the seq as its `id` and the `ChangeEvent` as its data; a
-/// comment line as heartbeat after a round without commits; an `error`
-/// event with an `Error` before the stream ends on an error (`unavailable`
-/// at shutdown). A `Last-Event-ID` header (what `EventSource` sends when it
-/// reconnects) resumes after that seq, instead of `from_seq`. An error in
-/// the first batch (no namespace, `not_retained`, ...) is the answer's
-/// status instead.
-async fn watch_changes<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    p: Result<Path<String>, PathRejection>,
-    q: Result<Query<ChangesQuery>, QueryRejection>,
-    headers: HeaderMap,
-) -> Answer {
-    let (mut from_seq, _, options) = changes_query(q, true)?;
-    if let Some(id) = headers.get("last-event-id") {
-        let seq = id.to_str().ok().and_then(|id| id.trim().parse::<u64>().ok());
-        let seq = seq.ok_or_else(|| Error::invalid("Last-Event-ID must be the seq of an event"))?;
-        from_seq = seq.saturating_add(1);
-    }
-    let r = pb::WatchRequest { namespace: path(p)?, from_seq, options };
-    let db = s.db(&caller)?;
-    let rounds = Arc::new(db.following());
-    let mut batches = ops::follow(Arc::new(db), rounds, r, None, s.stopping.clone());
-    let first = match batches.recv().await {
-        Some(first) => first?,
-        None => return Err(Error::unavailable("the server is shutting down").into()),
-    };
-    let events = tokio_stream::once(Ok(first)).chain(ReceiverStream::new(batches)).map(|batch| {
-        Ok::<_, std::convert::Infallible>(Bytes::from(match batch {
-            Ok(batch) => sse_events(&batch),
-            Err(e) => sse_error(&e),
-        }))
-    });
-    let headers = [
-        (header::CONTENT_TYPE, HeaderValue::from_static(EVENT_STREAM)),
-        (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
-    ];
-    Ok((headers, Body::from_stream(events)).into_response())
-}
-
-/// A batch as SSE events, or a heartbeat comment if it has none.
-fn sse_events(batch: &pb::GetChangesResponse) -> Vec<u8> {
-    if batch.events.is_empty() {
-        return format!(": next seq {}\n\n", batch.next_seq).into_bytes();
-    }
-    let mut out = Vec::new();
-    for event in &batch.events {
-        match serde_json::to_vec(event) {
-            Ok(json) => {
-                out.extend_from_slice(format!("id: {}\nevent: change\ndata: ", event.seq).as_bytes());
-                // JSON has no raw newlines: one data line
-                out.extend_from_slice(&json);
-                out.extend_from_slice(b"\n\n");
-            }
-            Err(e) => {
-                out.extend(sse_error(&Error::internal(format!("can't write change {}: {}", event.seq, e))));
-                break;
-            }
+/// The handler of a registered route.
+fn handler<D: Served>(id: RouteId) -> MethodRouter<Arc<Shared<D>>> {
+    match id {
+        RouteId::ListNamespaces => get(list_namespaces::<D>),
+        RouteId::CreateNamespace => put(create_namespace::<D>),
+        RouteId::DropNamespace => delete(drop_namespace::<D>),
+        RouteId::GetNamespaceStatus => get(namespace_status::<D>),
+        RouteId::GetCatalog => get(catalog::<D>),
+        RouteId::GetSchema => get(schema::<D>),
+        RouteId::CommitCatalog => post(commit_catalog::<D>),
+        RouteId::Commit => post(commit::<D>),
+        RouteId::WaitForSeq => post(wait_for_seq::<D>),
+        RouteId::GetNode => get(get_node::<D>),
+        RouteId::GetNodes => post(get_nodes::<D>),
+        RouteId::GetEdge => get(get_edge::<D>),
+        RouteId::GetEdges => post(get_edges::<D>),
+        RouteId::Find => post(find::<D>),
+        RouteId::Explain => post(explain::<D>),
+        RouteId::Neighbourhood => post(neighbourhood::<D>),
+        RouteId::Traverse => post(traverse::<D>),
+        RouteId::ShortestPath => post(shortest_path::<D>),
+        RouteId::RandomWalks => post(random_walks::<D>),
+        RouteId::Subgraph => post(subgraph::<D>),
+        RouteId::MatchPattern => post(match_pattern::<D>),
+        RouteId::Analyze => post(analyze::<D>),
+        RouteId::GetChanges => get(get_changes::<D>),
+        RouteId::WatchChanges => get(watch_changes::<D>),
+        RouteId::Openapi => get(openapi_document),
+        RouteId::Login => post(login::<D>),
+        RouteId::Logout => post(logout::<D>),
+        RouteId::WhoAmI => get(who_am_i::<D>),
+        RouteId::ListUsers => get(list_users::<D>),
+        RouteId::CreateUser => post(create_user::<D>),
+        RouteId::DeleteUser => delete(delete_user::<D>),
+        RouteId::SetPassword => put(set_password::<D>),
+        RouteId::SetAdmin => put(set_admin::<D>),
+        RouteId::Grant => put(grant::<D>),
+        RouteId::Revoke => delete(revoke::<D>),
+        RouteId::ListTokens => get(list_tokens::<D>),
+        RouteId::CreateToken => post(create_token::<D>),
+        RouteId::RevokeToken => delete(revoke_token::<D>),
+        RouteId::SetUserLimits => put(set_user_limits::<D>),
+        RouteId::SetNamespaceLimits => put(set_namespace_limits::<D>),
+        RouteId::GetLimits => get(get_limits::<D>),
+        RouteId::GetServerStatus => get(get_server_status::<D>),
+        RouteId::ListRequests => get(list_requests::<D>),
+        RouteId::CancelRequest => post(cancel_request::<D>),
+        RouteId::ListConsumers => get(list_consumers::<D>),
+        RouteId::GetMetrics => get(get_metrics::<D>),
+        RouteId::GetLog => get(get_log::<D>),
+        RouteId::Checkpoint => post(checkpoint::<D>),
+        RouteId::Backup => post(backup::<D>),
+        RouteId::Verify => post(verify::<D>),
+        RouteId::PruneArchive => post(prune_archive::<D>),
+        RouteId::StartJob => post(start_job::<D>),
+        RouteId::ListJobs => get(list_jobs::<D>),
+        RouteId::GetJob => get(get_job::<D>),
+        RouteId::CancelJob => post(cancel_job::<D>),
+        RouteId::GetJobResult => get(get_job_result::<D>),
+        RouteId::Live | RouteId::Ready | RouteId::PrometheusMetrics => {
+            unreachable!("gate routes are served before the REST router")
         }
     }
-    out
-}
-
-fn sse_error(e: &Error) -> Vec<u8> {
-    let body = pb::Error { code: e.code().as_str().to_owned(), message: e.message().to_owned() };
-    let json = serde_json::to_vec(&body).unwrap_or_default();
-    let mut out = b"event: error\ndata: ".to_vec();
-    out.extend_from_slice(&json);
-    out.extend_from_slice(b"\n\n");
-    out
-}
-
-/// The chunks of an answer of one item: there is one.
-fn merged<T: Default>(mut chunks: Vec<T>) -> Result<T, Failure> {
-    match chunks.len() {
-        1 => Ok(chunks.pop().unwrap_or_default()),
-        n => Err(Error::internal(format!("an answer of one item came in {} chunks", n)).into()),
-    }
-}
-
-// ---- authentication, users, grants, tokens (step 15a) ----
-
-/// A field of a body that names what the path names already.
-fn same(field: &mut String, path: &str, what: &str) -> Result<(), Failure> {
-    if !field.is_empty() && field != path {
-        return Err(Error::invalid(format!("the body names {} '{}', the path '{}'", what, field, path)).into());
-    }
-    *field = path.to_owned();
-    Ok(())
-}
-
-/// The session cookie (ADR 0046): HttpOnly (no script reads it),
-/// SameSite=Strict (no other site sends it), and `Secure` (sent over
-/// HTTPS only) when the request came over TLS (step 15b): browsers drop
-/// Secure cookies set over plain HTTP, which a server with
-/// `[tls] enabled = false` speaks.
-fn session_cookie(token: &str, max_age_secs: u64, secure: bool) -> HeaderValue {
-    let text = format!(
-        "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
-        SESSION_COOKIE,
-        token,
-        max_age_secs,
-        if secure { "; Secure" } else { "" }
-    );
-    HeaderValue::from_str(&text).unwrap_or_else(|_| HeaderValue::from_static("iwdb_session=; Max-Age=0"))
-}
-
-/// `POST /v1/auth/login`: the session's token in the body, or with `cookie`
-/// as the session cookie.
-async fn login<D: Served>(State(s): St<D>, caller: Caller_, headers: HeaderMap, body: Body) -> Answer {
-    let r: pb::LoginRequest = read(&headers, body, s.max_body).await?;
-    let cookie = r.cookie;
-    let audit = audit_of(caller.as_ref().map(|Extension(c)| c), &s.audit);
-    let secure = caller.as_ref().is_some_and(|Extension(c)| c.tls);
-    let (response, session) = ops::login(&*s.db, r, &audit).await?;
-    let mut answer = unary(Ok(response))?;
-    if cookie {
-        let max_age = session.expires_ms.saturating_sub(iwdb::auth::now_ms()) / 1000;
-        answer.headers_mut().insert(header::SET_COOKIE, session_cookie(session.token.expose(), max_age, secure));
-    }
-    answer.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    Ok(answer)
-}
-
-/// `POST /v1/auth/logout`: ends the session and clears the cookie.
-async fn logout<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
-    let db = s.db(&caller)?;
-    let token = caller.as_ref().and_then(|Extension(c)| c.token.clone());
-    let secure = caller.as_ref().is_some_and(|Extension(c)| c.tls);
-    let mut answer = unary(ops::logout(&db, token.as_ref()).await)?;
-    answer.headers_mut().insert(header::SET_COOKIE, session_cookie("", 0, secure));
-    Ok(answer)
-}
-
-async fn who_am_i<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
-    unary(Ok(ops::who_am_i(&s.db(&caller)?, s.mode)))
-}
-
-// ---- the operator's reads (step 16c) ----
-
-async fn get_server_status<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
-    unary(ops::get_server_status(&s.db(&caller)?).await)
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RequestsQuery {
-    user: Option<String>,
-    limit: Option<u32>,
-}
-
-async fn list_requests<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    q: Result<Query<RequestsQuery>, QueryRejection>,
-) -> Answer {
-    let Query(q) = q.map_err(|e| Failure::from(Error::invalid(format!("invalid query: {}", e))))?;
-    unary(ops::list_requests(&s.db(&caller)?, pb::ListRequestsRequest { user: q.user, limit: q.limit }).await)
-}
-
-async fn cancel_request<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    p: Result<Path<u64>, PathRejection>,
-    headers: HeaderMap,
-    body: Body,
-) -> Answer {
-    let db = s.db(&caller)?;
-    let mut r: pb::CancelRequestRequest = read(&headers, body, s.max_body).await?;
-    let id = path(p)?;
-    if r.id != 0 && r.id != id {
-        return Err(Error::invalid(format!("the body names request {}, the path {}", r.id, id)).into());
-    }
-    r.id = id;
-    unary(ops::cancel_request(&db, r).await)
-}
-
-// ---- managed jobs (step 16f) ----
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct JobQuery {
-    user: Option<String>,
-    offset: Option<u64>,
-    limit: Option<u32>,
-}
-
-fn job_query(q: Result<Query<JobQuery>, QueryRejection>) -> Result<JobQuery, Failure> {
-    q.map(|Query(q)| q).map_err(|e| Failure::from(Error::invalid(format!("invalid query: {}", e))))
-}
-
-async fn list_jobs<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    q: Result<Query<RequestsQuery>, QueryRejection>,
-) -> Answer {
-    let Query(q) = q.map_err(|e| Failure::from(Error::invalid(format!("invalid query: {}", e))))?;
-    unary(ops::list_jobs(&s.db(&caller)?, pb::ListJobsRequest { user: q.user, limit: q.limit }).await)
-}
-
-async fn get_job<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    p: Result<Path<u64>, PathRejection>,
-    q: Result<Query<JobQuery>, QueryRejection>,
-) -> Answer {
-    let q = job_query(q)?;
-    if q.offset.is_some() || q.limit.is_some() {
-        return Err(Error::invalid("a job takes only the parameter 'user'").into());
-    }
-    unary(ops::get_job(&s.db(&caller)?, pb::GetJobRequest { id: path(p)?, user: q.user }).await)
-}
-
-async fn get_job_result<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    p: Result<Path<u64>, PathRejection>,
-    q: Result<Query<JobQuery>, QueryRejection>,
-) -> Answer {
-    let q = job_query(q)?;
-    let r = pb::GetJobResultRequest { id: path(p)?, user: q.user, offset: q.offset.unwrap_or(0), limit: q.limit };
-    unary(ops::get_job_result(&s.db(&caller)?, r).await)
-}
-
-async fn cancel_job<D: Served>(
-    State(s): St<D>,
-    caller: Caller_,
-    p: Result<Path<u64>, PathRejection>,
-    headers: HeaderMap,
-    body: Body,
-) -> Answer {
-    let db = s.db(&caller)?;
-    let mut r: pb::CancelJobRequest = read(&headers, body, s.max_body).await?;
-    let id = path(p)?;
-    if r.id != 0 && r.id != id {
-        return Err(Error::invalid(format!("the body names job {}, the path {}", r.id, id)).into());
-    }
-    r.id = id;
-    unary(ops::cancel_job(&db, r).await)
-}
-
-async fn list_consumers<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
-    unary(ops::list_consumers(&s.db(&caller)?).await)
-}
-
-async fn get_metrics<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
-    unary(ops::get_metrics(&s.db(&caller)?).await)
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LogQuery {
-    after: Option<u64>,
-    limit: Option<u32>,
-}
-
-async fn get_log<D: Served>(State(s): St<D>, caller: Caller_, q: Result<Query<LogQuery>, QueryRejection>) -> Answer {
-    let Query(q) = q.map_err(|e| Failure::from(Error::invalid(format!("invalid query: {}", e))))?;
-    unary(ops::get_log(&s.db(&caller)?, pb::GetLogRequest { after: q.after.unwrap_or(0), limit: q.limit }).await)
-}
-
-/// A route whose body is its RPC's request message, and that has no path
-/// parameters: the admin writes.
-macro_rules! body_handler {
-    ($name:ident, $request:ty) => {
-        async fn $name<D: Served>(State(s): St<D>, caller: Caller_, headers: HeaderMap, body: Body) -> Answer {
-            let db = s.db(&caller)?;
-            let r: $request = read(&headers, body, s.max_body).await?;
-            unary(ops::$name(&db, r).await)
-        }
-    };
-}
-
-body_handler!(checkpoint, pb::CheckpointRequest);
-body_handler!(backup, pb::BackupRequest);
-body_handler!(verify, pb::VerifyRequest);
-body_handler!(prune_archive, pb::PruneArchiveRequest);
-
-async fn list_users<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
-    unary(ops::list_users(&s.db(&caller)?).await)
-}
-
-async fn create_user<D: Served>(State(s): St<D>, caller: Caller_, headers: HeaderMap, body: Body) -> Answer {
-    let db = s.db(&caller)?;
-    let r: pb::CreateUserRequest = read(&headers, body, s.max_body).await?;
-    unary(ops::create_user(&db, r).await)
-}
-
-/// A handler of a route under `/v1/users/{user}` whose body is the RPC's
-/// request message: the user (and namespace or token name) from the path.
-macro_rules! user_handler {
-    ($name:ident, $request:ty, $params:ty, |$r:ident, $p:ident| $fill:block, $op:ident) => {
-        async fn $name<D: Served>(
-            State(s): St<D>,
-            caller: Caller_,
-            p: Result<Path<$params>, PathRejection>,
-            headers: HeaderMap,
-            body: Body,
-        ) -> Answer {
-            let db = s.db(&caller)?;
-            let mut $r: $request = read(&headers, body, s.max_body).await?;
-            let $p = path(p)?;
-            $fill
-            unary(ops::$op(&db, $r).await)
-        }
-    };
-}
-
-user_handler!(
-    delete_user,
-    pb::DeleteUserRequest,
-    String,
-    |r, user| {
-        same(&mut r.name, &user, "user")?;
-    },
-    delete_user
-);
-user_handler!(
-    set_password,
-    pb::SetPasswordRequest,
-    String,
-    |r, user| {
-        same(&mut r.name, &user, "user")?;
-    },
-    set_password
-);
-user_handler!(
-    set_admin,
-    pb::SetAdminRequest,
-    String,
-    |r, user| {
-        same(&mut r.name, &user, "user")?;
-    },
-    set_admin
-);
-user_handler!(
-    grant,
-    pb::GrantRequest,
-    (String, String),
-    |r, p| {
-        same(&mut r.name, &p.0, "user")?;
-        namespace(&mut r.namespace, p.1)?;
-    },
-    grant
-);
-user_handler!(
-    revoke,
-    pb::RevokeRequest,
-    (String, String),
-    |r, p| {
-        same(&mut r.name, &p.0, "user")?;
-        namespace(&mut r.namespace, p.1)?;
-    },
-    revoke
-);
-user_handler!(
-    create_token,
-    pb::CreateTokenRequest,
-    String,
-    |r, user| {
-        same(&mut r.user, &user, "user")?;
-    },
-    create_token
-);
-user_handler!(
-    revoke_token,
-    pb::RevokeTokenRequest,
-    (String, String),
-    |r, p| {
-        same(&mut r.user, &p.0, "user")?;
-        same(&mut r.name, &p.1, "token")?;
-    },
-    revoke_token
-);
-
-user_handler!(
-    set_user_limits,
-    pb::SetUserLimitsRequest,
-    String,
-    |r, user| {
-        same(&mut r.name, &user, "user")?;
-    },
-    set_user_limits
-);
-
-async fn get_limits<D: Served>(State(s): St<D>, caller: Caller_) -> Answer {
-    unary(ops::get_limits(&s.db(&caller)?).await)
-}
-
-async fn list_tokens<D: Served>(State(s): St<D>, caller: Caller_, p: Result<Path<String>, PathRejection>) -> Answer {
-    let db = s.db(&caller)?;
-    unary(ops::list_tokens(&db, pb::ListTokensRequest { user: path(p)? }).await)
 }
 
 async fn openapi_document() -> Response {
@@ -1266,6 +728,7 @@ async fn openapi_document() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::{HeaderMap, HeaderValue, header};
 
     #[test]
     fn accept_headers_ask_for_ndjson() {

@@ -11,8 +11,8 @@ publish = false
 [lib]
 name = "iwdb_python"
 crate-type = ["cdylib"]
-# Tested with pytest (tests/), against the built module: a Rust test binary
-# would have to link libpython
+# Most bindings are tested with pytest against the built module. The focused
+# error adapter integration test links libpython (CI provisions Python explicitly).
 test = false
 doctest = false
 

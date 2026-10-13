@@ -35,6 +35,10 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v5
+      # The error-adapter integration test embeds Python and links libpython.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
       # Installs the toolchain named in rust-toolchain.toml (stable, rustfmt, clippy)
       - uses: dtolnay/rust-toolchain@stable
         with:

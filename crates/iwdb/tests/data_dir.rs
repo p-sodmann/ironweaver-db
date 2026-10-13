@@ -220,14 +220,16 @@ fn backups_and_interrupted_restores_are_refused() {
 #[test]
 fn reopening_while_another_thread_spawns_processes() {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let dir = tempfile::tempdir().unwrap();
     let mut opts = options(2);
     opts.wal.fsync = iwdb::FsyncPolicy::Off;
     Store::open(dir.path(), opts.clone()).unwrap().close().unwrap();
     let stop = Arc::new(AtomicBool::new(false));
+    let progress = Arc::new(AtomicUsize::new(0));
     let spawner = {
         let stop = stop.clone();
+        let progress = progress.clone();
         std::thread::spawn(move || {
             let mut spawned = 0;
             while !stop.load(Ordering::Relaxed) {
@@ -236,12 +238,20 @@ fn reopening_while_another_thread_spawns_processes() {
                 #[cfg(windows)]
                 Command::new("cmd").args(["/C", "rem"]).status().unwrap();
                 spawned += 1;
+                progress.store(spawned, Ordering::Relaxed);
             }
             spawned
         })
     };
     let mut locked = 0;
-    for _ in 0..400 {
+    let minimum_spawns = if cfg!(windows) { 10 } else { 100 };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut reopened = 0;
+    // Keep reopening while processes spawn until both coverage targets are met.
+    while reopened < 400 || progress.load(Ordering::Relaxed) <= minimum_spawns {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
         match Store::open(dir.path(), opts.clone()) {
             Err(Error::Locked { .. }) => locked += 1,
             other => drop(other.unwrap()),
@@ -250,10 +260,12 @@ fn reopening_while_another_thread_spawns_processes() {
         if matches!(iwdb::verify(dir.path()), Err(Error::Locked { .. })) {
             locked += 1;
         }
+        reopened += 1;
     }
     stop.store(true, Ordering::Relaxed);
     // (Windows starts processes more slowly)
-    assert!(spawner.join().unwrap() > if cfg!(windows) { 10 } else { 100 });
+    assert!(spawner.join().unwrap() > minimum_spawns);
+    assert!(reopened >= 400, "reopening coverage was not reached before the deadline");
     assert_eq!(locked, 0);
 }
 

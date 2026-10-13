@@ -127,47 +127,23 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// The Python exception for an error of the store.
 pub fn to_py(error: Error) -> PyErr {
     let message = error.to_string();
-    match &error {
-        Error::Engine(engine) => engine_error(engine, message),
-        Error::ReadOnly { .. } => ReadOnlyError::new_err(message),
-        Error::Locked { .. } => LockedError::new_err(message),
-        Error::MemoryLimit { .. } | Error::NamespaceMemoryLimit { .. } => ResourceExhaustedError::new_err(message),
-        Error::Io { .. } | Error::CheckpointsDisabled { .. } => IoError::new_err(message),
-        Error::InvalidOptions(_) => InvalidError::new_err(message),
-        Error::NoSuchNamespace { .. } | Error::NamespaceDropped { .. } => NotFoundError::new_err(message),
-        Error::NamespaceExists { .. } => ConflictError::new_err(message),
-        Error::Timeout { .. } => TimeoutError::new_err(message),
-        // Python has no way to cancel a request yet
-        Error::Cancelled => exc::Error::new_err(message),
-        Error::Corrupt { .. }
-        | Error::InvalidRecord { .. }
-        | Error::SeqMismatch { .. }
-        | Error::HeaderMismatch { .. }
-        | Error::SegmentTooLarge { .. }
-        | Error::TornTail { .. }
-        | Error::InvalidCheckpoint { .. }
-        | Error::NoUsableCheckpoint { .. }
-        | Error::ReplayFailed { .. }
-        | Error::InvalidDataDir { .. }
-        | Error::InvalidManifest { .. }
-        | Error::InvalidNamespaceLog { .. }
-        | Error::NamespaceDamaged { .. }
-        | Error::ArchiveConflict { .. }
-        | Error::LogEndsBefore { .. }
-        | Error::MissingRecords { .. }
-        | Error::UnsupportedVersion { .. } => CorruptError::new_err(message),
-        // Requests the state doesn't allow: not a store, a backup, an
-        // interrupted restore, a full destination, another history, a
-        // record too large, a restore target that isn't there
-        _ => InvalidError::new_err(message),
+    // The query layer owns classification of storage and engine errors.
+    // Keep the embedded Python exception and the original storage message
+    // independent of how the query layer converts nested errors.
+    if matches!(&error, Error::Locked { .. }) {
+        return LockedError::new_err(message);
     }
+    code_to_py(iwdb_query::Error::from(error).code(), message)
 }
 
 /// The Python exception for an error of the `Database` trait, by its code.
 pub fn query_to_py(error: iwdb_query::Error) -> PyErr {
+    code_to_py(error.code(), error.message().to_owned())
+}
+
+fn code_to_py(code: iwdb_query::Code, message: String) -> PyErr {
     use iwdb_query::Code;
-    let message = error.message().to_owned();
-    match error.code() {
+    match code {
         Code::Conflict => ConflictError::new_err(message),
         Code::ConstraintViolation => ConstraintError::new_err(message),
         Code::NotFound => NotFoundError::new_err(message),
@@ -186,17 +162,6 @@ pub fn query_to_py(error: iwdb_query::Error) -> PyErr {
         Code::PermissionDenied => PermissionDeniedError::new_err(message),
         // Python has no way to cancel a request
         _ => exc::Error::new_err(message),
-    }
-}
-
-fn engine_error(error: &iwdb_engine::Error, message: String) -> PyErr {
-    use iwdb_engine::Error as E;
-    match error {
-        E::Conflict { .. } | E::NoMatchingEdge { .. } => ConflictError::new_err(message),
-        E::ConstraintViolation { .. } => ConstraintError::new_err(message),
-        E::NotFound { .. } => NotFoundError::new_err(message),
-        E::Poisoned | E::ApplyFailed { .. } => ReadOnlyError::new_err(message),
-        _ => InvalidError::new_err(message),
     }
 }
 
