@@ -18,7 +18,8 @@ use prost_types::field_descriptor_proto::{Label, Type};
 use prost_types::{DescriptorProto, FileDescriptorSet, MethodDescriptorProto};
 use serde_json::{Map, Value as Json, json};
 
-use super::{CHANGES_PARAMETERS, EVENT_STREAM, Input, NDJSON, OPTION_PARAMETERS, ROUTES, Route};
+use super::transport::{CHANGES_PARAMETERS, OPTION_PARAMETERS};
+use super::{EVENT_STREAM, Input, NDJSON, ROUTES, Route};
 use crate::metrics::PROMETHEUS_TEXT;
 use crate::proto::DESCRIPTORS;
 

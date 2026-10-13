@@ -433,24 +433,22 @@ mod tests {
     fn a_full_queue_or_a_shut_down_pool_is_unavailable_and_panics_are_internal() {
         let pool = Pool::new("test", 1, 1).unwrap();
         let (tx, rx) = mpsc::channel::<()>();
+        let (started, saw_start) = mpsc::channel();
         let running = pool.submit(move |_| {
-            rx.recv().ok();
+            started.send(()).unwrap();
+            rx.recv().unwrap();
             Ok(1)
         });
-        // The worker may not have taken the first job yet: fill until full
-        let mut queued = Vec::new();
-        let full = loop {
-            let p = pool.submit(|_| Ok(2));
-            let ready = p.slot.state.lock().unwrap().value.take();
-            match ready {
-                Some(Err(e)) => break e,
-                _ => queued.push(p),
-            }
-            assert!(queued.len() < 3, "the queue never filled");
-        };
+        // Keep the worker occupied before filling its single queue slot.
+        saw_start.recv_timeout(Duration::from_secs(10)).expect("the worker started");
+        let queued = pool.submit(|_| Ok(2));
+        let full = block_on(pool.submit(|_| Ok(3))).unwrap_err();
         assert_eq!(full.code(), Code::Unavailable);
         tx.send(()).unwrap();
         assert_eq!(block_on(running).unwrap(), 1);
+        // A running result can arrive before the worker takes the queued job.
+        // Drain both accepted jobs before testing the panic classification.
+        assert_eq!(block_on(queued).unwrap(), 2);
         let panicked = block_on(pool.submit(|_| -> Result<(), Error> { panic!("boom") })).unwrap_err();
         assert_eq!(panicked.code(), Code::Internal);
         assert!(panicked.message().contains("boom"));

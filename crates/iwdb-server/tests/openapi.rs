@@ -148,3 +148,18 @@ fn rest_md_lists_every_route() {
     let routes: BTreeSet<(String, String)> = ROUTES.iter().map(|r| (r.method.to_string(), r.path.to_owned())).collect();
     assert_eq!(documented, routes);
 }
+
+#[test]
+fn route_descriptors_remain_constructible_by_callers() {
+    let route = iwdb_server::rest::Route {
+        method: http::Method::GET,
+        path: "/custom/health",
+        rpc: None,
+        input: Input::Nothing,
+        operation: "live",
+        summary: "Custom descriptor",
+    };
+    assert!(route.health());
+    assert!(route.gate());
+    assert!(route.open());
+}

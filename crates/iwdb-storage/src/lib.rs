@@ -94,3 +94,7 @@ pub use recovery::{
 pub use restore::{NamespaceRestore, RestoreReport, RestoreSources, RestoreTarget, restore};
 pub use verify::{Finding, Kind, NamespaceVerify, VerifyReport, verify};
 pub use writer::{DEFAULT_SEGMENT_SIZE, FsyncPolicy, MAX_SEGMENT_SIZE, MIN_SEGMENT_SIZE, Wal, WalOptions};
+
+/// Shared test fixtures and fault-injection helpers (not enabled in normal builds).
+#[cfg(feature = "testutil")]
+pub mod testutil;
