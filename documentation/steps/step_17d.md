@@ -2,7 +2,7 @@
 
 Status: todo
 Milestone: M4 Production 1.0
-Depends on: step 17c (it documents what the suites prove)
+Depends on: step 17a (it documents what the suites prove; 17b and 17c were dropped)
 
 Split out of step 17 on 2026-10-11 (see its "Plan change").
 
