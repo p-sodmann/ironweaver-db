@@ -686,18 +686,35 @@ fn cancel(shared: &Shared, id: u64, user: Option<&str>, message: &str) -> Result
         entry.token.cancel();
         queue.retain(|q| *q != id);
         entry.work = None;
-        end(entry, JobState::Cancelled, Some(Error::new(Code::Cancelled, message)));
-        shared.cancelled.fetch_add(1, Ordering::Relaxed);
+        end(shared, entry, Outcome::Cancelled, Some(Error::new(Code::Cancelled, message)));
     }
     let info = entry.info(shared.config.retention);
     trim(shared, &mut state);
     Ok(info)
 }
 
-/// Mark `entry` ended in `outcome`, and take it out of the request list.
-fn end(entry: &mut Entry, outcome: JobState, error: Option<Error>) {
+/// Execution outcomes, excluding retained-result expiry.
+enum Outcome {
+    Done,
+    Failed,
+    Cancelled,
+}
+
+/// Mark `entry` ended, release its request registration and count its outcome.
+/// The caller holds `shared.state`; an already ended job keeps its outcome
+/// and is never counted twice. Result eviction changes `Done` to `Expired`
+/// separately, without recording another execution outcome.
+fn end(shared: &Shared, entry: &mut Entry, outcome: Outcome, error: Option<Error>) {
+    if entry.info.state.ended() {
+        return;
+    }
+    let (state, counter) = match outcome {
+        Outcome::Done => (JobState::Done, &shared.done),
+        Outcome::Failed => (JobState::Failed, &shared.failed),
+        Outcome::Cancelled => (JobState::Cancelled, &shared.cancelled),
+    };
     entry.info.progress = JobProgress::of(&entry.progress);
-    entry.info.state = outcome;
+    entry.info.state = state;
     entry.info.error = error;
     entry.info.ended = Some(CommitTime::now());
     entry.ended_at = Some(Instant::now());
@@ -710,6 +727,7 @@ fn end(entry: &mut Entry, outcome: JobState, error: Option<Error>) {
             span.record("otel.status_code", "error");
         }
     }
+    counter.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Remove the jobs that ended more than the retention ago.
@@ -763,8 +781,7 @@ fn finish(shared: &Shared, id: u64, outcome: Result<Finished, Error>) {
             entry.info.truncated = f.truncated;
             entry.info.result_bytes = bytes;
             entry.result = Some(Arc::new(f.result));
-            end(entry, JobState::Done, None);
-            shared.done.fetch_add(1, Ordering::Relaxed);
+            end(shared, entry, Outcome::Done, None);
             // Room for it: the oldest other results go first
             *result_bytes += bytes;
             while *result_bytes > config.result_bytes {
@@ -788,11 +805,9 @@ fn finish(shared: &Shared, id: u64, outcome: Result<Finished, Error>) {
         Err(e) => {
             let cancelled = e.code() == Code::Cancelled && entry.token.is_cancelled();
             if cancelled {
-                end(entry, JobState::Cancelled, Some(e));
-                shared.cancelled.fetch_add(1, Ordering::Relaxed);
+                end(shared, entry, Outcome::Cancelled, Some(e));
             } else {
-                end(entry, JobState::Failed, Some(e));
-                shared.failed.fetch_add(1, Ordering::Relaxed);
+                end(shared, entry, Outcome::Failed, Some(e));
             }
         }
     }
@@ -1017,6 +1032,38 @@ mod tests {
     }
 
     #[test]
+    fn a_late_worker_result_keeps_the_cancelled_outcome_and_counts() {
+        let (jobs, requests) = jobs(JobsConfig { running: 1, ..JobsConfig::default() });
+        let (started_tx, started) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let work: JobWork = Box::new(move |handle| {
+            handle.running();
+            started_tx.send(()).unwrap();
+            // Deliberately return success after cancellation, as a worker
+            // can finish between its last token check and returning.
+            release_rx.recv().unwrap();
+            Ok(Finished { result: scores(3), truncated: false, seq: 7 })
+        });
+        let job = jobs.start("ns", "ann", None, "degree", None, work).unwrap();
+        started.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(jobs.cancel(job.id, None).unwrap().state, JobState::Cancelled);
+        assert_eq!(requests.active(), 0);
+        // A second job on the sole worker is a barrier: when it is done,
+        // the first worker result has passed through `finish`.
+        let next = jobs.start("ns", "ann", None, "degree", None, quick(scores(1))).unwrap();
+        release.send(()).unwrap();
+        let done = wait_for(&jobs, next.id, JobState::Done);
+        let cancelled = jobs.cancel(job.id, None).unwrap();
+        assert_eq!(cancelled.state, JobState::Cancelled);
+        assert_eq!(cancelled.result_bytes, 0);
+        assert_eq!(jobs.page(job.id, None, 0, None).unwrap_err().code(), Code::Cancelled);
+        let counts = jobs.counts();
+        assert_eq!((counts.done_total, counts.failed_total, counts.cancelled_total), (1, 0, 1));
+        assert_eq!(counts.result_bytes, done.result_bytes);
+        assert_eq!(requests.active(), 0);
+    }
+
+    #[test]
     fn queues_and_users_are_capped() {
         let config = JobsConfig { running: 1, queued: 2, per_user: 2, ..JobsConfig::default() };
         let (jobs, _) = jobs(config);
@@ -1083,7 +1130,13 @@ mod tests {
         assert_eq!((expired.state, expired.result_bytes), (JobState::Expired, 0));
         assert_eq!(jobs_.page(ids[0], None, 0, None).unwrap_err().code(), Code::NotFound);
         assert!(jobs_.page(ids[2], None, 0, None).is_ok());
-        assert_eq!(jobs_.counts().result_bytes, one * 2);
+        let counts = jobs_.counts();
+        assert_eq!(counts.result_bytes, one * 2);
+        assert_eq!(
+            (counts.done_total, counts.failed_total, counts.cancelled_total),
+            (3, 0, 0),
+            "expiring a stored result does not record another execution outcome"
+        );
         assert_eq!(memory.part(Part::Working), one * 2, "stored results count as working memory");
         let big = jobs_.start("ns", "ann", None, "degree", None, quick(scores(300))).unwrap().id;
         let failed = wait_for(&jobs_, big, JobState::Failed);
