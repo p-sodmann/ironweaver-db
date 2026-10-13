@@ -169,17 +169,24 @@
 
     /** `quiet`: no line for a success; `expected`: statuses that are answers here, not failures to log. */
     async function call(method, path, body, quiet, expected = []) {
-      const t0 = Date.now(); let res;
+      const t0 = Date.now(); let res; let text;
       try {
         const headers = { accept: 'application/json', 'x-iwdb-csrf': '1' };
         if (body !== undefined) headers['content-type'] = 'application/json';
         res = await doFetch(base + path, { method, headers, credentials: 'same-origin', body: body === undefined ? undefined : JSON.stringify(body) });
+        text = await res.text();
       } catch (e) {
         emit('ERROR', `${method} ${path} · no answer: ${e.message}`);
         throw new SourceError('unavailable', `no answer from ${base || 'the console server'}${path}: ${e.message}`);
       }
-      const text = await res.text(); let json = null;
-      try { json = text ? JSON.parse(text) : {}; } catch (_) { /* a proxy's page */ }
+      let json = null;
+      try { json = text ? JSON.parse(text) : {}; } catch (_) {
+        // An error response may be a proxy's HTML page; retain its HTTP status below.
+        if (res.ok) {
+          emit('ERROR', `${method} ${path} · invalid JSON response · ${res.status}`);
+          throw new SourceError('internal', `invalid JSON response from ${path} (HTTP ${res.status})`);
+        }
+      }
       const ms = Date.now() - t0;
       if (!res.ok) {
         const code = (json && json.code) || (res.status === 502 || res.status === 504 ? 'unavailable' : 'internal');

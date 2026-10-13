@@ -27,8 +27,10 @@
       if (l.startsWith('\\')) {
         const m = /^\\limit\s+(\d+|off)$/.exec(l);
         if (!m) throw bad(`unknown option ${l.split(/\s/)[0]}; the console knows \\limit <n>|off`);
-        opts.limit = m[1] === 'off' ? null : parseInt(m[1], 10);
-        if (opts.limit === 0) throw bad('\\limit takes a number above 0, or off');
+        opts.limit = m[1] === 'off' ? null : Number(m[1]);
+        if (opts.limit !== null && (!Number.isSafeInteger(opts.limit) || opts.limit <= 0)) {
+          throw bad('\\limit takes a positive safe integer (1 to 9007199254740991), or off');
+        }
         continue;
       }
       lines.push(l);
