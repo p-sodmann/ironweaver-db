@@ -492,6 +492,11 @@ pub struct Key {
 /// A setting's type, read from a variable's text.
 trait FromEnv: Sized {
     fn from_env(text: &str) -> Result<Self, String>;
+
+    /// Path settings participate in file-relative resolution; other types do not.
+    fn path_mut(&mut self) -> Option<&mut PathBuf> {
+        None
+    }
 }
 
 macro_rules! from_str_env {
@@ -516,6 +521,10 @@ impl FromEnv for bool {
 }
 
 impl FromEnv for PathBuf {
+    fn path_mut(&mut self) -> Option<&mut PathBuf> {
+        Some(self)
+    }
+
     fn from_env(text: &str) -> Result<Self, String> {
         if text.is_empty() { Err("expected a path, got nothing".into()) } else { Ok(PathBuf::from(text)) }
     }
@@ -528,6 +537,10 @@ impl FromEnv for String {
 }
 
 impl<T: FromEnv> FromEnv for Option<T> {
+    fn path_mut(&mut self) -> Option<&mut PathBuf> {
+        self.as_mut().and_then(FromEnv::path_mut)
+    }
+
     fn from_env(text: &str) -> Result<Self, String> {
         T::from_env(text).map(Some)
     }
@@ -547,6 +560,8 @@ macro_rules! serde_env {
 }
 serde_env!(Fsync, LogFormat, ClientAuth, OtlpProtocol);
 
+type PathAccessor = fn(&mut Config) -> Option<&mut PathBuf>;
+
 macro_rules! keys {
     ($($key:literal $var:literal => $($field:ident).+;)*) => {
         /// Every setting of the file but the projections, with its variable:
@@ -558,6 +573,11 @@ macro_rules! keys {
                 set: |c, text| { c.$($field).+ = FromEnv::from_env(text)?; Ok(()) },
                 get: |c| toml::Value::try_from(&c.$($field).+).ok(),
             },
+        )*];
+
+        // Derived from the same fields as KEYS, without changing public Key.
+        const PATH_ACCESSORS: &[(&str, PathAccessor)] = &[$(
+            ($key, |c| FromEnv::path_mut(&mut c.$($field).+)),
         )*];
     };
 }
@@ -645,11 +665,6 @@ const SECTION_PREFIXES: &[&str] = &[
     "IWDB_JOBS_",
     "IWDB_TRACING_",
 ];
-
-/// The settings that are paths, resolved against the file's directory when
-/// they come from the file.
-const PATH_KEYS: &[&str] =
-    &["data_dir", "tls.cert", "tls.key", "tls.client_ca", "audit.dir", "store.archive", "backup.dir"];
 
 /// A projection the server runs (ADR 0032).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -972,19 +987,11 @@ impl Config {
         let mut config = Config::build(text.as_deref(), &env)
             .map_err(|problems| ConfigError::Invalid { path: path.map(Path::to_path_buf), problems })?;
         if let Some(dir) = path.and_then(Path::parent) {
-            for key in PATH_KEYS {
+            for (key, path_mut) in PATH_ACCESSORS {
                 if config.source(key) != Source::File {
                     continue;
                 }
-                let field = match *key {
-                    "data_dir" => Some(&mut config.data_dir),
-                    "tls.cert" => config.tls.cert.as_mut(),
-                    "tls.key" => config.tls.key.as_mut(),
-                    "audit.dir" => config.audit.dir.as_mut(),
-                    "store.archive" => config.store.archive.as_mut(),
-                    "backup.dir" => config.backup.dir.as_mut(),
-                    _ => config.tls.client_ca.as_mut(),
-                };
+                let field = path_mut(&mut config);
                 if let Some(field) = field
                     && field.is_relative()
                 {
@@ -2036,6 +2043,43 @@ mod tests {
             let value = (k.get)(&defaults).map(|v| v.to_string()).unwrap_or_else(|| unset(k.key).into());
             let expected = if k.key == "data_dir" { "required".to_owned() } else { value };
             assert_eq!(row[2], expected, "{}", k.key);
+        }
+    }
+
+    #[test]
+    fn every_registered_path_preserves_its_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("server.toml");
+        std::fs::write(
+            &file,
+            concat!(
+                "data_dir = \"data\"\n",
+                "[tls]\ncert = \"cert.pem\"\nkey = \"key.pem\"\nclient_ca = \"ca.pem\"\n",
+                "[audit]\ndir = \"audit\"\n[backup]\ndir = \"backups\"\n[store]\narchive = \"archive\"\n",
+            ),
+        )
+        .unwrap();
+        let mut config = Config::load(&file).unwrap();
+        for (key, expected) in [
+            ("data_dir", "data"),
+            ("tls.cert", "cert.pem"),
+            ("tls.key", "key.pem"),
+            ("tls.client_ca", "ca.pem"),
+            ("audit.dir", "audit"),
+            ("backup.dir", "backups"),
+            ("store.archive", "archive"),
+        ] {
+            assert_eq!(config.source(key), Source::File);
+            let (_, accessor) = PATH_ACCESSORS.iter().find(|(name, _)| *name == key).unwrap();
+            assert_eq!(accessor(&mut config).unwrap(), &dir.path().join(expected));
+            let setting = KEYS.iter().find(|setting| setting.key == key).unwrap();
+            let mut overridden = Config::from_sources(Some(&file), env(&[(setting.var, "relative")])).unwrap();
+            assert_eq!(overridden.source(key), Source::Env(setting.var));
+            assert_eq!(accessor(&mut overridden).unwrap(), &PathBuf::from("relative"));
+        }
+        let mut defaults = Config::parse("data_dir = \"data\"").unwrap();
+        for (_, accessor) in PATH_ACCESSORS.iter().filter(|(key, _)| *key != "data_dir") {
+            assert!(accessor(&mut defaults).is_none());
         }
     }
 
