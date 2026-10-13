@@ -743,6 +743,7 @@ impl Database for Remote {
     }
 }
 
+/// Preserve absent and zero limits, saturating sizes to the wire's uint32.
 fn limit_to_pb(limit: Option<usize>) -> Option<u32> {
     limit.map(|n| u32::try_from(n).unwrap_or(u32::MAX))
 }
@@ -857,7 +858,7 @@ impl Admin for Remote {
         limit: Option<usize>,
     ) -> impl Future<Output = Result<Listed<JobInfo>, Error>> + Send {
         self.call_admin(move |mut client| async move {
-            let limit = limit.map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+            let limit = limit_to_pb(limit);
             let response = client.list_jobs(pb::ListJobsRequest { user, limit }).await.map_err(status)?;
             jobs_from_pb(response.into_inner()).map_err(bad_answer)
         })
@@ -885,7 +886,7 @@ impl Admin for Remote {
         limit: Option<usize>,
     ) -> impl Future<Output = Result<JobPage, Error>> + Send {
         self.call_admin(move |mut client| async move {
-            let limit = limit.map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+            let limit = limit_to_pb(limit);
             let request = pb::GetJobResultRequest { id, user, offset, limit };
             let response = client.get_job_result(request).await.map_err(status)?;
             job_page_from_pb(response.into_inner()).map_err(bad_answer)
@@ -1034,6 +1035,17 @@ impl Accounts for Remote {
 mod tests {
     use super::*;
     use iwdb_query::Code;
+
+    #[test]
+    fn admin_limits_preserve_presence_and_saturate() {
+        assert_eq!(limit_to_pb(None), None);
+        assert_eq!(limit_to_pb(Some(0)), Some(0));
+        assert_eq!(limit_to_pb(Some(17)), Some(17));
+        assert_eq!(limit_to_pb(Some(u32::MAX as usize)), Some(u32::MAX));
+        if let Some(oversized) = (u32::MAX as usize).checked_add(1) {
+            assert_eq!(limit_to_pb(Some(oversized)), Some(u32::MAX));
+        }
+    }
 
     #[test]
     fn a_connection_closed_under_a_call_is_unavailable() {

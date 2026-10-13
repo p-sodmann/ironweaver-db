@@ -8,6 +8,7 @@
 //! `documentation/iwctl.md` describes the commands and the exit codes.
 
 mod args;
+mod catalog_input;
 #[cfg(test)]
 mod guide;
 mod output;
@@ -18,7 +19,7 @@ mod users;
 use std::process::ExitCode;
 
 use iwdb::{
-    AttrPath, CatalogChange, CommitOptions, Constraint, ConstraintKind, Error, IdempotencyKey, IndexDef, Label,
+    AttrPath, CatalogChange, CommitOptions, Constraint, ConstraintKind, Error, IdempotencyKey, IndexDef,
     RestoreSources, Store, StoreOptions,
 };
 
@@ -290,11 +291,11 @@ fn key(parsed: &Parsed) -> Result<Option<IdempotencyKey>, Error> {
 }
 
 fn attr_path(path: &[String]) -> Result<AttrPath, Error> {
-    AttrPath::new(path.iter().cloned()).map_err(iwdb_engine_error)
+    catalog_input::attr_path(path).map_err(iwdb_engine_error)
 }
 
 fn constraint(kind: ConstraintKind, label: &str, path: &[String]) -> Result<Constraint, Error> {
-    Ok(Constraint { kind, label: Label::new(label).map_err(iwdb_engine_error)?, path: attr_path(path)? })
+    catalog_input::constraint(kind, label, path).map_err(iwdb_engine_error)
 }
 
 /// Open the store, commit one catalog change in a namespace, close.
