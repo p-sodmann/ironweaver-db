@@ -36,9 +36,24 @@ How to install, configure, run, watch, back up and upgrade an `iwdb-server`, wit
 
 ## Install
 
+Releases are published on GitHub only: a tag and a [GitHub Release](https://github.com/p-sodmann/ironweaver-db/releases) with the files below. There is no PyPI package, crate or image registry. What a version number promises is [ADR 0060](adr/0060-versioning-policy.md); what a release holds, in detail, is [releasing.md](releasing.md#the-files-of-a-release).
+
+### From a release
+
+Download the files of the release (`gh release download vX.Y.Z -R p-sodmann/ironweaver-db`, or from the release's page) and check them: `sha256sum -c --ignore-missing SHA256SUMS` (macOS: `shasum -a 256 -c --ignore-missing SHA256SUMS`).
+
+- **The server and `iwctl`**: `ironweaver-db-X.Y.Z-<target>.tar.gz` (`.zip` on Windows) holds both binaries, built with every feature (gRPC, REST, Postgres projections, console, traces). Targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (glibc 2.28 or later), `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`. Unpack it and put both on the `PATH`. They aren't signed: on macOS, a file downloaded with a browser needs `xattr -d com.apple.quarantine iwdb-server iwctl`.
+- **The image**: `docker load -i ironweaver-db-X.Y.Z-docker-linux-amd64.tar.gz` (or `-arm64`) gives the image `iwdb-server:X.Y.Z`; run it as below, with that name for `iwdb`.
+- **The Python package**: see [The Python package](#the-python-package).
+
+```sh
+tar -xzf ironweaver-db-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz
+ironweaver-db-X.Y.Z-x86_64-unknown-linux-gnu/iwdb-server --version   # iwdb-server X.Y.Z (grpc, rest, postgres, console, otel)
+```
+
 ### The Docker image (Linux)
 
-The image ([ADR 0034](adr/0034-docker-image-and-server-features.md)) has `iwdb-server` and `iwctl`, runs as a non-root user (uid 10001), keeps the data directory in the volume `/var/lib/iwdb`, and reads `/etc/iwdb/iwdb.toml` ([docker/iwdb.toml](../docker/iwdb.toml): every interface, port 7600, `fsync = "always"`, an 8 s drain). It has every feature: gRPC, REST, Postgres projections, the console and traces.
+The image ([ADR 0034](adr/0034-docker-image-and-server-features.md)) has `iwdb-server` and `iwctl`, runs as a non-root user (uid 10001), keeps the data directory in the volume `/var/lib/iwdb`, and reads `/etc/iwdb/iwdb.toml` ([docker/iwdb.toml](../docker/iwdb.toml): every interface, port 7600, `fsync = "always"`, an 8 s drain). It has every feature: gRPC, REST, Postgres projections, the console and traces. Load it from a release ([above](#from-a-release)) and tag it `iwdb` (`docker tag iwdb-server:X.Y.Z iwdb`), or build it:
 
 ```sh
 docker build -t iwdb .                                # or: docker build --build-arg FEATURES="" -t iwdb:grpc .
@@ -73,7 +88,14 @@ iwctl --version
 
 ### The Python package
 
-`pip install ironweaver-db` (abi3 wheels for Linux, macOS and Windows; until the first release, `maturin develop -m crates/iwdb-python/Cargo.toml`). It is the embedded store (a data directory in your process) and the remote client of a server (`iwdb.connect`); it doesn't include the server ([python-api.md](python-api.md)).
+One package, `ironweaver-db`, is both the embedded store (a data directory in your process) and the remote client of a server (`iwdb.connect`); it doesn't include the server ([python-api.md](python-api.md)). It isn't on PyPI: install a wheel of a release (abi3, CPython 3.9 and later, for Linux x86_64 and aarch64, macOS x86_64 and arm64, Windows x86_64), by its URL or from the downloaded files, where pip picks the one for your platform:
+
+```sh
+pip install https://github.com/p-sodmann/ironweaver-db/releases/download/vX.Y.Z/<the wheel's file name>
+pip install --no-index --find-links <download directory> ironweaver-db
+```
+
+From source: `maturin develop -m crates/iwdb-python/Cargo.toml` in a virtualenv, or `pip install` the release's sdist (`ironweaver_db-X.Y.Z.tar.gz`), which needs Rust 1.99 or later.
 
 ### Windows
 

@@ -15,7 +15,7 @@ Ship 1.0 with documented guarantees and a full verification suite.
 - ~~Continuous fuzzing: WAL reader, checkpoint loader, proto and JSON decoding, pattern and filter inputs. (17b)~~ Dropped on 2026-10-12 (see Plan change); CI keeps its short run of the WAL reader target.
 - ~~24h soak test with mixed load; runbook for running it before each minor release. (17c)~~ Dropped on 2026-10-12 (see Plan change).
 - [x] Docs: concepts, guarantees (`documentation/guarantees.md`: durability per fsync policy, isolation, limits, failure behaviour), operations, gRPC and REST reference. (17d)
-- [ ] Release pipeline: semver, a GitHub Release per tag with the Python wheels (embedded and client), the sdist, the server and `iwctl` binaries, and the multi-arch Docker image as files, CHANGELOG. No crates.io, PyPI or registry push (see Plan change). (17e)
+- [x] Release pipeline: semver, a GitHub Release per tag with the Python wheels (embedded and client), the sdist, the server and `iwctl` binaries, and the multi-arch Docker image as files, CHANGELOG. No crates.io, PyPI or registry push (see Plan change). (17e; [ADR 0060](../adr/0060-versioning-policy.md), [releasing.md](../releasing.md))
 
 ## Plan change
 

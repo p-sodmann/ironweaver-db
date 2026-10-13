@@ -433,7 +433,7 @@ The Python bindings ([python-api.md](python-api.md), [ADR 0013](adr/0013-python-
 **Not guaranteed:**
 
 - Downgrades: an older version can't open what a newer one wrote; it refuses it (`a_newer_layout_or_a_damaged_marker_is_refused`).
-- What may change in the wire contract (`proto/`) between versions: `buf breaking` checks it in CI (`ci.yml#buf`), and the versioning policy comes with the release pipeline ([step 17e](steps/step_17e.md)).
+- What may change between versions beyond these formats: the wire contract (`proto/`, which `buf breaking` checks in CI, `ci.yml#buf`), the APIs, configuration keys, error codes and metric names follow the versioning policy ([ADR 0060](adr/0060-versioning-policy.md)), a promise of process, not a test.
 
 ## Platforms
 
