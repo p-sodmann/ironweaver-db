@@ -262,11 +262,7 @@ pub fn dotted(path: &str) -> Vec<String> {
 }
 
 pub fn constraint_kind(word: &str) -> Result<ConstraintKind, String> {
-    match word {
-        "unique" => Ok(ConstraintKind::Unique),
-        "required" => Ok(ConstraintKind::Required),
-        other => Err(format!("a constraint is 'unique' or 'required', not '{}'", other)),
-    }
+    crate::catalog_input::constraint_kind(word)
 }
 
 pub fn parse(args: &[String]) -> Result<Parsed, String> {

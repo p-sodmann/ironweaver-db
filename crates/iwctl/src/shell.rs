@@ -184,15 +184,11 @@ fn words<'a>(rest: &'a str, n: usize, usage: &str) -> Result<Vec<&'a str>, Failu
 }
 
 fn dotted(path: &str) -> Result<AttrPath, Failure> {
-    AttrPath::new(path.split('.').map(str::to_owned)).map_err(|e| Failure::Usage(e.to_string()))
+    crate::catalog_input::attr_path(&crate::args::dotted(path)).map_err(|e| Failure::Usage(e.to_string()))
 }
 
 fn constraint_kind(word: &str) -> Result<ConstraintKind, Failure> {
-    match word {
-        "unique" => Ok(ConstraintKind::Unique),
-        "required" => Ok(ConstraintKind::Required),
-        other => Err(format!("a constraint is 'unique' or 'required', not '{}'", other).into()),
-    }
+    crate::catalog_input::constraint_kind(word).map_err(Failure::Usage)
 }
 
 fn filter(text: &str) -> Result<Expr, Failure> {
@@ -736,5 +732,26 @@ mod tests {
     fn match_columns_are_the_pattern_s_variables() {
         let pattern = Pattern::parse("(a)-[r:KNOWS]->(b)").ok().unwrap();
         assert_eq!(match_headers(&pattern, &[]), ["a", "b", "r"]);
+    }
+}
+
+#[cfg(test)]
+mod catalog_input_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_parser_errors_remain_shell_usage_errors() {
+        for word in ["unique", "required"] {
+            assert_eq!(constraint_kind(word).ok(), crate::args::constraint_kind(word).ok());
+        }
+        for word in ["", "Unique", "other"] {
+            let expected = format!("a constraint is 'unique' or 'required', not '{}'", word);
+            assert_eq!(crate::args::constraint_kind(word).unwrap_err(), expected);
+            assert!(matches!(constraint_kind(word), Err(Failure::Usage(message)) if message == expected));
+        }
+        for text in ["", "a..b", ".a"] {
+            let expected = crate::catalog_input::attr_path(&crate::args::dotted(text)).unwrap_err().to_string();
+            assert!(matches!(dotted(text), Err(Failure::Usage(message)) if message == expected));
+        }
     }
 }

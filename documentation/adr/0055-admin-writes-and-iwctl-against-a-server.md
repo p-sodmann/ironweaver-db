@@ -109,6 +109,8 @@ The server gets **`[store] archive`**: the WAL archive the store copies segments
 
 `status`, `checkpoint`, `backup <name>`, `verify [--backup <name> | --archive]`, `archive prune --before <name>`, `namespaces`, `create-namespace`, `drop-namespace`, `indexes`, `create-index`, `drop-index`, `add-constraint`, `drop-constraint`, `requests` and `cancel <id>`. Each makes one call through `client::Remote` (the `Database` and `Admin` traits) and prints its answer in the existing text and `--json` forms. Credentials work as for `user` and `token`: `--token` or `IWDB_TOKEN`, `--user` with a password prompt, or a client certificate. `import`, `export` and `restore` stay offline and are refused with `--server`.
 
+Catalog paths, constraint labels and constraint kinds are validated through `iwctl`'s internal `catalog_input` module. Local commands retain storage/engine errors, remote commands wrap invalid catalog input as query `invalid_argument`, and shell parsing retains usage errors. The shared module returns catalog errors rather than choosing an adapter's error policy.
+
 Exit codes for remote errors: `corrupt` is 1 (damage), as for local damage. A verify that finds problems is 1. `unavailable` is 3 (the server is busy or drains, which is like "locked"). Every other error is 4. Remote calls have no deadline: a backup takes as long as it takes.
 
 ### Visible

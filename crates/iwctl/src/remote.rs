@@ -257,12 +257,11 @@ fn key(key: &Option<String>) -> Result<CommitOptions, Error> {
 }
 
 fn attr_path(path: &[String]) -> Result<iwdb::AttrPath, Error> {
-    iwdb::AttrPath::new(path.iter().cloned()).map_err(|e| Error::invalid(e.to_string()))
+    crate::catalog_input::attr_path(path).map_err(|e| Error::invalid(e.to_string()))
 }
 
 fn constraint(kind: iwdb::ConstraintKind, label: &str, path: &[String]) -> Result<iwdb::Constraint, Error> {
-    let label = iwdb::Label::new(label).map_err(|e| Error::invalid(e.to_string()))?;
-    Ok(iwdb::Constraint { kind, label, path: attr_path(path)? })
+    crate::catalog_input::constraint(kind, label, path).map_err(|e| Error::invalid(e.to_string()))
 }
 
 /// Commit one catalog change and print it.
@@ -374,5 +373,34 @@ fn execute(remote: &Remote, endpoint: &str, action: &Action, out: &Out) -> Resul
             out.job_page(&block_on(remote.job_result(*id, None, *offset, *limit))?);
             Ok(OK)
         }
+    }
+}
+
+#[cfg(test)]
+mod catalog_input_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_catalog_inputs_keep_local_and_remote_error_policies() {
+        for path in [vec![], crate::args::dotted("a..b"), crate::args::dotted(".a")] {
+            let local = crate::attr_path(&path).unwrap_err();
+            let remote = attr_path(&path).unwrap_err();
+            assert!(matches!(local, iwdb::Error::Engine(_)));
+            assert_eq!(crate::exit_code(&local), crate::exit::FAILED);
+            assert_eq!(remote.code(), Code::InvalidArgument);
+            assert_eq!(exit_code(&remote), crate::exit::FAILED);
+            let expected = crate::catalog_input::attr_path(&path).unwrap_err().to_string();
+            assert_eq!(remote.message(), expected);
+            assert_eq!(local.to_string(), expected);
+        }
+        // Label validation still precedes path validation for CLI commands.
+        let path = crate::args::dotted("a..b");
+        let local = crate::constraint(iwdb::ConstraintKind::Required, "", &path).unwrap_err();
+        let remote = constraint(iwdb::ConstraintKind::Required, "", &path).unwrap_err();
+        let expected = iwdb::Label::new("").unwrap_err().to_string();
+        assert!(matches!(local, iwdb::Error::Engine(_)));
+        assert_eq!(local.to_string(), expected);
+        assert_eq!(remote.code(), Code::InvalidArgument);
+        assert_eq!(remote.message(), expected);
     }
 }
