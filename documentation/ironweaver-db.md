@@ -97,7 +97,7 @@ Traces cut across the layers ([ADR 0057](adr/0057-traces.md)): the service, quer
 
 ### 10. Quality and release
 - Model-based property tests, crash and fault injection, fuzzing (WAL reader, checkpoint loader, protocol decoding), format compatibility fixtures, benchmarks with CI gates, 24h soak.
-- Semver releases: crates.io, PyPI wheels, multi-arch Docker image, docs site.
+- Semver releases ([ADR 0060](adr/0060-versioning-policy.md)) on GitHub only: a tag and a GitHub Release with the Python wheels, the server and `iwctl` binaries and the multi-arch Docker image as files ([releasing.md](releasing.md)). No crates.io, PyPI or registry (step 17's Plan change).
 
 ### 11. Replication and HA (after 1.0)
 - WAL shipping to read replicas, manual failover first, Raft only if needed, Jepsen-style tests.
@@ -107,7 +107,7 @@ Traces cut across the layers ([ADR 0057](adr/0057-traces.md)): the service, quer
 | Milestone | Steps | Done when |
 |---|---|---|
 | **M0 Foundation** | 1–3 | Transactions commit in memory with versions, resolved ops and `seq`; upstream changes landed |
-| **M1 Embedded durable** | 4–7 | Kill -9 suite green; PITR works; Python embedded wheels on PyPI |
+| **M1 Embedded durable** | 4–7 | Kill -9 suite green; PITR works; Python embedded wheels (the PyPI publish was withdrawn: releases are GitHub only) |
 | **M2 Service** | 8–10 | Concurrent reads, catalog, bounded query layer behind the `Database` trait |
 | **M3 Network access** | 11–14b | gRPC, REST and change stream served; Python remote client passes the same tests as embedded; benchmarks published |
 | **M4 Production 1.0** | 15–17 | Security, operability, full verification suite; 1.0 released |
