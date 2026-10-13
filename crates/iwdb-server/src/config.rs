@@ -2077,7 +2077,7 @@ mod tests {
             assert_eq!(overridden.source(key), Source::Env(setting.var));
             assert_eq!(accessor(&mut overridden).unwrap(), &PathBuf::from("relative"));
         }
-        let mut defaults = Config::parse("data_dir = \"data\"").unwrap();
+        let mut defaults = Config::parse("data_dir = \"data\"\n[tls]\nenabled = false\n").unwrap();
         for (_, accessor) in PATH_ACCESSORS.iter().filter(|(key, _)| *key != "data_dir") {
             assert!(accessor(&mut defaults).is_none());
         }
