@@ -7,6 +7,9 @@
 //! waits for ready, `sh run=stopped` stops it first (SIGTERM, exit 0).
 //! `iwctl`'s own test (`crates/iwctl/src/guide.rs`) parses every `iwctl`
 //! command line.
+//!
+//! Step 17d: the configuration blocks of the API references (`grpc.md`,
+//! `config.md`, `projections.md`) are valid configurations too.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -119,6 +122,40 @@ fn every_toml_block_is_a_valid_configuration() {
         }
     }
     assert!(checked >= 4, "{}", checked);
+}
+
+/// The TOML blocks of the API references, each a valid configuration
+/// once a fragment gets `data_dir` and a certificate.
+#[test]
+fn every_toml_block_of_the_api_references_is_a_valid_configuration() {
+    let pages = [
+        ("grpc.md", include_str!("../../../documentation/api/grpc.md")),
+        ("config.md", include_str!("../../../documentation/api/config.md")),
+        ("projections.md", include_str!("../../../documentation/api/projections.md")),
+    ];
+    let mut checked = 0;
+    for (page, text) in pages {
+        for (info, lines) in blocks(text) {
+            if !info.starts_with("toml") {
+                continue;
+            }
+            let block = lines.join("\n");
+            let mut table: toml::Table =
+                toml::from_str(&block).unwrap_or_else(|e| panic!("{}: {}\n{}", page, e, block));
+            table.entry("data_dir").or_insert("data".into());
+            let tls = table.entry("tls").or_insert(toml::Table::new().into()).as_table_mut().unwrap();
+            tls.entry("cert").or_insert("tls/server.pem".into());
+            tls.entry("key").or_insert("tls/server.key".into());
+            checked += 1;
+            match Config::parse(&toml::to_string(&table).unwrap()) {
+                Ok(_) => {}
+                // A projection's Postgres source in a build without it
+                Err(e) if !cfg!(feature = "postgres") && e.contains("built without the postgres feature") => {}
+                Err(e) => panic!("{}: {}\n{}", page, e, block),
+            }
+        }
+    }
+    assert!(checked >= 2, "{}", checked);
 }
 
 /// The refusal of `[tracing] enabled` by a build without `feature`.

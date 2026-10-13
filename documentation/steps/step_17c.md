@@ -1,10 +1,12 @@
 # Step 17c: Soak test
 
-Status: todo
+Status: dropped (2026-10-12)
 Milestone: M4 Production 1.0
 Depends on: step 17b (the order only)
 
 Split out of step 17 on 2026-10-11 (see its "Plan change").
+
+> **Dropped.** The owner decided on 2026-10-12 that 1.0 doesn't need the soak test; see [step 17](step_17.md)'s Plan change. The plan below is kept for reference, in case it comes back after 1.0.
 
 ## Goal
 
