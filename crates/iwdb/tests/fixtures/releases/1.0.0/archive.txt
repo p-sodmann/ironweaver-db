@@ -1,0 +1,28 @@
+namespace default
+edge 0 "a" -> "a" type=Some("U") attr={} meta={} version=1
+edge 2 "d" -> "d" type=Some("T") attr={"y": String("s")} meta={} version=1
+node "a" labels=["A", "B"] attr={"x": [], "y": [String("t")]} meta={} version=3
+node "b" labels=["B"] attr={} meta={} version=1
+node "d" labels=[] attr={"y": String("t")} meta={} version=2
+node "p0" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000012")} meta={} version=5
+node "p1" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000013")} meta={} version=5
+node "p2" labels=[] attr={"pad": String("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014")} meta={} version=5
+catalog NamespaceCatalog { indexes: {}, constraints: {} }
+seq 24
+key KeyEntry { key: IdempotencyKey("before-0"), fingerprint: 814195480, result: CommitResult { seq: 21, edge_ids: [], versions: [(Node("p0"), 5)], time: Some(CommitTime(1791974266564637)), deduplicated: false } }
+key KeyEntry { key: IdempotencyKey("before-1"), fingerprint: 2468679855, result: CommitResult { seq: 22, edge_ids: [EdgeId(2), EdgeId(2)], versions: [(Node("d"), 2), (Edge(EdgeId(2)), 1)], time: Some(CommitTime(1791974266573756)), deduplicated: false } }
+key KeyEntry { key: IdempotencyKey("before-2"), fingerprint: 1942109244, result: CommitResult { seq: 23, edge_ids: [], versions: [(Node("p1"), 5)], time: Some(CommitTime(1791974266577720)), deduplicated: false } }
+key KeyEntry { key: IdempotencyKey("before-4"), fingerprint: 684865866, result: CommitResult { seq: 24, edge_ids: [], versions: [(Node("p2"), 5)], time: Some(CommitTime(1791974266580683)), deduplicated: false } }
+namespace imported
+edge 0 "a" -> "b" type=None attr={"w": Int(3)} meta={} version=1
+edge 1 "b" -> "a" type=None attr={"w": Int(4)} meta={} version=1
+node "a" labels=[] attr={"name": String("Ann"), "size": Int(1)} meta={} version=1
+node "b" labels=[] attr={"name": String("Bo B"), "size": Float(2.5)} meta={} version=1
+catalog NamespaceCatalog { indexes: {}, constraints: {} }
+seq 1
+namespace people
+catalog NamespaceCatalog { indexes: {}, constraints: {} }
+seq 0
+namespace scratch
+catalog NamespaceCatalog { indexes: {}, constraints: {} }
+seq 0
