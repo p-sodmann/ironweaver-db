@@ -4,7 +4,7 @@ A durable, concurrent graph database built around [`ironweaver-core`](https://gi
 
 Ironweaver DB adds what an in-process graph library lacks for production use: a write-ahead log and crash recovery, atomic transactions with optimistic concurrency, snapshot reads, a catalog, a bounded query API and network access over gRPC and REST/JSON. It runs either embedded (a library opened on a directory) or as a server that many clients share.
 
-**Status:** early development. Milestone M1 (embedded durable) is done: a store in a directory with a write-ahead log, checkpoints and crash recovery (tested by a kill -9 harness), online backups, WAL archiving, point-in-time restore, `verify`, the `iwctl` admin CLI and Python bindings. Nothing is released yet; releases will be files on GitHub ([Install](#install)). See the [implementation steps](documentation/steps/README.md).
+**Status:** 1.0.0 is released ([Install](#install)). The embedded store has a write-ahead log, checkpoints and crash recovery (tested by a kill -9 harness), online backups, WAL archiving, point-in-time restore and `verify`. The server has gRPC and REST, authentication, TLS and an operator console. There are also the `iwctl` admin CLI and Python bindings for both modes. What a version number promises is [ADR 0060](documentation/adr/0060-versioning-policy.md), and what the database guarantees is in [guarantees.md](documentation/guarantees.md). See the [implementation steps](documentation/steps/README.md).
 
 ```python
 import iwdb
