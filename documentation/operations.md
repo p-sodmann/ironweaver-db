@@ -60,7 +60,7 @@ docker build -t iwdb .                                # or: docker build --build
 sh docker/dev-cert.sh                                 # a development CA and certificate in docker/tls
 docker run -d --name iwdb -p 127.0.0.1:7600:7600 -v iwdb-data:/var/lib/iwdb \
   -v "$PWD/docker/tls:/etc/iwdb/tls:ro" -e IWDB_AUTH_BOOTSTRAP_PASSWORD="$ADMIN_PASSWORD" iwdb
-docker run --rm iwdb --version                        # iwdb-server 0.1.0 (grpc, rest, postgres, console, otel)
+docker run --rm iwdb --version                        # iwdb-server 1.0.0 (grpc, rest, postgres, console, otel)
 ```
 
 - **TLS is the default.** The image holds no certificate or key. Mount yours at `/etc/iwdb/tls/server.pem` and `server.key`. Without them the container exits with code 2 and the log says `can't read the TLS certificate /etc/iwdb/tls/server.pem`.
