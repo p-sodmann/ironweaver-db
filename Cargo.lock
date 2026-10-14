@@ -963,7 +963,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "iwctl"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "ironweaver-core",
  "iwdb",
@@ -978,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "iwdb"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "argon2",
  "fs4",
@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "iwdb-crash"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "iwdb",
  "iwdb-engine",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "iwdb-engine"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "crc32c",
  "ironweaver-core",
@@ -1026,7 +1026,7 @@ dependencies = [
 
 [[package]]
 name = "iwdb-python"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "ironweaver-core",
  "iwdb",
@@ -1039,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "iwdb-query"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "ironweaver-core",
  "iwdb-engine",
@@ -1052,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "iwdb-server"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "axum",
  "bytes",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "iwdb-storage"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "crc32c",
  "ironweaver-core",
