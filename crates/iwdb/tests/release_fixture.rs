@@ -98,31 +98,33 @@ fn describe_users(store: &Store) -> String {
     out
 }
 
+/// Copy `from` to `to` as a git checkout has it: without empty
+/// directories, which git doesn't keep. So a fixture just written (in a
+/// temporary directory, or before it is committed) is checked as a clone
+/// of the repository will see it.
 fn copy_dir(from: &Path, to: &Path) {
-    fs::create_dir_all(to).unwrap();
     for entry in fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();
         let target = to.join(entry.file_name());
         if entry.path().is_dir() {
             copy_dir(&entry.path(), &target);
         } else {
+            fs::create_dir_all(to).unwrap();
             fs::copy(entry.path(), target).unwrap();
         }
     }
 }
 
 /// Git keeps no empty directories: make every namespace's `checkpoints/`
-/// and `wal/` again (`scratch` has no checkpoint) in a copied store, and
-/// `checkpoints/` in a copied backup (where a placeholder file would be a
-/// file the manifest doesn't list).
-fn make_empty_dirs(dir: &Path, wal: bool) {
+/// and `wal/` again in a copied store or backup (`scratch` has no
+/// checkpoint, and nothing after its backup's start; a placeholder file
+/// would be a file the backup's manifest doesn't list).
+fn make_empty_dirs(dir: &Path) {
     if let Ok(entries) = fs::read_dir(dir.join("ns")) {
         for ns in entries {
             let ns = ns.unwrap().path();
             fs::create_dir_all(ns.join("checkpoints")).unwrap();
-            if wal {
-                fs::create_dir_all(ns.join("wal")).unwrap();
-            }
+            fs::create_dir_all(ns.join("wal")).unwrap();
         }
     }
 }
@@ -283,7 +285,7 @@ fn check_release(dir: &Path) {
     let work = tempfile::tempdir().unwrap();
     let path = work.path().join("store");
     copy_dir(&dir.join("store"), &path);
-    make_empty_dirs(&path, true);
+    make_empty_dirs(&path);
     let store = Store::open(&path, StoreOptions::default()).unwrap();
     assert_eq!(store.history().to_string(), expected.history, "{}", name);
     assert_eq!(describe_store(&store), expected.namespaces, "{}: the store", name);
@@ -325,7 +327,7 @@ fn check_release(dir: &Path) {
     // history and every password
     let backup = work.path().join("backup");
     copy_dir(&dir.join("backup"), &backup);
-    make_empty_dirs(&backup, false);
+    make_empty_dirs(&backup);
     let report = verify(&backup).unwrap();
     assert!(report.is_ok() && report.kind == Kind::Backup, "{}: {:#?}", name, report.problems);
     let dest = work.path().join("restored");
