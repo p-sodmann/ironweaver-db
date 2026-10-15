@@ -85,7 +85,9 @@ fn until_ended<D: Admin>(db: &D, id: u64) -> (JobInfo, Vec<JobInfo>) {
             return (job, seen);
         }
         seen.push(job);
-        assert!(start.elapsed() < Duration::from_secs(60), "job {} never ended", id);
+        // A hang guard, not a bound: on a loaded 3-core runner the 20 000
+        // iterations have taken over 60 s
+        assert!(start.elapsed() < Duration::from_secs(300), "job {} never ended", id);
         std::thread::sleep(Duration::from_millis(2));
     }
 }
