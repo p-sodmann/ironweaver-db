@@ -1,8 +1,8 @@
 # Upstream issue drafts for Ironweaver
 
-Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`. Drafts 19–21 are findings from step 10, fixed upstream in `ace9a0d`. Draft 22 is a finding from step 11, fixed upstream in `7e7b7fa`. Draft 27 is a finding from step 16h, fixed upstream in `73d8fab` ([#71](https://github.com/p-sodmann/Ironweaver/issues/71)). Draft 28 was found by the WAL reader's fuzz target during the `37849b7` bump and fixed upstream in `af3c441` ([#101](https://github.com/p-sodmann/Ironweaver/issues/101)).
+Status: drafts 1–7 are **done upstream**. They were implemented in [PR #25](https://github.com/p-sodmann/Ironweaver/pull/25) (merge commit `a14149e`), reviewed, and we moved to that revision (see the [core review](ironweaver-core-review.md#recommended-upstream-changes)). Drafts 8–12 are findings from the `a14149e` bump and step 2, draft 13 from step 3, draft 14 from step 5, draft 15 from step 7, drafts 16–17 from step 9; all are filed (links in the table), and drafts 8–17 are fixed upstream as of `3b15149`. Draft 18 is a gap in the fix for draft 9, found in the `3b15149` bump and fixed upstream in `cd09ea0`. Drafts 19–21 are findings from step 10, fixed upstream in `ace9a0d`. Draft 22 is a finding from step 11, fixed upstream in `7e7b7fa`. Draft 27 is a finding from step 16h, fixed upstream in `73d8fab` ([#71](https://github.com/p-sodmann/Ironweaver/issues/71)). Draft 28 was found by the WAL reader's fuzz target during the `37849b7` bump and fixed upstream in `af3c441` ([#101](https://github.com/p-sodmann/Ironweaver/issues/101)). Draft 29 is a performance finding from the `63be44a` bump ([#123](https://github.com/p-sodmann/Ironweaver/issues/123), open).
 
-Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`, drafts 19–21 against `cd09ea0`, draft 22 against `d15a7ec`, draft 27 against `9cec233`, draft 28 against `37849b7`. Titles are ready to paste; the text below each title is the issue body.
+Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 against `a14149e`, draft 18 against `3b15149`, drafts 19–21 against `cd09ea0`, draft 22 against `d15a7ec`, draft 27 against `9cec233`, draft 28 against `37849b7`, draft 29 against `63be44a`. Titles are ready to paste; the text below each title is the issue body.
 
 | # | Title | Status |
 |---|---|---|
@@ -34,6 +34,7 @@ Drafts 1–7 were checked against `ironweaver-core` at `02cefab`, drafts 8–17 
 | 26 | [Algorithms report no progress while they run](#26-algorithms-report-no-progress-while-they-run) | fixed upstream (`c69ef51`): [#62](https://github.com/p-sodmann/Ironweaver/issues/62) |
 | 27 | [`write_atomic` doesn't sync the directory on Windows](#27-write_atomic-doesnt-sync-the-directory-on-windows) | fixed upstream (`73d8fab`): [#71](https://github.com/p-sodmann/Ironweaver/issues/71) |
 | 28 | [`DateTime`'s binary serde: an offset of `i32::MIN` overflows the range check, and micros aren't bounded](#28-datetimes-binary-serde-an-offset-of-i32min-overflows-the-range-check-and-micros-arent-bounded) | fixed upstream (`af3c441`): [#101](https://github.com/p-sodmann/Ironweaver/issues/101) |
+| 29 | [Bidirectional BFS: a mode that returns any shortest path, without the canonical step](#29-bidirectional-bfs-a-mode-that-returns-any-shortest-path-without-the-canonical-step) | open: [#123](https://github.com/p-sodmann/Ironweaver/issues/123) |
 
 ---
 
@@ -740,3 +741,39 @@ let _ = dt.to_string(); // panics with overflow checks
 **Why the database needs it**
 
 Ironweaver DB decodes values with postcard from its WAL (frames are checksummed, but the reader must never panic on any input: AGENTS.md, and the fuzz target checks it) and from gRPC clients. Until this is fixed, the commit pipeline refuses date-times with an offset of a day or more, or whose micros overflow with the offset (`Error::InvalidDateTime`), so none can be logged. But a debug build still panics while decoding such a value, and the fuzz target finds it from time to time. A pin test (`datetime_binary_serde_does_not_bound_its_offset_or_micros` in `core_smoke.rs`) fails once it is fixed.
+
+## 29. Bidirectional BFS: a mode that returns any shortest path, without the canonical step
+
+Found in the `63be44a` bump of Ironweaver DB (filed as [#123](https://github.com/p-sodmann/Ironweaver/issues/123)), checked against `63be44a`.
+
+**Problem**
+
+Since #116/#117 (and #120's cheaper version in #122), `traversal::bidirectional_bfs` and `bidirectional_bfs_limited` always return the canonical shortest path: after the frontiers meet, `Ends::canonical_path` walks back from the target and, on the target side, proves for each lower candidate that it lies on a shortest path (`Ends::viable`, a DFS down the backward search tree). That step is deterministic and the rule is good, but it costs a lot relative to the search itself, and there is no public way to skip it while still getting a path. The new `bidirectional_reachable` returns only a bool.
+
+Measured from Rust on random graphs shaped like Ironweaver DB's benchmark graph (N nodes, 4 outgoing edges each to pseudo-random nodes, `Direction::Out`, 2 000 random pairs, best of 5, release build, one thread), `bidirectional_bfs_limited` at `af3c441` vs `63be44a`:
+
+| Graph | Time per call | Edges examined per call |
+|---|---:|---:|
+| 100k nodes, degree 4 | 127 µs → 157 µs (+23%) | 636 → 976 (+53%) |
+| 1M nodes, degree 4 | 671 µs → 947 µs (+41%) | 2 078 → 3 116 (+50%) |
+| 100k nodes, degree 4, `Both` | 127 µs → 187 µs (+47%) | 768 → 1 476 (+92%) |
+| 20k nodes, degree 8 | 42 µs → 56 µs (+32%) | 310 → 549 (+77%) |
+
+Instrumented, almost all of the extra work is `viable`: about 300 of the 340 extra edges per call at 100k nodes, and 990 of 1 040 at 1M. When a lower candidate is not on a shortest path, the DFS has to exhaust its subtree of the backward search down to the meeting level. Near the target, that subtree is most of the backward ball.
+
+The extra edges also count against `Budget::max_edges`, so a query that fitted its edge budget before can now be truncated.
+
+I also tried the other approach #120 suggested: finish the meeting level to collect every crossing edge, then mark the target side from those crossings, so that only nodes on shortest paths are touched. It gives the same paths as `63be44a` on all 14 000 pairs I compared (7 graph shapes), and all core tests pass. But it is not faster (100k: 183 µs, 1M: 902 µs), because finishing the meeting level costs about what the DFS saves. So the lazy DFS seems close to the cheapest way to compute this rule. The remaining lever is not computing it when the caller doesn't need it.
+
+**Proposal**
+
+Expose a public mode of the bidirectional BFS that returns *a* shortest path (the one where the frontiers first meet, as before #116), for example:
+
+- a `PathChoice { Canonical, Any }` parameter (or a `bidirectional_bfs_any_limited` function) next to `bidirectional_bfs_limited`; or
+- an option on `PathQuery` for `find_path_limited` with method `bfs`.
+
+`Canonical` stays the default, and the docs say what `Any` gives up: which shortest path is returned depends on edge order. `Any` is cheap with the current `Depths`: remember the meeting edge, then walk from its two ends, toward the source through any neighbour one level lower in `fwd` and toward the target through any one level lower in `bwd`. Depths on each side already prove that such a neighbour reaches its end, so no viability check is needed, and the walk looks only at the edges of the path's nodes.
+
+**Why the database needs it**
+
+Ironweaver DB serves `shortest_path` (BFS) over gRPC and REST with a budget per request. With `63be44a` the call is 20% slower embedded and 9–24% lower in throughput under concurrent load (100k and 1M nodes), the largest change in the bump; nothing else moved outside noise. The database doesn't need the canonical choice everywhere: its contract only promises a shortest path, and the node handles that decide the canonical path can differ between a running store and the one recovered from its checkpoint: a node added after the checkpoint reuses a freed slot in the first, and goes at the end in the second. Once `Any` exists we would let clients choose, or make it the database's default. Until then we take the canonical path and its cost. There is no workaround: our rules don't allow reimplementing the core's BFS. A smoke test pins the current path and edge count (`bidirectional_bfs_returns_the_canonical_path_and_counts_finding_it` in `core_smoke.rs`).
