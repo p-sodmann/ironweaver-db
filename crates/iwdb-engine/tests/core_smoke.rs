@@ -618,6 +618,31 @@ fn traversals_take_a_direction_and_an_edge_filter() {
     assert_eq!(ids(&g, expanded.value), ["a", "b"]);
 }
 
+/// Since core `63be44a` (upstream #116, #120): among several shortest
+/// paths, `bidirectional_bfs_limited` returns the one that walks back from
+/// the target through the lowest node handle, whatever the edge order. It
+/// finds that path after the frontiers meet, and the edges it looks at count
+/// against the budget: here 3 for the search and 3 for the path. Draft 29
+/// (#123) asks for a mode that skips that step; this count changes then.
+#[test]
+fn bidirectional_bfs_returns_the_canonical_path_and_counts_finding_it() {
+    use ironweaver_core::traversal::bidirectional_bfs_limited;
+    let mut g = G::new();
+    let s = g.add_node("s", Record::default()).expect("add");
+    let lo = g.add_node("lo", Record::default()).expect("add");
+    let hi = g.add_node("hi", Record::default()).expect("add");
+    let t = g.add_node("t", Record::default()).expect("add");
+    // Edges through `hi` first, so the frontiers meet there
+    for (from, to) in [(s, hi), (hi, t), (s, lo), (lo, t)] {
+        g.add_edge(from, to, Record::default()).expect("edge");
+    }
+    let all = |_, _: &_| Ok::<_, GraphError>(true);
+    let found = bidirectional_bfs_limited(&g, s, t, None, Direction::Out, Budget::UNLIMITED, all).expect("bfs");
+    let path: Vec<&str> = found.value.expect("path").into_iter().map(|ix| g.node(ix).expect("node").id()).collect();
+    assert_eq!(path, ["s", "lo", "t"]);
+    assert_eq!((found.visited, found.edges), (2, 6));
+}
+
 /// Fixed upstream (#62, draft 26): the core's algorithms report how far
 /// they have got to the `Progress` of `run_with_progress`, which another
 /// thread reads. A managed job (ADR 0056) reads it for its progress; this

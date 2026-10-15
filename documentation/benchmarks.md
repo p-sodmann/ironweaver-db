@@ -75,6 +75,38 @@ A call over gRPC costs about 50 to 100 µs more than embedded, which is mostly t
 4. See the first finding below.
 5. Since core `c69ef51` (upstream #61) the graph's estimate counts attribute payloads too, so the 100k and 1M rows were measured again (2026-10-08, same machine): 542 bytes per entity at 100k, about twice the earlier 278. The 10M row is from before and doesn't include them. Nothing else changed.
 
+## Core bump `af3c441` → `63be44a`
+
+Measured 2026-10-15 to find what the bump costs: the same benchmarks built against the old and the new core, run alternately (old, new, old, new, ...) on one machine, so that drift on the machine affects both. **The machine:** a cloud VM, 4 vCPUs (Intel Xeon, 2.8 GHz), 15 GB, Linux; Rust 1.99, release build. It is several times slower than the M4 Pro above, so compare the columns of a row, not these numbers with the tables above.
+
+**The one regression: BFS shortest paths.** Since `63be44a` the core returns the canonical shortest path (upstream #116, #120), found in a second pass after the search ([core review](ironweaver-core-review.md#findings-from-the-63be44a-bump)). Everything else is unchanged within the noise of this machine.
+
+| `shortest_path` (BFS) | `af3c441` | `63be44a` | Change |
+|---|---:|---:|---:|
+| criterion, embedded, 100k (median of 3 runs) | 376 µs | 452 µs | +20% |
+| criterion, gRPC, 100k | 834 µs | 918 µs | +10% |
+| load generator, 100k, 4 clients (median of 5 runs of 10 s) | 4 117/s, p99 2.3 ms | 3 760/s, p99 2.6 ms | −9% |
+| load generator, 1M, 4 clients (2 runs of 5 s) | 1 972/s, p99 4.9 ms | 1 491/s, p99 6.7 ms | −24% |
+| the core alone, 100k (`bidirectional_bfs_limited`, 2 000 pairs) | 127 µs, 636 edges | 157 µs, 976 edges | +23%, +53% edges |
+| the core alone, 1M | 671 µs, 2 078 edges | 947 µs, 3 116 edges | +41%, +50% edges |
+
+The edges examined count against `max_edges` too. The rule seems to have no cheaper implementation: a prototype that finishes the meeting level and marks the target side from every crossing edge returns the same paths on 14 000 random pairs and is no faster. Upstream [#123](https://github.com/p-sodmann/Ironweaver/issues/123) asks for a mode that returns any shortest path.
+
+**The rest** (criterion, 3 runs each; medians):
+
+| Operation | `af3c441` | `63be44a` |
+|---|---:|---:|
+| `get_node`, embedded / gRPC | 79.6 µs / 440 µs | 78.0 µs / 426 µs |
+| `neighbourhood_depth_2`, embedded / gRPC | 159 µs / 731 µs | 158 µs / 754 µs |
+| `find_indexed_100`, embedded / gRPC | 1.72 ms / 2.86 ms | 1.73 ms / 3.29 ms ¹ |
+| `match_two_hops_100`, embedded / gRPC | 61.0 ms / 60.5 ms | 58.8 ms / 63.5 ms |
+| `pagerank` (100k) | 71.6 ms | 71.7 ms |
+| commit `off` / `group` / `always` | 7.0 µs / 17.5 µs / 249 µs | 6.8 µs / 16.7 µs / 249 µs |
+
+1. Noise: the embedded call is unchanged, and the gRPC runs spread from 2.78 to 3.56 ms. In the load generator, `find_indexed_100` and `match_two_hops_from_id_100` were 7–10% slower in the first runs (100k and 1M) and in five longer runs at 100k 6% faster and 3% slower respectively. Run directly against both cores at 1M nodes, index lookup (10.9 and 11.6 ms against 12.6 and 9.8 ms) and the id-bound two-hop match (18 µs on both) don't differ. The core changes on these paths are a branch and the same sort behind a helper. Load, import, commits, memory per entity and resident memory are unchanged.
+
+**Projections.** Unweighted projections (the default) have the same size and build time. Weighted ones are about 50% larger, since each entry now keeps its edge (`set_weights`): 9.0 → 13.5 MiB for 100k nodes and 400k edges, 13.9 → 20.0 MiB with the incoming side. Build and PageRank times are unchanged for both.
+
 ## Findings
 
 - **A first page from an index costs O(candidates), not O(page).** `find` returns results sorted by id with a keyset cursor (ADR 0021), so it checks every candidate the index gives and keeps the smallest 101 ids. With 1 of 80 values per node that is 1 250 candidates at 100k, 12 500 at 1M and 125 000 at 10M. At 10M a page of 100 costs 0.7 s and is truncated at the default `max_visited` of 100 000. This is how pagination was designed, not a bug, but it makes low-selectivity index lookups expensive on large graphs. Options for a later step: iterate the index in id order (needs the core's index to keep ids sorted per key, an upstream request), or offer an unordered first page without a cursor.

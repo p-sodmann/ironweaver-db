@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `ironweaver-core` bumped from `af3c441` to `63be44a` (upstream #108–#122). `shortest_path` with BFS now returns the canonical shortest path: walking back from the target, each step goes to the lowest node handle on a shortest path, whatever the edge order. Finding it costs about 50% more edges examined (which count against `max_edges`), and BFS paths are about 20% slower ([benchmarks](documentation/benchmarks.md#core-bump-af3c441--63be44a); upstream [#123](https://github.com/p-sodmann/Ironweaver/issues/123) asks for a faster mode). Weighted projections for analytics take about 50% more memory. In weighted analytics an edge of infinite weight is now impassable (PageRank counts it as 0).
+
 ## [1.0.0] - 2026-10-14
 
 ### Added
