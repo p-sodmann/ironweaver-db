@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- rustls 0.23.46 (from 0.23.45) for RUSTSEC-2026-0349: an unauthenticated ServerHello could make later TLS client connections fall back to classical key exchange. `cargo deny` fails on the advisory.
+
 ## [1.0.0] - 2026-10-14
 
 ### Added
