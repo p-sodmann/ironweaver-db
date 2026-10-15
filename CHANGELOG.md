@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Dependabot checks the Cargo workspace, the GitHub Actions, the wheel's Python requirements and the console's npm packages weekly (`.github/dependabot.yml`), as in the core's repository. ironweaver-core stays with the upstream check.
 - Patch updates within the locked ranges: tokio 1.53.3, serde_json 1.0.154, rustls-native-certs 0.8.5, sha2 0.11.1 and build-time crates.
 - CI and release workflows use the current major versions of their actions (checkout v7, upload-artifact v7, download-artifact v8, setup-node v7, setup-python v7, setup-uv v7, build-push-action v7, setup-buildx-action v4), which run on Node 24.
 - CI builds the tests with line tables only instead of full debug info, and runs them with cargo-nextest (test binaries in parallel; doctests with `cargo test --doc`); the tests that use PGlite, one Postgres session, run one at a time, and the two tests that bound latency in milliseconds run alone (`.config/nextest.toml`). The shutdown test with a collector that is down allows 60 s (Windows runners took over 15 s). The jobs tests' guard against a job that never ends waits 300 s instead of 60 s (macOS runners took 41 s and over 60 s).

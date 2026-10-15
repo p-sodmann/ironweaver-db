@@ -1,0 +1,72 @@
+# Version updates stay reviewable, as in the core's repository: weekly
+# checks, at most three open PRs per entry, no automatic merge.
+version: 2
+updates:
+  # The workspace, tests/crash included. fuzz/ is a workspace of its own
+  # without a lockfile, so there is nothing to update there.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    ignore:
+      # Pinned by revision and bumped by the upstream check, which reviews
+      # the core's changes first (ADR 0002, documentation/steps/upstream-check.md)
+      - dependency-name: ironweaver-core
+    groups:
+      rust-patches:
+        patterns: ["*"]
+        update-types: [patch]
+      # Most of these crates are 0.x, where a minor release is a breaking
+      # one, so other updates come one crate at a time, except families
+      # that only work together
+      tonic:
+        patterns: ["tonic*", "prost*"]
+        update-types: [minor, major]
+      opentelemetry:
+        patterns: ["opentelemetry*", "tracing-opentelemetry"]
+        update-types: [minor, major]
+      pbjson:
+        patterns: ["pbjson*"]
+        update-types: [minor, major]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # The wheel's build backend and test extras
+  - package-ecosystem: pip
+    directory: "/crates/iwdb-python"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      python-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      # Keep the supported build backend range from pyproject.toml
+      - dependency-name: maturin
+        versions: [">=2.0"]
+
+  # esbuild, which builds the console's committed bundle: if an update
+  # changes the output, the console check in CI fails until `npm run build`
+  # is committed on the PR
+  - package-ecosystem: npm
+    directory: "/console"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+
+  # No docker entry: the Dockerfile's Rust image follows the MSRV through
+  # RUST_VERSION (ADR 0029), which is bumped with rust-version, not alone
