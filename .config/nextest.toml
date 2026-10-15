@@ -1,0 +1,19 @@
+# cargo-nextest (CI's test runner): each test is a process of its own and
+# the test binaries run in parallel.
+
+# PGlite (scripts/pglite.sh) is one Postgres session that serves its
+# connections a statement at a time: the tests that use it run one at a
+# time, also across test binaries
+[test-groups]
+pglite = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "binary_id(iwdb::postgres) | (binary_id(iwdb-server::binary) & test(=runs_the_projections_of_its_config))"
+test-group = "pglite"
+
+# Tests that measure latency in milliseconds run alone, as they did when
+# cargo test ran the binaries one after another; next to the crash tests a
+# Windows runner showed a 278 ms wait against a 150 ms bound
+[[profile.default.overrides]]
+filter = "(binary_id(iwdb-server::limits) & test(=one_client_over_its_limits_cannot_starve_another)) | (binary_id(iwdb::concurrency) & test(=reads_and_commits_go_on_during_a_long_analytics_job))"
+threads-required = "num-test-threads"

@@ -24,6 +24,10 @@ jobs:
       # fails every step below, without changing the compiler flags (and so
       # the cache key) the way RUSTFLAGS=-Dwarnings would
       CARGO_BUILD_WARNINGS: deny
+      # Line tables only (backtraces keep file and line): linking the 80-odd
+      # test binaries with full debug info took most of the build, above
+      # all on Windows
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     strategy:
       fail-fast: false
       matrix:
@@ -34,9 +38,9 @@ jobs:
         # Git Bash on Windows: the same scripts everywhere
         shell: bash
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # The error-adapter integration test embeds Python and links libpython.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       # Installs the toolchain named in rust-toolchain.toml (stable, rustfmt, clippy)
@@ -44,7 +48,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Start PGlite for the Postgres tests (step 13, ADR 0032)
@@ -61,8 +65,14 @@ jobs:
           echo "IWDB_TEST_POSTGRES_URL=postgresql://postgres:postgres@127.0.0.1:55432/postgres?sslmode=disable" >> "$GITHUB_ENV"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked
-      # Every failing test binary at once (Windows runners are slow to iterate on)
-      - run: cargo test --workspace --all-features --locked --no-fail-fast
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      # nextest runs the test binaries in parallel, not one after another;
+      # every failing test at once (Windows runners are slow to iterate on)
+      - run: cargo nextest run --workspace --all-features --locked --no-fail-fast
+      # nextest doesn't run doctests
+      - run: cargo test --workspace --all-features --locked --doc
       - name: No Python in the dependency graph
         # Design rule 1: pyo3 only in crates/iwdb-python, which is in the
         # workspace since step 7; every other crate must stay free of it
@@ -94,7 +104,7 @@ jobs:
       matrix:
         features: ["", "rest", "postgres", "rest console", "otel", "rest otel"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -122,11 +132,11 @@ jobs:
       run:
         working-directory: console
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: npm ci
@@ -141,10 +151,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
       - name: Build (default features)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -152,7 +162,7 @@ jobs:
           cache-from: type=gha,scope=docker
           cache-to: type=gha,mode=max,scope=docker
       - name: Build (gRPC only)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -169,7 +179,7 @@ jobs:
     name: release gate script
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: sh scripts/release-gate-test.sh
 
   python:
@@ -194,8 +204,8 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - name: Build the wheel
@@ -230,7 +240,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked -p iwdb-crash
@@ -238,7 +248,7 @@ jobs:
         run: ./target/release/iwdb-crash --policy all --cycles 150 --seed "${{ github.run_id }}${{ github.run_attempt }}" --work "$RUNNER_TEMP/iwdb-crash"
       - name: Keep the files of a failed run
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: crash-${{ matrix.os }}
           path: ${{ runner.temp }}/iwdb-crash
@@ -253,7 +263,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked -p iwdb-server --example loadgen
@@ -262,7 +272,7 @@ jobs:
           ./target/release/examples/loadgen --nodes 100000 --clients 4 --seconds 3
           --dir "$RUNNER_TEMP/loadgen" --json bench-100k.json
           --check crates/iwdb-server/benches/targets-100k.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: bench-100k
@@ -277,7 +287,7 @@ jobs:
       RUSTUP_TOOLCHAIN: "1.99.0"
       CARGO_BUILD_WARNINGS: deny
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets --all-features --locked
@@ -286,7 +296,7 @@ jobs:
     name: cargo deny (licenses, advisories, bans, sources)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
@@ -299,7 +309,7 @@ jobs:
     name: buf lint and breaking
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: bufbuild/buf-action@v1
@@ -334,8 +344,8 @@ jobs:
     name: OpenAPI document (redocly lint)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - run: npx --yes @redocly/cli@2.57.0 lint documentation/api/openapi.json
@@ -347,7 +357,7 @@ jobs:
       # fuzz/ is a nightly-only workspace; overrides rust-toolchain.toml
       RUSTUP_TOOLCHAIN: nightly
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
