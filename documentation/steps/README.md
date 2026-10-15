@@ -38,13 +38,13 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | [16g](step_16g.md) | OpenTelemetry traces | M4 | done |
 | [16h](step_16h.md) | Windows | M4 | done |
 | [16i](step_16i.md) | Operations guide | M4 | done |
-| [17](step_17.md) | Release 1.0 | M4 | in progress (split into 17a to 17f; 17b and 17c dropped) |
+| [17](step_17.md) | Release 1.0 | M4 | done (1.0.0 released on 2026-10-14; 17b and 17c dropped) |
 | [17a](step_17a.md) | Upstream check and release fixtures | M4 | done |
 | [17b](step_17b.md) | Continuous fuzzing | M4 | dropped |
 | [17c](step_17c.md) | Soak test | M4 | dropped |
 | [17d](step_17d.md) | Documentation for 1.0 | M4 | done |
 | [17e](step_17e.md) | Release pipeline on GitHub | M4 | done (the rehearsal tag is the owner's) |
-| [17f](step_17f.md) | 1.0 | M4 | todo |
+| [17f](step_17f.md) | 1.0 | M4 | done |
 | [18](step_18.md) | Replication and high availability | M5 | todo |
 
 ## Recurring gate: upstream check
@@ -59,5 +59,5 @@ Ordered task list for [Ironweaver DB](../ironweaver-db.md), built on `ironweaver
 | M1 Embedded durable | 4–7 | done (the PyPI publish of 0.1.0 was withdrawn: releases are GitHub only) |
 | M2 Service | 8–10 | done |
 | M3 Network access | 11–14b | done |
-| M4 Production 1.0 | 15–17 | in progress (15, 16, 17a, 17d and 17e done; 17f to do; 17b and 17c dropped) |
+| M4 Production 1.0 | 15–17 | done (1.0.0 released on 2026-10-14; 17b and 17c dropped) |
 | M5 HA | 18 | todo |

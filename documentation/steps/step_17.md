@@ -1,6 +1,6 @@
 # Step 17: Release 1.0
 
-Status: in progress (split into 17a to 17f; 17b and 17c dropped)
+Status: done (1.0.0 released on 2026-10-14; 17b and 17c dropped)
 Milestone: M4 Production 1.0
 Depends on: steps 14, 15, 16 (15d was the last of them to finish; only 17f, the release itself, waited for it)
 
@@ -11,7 +11,7 @@ Ship 1.0 with documented guarantees and a full verification suite.
 ## Tasks
 
 - [x] First: run the [upstream check](upstream-check.md). Issues this step depends on: all open ones (the release notes list any that remain, with their workarounds). (17a; none is open)
-- [ ] Compatibility fixtures: data directories (WAL + checkpoints) written by every released version open in the new one. (17a builds the fixture and its test; 17f writes the first one, for 1.0)
+- [x] Compatibility fixtures: data directories (WAL + checkpoints) written by every released version open in the new one. (17a builds the fixture and its test; 17f writes the first one, for 1.0)
 - ~~Continuous fuzzing: WAL reader, checkpoint loader, proto and JSON decoding, pattern and filter inputs. (17b)~~ Dropped on 2026-10-12 (see Plan change); CI keeps its short run of the WAL reader target.
 - ~~24h soak test with mixed load; runbook for running it before each minor release. (17c)~~ Dropped on 2026-10-12 (see Plan change).
 - [x] Docs: concepts, guarantees (`documentation/guarantees.md`: durability per fsync policy, isolation, limits, failure behaviour), operations, gRPC and REST reference. (17d)
