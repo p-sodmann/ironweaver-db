@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Patch updates within the locked ranges: tokio 1.53.3, serde_json 1.0.154, rustls-native-certs 0.8.5, sha2 0.11.1 and build-time crates.
+- CI and release workflows use the current major versions of their actions (checkout v7, upload-artifact v7, download-artifact v8, setup-node v7, setup-python v7, setup-uv v7, build-push-action v7, setup-buildx-action v4), which run on Node 24.
+
 ### Security
 - rustls 0.23.46 (from 0.23.45) for RUSTSEC-2026-0349: an unauthenticated ServerHello could make later TLS client connections fall back to classical key exchange. `cargo deny` fails on the advisory.
 
