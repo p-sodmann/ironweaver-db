@@ -960,7 +960,9 @@ fn a_collector_that_is_down_slows_and_fails_no_request() {
     let start = std::time::Instant::now();
     shut_down(&child);
     assert!(child.wait().unwrap().success());
-    assert!(start.elapsed() < Duration::from_secs(15), "shutdown took {:?}", start.elapsed());
+    // Generous: Windows runners have taken over 15 s (the signal goes
+    // through PowerShell, which compiles its helper first)
+    assert!(start.elapsed() < Duration::from_secs(60), "shutdown took {:?}", start.elapsed());
     reader.join().unwrap();
     seen.extend(lines.try_iter());
     let warned = seen.iter().filter(|l| l.contains("trace export failed")).count();
