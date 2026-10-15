@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Patch updates within the locked ranges: tokio 1.53.3, serde_json 1.0.154, rustls-native-certs 0.8.5, sha2 0.11.1 and build-time crates.
 - CI and release workflows use the current major versions of their actions (checkout v7, upload-artifact v7, download-artifact v8, setup-node v7, setup-python v7, setup-uv v7, build-push-action v7, setup-buildx-action v4), which run on Node 24.
-- CI builds the tests with line tables only instead of full debug info, and runs them with cargo-nextest (test binaries in parallel; doctests with `cargo test --doc`); the tests that use PGlite, one Postgres session, run one at a time (`.config/nextest.toml`). The shutdown test with a collector that is down allows 60 s (Windows runners took over 15 s).
+- CI builds the tests with line tables only instead of full debug info, and runs them with cargo-nextest (test binaries in parallel; doctests with `cargo test --doc`); the tests that use PGlite, one Postgres session, run one at a time, and the two tests that bound latency in milliseconds run alone (`.config/nextest.toml`). The shutdown test with a collector that is down allows 60 s (Windows runners took over 15 s).
 
 ### Security
 - rustls 0.23.46 (from 0.23.45) for RUSTSEC-2026-0349: an unauthenticated ServerHello could make later TLS client connections fall back to classical key exchange. `cargo deny` fails on the advisory.
