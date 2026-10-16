@@ -37,6 +37,11 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 3
+    ignore:
+      # Its refs name the Rust toolchain to install (stable, nightly, and
+      # 1.99.0 for the MSRV job, ADR 0029), not a version of the action:
+      # Dependabot read 1.99.0 as one and proposed 1.120.0, which doesn't exist
+      - dependency-name: dtolnay/rust-toolchain
     groups:
       actions-minor-patch:
         patterns: ["*"]
