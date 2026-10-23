@@ -29,7 +29,7 @@ iwdb-server = { path = "../iwdb-server", default-features = false, features = ["
 # The bindings (design rule 1: only in this crate). abi3: one wheel per
 # platform for CPython 3.9 and later (ADR 0013); maturin adds the
 # extension-module feature when it builds the wheel
-pyo3 = { version = "0.29", features = ["abi3-py39"] }
+pyo3 = { version = "0.30", features = ["abi3-py39"] }
 
 [lints]
 workspace = true
